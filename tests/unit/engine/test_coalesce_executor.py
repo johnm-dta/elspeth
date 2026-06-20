@@ -10,6 +10,9 @@ and audit trail recording.
 from __future__ import annotations
 
 import itertools
+import json
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any, Literal
 from unittest.mock import MagicMock, Mock
 from uuid import uuid4
@@ -17,6 +20,7 @@ from uuid import uuid4
 import pytest
 
 from elspeth.contracts import TokenInfo
+from elspeth.contracts.barrier_scalars import CoalescePendingScalars
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.enums import NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
@@ -24,11 +28,13 @@ from elspeth.contracts.errors import (
     CoalesceCollisionError,
     OrchestrationInvariantError,
 )
+from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.engine.clock import MockClock
 from elspeth.engine.coalesce_executor import CoalesceExecutor, CoalesceOutcome, _BranchEntry, _PendingCoalesce
 from elspeth.testing import make_field, make_row
@@ -45,7 +51,9 @@ class _TestCoalesceExecutor(CoalesceExecutor):
     Tests bypass the DAG builder, so this wrapper provides an OBSERVED-mode schema
     by default, matching the contract mode used by test fixtures.
 
-    This eliminates the need for the fallback path in CoalesceExecutor._execute_merge().
+    An OBSERVED output_schema routes _execute_merge() through the runtime
+    merge_union_contracts() path (the all-OBSERVED union path), which shares
+    its core algorithm with merge_union_fields().
     """
 
     def register_coalesce(
@@ -223,6 +231,75 @@ def _settings(
         quorum_count=quorum_count,
         select_branch=select_branch,
         union_collision_policy=union_collision_policy,
+    )
+
+
+def _assert_collision_fingerprints(
+    entries: list[tuple[str, Any]],
+    branches: list[str],
+    *,
+    value_type: str = "str",
+) -> None:
+    assert [branch for branch, _fingerprint in entries] == branches
+    fingerprints = [dict(fingerprint) for _branch, fingerprint in entries]
+    assert [fingerprint["value_type"] for fingerprint in fingerprints] == [value_type] * len(branches)
+    assert all(set(fingerprint) == {"value_hash", "value_type"} for fingerprint in fingerprints)
+    assert all(isinstance(fingerprint["value_hash"], str) and len(fingerprint["value_hash"]) == 64 for fingerprint in fingerprints)
+
+
+# Reference instant for journal-restore tests (tz-aware, like barrier_blocked_at).
+_JOURNAL_T0 = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
+
+
+def _journal_payload(data: dict[str, Any], contract: SchemaContract | None = None) -> str:
+    """Build a REAL journal row payload via the serializer mark_blocked rows carry.
+
+    Round-trip fidelity through serialize_row_payload/deserialize_row_payload is
+    the property restore_from_journal depends on — fixtures must not shortcut it.
+    """
+    if contract is None:
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=True)
+    return TokenSchedulerRepository.serialize_row_payload(PipelineRow(data, contract))
+
+
+def _blocked_item(
+    *,
+    token_id: str,
+    row_id: str,
+    branch_name: str | None,
+    blocked_at: datetime | None,
+    payload: str | None = None,
+    coalesce_name: str | None = "merge",
+    node_id: str = "co-1",
+    ingest_sequence: int = 0,
+    attempt: int = 0,
+    fork_group_id: str | None = None,
+    join_group_id: str | None = None,
+    expand_group_id: str | None = None,
+) -> TokenWorkItem:
+    """Build a BLOCKED journal row as list_blocked_barrier_items returns them."""
+    return TokenWorkItem(
+        work_item_id=f"wi-{token_id}",
+        run_id="run_1",
+        token_id=token_id,
+        row_id=row_id,
+        node_id=node_id,
+        step_index=0,
+        ingest_sequence=ingest_sequence,
+        row_payload_json=payload if payload is not None else _journal_payload({"amount": 100}),
+        status=TokenWorkStatus.BLOCKED,
+        attempt=attempt,
+        available_at=_JOURNAL_T0,
+        created_at=_JOURNAL_T0,
+        updated_at=_JOURNAL_T0,
+        barrier_key=coalesce_name,
+        branch_name=branch_name,
+        fork_group_id=fork_group_id,
+        join_group_id=join_group_id,
+        expand_group_id=expand_group_id,
+        coalesce_node_id=node_id,
+        coalesce_name=coalesce_name,
+        barrier_blocked_at=blocked_at,
     )
 
 
@@ -771,8 +848,8 @@ class TestUnionMerge:
         # No collisions -> collision_values should be absent (None).
         assert o.coalesce_metadata.union_field_collision_values is None
 
-    def test_union_merge_collision_preserves_overwritten_value(self):
-        """When two branches collide, both (branch, value) entries must be recorded."""
+    def test_union_merge_collision_records_ordered_value_fingerprints(self):
+        """When branches collide, ordered branch/value fingerprints are recorded."""
         executor, _, _, _, _ = _make_executor()
         executor.register_coalesce(_settings(branches=["a", "b"], merge="union"), "node_1")
         t1 = _make_token(branch_name="a", token_id="t1", data={"shared": "from_a"})
@@ -781,12 +858,33 @@ class TestUnionMerge:
         o = executor.accept(t2, "merge")
         collision_values = o.coalesce_metadata.union_field_collision_values
         assert collision_values is not None
-        assert list(collision_values["shared"]) == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(list(collision_values["shared"]), ["a", "b"])
         # Default last_wins: winner in merged data is the last branch.
         assert o.coalesce_metadata.union_field_origins["shared"] == "b"
 
-    def test_union_merge_three_way_collision_preserves_all_values(self):
-        """Three-way collisions preserve every (branch, value) entry in declaration order."""
+    def test_union_merge_collision_metadata_serializes_value_hashes_not_raw_values(self):
+        """Collision audit metadata must preserve provenance without leaking branch payload values."""
+        executor, _, _, _, _ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"], merge="union"), "node_1")
+        t1 = _make_token(branch_name="a", token_id="t1", data={"shared": "secret-from-a"})
+        t2 = _make_token(branch_name="b", token_id="t2", data={"shared": "secret-from-b"})
+
+        executor.accept(t1, "merge")
+        outcome = executor.accept(t2, "merge")
+
+        serialized = outcome.coalesce_metadata.to_dict()
+        serialized_json = json.dumps(serialized, sort_keys=True)
+        assert "secret-from-a" not in serialized_json
+        assert "secret-from-b" not in serialized_json
+
+        collision_entries = serialized["union_field_collision_values"]["shared"]
+        assert [entry[0] for entry in collision_entries] == ["a", "b"]
+        assert [entry[1]["value_type"] for entry in collision_entries] == ["str", "str"]
+        assert [set(entry[1]) for entry in collision_entries] == [{"value_hash", "value_type"}, {"value_hash", "value_type"}]
+        assert collision_entries[0][1]["value_hash"] != collision_entries[1][1]["value_hash"]
+
+    def test_union_merge_three_way_collision_preserves_all_branch_fingerprints(self):
+        """Three-way collisions preserve every branch fingerprint in declaration order."""
         executor, _, _, _, _ = _make_executor()
         s = _settings(branches=["a", "b", "c"], merge="union", policy="require_all")
         executor.register_coalesce(s, "node_1")
@@ -797,7 +895,7 @@ class TestUnionMerge:
         executor.accept(t2, "merge")
         o = executor.accept(t3, "merge")
         entries = list(o.coalesce_metadata.union_field_collision_values["f"])
-        assert entries == [("a", "va"), ("b", "vb"), ("c", "vc")]
+        _assert_collision_fingerprints(entries, ["a", "b", "c"])
 
     def test_union_merge_field_origins_flow_to_metadata(self):
         """field_origins returned from _merge_data must be reflected in CoalesceMetadata."""
@@ -857,9 +955,9 @@ class TestUnionMerge:
         assert merged["shared"] == "from_a"
         # Origins reflect the winner.
         assert o.coalesce_metadata.union_field_origins["shared"] == "a"
-        # Collision values still record every contributing branch in order.
+        # Collision fingerprints still record every contributing branch in order.
         entries = list(o.coalesce_metadata.union_field_collision_values["shared"])
-        assert entries == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(entries, ["a", "b"])
 
     def test_union_collision_policy_first_wins_three_way(self):
         """first_wins: first branch in settings.branches order wins for 3-way collisions."""
@@ -886,7 +984,7 @@ class TestUnionMerge:
     # ------------------------------------------------------------------
 
     def test_union_collision_policy_fail_raises_on_collision(self):
-        """fail: CoalesceCollisionError raised with full metadata attached."""
+        """fail: CoalesceCollisionError raised with redacted metadata attached."""
         executor, _, _, _, _ = _make_executor()
         s = _settings(
             branches=["a", "b"],
@@ -900,12 +998,12 @@ class TestUnionMerge:
         with pytest.raises(CoalesceCollisionError) as exc_info:
             executor.accept(t2, "merge")
         # Metadata must be attached so the orchestrator's failure path
-        # can persist the full collision record to the audit trail.
+        # can persist redacted collision provenance to the audit trail.
         md = exc_info.value.metadata
         assert md.union_field_origins is not None
         assert md.union_field_collision_values is not None
         entries = list(md.union_field_collision_values["shared"])
-        assert entries == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(entries, ["a", "b"])
 
     def test_union_collision_policy_fail_no_collisions_is_noop(self):
         """fail: non-overlapping branches merge successfully without raising."""
@@ -932,8 +1030,8 @@ class TestUnionMerge:
 
         Without this propagation, the audit trail loses the field-level provenance
         that union_collision_policy=fail exists to capture. The stringified exception
-        message preserves only the field name — every (branch, value) pair would be
-        lost, defeating the whole point of opting into hard-fail enforcement.
+        message preserves only the field name — every branch/value fingerprint would
+        be lost, defeating the whole point of opting into hard-fail enforcement.
         """
         executor, execution, _, _, _ = _make_executor()
         s = _settings(
@@ -960,14 +1058,14 @@ class TestUnionMerge:
         ]
         assert metadata_calls, (
             "expected fail-path audit record to carry union_field_collision_values; "
-            "without this, the Landscape audit trail loses the (branch, value) pairs "
+            "without this, the Landscape audit trail loses the branch/value fingerprints "
             "that union_collision_policy=fail is specifically designed to preserve"
         )
 
         md = metadata_calls[0].kwargs["context_after"]
-        # Every branch's contributing value must survive into the audit record.
+        # Every branch's contributing value fingerprint must survive into the audit record.
         entries = list(md.union_field_collision_values["shared"])
-        assert entries == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(entries, ["a", "b"])
         # field_origins must also be present (last_wins default before the raise).
         assert md.union_field_origins is not None
         assert md.union_field_origins["shared"] == "b"
@@ -1174,12 +1272,12 @@ class TestUnionMerge:
         assert origins["only_a"] == "a"
         assert origins["only_b"] == "b"
 
-        # collision_values: records both contributing branches for "shared".
+        # collision_values: records both contributing branch fingerprints for "shared".
         collision_values = outcome.coalesce_metadata.union_field_collision_values
         assert collision_values is not None
         entries = list(collision_values["shared"])
         # Order in collision_values is branch order, not arrival order.
-        assert entries == [("a", "from_a"), ("b", "from_b")]
+        _assert_collision_fingerprints(entries, ["a", "b"])
 
 
 # ===========================================================================
@@ -1694,6 +1792,44 @@ class TestContractHandling:
         mc = merged_data.contract
         assert mc.get_field("x") is not None
         assert mc.get_field("y") is not None
+
+    def test_all_observed_require_all_exclusive_fields_not_forced_nullable(self):
+        """All-OBSERVED require_all union: branch-exclusive fields keep nullable=False.
+
+        Regression pin for the schema-merge collapse: the runtime union merge
+        is policy-aware (merge_union_contracts). Under require_all every branch
+        is guaranteed to arrive, so a branch-exclusive field keeps its source
+        flags (required=False, nullable=False for observed/inferred fields)
+        instead of being forced (required=False, nullable=True) as the old
+        AND-only SchemaContract.merge fold did.
+        """
+        executor, _, _, tm, _ = _make_executor()
+        executor.register_coalesce(_settings(policy="require_all", merge="union"), "node_1")
+        # Production-shape OBSERVED contracts: inferred fields are always
+        # required=False, nullable=False (SchemaContract.with_field hardcodes them).
+        c_a = _make_contract(
+            fields=[
+                make_field("shared", python_type=int, required=False, source="inferred"),
+                make_field("a_only", python_type=str, required=False, source="inferred"),
+            ],
+            mode="OBSERVED",
+        )
+        c_b = _make_contract(
+            fields=[
+                make_field("shared", python_type=int, required=False, source="inferred"),
+                make_field("b_only", python_type=float, required=False, source="inferred"),
+            ],
+            mode="OBSERVED",
+        )
+        t1 = _make_token(branch_name="a", token_id="t1", data={"shared": 1, "a_only": "hi"}, contract=c_a)
+        t2 = _make_token(branch_name="b", token_id="t2", data={"shared": 1, "b_only": 2.5}, contract=c_b)
+        executor.accept(t1, "merge")
+        executor.accept(t2, "merge")
+        mc = tm.coalesce_tokens.call_args.kwargs["merged_data"].contract
+        for name in ("a_only", "b_only"):
+            fc = mc.get_field(name)
+            assert fc.required is False
+            assert fc.nullable is False, f"require_all union: exclusive field '{name}' must keep nullable=False"
 
     def test_nested_merge_branch_key_contract(self):
         """Nested merge produces FIXED contract with branch keys typed as object."""
@@ -2469,102 +2605,18 @@ class TestBestEffortTimeoutZeroArrivals:
 
 
 # ===========================================================================
-# Bug: completed_keys lost on checkpoint restore
+# Landscape-backed completed-keys (late-arrival detection survives restart)
 # ===========================================================================
 
 
-class TestCheckpointCompletedKeys:
-    """Regression tests for _completed_keys surviving checkpoint/restore.
+class TestLandscapeCompletedKeys:
+    """Late-arrival detection is Landscape-backed, not checkpoint-backed.
 
-    Bug: get_checkpoint_state() did not serialize _completed_keys, and
-    restore_from_checkpoint() called _completed_keys.clear(). After a
-    checkpoint/restore cycle, late arrivals were not detected — creating
-    contradictory audit outcomes (both COALESCED and FAILED/timeout for
-    the same fork group).
+    _completed_keys is a bounded FIFO performance cache; the Landscape is the
+    source of truth. On journal restore the cache is reconstructed from the
+    Landscape (see TestRestoreFromJournal for the restore-path tests); evicted
+    keys are rediscovered via the accept()-time fallback tested here.
     """
-
-    def test_completed_keys_restored_from_landscape_on_resume(self):
-        """On restore, completed keys are reconstructed from Landscape, not checkpoint.
-
-        The Landscape is the source of truth. The checkpoint's completed_keys
-        field is ignored — the Landscape query returns ALL completed coalesces
-        (no FIFO eviction limit).
-        """
-        executor, _execution, _data_flow, _, _clock = _make_executor()
-        executor.register_coalesce(_settings(branches=["a", "b"]), "node_1")
-
-        # Complete a coalesce: both branches arrive → merge
-        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
-        executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-
-        # Verify the key is marked completed
-        assert ("merge", "row_1") in executor._completed_keys
-
-        # Checkpoint (completed_keys is now written as empty)
-        checkpoint = executor.get_checkpoint_state()
-        assert checkpoint.completed_keys == ()  # No longer serialized
-
-        # Build a new executor and restore, with Landscape mock returning the completed key
-        executor2, _execution2, _data_flow2, _, _clock2 = _make_executor()
-        executor2.register_coalesce(_settings(branches=["a", "b"]), "node_1")
-        _execution2.get_completed_row_ids_for_nodes.return_value = {("node_1", "row_1")}
-        executor2.restore_from_checkpoint(checkpoint)
-
-        # Late arrival on the restored executor must be detected (via Landscape)
-        assert ("merge", "row_1") in executor2._completed_keys
-        late = _make_token(branch_name="a", token_id="t_late", row_id="row_1")
-        outcome = executor2.accept(late, "merge")
-
-        assert outcome.held is False
-        assert outcome.failure_reason == "late_arrival_after_merge"
-        assert outcome.outcomes_recorded is True
-
-    def test_get_checkpoint_state_does_not_serialize_for_size_check(self, monkeypatch: pytest.MonkeyPatch):
-        """Checkpoint state construction must not pre-serialize the DTO.
-
-        The CheckpointManager is the persistence boundary that serializes the
-        state.  Serializing here purely for size validation doubles checkpoint
-        cost on every interrupted coalesce run.
-        """
-        import elspeth.engine.coalesce_executor as coalesce_module
-
-        def fail_if_called(_obj: object) -> str:
-            raise AssertionError("CoalesceExecutor.get_checkpoint_state must not serialize")
-
-        monkeypatch.setattr(coalesce_module, "checkpoint_dumps", fail_if_called, raising=False)
-
-        executor, _execution, _data_flow, _, _clock = _make_executor()
-        executor.register_coalesce(_settings(branches=["a", "b"]), "node_1")
-        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
-
-        checkpoint = executor.get_checkpoint_state()
-
-        assert checkpoint.pending
-
-    def test_landscape_reconstruction_restores_all_completed_keys(self):
-        """Multiple completed keys restored from Landscape, not checkpoint."""
-        executor, _, _, _, _clock = _make_executor()
-        s = _settings(branches=["a", "b"])
-        executor.register_coalesce(s, "node_1")
-
-        # Complete 3 different row coalesces
-        for i in range(3):
-            row_id = f"row_{i}"
-            executor.accept(_make_token(row_id=row_id, branch_name="a", token_id=f"t{i}_a"), "merge")
-            executor.accept(_make_token(row_id=row_id, branch_name="b", token_id=f"t{i}_b"), "merge")
-
-        assert len(executor._completed_keys) == 3
-
-        # Checkpoint → restore with Landscape mock
-        checkpoint = executor.get_checkpoint_state()
-        executor2, execution2, _, _, _ = _make_executor()
-        executor2.register_coalesce(s, "node_1")
-        execution2.get_completed_row_ids_for_nodes.return_value = {("node_1", f"row_{i}") for i in range(3)}
-        executor2.restore_from_checkpoint(checkpoint)
-
-        # All 3 completed keys must be present (from Landscape)
-        for i in range(3):
-            assert ("merge", f"row_{i}") in executor2._completed_keys
 
     def test_landscape_fallback_catches_evicted_keys(self):
         """After FIFO eviction, the Landscape fallback still detects late arrivals."""
@@ -2593,122 +2645,6 @@ class TestCheckpointCompletedKeys:
         assert outcome.failure_reason == "late_arrival_after_merge"
         # Key should now be in the FIFO cache (backfilled from Landscape)
         assert ("merge", "row_0") in executor._completed_keys
-
-    def test_pending_and_completed_both_restored(self):
-        """Checkpoint with both pending and completed entries restores both."""
-        executor, _, _, _, _clock = _make_executor()
-        s = _settings(branches=["a", "b"])
-        executor.register_coalesce(s, "node_1")
-
-        # Complete row_1
-        executor.accept(_make_token(row_id="row_1", branch_name="a", token_id="t1a"), "merge")
-        executor.accept(_make_token(row_id="row_1", branch_name="b", token_id="t1b"), "merge")
-
-        # Leave row_2 pending (only branch a arrived)
-        executor.accept(_make_token(row_id="row_2", branch_name="a", token_id="t2a"), "merge")
-
-        assert ("merge", "row_1") in executor._completed_keys
-        assert ("merge", "row_2") in executor._pending
-
-        checkpoint = executor.get_checkpoint_state()
-
-        executor2, execution2, _, _, _ = _make_executor()
-        executor2.register_coalesce(s, "node_1")
-        # Mock Landscape to return completed key for row_1
-        execution2.get_completed_row_ids_for_nodes.return_value = {("node_1", "row_1")}
-        executor2.restore_from_checkpoint(checkpoint)
-
-        # Completed key restored (from Landscape)
-        assert ("merge", "row_1") in executor2._completed_keys
-        # Pending entry restored (from checkpoint)
-        assert ("merge", "row_2") in executor2._pending
-
-    def test_checkpoint_dto_writes_empty_completed_keys(self):
-        """Checkpoint no longer serializes completed_keys (Landscape is source of truth)."""
-        executor, _, _, _, _ = _make_executor()
-        s = _settings(branches=["a", "b"])
-        executor.register_coalesce(s, "node_1")
-
-        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
-        executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-
-        checkpoint = executor.get_checkpoint_state()
-        wire = checkpoint.to_dict()
-
-        # Wire format still includes the field (schema compat) but it's empty
-        assert "completed_keys" in wire
-        assert wire["completed_keys"] == []
-
-    def test_checkpoint_dto_from_dict_restores_completed_keys(self):
-        """CoalesceCheckpointState.from_dict should parse completed_keys."""
-        from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-
-        wire = {
-            "_version": "1.0",
-            "pending": [],
-            "completed_keys": [["merge", "row_1"], ["merge", "row_2"]],
-        }
-        state = CoalesceCheckpointState.from_dict(wire)
-        assert state.completed_keys == (("merge", "row_1"), ("merge", "row_2"))
-
-
-class TestRestoreFromCheckpoint:
-    """Tests for restore_from_checkpoint version and coalesce name validation."""
-
-    def test_rejects_incompatible_checkpoint_version(self):
-        """restore_from_checkpoint raises AuditIntegrityError on version mismatch."""
-        from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-
-        executor, *_ = _make_executor()
-        executor.register_coalesce(_settings(name="merge"), "node_1")
-
-        state = CoalesceCheckpointState(
-            version="0.0-bogus",
-            pending=(),
-            completed_keys=(),
-        )
-        with pytest.raises(AuditIntegrityError, match="Incompatible coalesce checkpoint version"):
-            executor.restore_from_checkpoint(state)
-
-    def test_rejects_unknown_coalesce_name_in_pending(self):
-        """restore_from_checkpoint raises AuditIntegrityError for unregistered coalesce names."""
-        from elspeth.contracts.coalesce_checkpoint import (
-            CoalesceCheckpointState,
-            CoalescePendingCheckpoint,
-            CoalesceTokenCheckpoint,
-        )
-        from elspeth.engine.coalesce_executor import COALESCE_CHECKPOINT_VERSION
-
-        executor, *_ = _make_executor()
-        executor.register_coalesce(_settings(name="merge"), "node_1")
-
-        contract = _make_contract(mode="FLEXIBLE")
-        token_cp = CoalesceTokenCheckpoint(
-            token_id="tok_1",
-            row_id="row_1",
-            branch_name="a",
-            fork_group_id=None,
-            join_group_id=None,
-            expand_group_id=None,
-            row_data={"amount": 100},
-            contract=contract.to_checkpoint_format(),
-            state_id="state_001",
-            arrival_offset_seconds=0.5,
-        )
-        pending = CoalescePendingCheckpoint(
-            coalesce_name="nonexistent_merge",
-            row_id="row_1",
-            elapsed_age_seconds=1.0,
-            branches={"a": token_cp},
-            lost_branches={},
-        )
-        state = CoalesceCheckpointState(
-            version=COALESCE_CHECKPOINT_VERSION,
-            pending=(pending,),
-            completed_keys=(),
-        )
-        with pytest.raises(AuditIntegrityError, match="unknown coalesce 'nonexistent_merge'"):
-            executor.restore_from_checkpoint(state)
 
 
 # ===========================================================================
@@ -2869,195 +2805,441 @@ class TestSelectBranchNotArrivedFailure:
 
 
 # ===========================================================================
-# Checkpoint/restore round-trip (elspeth-c44cdc5ffe)
+# restore_from_journal (F1: pending state rebuilds from BLOCKED journal rows)
 # ===========================================================================
 
 
-class TestCheckpointRestoreRoundTrip:
-    """Verify that partial coalesce state survives checkpoint/restore and
-    the restored executor can complete the merge successfully.
+class TestRestoreFromJournal:
+    """Pending coalesce state rebuilds from journal BLOCKED rows on resume.
 
-    Bug: elspeth-c44cdc5ffe — Coalesce checkpoint/restore round-trip not tested.
+    F1 Task 2.2: the journal (token_work_items BLOCKED rows) is authoritative
+    for arrived-branch token payloads; the checkpoint row carries only the
+    lost_branches scalars; state ids and attempt offsets derive from audit
+    tables (Task 3.1's caller).
     """
 
-    def test_partial_accept_checkpoint_restore_then_merge(self):
-        """Accept branch a → checkpoint → restore to new executor → accept branch b → merge succeeds."""
-        executor, _execution, _data_flow, _tm, _clock = _make_executor()
-        s = _settings(branches=["a", "b"], policy="require_all")
-        executor.register_coalesce(s, "node_1")
+    def test_restore_from_journal_rebuilds_pending_with_absolute_arrivals(self) -> None:
+        """Journal items rebuild pending branches with typed-value fidelity.
 
-        # Accept first branch
-        outcome_a = executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
-        assert outcome_a.held is True
+        Payloads carry datetime AND Decimal values — proves the journal payload
+        round-trip (serialize_row_payload → deserialize_row_payload) preserves
+        type fidelity into the restored branch tokens.
+        """
+        clock = MockClock(start=100.0)
+        executor, _, _, _, _ = _make_executor(clock=clock)
+        s = _settings(branches=["left", "mid", "right"], policy="best_effort", timeout_seconds=60.0)
+        executor.register_coalesce(s, NodeID("co-1"))
+        t0 = _JOURNAL_T0
+        items = [
+            _blocked_item(
+                token_id="tA",
+                row_id="r1",
+                branch_name="left",
+                payload=_journal_payload({"v": 1, "at": datetime(2026, 6, 1, tzinfo=UTC), "amount": Decimal("1.10")}),
+                blocked_at=t0,
+                fork_group_id="fg-1",
+            ),
+            _blocked_item(
+                token_id="tB",
+                row_id="r1",
+                branch_name="right",
+                payload=_journal_payload({"v": 2, "at": datetime(2026, 6, 2, tzinfo=UTC), "amount": Decimal("2.25")}),
+                blocked_at=t0 + timedelta(seconds=3),
+                ingest_sequence=1,
+                fork_group_id="fg-1",
+            ),
+        ]
 
-        # Checkpoint
-        checkpoint = executor.get_checkpoint_state()
-        assert len(checkpoint.pending) == 1
-        assert checkpoint.pending[0].coalesce_name == "merge"
-        assert checkpoint.pending[0].row_id == "row_1"
-        assert "a" in checkpoint.pending[0].branches
-
-        # Restore to a fresh executor
-        executor2, _execution2, _data_flow2, _tm2, _clock2 = _make_executor()
-        executor2.register_coalesce(s, "node_1")
-        executor2.restore_from_checkpoint(checkpoint)
-
-        # Verify pending state was restored
-        assert ("merge", "row_1") in executor2._pending
-        pending = executor2._pending[("merge", "row_1")]
-        assert "a" in pending.branches
-        assert pending.branches["a"].token.token_id == "t1"
-        assert pending.branches["a"].token.row_data.to_dict() == {"amount": 100}
-
-        # Accept second branch on restored executor — should trigger merge
-        outcome_b = executor2.accept(
-            _make_token(branch_name="b", token_id="t2", data={"amount": 200}),
-            "merge",
+        executor.restore_from_journal(
+            items=items,
+            scalars={("merge", "r1"): CoalescePendingScalars(lost_branches={"mid": "lost"})},
+            state_ids={"tA": "st-1", "tB": "st-2"},  # derived from node_states (Task 3.1's caller)
+            attempt_offsets={"tA": 1, "tB": 1},  # max_attempt+1 discipline (D5)
+            resume_checkpoint_id="cp-0",
+            now=t0 + timedelta(seconds=10),
         )
-        assert outcome_b.held is False
-        assert outcome_b.merged_token is not None
-        assert outcome_b.failure_reason is None
 
-    def test_lost_branches_survive_checkpoint_restore(self):
-        """lost_branches recorded before checkpoint must be present after restore."""
+        pending = executor._pending[("merge", "r1")]
+        assert set(pending.branches) == {"left", "right"}
+        assert pending.lost_branches == {"mid": "lost"}
+        assert pending.branches["left"].state_id == "st-1"
+        assert pending.branches["right"].state_id == "st-2"
+        # first_arrival is the earliest blocked_at, expressed on the executor
+        # clock: now - min(blocked_at) = 10s ago → monotonic 100.0 - 10.0
+        assert pending.first_arrival == pytest.approx(90.0)
+        assert pending.branches["left"].arrival_time == pytest.approx(pending.first_arrival)
+        assert pending.branches["right"].arrival_time - pending.first_arrival == pytest.approx(3.0)
+        # Tokens rebuilt with full lineage + resume provenance (D5)
+        left = pending.branches["left"].token
+        assert left.token_id == "tA"
+        assert left.row_id == "r1"
+        assert left.branch_name == "left"
+        assert left.fork_group_id == "fg-1"
+        assert left.resume_attempt_offset == 1
+        assert left.resume_checkpoint_id == "cp-0"
+        # Typed-payload round trip (datetime/Decimal fidelity)
+        row = left.row_data.to_dict()
+        assert row["at"] == datetime(2026, 6, 1, tzinfo=UTC)
+        assert isinstance(row["at"], datetime)
+        assert row["amount"] == Decimal("1.10")
+        assert isinstance(row["amount"], Decimal)
+        assert isinstance(left.row_data, PipelineRow)
+
+    def test_restore_from_journal_resumed_pending_completes_merge(self) -> None:
+        """A journal-restored branch merges when the sibling arrives post-resume."""
         executor, *_ = _make_executor()
-        s = _settings(branches=["a", "b", "c"], policy="best_effort", timeout_seconds=60.0)
-        executor.register_coalesce(s, "node_1")
+        s = _settings(branches=["a", "b"], policy="require_all")
+        executor.register_coalesce(s, NodeID("co-1"))
 
-        # Accept one branch and lose another
-        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
-        executor.notify_branch_lost("merge", "row_1", "b", "upstream_error")
+        executor.restore_from_journal(
+            items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+            scalars={},
+            state_ids={"t1": "st-1"},
+            attempt_offsets={"t1": 2},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0 + timedelta(seconds=5),
+        )
 
-        # Verify lost_branches in pending
-        pending = executor._pending[("merge", "row_1")]
-        assert pending.lost_branches == {"b": "upstream_error"}
-
-        # Checkpoint
-        checkpoint = executor.get_checkpoint_state()
-        assert checkpoint.pending[0].lost_branches == {"b": "upstream_error"}
-
-        # Restore to fresh executor
-        executor2, *_ = _make_executor()
-        executor2.register_coalesce(s, "node_1")
-        executor2.restore_from_checkpoint(checkpoint)
-
-        # lost_branches must survive
-        restored_pending = executor2._pending[("merge", "row_1")]
-        assert restored_pending.lost_branches == {"b": "upstream_error"}
-
-        # Losing the last remaining branch should trigger merge (all accounted for)
-        outcome = executor2.notify_branch_lost("merge", "row_1", "c", "timeout")
-        assert outcome is not None
-        # arrived=1 + lost=2 = 3 = total_branches → merge with the one arrived branch
+        outcome = executor.accept(_make_token(branch_name="b", token_id="t2", data={"amount": 200}), "merge")
+        assert outcome.held is False
         assert outcome.merged_token is not None
+        assert outcome.failure_reason is None
 
-    def test_lost_branches_checkpoint_then_accept_remaining_merges(self):
-        """After restoring lost_branches, accepting the remaining branch completes the merge."""
+    def test_restore_from_journal_lost_branches_then_accept_remaining_merges(self) -> None:
+        """Restored lost_branches count toward best_effort accounting after resume."""
         executor, *_ = _make_executor()
         s = _settings(branches=["a", "b", "c"], policy="best_effort", timeout_seconds=60.0)
-        executor.register_coalesce(s, "node_1")
+        executor.register_coalesce(s, NodeID("co-1"))
 
-        # Lose branch a, accept branch b
-        executor.notify_branch_lost("merge", "row_1", "a", "error_routed")
-        executor.accept(_make_token(branch_name="b", token_id="t1"), "merge")
+        executor.restore_from_journal(
+            items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="b", blocked_at=_JOURNAL_T0)],
+            scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"a": "error_routed"})},
+            state_ids={"t1": "st-1"},
+            attempt_offsets={"t1": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
 
-        # Checkpoint with 1 lost, 1 arrived, 1 pending
-        checkpoint = executor.get_checkpoint_state()
-
-        # Restore
-        executor2, *_ = _make_executor()
-        executor2.register_coalesce(s, "node_1")
-        executor2.restore_from_checkpoint(checkpoint)
+        assert executor._pending[("merge", "row_1")].lost_branches == {"a": "error_routed"}
 
         # Accept remaining branch c — all 3 accounted for (1 lost + 2 arrived)
-        outcome = executor2.accept(
-            _make_token(branch_name="c", token_id="t2", data={"amount": 300}),
-            "merge",
-        )
+        outcome = executor.accept(_make_token(branch_name="c", token_id="t2", data={"amount": 300}), "merge")
         assert outcome.held is False
         assert outcome.merged_token is not None
 
-    def test_checkpoint_preserves_arrival_time_offsets(self):
-        """Branch arrival time offsets survive round-trip for correct timeout evaluation."""
+    def test_restore_from_journal_groups_items_per_pending_key(self) -> None:
+        """Items group by (coalesce_name, row_id) — keys restore independently."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        executor.register_coalesce(_settings(name="other", branches=["a", "b"]), NodeID("co-2"))
+        items = [
+            _blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0),
+            _blocked_item(token_id="t2", row_id="row_2", branch_name="b", blocked_at=_JOURNAL_T0),
+            _blocked_item(token_id="t3", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0, coalesce_name="other", node_id="co-2"),
+        ]
+
+        executor.restore_from_journal(
+            items=items,
+            scalars={},
+            state_ids={"t1": "s1", "t2": "s2", "t3": "s3"},
+            attempt_offsets={"t1": 1, "t2": 1, "t3": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        assert set(executor._pending) == {("merge", "row_1"), ("merge", "row_2"), ("other", "row_1")}
+
+    def test_restore_from_journal_missing_scalars_entry_means_no_lost_branches(self) -> None:
+        """A pending key absent from scalars restores with empty lost_branches.
+
+        The writer only emits keys with non-empty lost_branches (D3) — a
+        missing entry means none were recorded, not corruption.
+        """
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        executor.restore_from_journal(
+            items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+            scalars={},
+            state_ids={"t1": "s1"},
+            attempt_offsets={"t1": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        assert executor._pending[("merge", "row_1")].lost_branches == {}
+
+    def test_restore_from_journal_ignores_stale_scalars(self) -> None:
+        """A scalars entry whose key has NO journal items is stale — ignored, never rejected.
+
+        Window: that pending key flushed/completed after the checkpoint was
+        written (checkpoint older than the journal — legitimate under D3's
+        staleness model). Mirrors aggregation's drop-stale-scalars arm.
+        """
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        executor.restore_from_journal(
+            items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+            scalars={
+                ("merge", "row_1"): CoalescePendingScalars(lost_branches={}),
+                ("merge", "row_gone"): CoalescePendingScalars(lost_branches={"b": "lost"}),
+            },
+            state_ids={"t1": "s1"},
+            attempt_offsets={"t1": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        # Only the journal-backed key is restored; the stale key is dropped
+        assert set(executor._pending) == {("merge", "row_1")}
+
+    def test_restore_from_journal_clamps_wall_clock_backstep(self) -> None:
+        """A wall-clock backward step must not put first_arrival in the monotonic future."""
         clock = MockClock(start=100.0)
         executor, *_ = _make_executor(clock=clock)
-        s = _settings(branches=["a", "b", "c"], policy="require_all", timeout_seconds=30.0)
-        executor.register_coalesce(s, "node_1")
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
 
-        # Accept branch a at t=100
-        executor.accept(_make_token(branch_name="a", token_id="t1"), "merge")
-
-        # Advance 10s, accept branch b at t=110
-        clock.advance(10.0)
-        executor.accept(_make_token(branch_name="b", token_id="t2"), "merge")
-
-        # Checkpoint at t=110
-        checkpoint = executor.get_checkpoint_state()
-
-        # Verify offsets in checkpoint
-        branches = checkpoint.pending[0].branches
-        assert branches["a"].arrival_offset_seconds == pytest.approx(0.0)
-        assert branches["b"].arrival_offset_seconds == pytest.approx(10.0)
-
-        # Restore at t=200 (different clock)
-        clock2 = MockClock(start=200.0)
-        executor2, *_ = _make_executor(clock=clock2)
-        executor2.register_coalesce(s, "node_1")
-        executor2.restore_from_checkpoint(checkpoint)
-
-        # The restored pending should maintain the relative offset between branches
-        restored = executor2._pending[("merge", "row_1")]
-        arrival_a = restored.branches["a"].arrival_time
-        arrival_b = restored.branches["b"].arrival_time
-        assert (arrival_b - arrival_a) == pytest.approx(10.0)
-
-    def test_version_mismatch_raises_audit_integrity_error(self):
-        """Restoring from a checkpoint with wrong version must raise AuditIntegrityError."""
-        from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-
-        executor, *_ = _make_executor()
-        executor.register_coalesce(_settings(), "node_1")
-
-        state = CoalesceCheckpointState(
-            version="99.99",
-            pending=(),
-            completed_keys=(),
-        )
-        with pytest.raises(AuditIntegrityError, match="Incompatible coalesce checkpoint version"):
-            executor.restore_from_checkpoint(state)
-
-    def test_checkpoint_row_data_survives_round_trip(self):
-        """Row data and schema contract must be identical after checkpoint/restore."""
-        contract = _make_contract(
-            [
-                make_field("amount", original_name="amount", python_type=int, required=True, source="declared"),
-                make_field("label", original_name="label", python_type=str, required=False, source="declared"),
+        executor.restore_from_journal(
+            items=[
+                _blocked_item(
+                    token_id="t1",
+                    row_id="row_1",
+                    branch_name="a",
+                    blocked_at=_JOURNAL_T0 + timedelta(seconds=30),  # blocked AFTER "now"
+                )
             ],
-            mode="FLEXIBLE",
+            scalars={},
+            state_ids={"t1": "s1"},
+            attempt_offsets={"t1": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,  # wall clock stepped backward
         )
+
+        assert executor._pending[("merge", "row_1")].first_arrival == pytest.approx(100.0)
+
+    def test_restore_from_journal_reconstructs_completed_keys_from_landscape(self) -> None:
+        """Completed keys rebuild from the Landscape so late arrivals are detected post-resume."""
+        executor, execution, _, _, _ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        execution.get_completed_row_ids_for_nodes.return_value = {("co-1", "row_0"), ("co-1", "row_9")}
+
+        executor.restore_from_journal(
+            items=[],
+            scalars={},
+            state_ids={},
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        assert ("merge", "row_0") in executor._completed_keys
+        assert ("merge", "row_9") in executor._completed_keys
+
+        late = _make_token(branch_name="a", token_id="t_late", row_id="row_0")
+        outcome = executor.accept(late, "merge")
+        assert outcome.held is False
+        assert outcome.failure_reason == "late_arrival_after_merge"
+        assert outcome.outcomes_recorded is True
+
+    # --- corruption guards (journal/audit disagreement = crash, no coercion) ---
+
+    def test_restore_from_journal_null_blocked_at_is_corruption(self) -> None:
+        """Post-epoch-20 every BLOCKED row was stamped; NULL barrier_blocked_at = corruption."""
         executor, *_ = _make_executor()
-        s = _settings(branches=["a", "b"], policy="require_all")
-        executor.register_coalesce(s, "node_1")
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
 
-        token = _make_token(
-            branch_name="a",
-            token_id="t1",
-            data={"amount": 42, "label": "test"},
-            contract=contract,
-        )
-        executor.accept(token, "merge")
+        with pytest.raises(AuditIntegrityError, match="barrier_blocked_at"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=None)],
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
 
-        checkpoint = executor.get_checkpoint_state()
-        executor2, *_ = _make_executor()
-        executor2.register_coalesce(s, "node_1")
-        executor2.restore_from_checkpoint(checkpoint)
+    @pytest.mark.parametrize("bad_branch", [None, ""])
+    def test_restore_from_journal_missing_branch_name_is_corruption(self, bad_branch: str | None) -> None:
+        """Only forked branch tokens block at a coalesce — no branch_name = corruption."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
 
-        restored = executor2._pending[("merge", "row_1")]
-        restored_token = restored.branches["a"].token
-        assert restored_token.row_data.to_dict() == {"amount": 42, "label": "test"}
-        assert restored_token.token_id == "t1"
-        assert restored_token.row_id == "row_1"
-        assert restored_token.branch_name == "a"
+        with pytest.raises(AuditIntegrityError, match="branch_name"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name=bad_branch, blocked_at=_JOURNAL_T0)],
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_missing_coalesce_name_is_corruption(self) -> None:
+        """A coalesce-barrier journal row without a coalesce cursor = corruption."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="coalesce_name"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0, coalesce_name=None)],
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_unknown_coalesce_is_corruption(self) -> None:
+        """A journal row naming an unregistered coalesce = config/journal mismatch."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="unknown coalesce 'nonexistent_merge'"):
+            executor.restore_from_journal(
+                items=[
+                    _blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0, coalesce_name="nonexistent_merge")
+                ],
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_duplicate_journal_rows_are_corruption(self) -> None:
+        """Two BLOCKED journal rows for the same token at one barrier = corruption."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        items = [
+            _blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0),
+            _blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0),
+        ]
+
+        with pytest.raises(AuditIntegrityError, match="Duplicate BLOCKED journal rows"):
+            executor.restore_from_journal(
+                items=items,
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_duplicate_branch_rows_are_corruption(self) -> None:
+        """Two journal rows claiming the same branch for one pending key = corruption.
+
+        accept() crashes on a duplicate arrival, so two BLOCKED rows for one
+        (coalesce_name, row_id, branch_name) can never be legitimately journaled.
+        """
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        items = [
+            _blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0),
+            _blocked_item(token_id="t2", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0),
+        ]
+
+        with pytest.raises(AuditIntegrityError, match="both claim branch 'a'"):
+            executor.restore_from_journal(
+                items=items,
+                scalars={},
+                state_ids={"t1": "s1", "t2": "s2"},
+                attempt_offsets={"t1": 1, "t2": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_missing_attempt_offset_is_corruption(self) -> None:
+        """Every journal item must have an audit-derived attempt offset."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="attempt_offsets"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_missing_state_id_is_corruption(self) -> None:
+        """Every journal item must have a node_state hold id from the audit trail.
+
+        A BLOCKED journal row's branch holds a PENDING node_state (written at
+        accept() time); the caller derives state_ids from those holds. A
+        BLOCKED row with no hold means journal and audit trail disagree —
+        corruption, not a default.
+        """
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="state_ids"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+                scalars={},
+                state_ids={},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+    def test_restore_from_journal_corruption_leaves_state_intact(self) -> None:
+        """Validation failures must not destroy the executor's in-memory state."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        executor.accept(_make_token(branch_name="a", token_id="t_live"), "merge")
+        assert ("merge", "row_1") in executor._pending
+
+        with pytest.raises(AuditIntegrityError):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_9", branch_name="a", blocked_at=None)],
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+
+        # Pre-restore pending state preserved for error recovery
+        assert ("merge", "row_1") in executor._pending
+        assert executor._pending[("merge", "row_1")].branches["a"].token.token_id == "t_live"
+
+
+# ===========================================================================
+# get_barrier_scalars (F1: checkpoint row carries only lost_branches scalars)
+# ===========================================================================
+
+
+class TestGetBarrierScalars:
+    """The checkpoint row carries only the underivable lost_branches records."""
+
+    def test_emits_only_keys_with_lost_branches(self) -> None:
+        """Pending keys without losses contribute no scalars.
+
+        Emission choice (Task 2.2, mirroring aggregation's only-latched
+        emission): the checkpoint writer serializes None when no scalars
+        exist, and restore treats a missing entry as empty lost_branches —
+        emitting loss-free keys would add bytes without information.
+        """
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b", "c"], policy="best_effort", timeout_seconds=60.0)
+        executor.register_coalesce(s, NodeID("co-1"))
+
+        executor.accept(_make_token(row_id="row_1", branch_name="a", token_id="t1"), "merge")
+        executor.accept(_make_token(row_id="row_2", branch_name="a", token_id="t2"), "merge")
+        executor.notify_branch_lost("merge", "row_2", "b", "error_routed")
+
+        scalars = executor.get_barrier_scalars()
+        assert set(scalars) == {("merge", "row_2")}
+        assert scalars[("merge", "row_2")].lost_branches == {"b": "error_routed"}
+
+    def test_empty_when_no_pending(self) -> None:
+        """No pending coalesces → no scalars."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        assert executor.get_barrier_scalars() == {}
 
 
 # ===========================================================================
@@ -3341,10 +3523,10 @@ class TestNotifyBranchLostEvaluateAfterLoss:
 class TestPrecomputedOutputSchema:
     """Tests for P2 fix: using pre-computed DAG schema for build/runtime alignment.
 
-    When output_schema is passed to register_coalesce(), the executor uses it
-    directly for union merge instead of calling SchemaContract.merge(). This
-    ensures runtime contracts match the DAG-computed schema, preserving the
-    nullable semantics from the P1 fix.
+    When a typed output_schema is passed to register_coalesce(), the executor
+    uses it directly for union merge instead of calling merge_union_contracts()
+    on the branch contracts at runtime. This ensures runtime contracts match
+    the DAG-computed schema, preserving the nullable semantics from the P1 fix.
     """
 
     def test_union_merge_uses_precomputed_schema_when_provided(self):

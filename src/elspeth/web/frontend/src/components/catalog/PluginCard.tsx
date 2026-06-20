@@ -47,6 +47,13 @@ interface DiscriminatedSchema {
 }
 
 const DEFS_REF_PREFIX = "#/$defs/";
+function pluginCardIdSegment(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "unnamed";
+}
 
 interface PluginCardProps {
   plugin: PluginSummary;
@@ -84,6 +91,11 @@ function resolveVariants(s: DiscriminatedSchema): Array<{ label: string; def: Js
   return out;
 }
 
+function variantKindLabel(s: DiscriminatedSchema): string {
+  const name = s.discriminator?.propertyName?.trim() || "variant";
+  return name.endsWith("s") ? name : `${name}s`;
+}
+
 function renderFields(properties: Record<string, JsonSchemaField>, required: string[] | undefined): JSX.Element[] {
   const req = new Set(required ?? []);
   return Object.entries(properties).map(([name, field]) => (
@@ -108,6 +120,9 @@ export function PluginCard({
 }: PluginCardProps) {
   const [expanded, setExpanded] = useState(initialExpanded);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const cardId = `${pluginCardIdSegment(plugin.plugin_type)}-${pluginCardIdSegment(plugin.name)}`;
+  const detailsPanelId = `plugin-card-details-panel-${cardId}`;
+  const schemaPanelId = `plugin-card-schema-panel-${cardId}`;
 
   function handleDisclosureClick(e: MouseEvent<HTMLButtonElement>) {
     e.preventDefault();
@@ -152,6 +167,7 @@ export function PluginCard({
           className="btn btn-small plugin-card-detail-toggle"
           onClick={() => setDetailsOpen((open) => !open)}
           aria-expanded={detailsOpen}
+          aria-controls={detailsPanelId}
           aria-label={`Reference details for ${plugin.name}`}
         >
           Details
@@ -161,6 +177,7 @@ export function PluginCard({
           className="btn btn-small plugin-card-disclosure"
           onClick={handleDisclosureClick}
           aria-expanded={expanded}
+          aria-controls={schemaPanelId}
           aria-label={`Schema for ${plugin.name}`}
         >
           Schema
@@ -168,7 +185,7 @@ export function PluginCard({
       </div>
 
       {detailsOpen && (
-        <div className="plugin-card-details">
+        <div id={detailsPanelId} className="plugin-card-details">
           {allFallback ? (
             <div className="plugin-card-prose-fallback">{PROSE_FALLBACK}</div>
           ) : (
@@ -187,7 +204,7 @@ export function PluginCard({
       )}
 
       {expanded && (
-        <div className="plugin-card-expanded">
+        <div id={schemaPanelId} className="plugin-card-expanded">
           {schemaError ? (
             <div className="plugin-card-schema-error">
               <span>Failed to load schema.</span>
@@ -201,6 +218,9 @@ export function PluginCard({
             </div>
           ) : isDiscriminated(configSchema) ? (
             <div className="plugin-card-variants">
+              <div className="plugin-card-variants-hint">
+                This plugin supports multiple {variantKindLabel(configSchema)}. Configure exactly one:
+              </div>
               {resolveVariants(configSchema).map((v) => (
                 <div key={v.label} className="plugin-card-variant">
                   <div className="plugin-card-variant-label">{v.label}</div>

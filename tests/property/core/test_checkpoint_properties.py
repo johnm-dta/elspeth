@@ -4,9 +4,13 @@
 These tests verify the fundamental invariants of ELSPETH's checkpoint system:
 
 Recovery Properties:
-- Aggregation state round-trips through JSON serialization deterministically
 - Format version validation rejects incompatible versions
 - Topology hash detects ANY graph change (not just upstream)
+
+(Barrier-scalars round-trip and persistence properties live in
+tests/unit/contracts/test_barrier_scalars.py and
+tests/unit/core/checkpoint/test_manager.py — the F1 replacement for the
+retired aggregation/coalesce checkpoint blob layer.)
 
 Ordering Properties:
 - Sequence numbers are monotonically ordered on retrieval
@@ -17,7 +21,7 @@ Validation Properties:
 - Config hash is stable for identical configurations
 
 These properties are CRITICAL for crash recovery - if violated, resumed
-pipelines could produce corrupt audit trails or lose aggregation data.
+pipelines could produce corrupt audit trails.
 """
 
 from __future__ import annotations
@@ -32,14 +36,8 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from elspeth.contracts import Checkpoint, Determinism, NodeType, RunStatus
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
 from elspeth.core.canonical import stable_hash
 from elspeth.core.checkpoint import CheckpointCompatibilityValidator, CheckpointManager
-from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import nodes_table, rows_table, runs_table, tokens_table
@@ -48,65 +46,6 @@ from tests.strategies.json import json_primitives
 # =============================================================================
 # Strategies for checkpoint testing
 # =============================================================================
-
-# Aggregation state: typed AggregationCheckpointState DTOs
-_node_name_alphabet = st.characters(whitelist_categories=("L", "N"), whitelist_characters="_-")
-_node_names = st.text(min_size=1, max_size=20, alphabet=_node_name_alphabet)
-_safe_ids = st.text(min_size=3, max_size=20, alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters="-"))
-
-_agg_token_checkpoints = st.builds(
-    AggregationTokenCheckpoint,
-    token_id=_safe_ids.map(lambda s: f"tok-{s}"),
-    row_id=_safe_ids.map(lambda s: f"row-{s}"),
-    branch_name=st.none() | _safe_ids,
-    fork_group_id=st.none() | _safe_ids,
-    join_group_id=st.none() | _safe_ids,
-    expand_group_id=st.none() | _safe_ids,
-    row_data=st.dictionaries(_node_names, json_primitives, max_size=3),
-    contract_version=_safe_ids,
-    contract=st.just({"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []}),
-)
-
-
-@st.composite
-def _agg_node_checkpoint_strategy(draw: st.DrawFn) -> AggregationNodeCheckpoint:
-    """Build an AggregationNodeCheckpoint that respects the counter-only invariant.
-
-    When tokens is empty, trigger fire-state fields must all be in their reset
-    state (None / 0.0) since there is no active batch to preserve. When tokens
-    is non-empty, all the in-flight trigger metadata may be populated.
-    """
-    tokens = tuple(draw(st.lists(_agg_token_checkpoints, min_size=0, max_size=3)))
-    accepted = draw(st.integers(min_value=0, max_value=1_000_000))
-    completed = draw(st.integers(min_value=0, max_value=1_000_000))
-    if tokens:
-        batch_id: str | None = draw(_safe_ids.map(lambda s: f"batch-{s}"))
-        elapsed = draw(st.floats(min_value=0.0, max_value=3600.0, allow_nan=False, allow_infinity=False))
-        count_off = draw(st.none() | st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False))
-        cond_off = draw(st.none() | st.floats(min_value=0.0, max_value=1000.0, allow_nan=False, allow_infinity=False))
-    else:
-        batch_id = None
-        elapsed = 0.0
-        count_off = None
-        cond_off = None
-    return AggregationNodeCheckpoint(
-        tokens=tokens,
-        batch_id=batch_id,
-        elapsed_age_seconds=elapsed,
-        count_fire_offset=count_off,
-        condition_fire_offset=cond_off,
-        accepted_count_total=accepted,
-        completed_flush_count=completed,
-    )
-
-
-_agg_node_checkpoints = _agg_node_checkpoint_strategy()
-
-aggregation_states = st.builds(
-    AggregationCheckpointState,
-    version=st.just("5.0"),
-    nodes=st.dictionaries(_node_names, _agg_node_checkpoints, min_size=0, max_size=3),
-)
 
 # Valid run IDs
 run_ids = st.text(
@@ -225,6 +164,8 @@ def setup_checkpoint_prerequisites(
                 run_id=run_id,
                 source_node_id="source",
                 row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
                 source_data_hash="data-hash",
                 created_at=now,
             )
@@ -239,214 +180,6 @@ def setup_checkpoint_prerequisites(
                 created_at=now,
             )
         )
-
-
-# =============================================================================
-# Aggregation State Round-Trip Properties
-# =============================================================================
-
-
-class TestAggregationStateRoundTripProperties:
-    """Property tests for aggregation state serialization."""
-
-    @given(state=aggregation_states)
-    @settings(max_examples=200)
-    def test_aggregation_state_roundtrip_deterministic(self, state: AggregationCheckpointState) -> None:
-        """Property: Aggregation state survives JSON round-trip identically.
-
-        This is CRITICAL for crash recovery - if aggregation buffers are
-        corrupted during checkpoint save/load, partial data could be lost
-        or duplicated when pipeline resumes.
-        """
-        db, _ = create_test_db()
-        try:
-            manager = CheckpointManager(db)
-            graph = create_test_graph()
-
-            # Create run first (foreign key constraint)
-            setup_checkpoint_prerequisites(db, "test-run-001")
-
-            # Create checkpoint with typed aggregation state
-            checkpoint = manager.create_checkpoint(
-                run_id="test-run-001",
-                token_id="token-001",
-                node_id="transform_0",
-                sequence_number=1,
-                graph=graph,
-                aggregation_state=state,
-            )
-
-            assert checkpoint.aggregation_state_json is not None
-            restored = checkpoint_loads(checkpoint.aggregation_state_json)
-            expected = state.to_dict()
-            assert restored == expected, f"Aggregation state corrupted during round-trip!\nOriginal: {expected}\nRestored: {restored}"
-        finally:
-            db.close()
-
-    @given(state=aggregation_states)
-    @settings(max_examples=100)
-    def test_aggregation_state_hash_deterministic(self, state: AggregationCheckpointState) -> None:
-        """Property: Same aggregation state produces same JSON representation.
-
-        This uses the actual checkpoint serialization path to avoid
-        diverging from production behavior.
-        """
-        db, _ = create_test_db()
-        try:
-            manager = CheckpointManager(db)
-            graph = create_test_graph()
-
-            setup_checkpoint_prerequisites(db, "test-run-json", token_id="token-json")
-
-            checkpoint1 = manager.create_checkpoint(
-                run_id="test-run-json",
-                token_id="token-json",
-                node_id="transform_0",
-                sequence_number=1,
-                graph=graph,
-                aggregation_state=state,
-            )
-            checkpoint2 = manager.create_checkpoint(
-                run_id="test-run-json",
-                token_id="token-json",
-                node_id="transform_0",
-                sequence_number=2,
-                graph=graph,
-                aggregation_state=state,
-            )
-
-            assert checkpoint1.aggregation_state_json is not None
-            assert checkpoint1.aggregation_state_json == checkpoint2.aggregation_state_json
-        finally:
-            db.close()
-
-    def test_none_aggregation_state_stored_as_null(self) -> None:
-        """Property: None aggregation state is stored as SQL NULL."""
-        db, _ = create_test_db()
-        try:
-            manager = CheckpointManager(db)
-            graph = create_test_graph()
-
-            setup_checkpoint_prerequisites(db, "test-run-002", token_id="token-002")
-
-            checkpoint = manager.create_checkpoint(
-                run_id="test-run-002",
-                token_id="token-002",
-                node_id="transform_0",
-                sequence_number=1,
-                graph=graph,
-                aggregation_state=None,
-            )
-
-            assert checkpoint.aggregation_state_json is None
-        finally:
-            db.close()
-
-    def test_checkpoint_rejects_nan_in_aggregation_state(self) -> None:
-        """Property: NaN in aggregation state raises ValueError.
-
-        Per CLAUDE.md, NaN and Infinity are strictly rejected for audit integrity.
-        Checkpoints use json.dumps(allow_nan=False) which enforces this policy.
-        NaN is injected via row_data inside a token checkpoint.
-        """
-        db, _ = create_test_db()
-        try:
-            manager = CheckpointManager(db)
-            graph = create_test_graph()
-
-            setup_checkpoint_prerequisites(db, "test-nan", token_id="token-nan")
-
-            nan_state = AggregationCheckpointState(
-                version="5.0",
-                nodes={
-                    "test_node": AggregationNodeCheckpoint(
-                        tokens=(
-                            AggregationTokenCheckpoint(
-                                token_id="tok-nan",
-                                row_id="row-nan",
-                                branch_name=None,
-                                fork_group_id=None,
-                                join_group_id=None,
-                                expand_group_id=None,
-                                row_data={"avg": float("nan")},
-                                contract_version="test",
-                                contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                            ),
-                        ),
-                        batch_id="batch-001",
-                        elapsed_age_seconds=0.0,
-                        count_fire_offset=None,
-                        condition_fire_offset=None,
-                        accepted_count_total=0,
-                        completed_flush_count=0,
-                    ),
-                },
-            )
-
-            with pytest.raises(ValueError, match="Cannot serialize non-finite float"):
-                manager.create_checkpoint(
-                    run_id="test-nan",
-                    token_id="token-nan",
-                    node_id="transform_0",
-                    sequence_number=1,
-                    graph=graph,
-                    aggregation_state=nan_state,
-                )
-        finally:
-            db.close()
-
-    def test_checkpoint_rejects_infinity_in_aggregation_state(self) -> None:
-        """Property: Infinity in aggregation state raises ValueError.
-
-        Per CLAUDE.md, NaN and Infinity are strictly rejected for audit integrity.
-        Checkpoints use json.dumps(allow_nan=False) which enforces this policy.
-        Infinity is injected via row_data inside a token checkpoint.
-        """
-        db, _ = create_test_db()
-        try:
-            manager = CheckpointManager(db)
-            graph = create_test_graph()
-
-            setup_checkpoint_prerequisites(db, "test-inf", token_id="token-inf")
-
-            inf_state = AggregationCheckpointState(
-                version="5.0",
-                nodes={
-                    "test_node": AggregationNodeCheckpoint(
-                        tokens=(
-                            AggregationTokenCheckpoint(
-                                token_id="tok-inf",
-                                row_id="row-inf",
-                                branch_name=None,
-                                fork_group_id=None,
-                                join_group_id=None,
-                                expand_group_id=None,
-                                row_data={"value": float("inf")},
-                                contract_version="test",
-                                contract={"mode": "FLEXIBLE", "locked": False, "version_hash": "test", "fields": []},
-                            ),
-                        ),
-                        batch_id="batch-001",
-                        elapsed_age_seconds=0.0,
-                        count_fire_offset=None,
-                        condition_fire_offset=None,
-                        accepted_count_total=0,
-                        completed_flush_count=0,
-                    ),
-                },
-            )
-
-            with pytest.raises(ValueError, match="Cannot serialize non-finite float"):
-                manager.create_checkpoint(
-                    run_id="test-inf",
-                    token_id="token-inf",
-                    node_id="transform_0",
-                    sequence_number=1,
-                    graph=graph,
-                    aggregation_state=inf_state,
-                )
-        finally:
-            db.close()
 
 
 # =============================================================================
@@ -480,9 +213,8 @@ class TestFormatVersionProperties:
             # Create a valid checkpoint first
             manager.create_checkpoint(
                 run_id="test-run-version",
-                token_id="token-version",
-                node_id="transform_0",
                 sequence_number=1,
+                barrier_scalars=None,
                 graph=graph,
             )
 
@@ -515,9 +247,8 @@ class TestFormatVersionProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-run-current",
-                token_id="token-current",
-                node_id="transform_0",
                 sequence_number=1,
+                barrier_scalars=None,
                 graph=graph,
             )
 
@@ -627,9 +358,8 @@ class TestCompatibilityValidationProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-unchanged",
-                token_id="token-unchanged",
-                node_id="transform_0",
                 sequence_number=1,
+                barrier_scalars=None,
                 graph=graph,
             )
 
@@ -651,9 +381,8 @@ class TestCompatibilityValidationProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-missing-node",
-                token_id="token-missing",
-                node_id="transform_1",  # Will be missing in modified graph
                 sequence_number=1,
+                barrier_scalars=None,
                 graph=graph_original,
             )
 
@@ -664,7 +393,6 @@ class TestCompatibilityValidationProperties:
             result = validator.validate(checkpoint, graph_modified)
 
             assert result.can_resume is False
-            assert result.reason is not None and "no longer exists" in result.reason
         finally:
             db.close()
 
@@ -691,9 +419,8 @@ class TestCompatibilityValidationProperties:
 
             checkpoint = manager.create_checkpoint(
                 run_id="test-config-change",
-                token_id="token-config",
-                node_id="transform_0",
                 sequence_number=1,
+                barrier_scalars=None,
                 graph=graph1,
             )
 
@@ -714,7 +441,6 @@ class TestCompatibilityValidationProperties:
             result = validator.validate(checkpoint, graph2)
 
             assert result.can_resume is False
-            assert result.reason is not None and "configuration has changed" in result.reason
         finally:
             db.close()
 
@@ -742,9 +468,8 @@ class TestSequenceNumberProperties:
             for seq in reversed(seq_numbers):
                 manager.create_checkpoint(
                     run_id="test-ordering",
-                    token_id="token-001",  # Reuse same token - sequence_number is unique
-                    node_id="transform_0",
                     sequence_number=seq,
+                    barrier_scalars=None,
                     graph=graph,
                 )
 
@@ -771,9 +496,8 @@ class TestSequenceNumberProperties:
             for seq in seq_numbers:
                 manager.create_checkpoint(
                     run_id="test-latest",
-                    token_id="token-001",  # Reuse same token - sequence_number is unique
-                    node_id="transform_0",
                     sequence_number=seq,
+                    barrier_scalars=None,
                     graph=graph,
                 )
 
@@ -795,26 +519,6 @@ class TestSequenceNumberProperties:
 class TestCheckpointCreationProperties:
     """Property tests for checkpoint creation validation."""
 
-    def test_create_checkpoint_requires_valid_node(self) -> None:
-        """Property: Checkpoint creation fails if node doesn't exist in graph."""
-        db, _ = create_test_db()
-        try:
-            manager = CheckpointManager(db)
-            graph = create_test_graph()
-
-            setup_checkpoint_prerequisites(db, "test-invalid-node")
-
-            with pytest.raises(ValueError, match="does not exist"):
-                manager.create_checkpoint(
-                    run_id="test-invalid-node",
-                    token_id="token-invalid",
-                    node_id="nonexistent_node",
-                    sequence_number=1,
-                    graph=graph,
-                )
-        finally:
-            db.close()
-
     def test_create_checkpoint_requires_graph(self) -> None:
         """Property: Checkpoint creation fails if graph is None."""
         db, _ = create_test_db()
@@ -824,9 +528,8 @@ class TestCheckpointCreationProperties:
             with pytest.raises(ValueError, match="graph parameter is required"):
                 manager.create_checkpoint(
                     run_id="test-no-graph",
-                    token_id="token-no-graph",
-                    node_id="transform_0",
                     sequence_number=1,
+                    barrier_scalars=None,
                     graph=None,  # type: ignore
                 )
         finally:

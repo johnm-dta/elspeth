@@ -944,6 +944,21 @@ class SourceSettings(BaseModel):
         return _validate_connection_or_sink_name(value, field_label="Source on_success connection name")
 
 
+class QueueSettings(BaseModel):
+    """Pass-through scheduling queue declared as a DAG fan-in node.
+
+    Queues are coordination points only in v1. They do not merge row data,
+    join source schemas, or alter token identity.
+    """
+
+    model_config = {"frozen": True, "extra": "forbid"}
+
+    description: str | None = Field(
+        default=None,
+        description="Optional operator-facing description for the queue.",
+    )
+
+
 class TransformSettings(BaseModel):
     """Transform plugin configuration per architecture.
 
@@ -1391,12 +1406,19 @@ class ElspethSettings(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
     # Required - core pipeline definition
-    source: SourceSettings = Field(
-        description="Source plugin configuration (exactly one per run)",
+    sources: dict[str, SourceSettings] = Field(
+        min_length=1,
+        max_length=50,
+        description="Named source plugin configurations (one or more per run)",
     )
     sinks: dict[str, SinkSettings] = Field(
         max_length=50,
         description="Named sink configurations (one or more required)",
+    )
+    queues: dict[str, QueueSettings] = Field(
+        default_factory=dict,
+        max_length=100,
+        description="Named pass-through scheduling queues for explicit fan-in.",
     )
 
     # Run mode configuration
@@ -1488,6 +1510,27 @@ class ElspethSettings(BaseModel):
         description="Telemetry and observability configuration",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_source_field(cls, data: Any) -> Any:
+        """Reject the singular ``source:`` YAML key per ADR-025 §1.
+
+        ELSPETH's source surface is plural by contract. The legacy
+        ``source: { ... }`` shape is deleted, not deprecated. A YAML
+        config that supplies ``source:`` instead of ``sources:`` is a
+        configuration error; the operator must rewrite as
+        ``sources:\\n  <name>: { ... }``.
+        """
+        if type(data) is not dict:
+            return data
+        if "source" in data and data["source"] is not None:
+            raise ValueError(
+                "Configuration uses the deleted singular 'source:' field. "
+                "Per ADR-025 the source surface is plural; rewrite as "
+                "'sources:\\n  <name>: { ... }' (e.g. 'sources: { primary: { plugin: ... } }')."
+            )
+        return data
+
     @model_validator(mode="after")
     def validate_export_sink_exists(self) -> "ElspethSettings":
         """Ensure export.sink references a defined sink when enabled."""
@@ -1517,6 +1560,10 @@ class ElspethSettings(BaseModel):
             all_names.append((a.name, "aggregation"))
         for c in self.coalesce:
             all_names.append((c.name, "coalesce"))
+        for source_name in self.sources:
+            all_names.append((source_name, "source"))
+        for queue_name in self.queues:
+            all_names.append((queue_name, "queue"))
         for sink_name in self.sinks:
             all_names.append((sink_name, "sink"))
 
@@ -1526,7 +1573,7 @@ class ElspethSettings(BaseModel):
                 raise ValueError(
                     f"Node name '{name}' is used by both {seen[name]} and {node_type}. "
                     f"All node names must be unique across transforms, gates, "
-                    f"aggregations, coalesce nodes, and sinks."
+                    f"aggregations, coalesce nodes, sources, queues, and sinks."
                 )
             seen[name] = node_type
         return self
@@ -1541,6 +1588,42 @@ class ElspethSettings(BaseModel):
         if self.run_mode in (RunMode.REPLAY, RunMode.VERIFY) and not self.replay_from:
             raise ValueError(f"replay_from is required when run_mode is '{self.run_mode.value}'")
         return self
+
+    @field_validator("sources")
+    @classmethod
+    def validate_sources_not_empty_and_named(cls, v: dict[str, SourceSettings]) -> dict[str, SourceSettings]:
+        """Source names are stable audit-visible identifiers."""
+        if not v:
+            raise ValueError("At least one source is required")
+        non_lowercase = [name for name in v if name != name.lower()]
+        if non_lowercase:
+            suggestions = [f"'{name}' -> '{name.lower()}'" for name in non_lowercase]
+            raise ValueError(f"Source names must be lowercase. Found: {non_lowercase}. Suggested fixes: {', '.join(suggestions)}")
+        for source_name in v:
+            _validate_max_length(source_name, field_label="Source name", max_length=_MAX_NODE_NAME_LENGTH)
+            _validate_node_name_chars(source_name, field_label="Source name")
+            if source_name in _RESERVED_EDGE_LABELS:
+                raise ValueError(f"Source name '{source_name}' is reserved. Reserved source/edge labels: {sorted(_RESERVED_EDGE_LABELS)}")
+            if source_name.startswith("__"):
+                raise ValueError(f"Source name '{source_name}' starts with '__', which is reserved for system edges")
+        return v
+
+    @field_validator("queues")
+    @classmethod
+    def validate_queue_names(cls, v: dict[str, QueueSettings]) -> dict[str, QueueSettings]:
+        """Queue names are connection identifiers and DAG node names."""
+        non_lowercase = [name for name in v if name != name.lower()]
+        if non_lowercase:
+            suggestions = [f"'{name}' -> '{name.lower()}'" for name in non_lowercase]
+            raise ValueError(f"Queue names must be lowercase. Found: {non_lowercase}. Suggested fixes: {', '.join(suggestions)}")
+        for queue_name in v:
+            _validate_max_length(queue_name, field_label="Queue name", max_length=_MAX_NODE_NAME_LENGTH)
+            _validate_node_name_chars(queue_name, field_label="Queue name")
+            if queue_name in _RESERVED_EDGE_LABELS:
+                raise ValueError(f"Queue name '{queue_name}' is reserved. Reserved queue/edge labels: {sorted(_RESERVED_EDGE_LABELS)}")
+            if queue_name.startswith("__"):
+                raise ValueError(f"Queue name '{queue_name}' starts with '__', which is reserved for system edges")
+        return v
 
     @field_validator("sinks")
     @classmethod
@@ -2009,6 +2092,11 @@ def _fingerprint_config_for_audit(
         )
 
     # === Source options ===
+    if "sources" in config and type(config["sources"]) is dict:
+        for source in config["sources"].values():
+            if type(source) is dict and "options" in source and type(source["options"]) is dict:
+                source["options"] = _fingerprint_secrets(source["options"], fail_if_no_key=fail_if_no_key)
+
     if "source" in config and isinstance(config["source"], dict):
         ds = config["source"]
         if "options" in ds and isinstance(ds["options"], dict):

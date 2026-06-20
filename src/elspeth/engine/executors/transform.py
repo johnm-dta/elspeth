@@ -70,7 +70,7 @@ class TransformExecutor:
     it as FAILED.  This prevents orphan OPEN states in the audit trail.
 
     Example:
-        executor = TransformExecutor(execution, span_factory, step_resolver)
+        executor = TransformExecutor(execution, span_factory, step_resolver, data_flow=data_flow)
         result, updated_token, error_sink = executor.execute_transform(
             transform=my_transform,
             token=token,
@@ -83,9 +83,9 @@ class TransformExecutor:
         execution: ExecutionRepository,
         span_factory: SpanFactory,
         step_resolver: StepResolver,
+        data_flow: DataFlowRepository,
         max_workers: int | None = None,
         error_edge_ids: dict[NodeID, str] | None = None,
-        data_flow: DataFlowRepository | None = None,
     ) -> None:
         """Initialize executor.
 
@@ -93,12 +93,11 @@ class TransformExecutor:
             execution: Execution repository for audit trail
             span_factory: Span factory for tracing
             step_resolver: Resolves NodeID to 1-indexed audit step position
+            data_flow: Data flow repository for schema contract updates.
             max_workers: Maximum concurrent workers (None = no limit)
             error_edge_ids: Map of transform node_id -> DIVERT edge_id for error routing.
                            Built by the processor from the edge_map using error_edge_label().
                            Only populated for transforms with on_error pointing to a real sink.
-            data_flow: Data flow repository for schema contract updates.
-                       Optional for backwards compatibility with tests.
         """
         self._execution = execution
         self._data_flow = data_flow

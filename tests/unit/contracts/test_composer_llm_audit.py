@@ -257,6 +257,41 @@ def test_composer_llm_call_allows_seed_none_when_provider_omits_it() -> None:
     assert payload["seed"] is None
 
 
+@pytest.mark.parametrize(
+    ("overrides", "exc_type", "match"),
+    [
+        ({"status": "success"}, TypeError, "status must be ComposerLLMCallStatus"),
+        ({"prompt_tokens": True}, TypeError, "prompt_tokens must be int"),
+        ({"completion_tokens": -1}, ValueError, "completion_tokens must be >= 0"),
+        ({"total_tokens": 1.5}, TypeError, "total_tokens must be int"),
+        ({"latency_ms": -1}, ValueError, "latency_ms must be >= 0"),
+        ({"seed": 1.5}, TypeError, "seed must be int"),
+        ({"temperature": float("inf")}, ValueError, "temperature must be finite"),
+        ({"model_requested": ""}, ValueError, "model_requested must be non-empty"),
+        ({"model_returned": ""}, ValueError, "model_returned must be non-empty"),
+        ({"messages_hash": ""}, ValueError, "messages_hash must be non-empty"),
+        ({"tools_spec_hash": ""}, ValueError, "tools_spec_hash must be non-empty"),
+        ({"provider_request_id": ""}, ValueError, "provider_request_id must be non-empty"),
+        ({"started_at": "2026-05-04T12:00:00Z"}, TypeError, "started_at must be datetime"),
+        ({"finished_at": "2026-05-04T12:00:00Z"}, TypeError, "finished_at must be datetime"),
+        ({"finished_at": datetime(2026, 5, 4, 11, 59, 59, tzinfo=UTC)}, ValueError, "finished_at must be >= started_at"),
+        ({"error_class": "TimeoutError"}, ValueError, "SUCCESS calls must not include error_class or error_message"),
+        (
+            {"status": ComposerLLMCallStatus.TIMEOUT, "error_class": None, "error_message": "TimeoutError"},
+            ValueError,
+            "non-success calls must include error_class and error_message",
+        ),
+    ],
+)
+def test_composer_llm_call_rejects_invalid_audit_shape(
+    overrides: dict[str, object],
+    exc_type: type[Exception],
+    match: str,
+) -> None:
+    with pytest.raises(exc_type, match=match):
+        _make_call(**overrides)
+
+
 def test_recorder_protocol_runtime_check() -> None:
     class _StubRecorder:
         def record_llm_call(self, call: ComposerLLMCall) -> None:

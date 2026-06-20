@@ -25,15 +25,22 @@ per_file_rules:
   reason: RuntimeRateLimitConfig.services uses MappingProxyType(dict()) — values are RuntimeServiceRateLimit (frozen DCs)
   expires: null
   max_hits: 1
-- pattern: contracts/coalesce_checkpoint.py
+- pattern: contracts/checkpoint.py
   rules:
   - FG2
-  reason: isinstance type guards validate checkpoint data structure at Tier 1 boundary (crash on wrong type)
+  reason: ResumedRow.__post_init__ isinstance(self.row_data, Mapping) is a Tier-1
+    type-validation guard that raises TypeError on wrong type (offensive programming),
+    then calls freeze_fields() on the validated value on the next line — not a
+    conditional freeze bypass
   expires: null
-  max_hits: 2
-- pattern: contracts/aggregation_checkpoint.py
+  max_hits: 1
+- pattern: contracts/node_state_context.py
   rules:
   - FG2
-  reason: isinstance type guards validate checkpoint data structure at Tier 1 boundary (crash on wrong type)
+  reason: PoolExecutionContext.__post_init__ isinstance(self.query_ordering, tuple) is a
+    Tier-1 type-validation guard that raises TypeError on wrong type (offensive
+    programming), not a conditional freeze bypass — query_ordering is
+    tuple[QueryOrderEntry, ...] of frozen dataclasses (already immutable) and each entry
+    is type-checked on the following lines
   expires: null
-  max_hits: 3
+  max_hits: 1

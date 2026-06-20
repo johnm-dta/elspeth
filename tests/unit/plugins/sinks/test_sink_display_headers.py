@@ -7,7 +7,7 @@ that controls output header naming (normalized, original, or custom mapping).
 import csv
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -340,6 +340,85 @@ class TestJSONSinkHeaders:
         with open(output_file) as f:
             row = json.loads(f.readline())
             assert row == {"User ID": "u1", "Amount (USD)": 99.99}
+
+    def test_original_headers_jsonl_retries_after_resolution_failure(self, tmp_path: Path) -> None:
+        """Failed display-header resolution must not mark JSON sink resolved or write output."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.jsonl"
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "schema": {"mode": "observed"},
+                    "headers": "original",
+                }
+            )
+        )
+
+        mock_landscape = MagicMock()
+        mock_landscape.get_source_field_resolution.side_effect = [
+            RuntimeError("Landscape DB locked"),
+            {"User ID": "user_id"},
+        ]
+
+        ctx = make_context(landscape=mock_landscape)
+        sink.on_start(ctx)
+
+        with pytest.raises(RuntimeError, match="Landscape DB locked"):
+            sink.write([{"user_id": "u1"}], ctx)
+
+        assert sink._display_headers_resolved is False
+        assert not output_file.exists()
+
+        sink.write([{"user_id": "u1"}], ctx)
+        sink.flush()
+        sink.close()
+
+        assert mock_landscape.get_source_field_resolution.call_count == 2
+        assert sink._display_headers_resolved is True
+        with open(output_file) as f:
+            row = json.loads(f.readline())
+            assert row == {"User ID": "u1"}
+
+    def test_original_headers_json_array_failed_write_rolls_back_mapped_rows(self, tmp_path: Path) -> None:
+        """Mapped JSON array rows from a failed write must not appear in a later artifact."""
+        from elspeth.plugins.sinks.json_sink import JSONSink
+
+        output_file = tmp_path / "output.json"
+        sink = inject_write_failure(
+            JSONSink(
+                {
+                    "path": str(output_file),
+                    "format": "json",
+                    "schema": {"mode": "observed"},
+                    "headers": "original",
+                }
+            )
+        )
+
+        mock_landscape = MagicMock()
+        mock_landscape.get_source_field_resolution.return_value = {"User ID": "user_id"}
+        ctx = make_context(landscape=mock_landscape)
+        sink.on_start(ctx)
+
+        sink.write([{"user_id": "u1"}], ctx)
+        assert json.loads(output_file.read_text()) == [{"User ID": "u1"}]
+
+        with (
+            patch("elspeth.plugins.sinks.json_sink.os.replace", side_effect=OSError("disk full")),
+            pytest.raises(OSError, match="disk full"),
+        ):
+            sink.write([{"user_id": "u2"}], ctx)
+
+        assert json.loads(output_file.read_text()) == [{"User ID": "u1"}]
+        assert sink._rows == [{"User ID": "u1"}]
+
+        sink.write([{"user_id": "u3"}], ctx)
+        sink.close()
+
+        assert mock_landscape.get_source_field_resolution.call_count == 1
+        assert json.loads(output_file.read_text()) == [{"User ID": "u1"}, {"User ID": "u3"}]
 
     def test_no_headers_option_uses_normalized(self, tmp_path: Path, ctx: PluginContext) -> None:
         """Without headers option, JSONL uses normalized field names."""

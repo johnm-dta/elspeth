@@ -35,6 +35,8 @@ These examples run locally with no credentials or external services.
 | [`retention_purge`](retention_purge/) | Payload retention lifecycle and `elspeth purge` |
 | [`audit_export`](audit_export/) | Export the Landscape audit trail to JSON |
 | [`landscape_journal`](landscape_journal/) | Event journaling for real-time audit monitoring |
+| [`multi_flow`](multi_flow/) | Two independent named source flows in one run |
+| [`multi_source_queue`](multi_source_queue/) | Multiple named sources fan into a durable pass-through queue |
 | [`schema_contracts_demo`](schema_contracts_demo/) | DAG-time schema validation (`guaranteed_fields` / `required_input_fields`) |
 | [`large_scale_test`](large_scale_test/) | Performance testing with large datasets |
 | [`threshold_gate_container`](threshold_gate_container/) | Docker-packaged pipeline deployment |
@@ -48,6 +50,17 @@ These examples demonstrate Retrieval-Augmented Generation using ChromaDB as a ve
 | [`chroma_rag`](chroma_rag/) | Basic RAG retrieval — query a pre-populated ChromaDB collection |
 | [`chroma_rag_qa`](chroma_rag_qa/) | RAG + LLM — retrieve context then generate answers via OpenRouter (requires `OPENROUTER_API_KEY`) |
 | [`chroma_rag_indexed`](chroma_rag_indexed/) | **Pipeline dependencies** — `depends_on` runs an indexing pipeline first, commencement gate verifies the collection, then query pipeline retrieves context. Entry point: `query_pipeline.yaml` |
+
+### 0.6.0 — Multi-Worker & Concurrent Scheduling
+
+New in 0.6.0: examples that demonstrate concurrent in-process token scheduling
+(ADR-026) and multi-worker packs (ADR-030, `elspeth join`).
+
+| Example | What It Demonstrates |
+|---------|---------------------|
+| [`concurrent_scheduler`](concurrent_scheduler/) | Count-6 two-source rendezvous — proves the scheduler holds multiple token lifecycles open at once (pure-data, self-verifying) |
+| [`multi_worker`](multi_worker/) | `elspeth join` — leader + follower(s) share one RUNNING run; asserts ≥2 workers shared the rows (ChaosLLM, self-verifying) |
+| [`multi_worker_showcase`](multi_worker_showcase/) | 4-worker swarm spectacle with live stats card — demonstrative only, no assertion (ChaosLLM) |
 
 ### OpenRouter LLM (real API — requires `OPENROUTER_API_KEY`)
 
@@ -92,6 +105,8 @@ These examples use ELSPETH's built-in fault injection servers to test pipeline r
 | You want to learn about... | Look at... |
 |---------------------------|-----------|
 | **How wiring works** | [`explicit_routing`](explicit_routing/) — the canonical minimal example |
+| **Named source roots** | [`multi_source_queue`](multi_source_queue/) — two sources feeding one queue |
+| **Independent flows in one run** | [`multi_flow`](multi_flow/) — two source→transform→sink branches with shared audit |
 | **Simple routing** | [`threshold_gate`](threshold_gate/) or [`boolean_routing`](boolean_routing/) |
 | **Complex decision trees** | [`deep_routing`](deep_routing/) — 5 gates, 7 sinks, 8-node-deep DAG |
 | **Fork/join patterns** | [`fork_coalesce`](fork_coalesce/) — parallel paths with merge policies |

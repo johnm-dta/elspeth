@@ -59,7 +59,7 @@ def _seed_run_with_artifacts(
         if sink_node_id not in sink_nodes_seen:
             _register_node(factory, run_id, sink_node_id, NodeType.SINK, "csv")
             sink_nodes_seen.add(sink_node_id)
-        row = factory.data_flow.create_row(run_id, "src", i, {"x": i}, row_id=f"row-{i}")
+        row = factory.data_flow.create_row(run_id, "src", i, {"x": i}, row_id=f"row-{i}", source_row_index=i, ingest_sequence=i)
         token = factory.data_flow.create_token(row.row_id, token_id=f"tok-{i}")
         state = factory.execution.begin_node_state(
             token.token_id,

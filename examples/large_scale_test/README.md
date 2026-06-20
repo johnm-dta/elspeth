@@ -1,12 +1,13 @@
 # Large-Scale Test Example
 
-This example demonstrates ELSPETH's performance and auditability with large datasets (10k-100k rows).
+This example demonstrates ELSPETH's durable scheduler and audit trail with large datasets.
+It is a throughput and audit-overhead example, not a quick smoke test.
 
 ## What This Example Shows
 
 - **Scale Testing**: Process tens of thousands of rows with full audit trail
 - **Gate Routing**: Route high-value transactions to a separate sink based on value threshold
-- **Performance**: Measure throughput and audit overhead at scale
+- **Durable Scheduler Cost**: Measure throughput with recoverable work items, scheduler events, and full audit writes
 - **Lineage**: Explore complete lineage for any row in a large dataset
 
 ## Dataset
@@ -41,10 +42,13 @@ Generate 50,000 rows (default):
 python examples/large_scale_test/generate_data.py
 ```
 
-Generate custom row count (10k-100k recommended):
+Generate custom row count:
 
 ```bash
-# 10,000 rows (fast)
+# 1,000 rows (quick local check)
+python examples/large_scale_test/generate_data.py 1000
+
+# 10,000 rows
 python examples/large_scale_test/generate_data.py 10000
 
 # 100,000 rows (stress test)
@@ -54,7 +58,7 @@ python examples/large_scale_test/generate_data.py 100000
 ### 2. Run Pipeline
 
 ```bash
-uv run elspeth run -s examples/large_scale_test/settings.yaml --execute
+elspeth run --settings examples/large_scale_test/settings.yaml --execute
 ```
 
 ### 3. Explore Results
@@ -107,39 +111,49 @@ not rely on runtime defaults.
 
 ## Performance Expectations
 
-Typical throughput on modern hardware:
+The current durable scheduler mode records recoverable scheduler state and
+per-transition scheduler events for every row. That makes this example much
+heavier than the older pre-durable-scheduler benchmark numbers.
+
+Measured local SQLite evidence from the multi-source-token-scheduler worktree:
+5,000 generated rows completed in about 50 seconds with all rows successful and
+matching scheduler event counts.
+
+Use these as order-of-magnitude expectations on a local SQLite database:
 
 | Row Count | Processing Time | Throughput |
 |-----------|----------------|------------|
-| 10,000 | ~1-2 seconds | ~5,000-10,000 rows/sec |
-| 50,000 | ~5-10 seconds | ~5,000-10,000 rows/sec |
-| 100,000 | ~10-20 seconds | ~5,000-10,000 rows/sec |
+| 1,000 | ~10 seconds | ~100 rows/sec |
+| 5,000 | ~50 seconds | ~100 rows/sec |
+| 50,000 | ~7-9 minutes | ~100 rows/sec |
 
-*Note: Actual performance depends on hardware, disk I/O, database backend
-(SQLite vs PostgreSQL), and the declared checkpoint policy.*
+Actual performance depends on hardware, disk I/O, the declared checkpoint
+policy, payload storage, and database backend. PostgreSQL or a future
+high-cardinality scheduler batching mode may have different characteristics.
 
 ## What Gets Audited
 
-For each of the 50k rows, ELSPETH records:
+For each row, ELSPETH records:
 
-- ✅ Source row entry with content hash
-- ✅ Transform input/output hashes
-- ✅ Gate evaluation result (`true`/`false`)
-- ✅ Routing decision (which sink)
-- ✅ Terminal state (`COMPLETED` or `ROUTED`)
-- ✅ Output artifact hash
+- Source row entry with content hash
+- Initial token and token terminal outcome
+- Source and gate node states
+- Routing decision for the gate branch
+- Durable scheduler work item transitions
+- Sink node state and output artifact hash
 
-**Total audit records**: ~250k entries for 50k rows (5 records per row)
+The durable scheduler path writes more than five rows of audit data per input
+row. A 50k-row run should be treated as a long-running local benchmark.
 
 ## Use Cases
 
 This example is useful for:
 
-1. **Performance Testing**: Measure ELSPETH throughput with realistic data volumes
+1. **Performance Testing**: Measure ELSPETH durable-audit throughput with realistic data volumes
 2. **Audit Verification**: Verify complete lineage at scale
 3. **Load Testing**: Stress test with 100k+ rows
 4. **Development**: Test plugins with large datasets before production
-5. **Benchmarking**: Compare performance across different configurations
+5. **Benchmarking**: Compare performance across checkpoint and database configurations
 
 ## Extending This Example
 

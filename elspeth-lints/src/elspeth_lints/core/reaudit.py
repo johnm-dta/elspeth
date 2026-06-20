@@ -596,6 +596,14 @@ _RULE_VOCABULARY_REGISTRY: dict[str, _VocabularySpec] = {
         "elspeth_lints.rules.immutability.frozen_annotations.rule",
         ("RULE_ID",),
     ),
+    "contract_invariants.session_engine_factory": _VocabularySpec(
+        "elspeth_lints.rules.contract_invariants.session_engine_factory.rule",
+        ("RULE_ID",),
+    ),
+    "contract_invariants.validation_theatre": _VocabularySpec(
+        "elspeth_lints.rules.contract_invariants.validation_theatre.rule",
+        ("RULE_ID",),
+    ),
     "audit_evidence.guard_symmetry": _VocabularySpec(
         "elspeth_lints.rules.audit_evidence.guard_symmetry.rule",
         ("LEGACY_RULE_ID",),

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from pydantic import BaseModel, ConfigDict
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.secrets import SecretInventoryItem, SecretScope, SecretUnavailabilityReason
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
@@ -84,6 +85,24 @@ class _WireSecretRefArgumentsModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _SecretInventoryItemPayload(TypedDict):
+    name: str
+    scope: SecretScope
+    available: bool
+    source_kind: str
+    reason: SecretUnavailabilityReason | None
+
+
+def _inventory_item_payload(item: SecretInventoryItem) -> _SecretInventoryItemPayload:
+    return {
+        "name": item.name,
+        "scope": item.scope,
+        "available": item.available,
+        "source_kind": item.source_kind,
+        "reason": item.reason,
+    }
+
+
 def _handle_list_secret_refs(
     arguments: dict[str, Any],
     state: CompositionState,
@@ -93,7 +112,7 @@ def _handle_list_secret_refs(
         return _failure_result(state, "Secret tools require secret service context.")
     items = context.secret_service.list_refs(context.user_id)
     # Return inventory dicts — NEVER include values
-    data = [{"name": item.name, "scope": item.scope, "available": item.available} for item in items]
+    data = [_inventory_item_payload(item) for item in items]
     return _discovery_result(state, data)
 
 
@@ -122,6 +141,10 @@ def _handle_validate_secret_ref(
             actual_type=type(exc).__name__,
         ) from exc
     name = validated.name
+    for item in context.secret_service.list_refs(context.user_id):
+        if item.name == name:
+            return _discovery_result(state, _inventory_item_payload(item))
+
     available = context.secret_service.has_ref(context.user_id, name)
     return _discovery_result(state, {"name": name, "available": available})
 
@@ -170,16 +193,27 @@ def _execute_wire_secret_ref(
     marker = {"secret_ref": name}
 
     if target == "source":
-        if state.source is None:
+        if not state.sources:
             return _failure_result(state, "No source configured — set a source first.")
-        patched_options = dict(deep_thaw(state.source.options))
+        if target_id is None:
+            if len(state.sources) == 1:
+                source_name = next(iter(state.sources))
+            else:
+                return _failure_result(state, "target_id is required for source targets when multiple sources are configured.")
+        else:
+            source_name = str(target_id)
+        source = state.sources[source_name] if source_name in state.sources else None
+        if source is None:
+            return _failure_result(state, f"Source '{source_name}' not found.")
+        patched_options = dict(deep_thaw(source.options))
         patched_options[option_key] = marker
-        placement_error = _secret_ref_placement_error("source", state.source.plugin, patched_options)
+        placement_error = _secret_ref_placement_error("source", source.plugin, patched_options)
         if placement_error is not None:
             return _failure_result(state, placement_error)
-        new_source = replace(state.source, options=patched_options)
-        new_state = state.with_source(new_source)
-        return _mutation_result(new_state, ("source",))
+        new_source = replace(source, options=patched_options)
+        new_state = state.with_named_source(source_name, new_source)
+        affected = "source" if source_name == "source" else f"source:{source_name}"
+        return _mutation_result(new_state, (affected,))
 
     elif target == "node":
         if target_id is None:

@@ -1,16 +1,17 @@
-source:
-  plugin: csv
-  on_success: top_k_in
-  options:
-    path: examples/statistical_batch_plugins/top_k_labels.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'model: str'
-      - 'predicted_label: str'
-      - 'task_family: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: top_k_in
+    options:
+      path: examples/statistical_batch_plugins/top_k_labels.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'model: str'
+        - 'predicted_label: str'
+        - 'task_family: str'
+      on_validation_failure: discard
 aggregations:
 - name: label_top_k
   plugin: batch_top_k

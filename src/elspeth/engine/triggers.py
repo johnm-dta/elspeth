@@ -98,7 +98,7 @@ class TriggerEvaluator:
         """
         return self.batch_age_seconds
 
-    def record_accept(self) -> None:
+    def record_accept(self, accept_time: float | None = None) -> None:
         """Record that a row was accepted into the batch.
 
         Call this after each successful accept. Updates batch_count,
@@ -106,11 +106,24 @@ class TriggerEvaluator:
 
         Per plugin-protocol.md:1211: "Multiple triggers can be combined (first one to fire wins)"
         We track when each trigger first becomes true so we can report the earliest.
+
+        ``accept_time`` (ADR-030 §E.2 backdated accept timing): an explicit
+        monotonic anchor for this accept — the journal-first intake passes the
+        row's durable ``barrier_blocked_at`` arrival converted onto this
+        clock's monotonic scale, so the first-accept, count-fire and
+        condition-fire latches anchor at durable arrival rather than at
+        adoption. A batch's timeout fire time is therefore a pure function of
+        durable state + config (``barrier_blocked_at(oldest member) +
+        timeout_seconds``) — invariant under leader takeover (§H pinned
+        doctrine). ``None`` preserves the live-clock anchor.
         """
-        current_time = self._clock.monotonic()
+        current_time = accept_time if accept_time is not None else self._clock.monotonic()
         self._batch_count += 1
 
-        if self._first_accept_time is None:
+        if self._first_accept_time is None or current_time < self._first_accept_time:
+            # min-anchor: §H doctrine pins the timeout fire time to the OLDEST
+            # member's durable arrival; a backdated adoption arriving out of
+            # blocked-at order must still rewind the anchor.
             self._first_accept_time = current_time
 
         # Track when count threshold was first reached

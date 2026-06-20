@@ -351,6 +351,8 @@ class TestRowRecordingProperties:
             source_node_id=source_node.node_id,
             row_index=row_index,
             data=data,
+            source_row_index=row_index,
+            ingest_sequence=row_index,
         )
 
         # Verify row is persisted
@@ -382,6 +384,8 @@ class TestRowRecordingProperties:
                 source_node_id=source_node.node_id,
                 row_index=i,
                 data={"value": i},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             rows.append(row)
 
@@ -416,6 +420,8 @@ class TestRowRecordingProperties:
                 source_node_id=source_node.node_id,
                 row_index=i,
                 data={"value": i},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             row_ids.add(row.row_id)
 
@@ -452,6 +458,8 @@ class TestTokenRecordingProperties:
             source_node_id=source_node.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         token = factory.data_flow.create_token(row_id=row.row_id)
@@ -482,6 +490,8 @@ class TestTokenRecordingProperties:
             source_node_id=source_node.node_id,
             row_index=0,
             data={"value": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         token_ids = set()
@@ -522,6 +532,8 @@ class TestTokenOutcomeProperties:
             source_node_id=source_node.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -565,6 +577,8 @@ class TestTokenOutcomeProperties:
             source_node_id=source_node.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -610,6 +624,8 @@ class TestTokenOutcomeProperties:
                 source_node_id=source_node.node_id,
                 row_index=i,
                 data={"value": i},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             factory.data_flow.record_token_outcome(
@@ -653,7 +669,7 @@ class TestTokenOutcomeProperties:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        run = factory.run_lifecycle.begin_run(config={"source": {"plugin": "test"}}, canonical_version="1.0")
+        run = factory.run_lifecycle.begin_run(config={"sources": {"primary": {"plugin": "test"}}}, canonical_version="1.0")
         source_node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
@@ -667,6 +683,8 @@ class TestTokenOutcomeProperties:
             source_node_id=source_node.node_id,
             row_index=0,
             data={"value": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -718,7 +736,7 @@ class TestTokenOutcomeProperties:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        run = factory.run_lifecycle.begin_run(config={"source": {"plugin": "test"}}, canonical_version="1.0")
+        run = factory.run_lifecycle.begin_run(config={"sources": {"primary": {"plugin": "test"}}}, canonical_version="1.0")
         source_node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
@@ -732,6 +750,8 @@ class TestTokenOutcomeProperties:
             source_node_id=source_node.node_id,
             row_index=0,
             data={"value": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -805,6 +825,8 @@ class TestNodeStateProperties:
             source_node_id=source_node.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -856,6 +878,8 @@ class TestNodeStateProperties:
             source_node_id=source_node.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -911,6 +935,8 @@ class TestForeignKeyIntegrity:
                 source_node_id=source_node.node_id,
                 row_index=i,
                 data={"value": i},
+                source_row_index=i,
+                ingest_sequence=i,
             )
 
         # Verify all rows reference valid run
@@ -948,6 +974,8 @@ class TestForeignKeyIntegrity:
             source_node_id=source_node.node_id,
             row_index=0,
             data={"value": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         for _ in range(n_tokens):
@@ -989,6 +1017,8 @@ class TestForeignKeyIntegrity:
                 source_node_id=source_node.node_id,
                 row_index=i,
                 data={"value": i},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             factory.data_flow.record_token_outcome(
@@ -1027,7 +1057,7 @@ class TestHashDeterminism:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        run = factory.run_lifecycle.begin_run(config={"source": {"plugin": "test"}}, canonical_version="1.0")
+        run = factory.run_lifecycle.begin_run(config={"sources": {"primary": {"plugin": "test"}}}, canonical_version="1.0")
         source_node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
@@ -1042,6 +1072,8 @@ class TestHashDeterminism:
             source_node_id=source_node.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         row2 = factory.data_flow.create_row(
@@ -1049,6 +1081,8 @@ class TestHashDeterminism:
             source_node_id=source_node.node_id,
             row_index=1,
             data=data,
+            source_row_index=1,
+            ingest_sequence=1,
         )
 
         assert row1.source_data_hash == row2.source_data_hash, (
@@ -1062,7 +1096,7 @@ class TestHashDeterminism:
         db = make_landscape_db()
         factory = make_factory(db)
 
-        run = factory.run_lifecycle.begin_run(config={"source": {"plugin": "test"}}, canonical_version="1.0")
+        run = factory.run_lifecycle.begin_run(config={"sources": {"primary": {"plugin": "test"}}}, canonical_version="1.0")
         source_node = factory.data_flow.register_node(
             run_id=run.run_id,
             plugin_name="test_source",
@@ -1086,6 +1120,8 @@ class TestHashDeterminism:
             source_node_id=source_node.node_id,
             row_index=0,
             data=data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token1 = factory.data_flow.create_token(row_id=row.row_id)
         token2 = factory.data_flow.create_token(row_id=row.row_id)

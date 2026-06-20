@@ -60,7 +60,7 @@ class TestCompletedOutcomeTimingContract:
         sink = FailingSink(error_message="Simulated sink failure - data never written")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -103,7 +103,7 @@ class TestCompletedOutcomeTimingContract:
         sink = FailingSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -155,7 +155,7 @@ class TestCompletedOutcomeTimingContract:
         sink = FailingSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )

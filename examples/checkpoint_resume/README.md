@@ -48,7 +48,22 @@ elspeth resume <run_id> --database examples/checkpoint_resume/runs/audit.db
 elspeth resume <run_id> --database examples/checkpoint_resume/runs/audit.db --execute
 ```
 
-The resume skips rows that were already processed and appends new results to the output files.
+The resume skips rows that were already persisted and appends new results to the output files.
+
+If the source lifecycle is still `interrupted` and there are no persisted rows left
+to replay, ELSPETH refuses to mark the run complete:
+
+```json
+{
+  "event": "not_resumable",
+  "reason": "source_not_exhausted"
+}
+```
+
+That refusal is intentional. Current resume replays persisted row payloads through
+the audit trail; it does not reopen the original source and prove that unread input
+rows do not exist. Start a fresh run for that case, or use a future source-aware
+resume path once implemented.
 
 ## Checkpoint Configuration
 
@@ -64,8 +79,8 @@ checkpoint:
 
 | Frequency | Trade-off |
 |-----------|-----------|
-| `every_row` | Safest — can resume from any row. Higher I/O overhead. |
-| `every_n` | Balanced — lose up to N-1 rows on crash. Lower I/O. |
+| `every_row` | Safest for persisted-row replay. Higher I/O overhead. |
+| `every_n` | Balanced — fewer checkpoint writes, but a mid-source interrupt may be refused if unread source rows could exist. |
 | `aggregation_only` | Fastest — only checkpoint at aggregation boundaries. |
 
 ## Graceful Shutdown

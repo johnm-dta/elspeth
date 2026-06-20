@@ -52,7 +52,9 @@ class TestPluginContextProtocolContracts:
         """Every protocol member must map to a concrete PluginContext field or method."""
         from elspeth.contracts.plugin_context import PluginContext
 
-        plugin_context_fields = {field.name for field in fields(PluginContext)}
+        plugin_context_fields = {field.name for field in fields(PluginContext)} | {
+            name for name, value in vars(PluginContext).items() if isinstance(value, property)
+        }
         plugin_context_methods = {
             name for name, value in inspect.getmembers(PluginContext, predicate=inspect.isfunction) if not name.startswith("_")
         }
@@ -87,6 +89,7 @@ class TestPluginContextProtocolContracts:
 # link a validation error audit record to the later persisted quarantine row.
 EXECUTOR_ONLY_FIELDS = {
     "config",
+    "_config",
     "_pending_quarantine_validation_errors",
 }
 
@@ -105,10 +108,12 @@ class TestProtocolFieldCoverage:
     """
 
     def _get_plugin_context_fields(self) -> set[str]:
-        """Get all field names from PluginContext dataclass."""
+        """Get all concrete field/property names from PluginContext."""
         from elspeth.contracts.plugin_context import PluginContext
 
-        return {field.name for field in fields(PluginContext)}
+        dataclass_fields = {field.name for field in fields(PluginContext)}
+        properties = {name for name, value in vars(PluginContext).items() if isinstance(value, property)}
+        return dataclass_fields | properties
 
     def _get_plugin_context_methods(self) -> set[str]:
         """Get all public method names from PluginContext."""

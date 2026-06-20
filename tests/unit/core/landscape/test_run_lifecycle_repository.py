@@ -4,11 +4,10 @@
 These tests exercise RunLifecycleRepository directly to pin its contract
 and verify Tier 1 crash paths.
 
-Covers 4 untested branch clusters identified in review:
+Covers 3 untested branch clusters identified in review:
 1. get_source_schema — non-string type rejection
 2. get_source_field_resolution — corruption paths (bad JSON shape, missing key, non-dict mapping, non-string entries)
-3. get_run_contract — missing run, null hash, hash mismatch
-4. set_export_status — COMPLETED/PENDING/FAILED branching logic
+3. set_export_status — COMPLETED/PENDING/FAILED branching logic
 """
 
 from __future__ import annotations
@@ -21,12 +20,12 @@ from sqlalchemy import select, update
 from elspeth.contracts import (
     Determinism,
     ExportStatus,
-    FieldContract,
+    NodeType,
     ReproducibilityGrade,
     RunStatus,
-    SchemaContract,
     SecretResolutionInput,
 )
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import AuditIntegrityError, FrameworkBugError
 from elspeth.core.dependency_config import CommencementGateResult, DependencyRunResult, PreflightResult
 from elspeth.core.landscape._database_ops import DatabaseOps
@@ -38,7 +37,7 @@ from elspeth.core.landscape.run_lifecycle_repository import (
     is_valid_sha256_hex,
 )
 from elspeth.core.landscape.schema import run_attributions_table, runs_table
-from tests.fixtures.landscape import make_factory, make_landscape_db
+from tests.fixtures.landscape import make_factory, make_landscape_db, make_recorder_with_run, register_test_node
 
 
 def _make_repo(*, run_id: str = "run-1") -> tuple[LandscapeDB, RunLifecycleRepository]:
@@ -87,6 +86,70 @@ class TestBeginRunDirect:
         repo = RunLifecycleRepository(db, ops, RunLoader())
         run = repo.begin_run(config={}, canonical_version="v1")
         assert run.run_id  # non-empty generated ID
+
+    def test_begin_run_mints_leader_seat_atomically(self) -> None:
+        """Epoch 21 (ADR-030 §B.4 closing line / uniformity rule).
+
+        begin_run creates the run_coordination seat at epoch 1, registers the
+        leader's run_workers row (with pid/hostname/entry_point forensics),
+        and writes the worker_register + leader_acquire events — every N=1
+        run, including every repository-level test fixture, exercises the
+        substrate.
+        """
+        from sqlalchemy import select as sa_select
+
+        from elspeth.core.landscape.schema import (
+            run_coordination_events_table,
+            run_coordination_table,
+            run_workers_table,
+        )
+
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        explicit_worker = "worker:seat-mint-run:abc123"
+        repo.begin_run(
+            config={},
+            canonical_version="v1",
+            run_id="seat-mint-run",
+            leader_worker_id=explicit_worker,
+        )
+        with db.connection() as conn:
+            seat = conn.execute(sa_select(run_coordination_table).where(run_coordination_table.c.run_id == "seat-mint-run")).one()
+            worker = conn.execute(sa_select(run_workers_table).where(run_workers_table.c.worker_id == explicit_worker)).one()
+            event_types = (
+                conn.execute(
+                    sa_select(run_coordination_events_table.c.event_type)
+                    .where(run_coordination_events_table.c.run_id == "seat-mint-run")
+                    .order_by(run_coordination_events_table.c.seq)
+                )
+                .scalars()
+                .all()
+            )
+        assert seat.leader_worker_id == explicit_worker
+        assert seat.leader_epoch == 1
+        assert seat.leader_heartbeat_expires_at is not None
+        assert worker.role == "leader"
+        assert worker.status == "active"
+        assert worker.entry_point == "run"
+        assert worker.pid is not None
+        assert event_types == ["worker_register", "leader_acquire"]
+
+    def test_begin_run_self_mints_worker_identity_when_omitted(self) -> None:
+        """Uniformity-for-free: callers that pass no identity still get a seat."""
+        from sqlalchemy import select as sa_select
+
+        from elspeth.core.landscape.schema import run_coordination_table
+
+        db = make_landscape_db()
+        ops = DatabaseOps(db)
+        repo = RunLifecycleRepository(db, ops, RunLoader())
+        run = repo.begin_run(config={}, canonical_version="v1")
+        with db.connection() as conn:
+            seat = conn.execute(sa_select(run_coordination_table).where(run_coordination_table.c.run_id == run.run_id)).one()
+        assert isinstance(seat.leader_worker_id, str)
+        assert seat.leader_worker_id.startswith(f"worker:{run.run_id}:")
+        assert seat.leader_epoch == 1
 
     def test_get_run_roundtrip(self) -> None:
         """get_run returns the same run that begin_run created."""
@@ -417,6 +480,110 @@ class TestGetSourceFieldResolution:
         with pytest.raises(AuditIntegrityError, match="Corrupt field resolution JSON"):
             repo.get_source_field_resolution("run-1")
 
+    def test_resume_resolution_uses_source_scoped_mapping_when_present(self) -> None:
+        """Multi-source resume uses run_sources, not the overwritten run-level singleton."""
+        setup = make_recorder_with_run(run_id="run-1", source_node_id="source_orders", source_plugin_name="csv")
+        register_test_node(
+            setup.data_flow,
+            setup.run_id,
+            "source_refunds",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+        )
+        shared_mapping = {"Order ID": "order_id", "Amount": "amount"}
+        setup.run_lifecycle.record_source_field_resolution(
+            setup.run_id,
+            {"Refund ID": "refund_id", "Amount": "amount"},
+            "v1",
+        )
+        for source_node_id, source_name in (
+            ("source_orders", "orders"),
+            ("source_refunds", "refunds"),
+        ):
+            setup.run_lifecycle.record_run_source(
+                run_id=setup.run_id,
+                source_node_id=source_node_id,
+                source_name=source_name,
+                plugin_name="csv",
+                config_hash=source_name,
+                lifecycle_state="loaded",
+                field_resolution_mapping=shared_mapping,
+                normalization_version="v1",
+            )
+
+        assert setup.run_lifecycle.get_resume_field_resolution(setup.run_id) == shared_mapping
+
+    def test_resume_resolution_rejects_distinct_multi_source_mappings(self) -> None:
+        """One sink-level mapping cannot safely represent two original header sets."""
+        setup = make_recorder_with_run(run_id="run-1", source_node_id="source_orders", source_plugin_name="csv")
+        register_test_node(
+            setup.data_flow,
+            setup.run_id,
+            "source_refunds",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+        )
+        setup.run_lifecycle.record_source_field_resolution(
+            setup.run_id,
+            {"Refund ID": "refund_id", "Amount": "amount"},
+            "v1",
+        )
+        setup.run_lifecycle.record_run_source(
+            run_id=setup.run_id,
+            source_node_id="source_orders",
+            source_name="orders",
+            plugin_name="csv",
+            config_hash="orders",
+            lifecycle_state="loaded",
+            field_resolution_mapping={"Order ID": "order_id", "Amount": "amount"},
+            normalization_version="v1",
+        )
+        setup.run_lifecycle.record_run_source(
+            run_id=setup.run_id,
+            source_node_id="source_refunds",
+            source_name="refunds",
+            plugin_name="csv",
+            config_hash="refunds",
+            lifecycle_state="loaded",
+            field_resolution_mapping={"Refund ID": "refund_id", "Amount": "amount"},
+            normalization_version="v1",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="different original-header mappings"):
+            setup.run_lifecycle.get_resume_field_resolution(setup.run_id)
+
+    def test_resume_resolution_rejects_missing_multi_source_mapping(self) -> None:
+        """Missing per-source mapping is ambiguous once multiple sources exist."""
+        setup = make_recorder_with_run(run_id="run-1", source_node_id="source_orders", source_plugin_name="csv")
+        register_test_node(
+            setup.data_flow,
+            setup.run_id,
+            "source_refunds",
+            node_type=NodeType.SOURCE,
+            plugin_name="csv",
+        )
+        setup.run_lifecycle.record_run_source(
+            run_id=setup.run_id,
+            source_node_id="source_orders",
+            source_name="orders",
+            plugin_name="csv",
+            config_hash="orders",
+            lifecycle_state="loaded",
+            field_resolution_mapping={"Order ID": "order_id"},
+            normalization_version="v1",
+        )
+        setup.run_lifecycle.record_run_source(
+            run_id=setup.run_id,
+            source_node_id="source_refunds",
+            source_name="refunds",
+            plugin_name="csv",
+            config_hash="refunds",
+            lifecycle_state="loaded",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="missing for source"):
+            setup.run_lifecycle.get_resume_field_resolution(setup.run_id)
+
 
 class TestRecordSourceFieldResolutionNonexistentRun:
     """record_source_field_resolution on a nonexistent run must crash."""
@@ -433,69 +600,6 @@ class TestRecordSourceFieldResolutionNonexistentRun:
                 {"header": "field"},
                 "v1",
             )
-
-
-# ---------------------------------------------------------------------------
-# get_run_contract — Tier 1 integrity checks
-# ---------------------------------------------------------------------------
-
-
-class TestGetRunContract:
-    """Direct tests for get_run_contract Tier 1 validation."""
-
-    def test_returns_none_when_no_contract_stored(self) -> None:
-        _, repo = _make_repo()
-        assert repo.get_run_contract("run-1") is None
-
-    def test_nonexistent_run_raises(self) -> None:
-        """get_run_contract raises AuditIntegrityError when run_id not found."""
-        _, repo = _make_repo()
-        with pytest.raises(AuditIntegrityError, match="not found"):
-            repo.get_run_contract("nonexistent")
-
-    def test_roundtrip_with_contract(self) -> None:
-        _, repo = _make_repo()
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(
-                FieldContract(normalized_name="name", original_name="name", python_type=str, required=True, source="declared"),
-                FieldContract(normalized_name="age", original_name="age", python_type=int, required=True, source="declared"),
-            ),
-            locked=True,
-        )
-        repo.update_run_contract("run-1", contract)
-        result = repo.get_run_contract("run-1")
-        assert result is not None
-        assert result.mode == "FIXED"
-        assert len(result.fields) == 2
-
-    def test_null_hash_with_json_raises_audit_integrity_error(self) -> None:
-        """Tier 1: JSON present but hash NULL = corruption/tampering."""
-        db, repo = _make_repo()
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(FieldContract(normalized_name="x", original_name="x", python_type=str, required=True, source="declared"),),
-            locked=True,
-        )
-        repo.update_run_contract("run-1", contract)
-        # Corrupt: set hash to NULL while keeping JSON
-        _corrupt_column(db, "run-1", schema_contract_hash=None)
-        with pytest.raises(AuditIntegrityError, match="hash is NULL"):
-            repo.get_run_contract("run-1")
-
-    def test_hash_mismatch_raises_audit_integrity_error(self) -> None:
-        """Tier 1: stored hash != recomputed hash = corruption/tampering."""
-        db, repo = _make_repo()
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(FieldContract(normalized_name="x", original_name="x", python_type=str, required=True, source="declared"),),
-            locked=True,
-        )
-        repo.update_run_contract("run-1", contract)
-        # Corrupt the stored hash
-        _corrupt_column(db, "run-1", schema_contract_hash="tampered-hash-value")
-        with pytest.raises(AuditIntegrityError, match="hash mismatch"):
-            repo.get_run_contract("run-1")
 
 
 # ---------------------------------------------------------------------------
@@ -746,65 +850,6 @@ class TestRecordSecretResolutions:
         # Verify atomicity: zero records should be stored
         stored = repo.get_secret_resolutions_for_run("run-1")
         assert len(stored) == 0
-
-
-# ---------------------------------------------------------------------------
-# update_run_contract — overwrite guard
-# ---------------------------------------------------------------------------
-
-
-class TestUpdateRunContract:
-    """Direct tests for update_run_contract overwrite protection."""
-
-    def test_update_succeeds_when_no_prior_contract(self) -> None:
-        """Normal path: adding contract to a run that has none."""
-        _, repo = _make_repo()
-        contract = SchemaContract(
-            mode="OBSERVED",
-            fields=(FieldContract(normalized_name="x", original_name="x", python_type=str, required=True, source="inferred"),),
-            locked=True,
-        )
-        repo.update_run_contract("run-1", contract)
-        result = repo.get_run_contract("run-1")
-        assert result is not None
-        assert result.mode == "OBSERVED"
-
-    def test_update_nonexistent_run_raises(self) -> None:
-        """Atomic guard: update_run_contract on missing run raises AuditIntegrityError."""
-        _, repo = _make_repo()
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(FieldContract(normalized_name="x", original_name="x", python_type=str, required=True, source="declared"),),
-            locked=True,
-        )
-        with pytest.raises(AuditIntegrityError, match="not found"):
-            repo.update_run_contract("ghost-run", contract)
-
-    def test_overwrite_existing_contract_raises(self) -> None:
-        """Tier 1: overwriting an existing contract is evidence contamination."""
-        db = make_landscape_db()
-        ops = DatabaseOps(db)
-        repo = RunLifecycleRepository(db, ops, RunLoader())
-        # Create run WITH a contract via begin_run
-        contract = SchemaContract(
-            mode="FIXED",
-            fields=(FieldContract(normalized_name="y", original_name="y", python_type=int, required=True, source="declared"),),
-            locked=True,
-        )
-        repo.begin_run(
-            config={"key": "value"},
-            canonical_version="v1",
-            run_id="run-with-contract",
-            schema_contract=contract,
-        )
-        # Attempting to update should fail — contract already exists
-        new_contract = SchemaContract(
-            mode="OBSERVED",
-            fields=(FieldContract(normalized_name="z", original_name="z", python_type=str, required=True, source="inferred"),),
-            locked=True,
-        )
-        with pytest.raises(AuditIntegrityError, match="contract already exists"):
-            repo.update_run_contract("run-with-contract", new_contract)
 
 
 # ---------------------------------------------------------------------------
@@ -1224,3 +1269,150 @@ class TestWriteRepositoryOpenrouterCatalogSnapshotValidation:
                 openrouter_catalog_sha256="not-a-sha",
                 openrouter_catalog_source="bundled",
             )
+
+
+# ---------------------------------------------------------------------------
+# Immutability backstop beneath the epoch fence + complete_run diagnosis order
+# (ADR-030 §D / §H — slice 2 test campaign §4)
+# ---------------------------------------------------------------------------
+
+
+def _make_repo_with_token(*, run_id: str = "run-fenced") -> tuple[LandscapeDB, RunLifecycleRepository, CoordinationToken]:
+    """Run + epoch-1 leader seat + the matching (CURRENT, VALID) token.
+
+    ``begin_run`` mints the seat atomically with the runs row (uniformity
+    rule); passing ``leader_worker_id`` lets the test construct the epoch-1
+    token without a read-back — exactly what the engine does.
+    """
+    db = make_landscape_db()
+    ops = DatabaseOps(db)
+    repo = RunLifecycleRepository(db, ops, RunLoader())
+    worker_id = f"worker:{run_id}:unit-fence"
+    repo.begin_run(config={"key": "value"}, canonical_version="v1", run_id=run_id, leader_worker_id=worker_id)
+    return db, repo, CoordinationToken(run_id=run_id, worker_id=worker_id, leader_epoch=1)
+
+
+def _bump_seat_epoch(db: LandscapeDB, run_id: str) -> None:
+    """The in-DB image of a takeover: depose the token holder by epoch bump."""
+    from elspeth.core.landscape.schema import run_coordination_table
+
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(run_coordination_table)
+            .where(run_coordination_table.c.run_id == run_id)
+            .values(leader_epoch=run_coordination_table.c.leader_epoch + 1)
+        )
+
+
+class TestImmutabilityBackstopBeneathEpochFence:
+    """ADR-030 §B.4 closing line: the epoch fence did NOT replace immutability.
+
+    The durable backstop the design retains beneath the resume() entry guard
+    (which now refuses terminal runs itself — the §H test-#1 flip): a
+    perfectly-fenced caller holding a CURRENT, VALID token still cannot
+    mutate a successful terminal run.
+    """
+
+    def test_update_run_status_from_completed_refused_even_with_current_epoch_token(self) -> None:
+        _db, repo, token = _make_repo_with_token(run_id="run-immut-fenced")
+        repo.complete_run("run-immut-fenced", RunStatus.COMPLETED, token=token)
+
+        # The token is still CURRENT (complete_run does not release the
+        # seat), so the fence passes — the refusal below is the immutability
+        # guard, not the fence.
+        with pytest.raises(AuditIntegrityError, match=r"from COMPLETED .*immutable"):
+            repo.update_run_status("run-immut-fenced", RunStatus.RUNNING, token=token)
+
+        run = repo.get_run("run-immut-fenced")
+        assert run is not None
+        assert run.status == RunStatus.COMPLETED
+
+    def test_update_run_status_immutable_success_target_still_refused_with_token(self) -> None:
+        """Setting an immutable-success status via update_run_status stays refused
+        (the :922-926 arm), token or no token — completed_at must be recorded
+        via complete_run()."""
+        _db, repo, token = _make_repo_with_token(run_id="run-immut-target")
+        with pytest.raises(AuditIntegrityError, match="complete_run"):
+            repo.update_run_status("run-immut-target", RunStatus.COMPLETED, token=token)
+
+
+class TestCompleteRunDiagnosisOrder:
+    """§D rowcount-0 diagnosis order (design :316), pinned arm by arm:
+
+    already-terminal ⇒ AuditIntegrityError (wins even over a stale fence);
+    fence mismatch on a non-terminal run ⇒ RunLeadershipLostError;
+    residual scheduler work ⇒ OrchestrationInvariantError.
+    """
+
+    def test_already_terminal_wins_over_fence_diagnosis(self) -> None:
+        """A deposed leader finalizing an ALREADY-TERMINAL run gets the
+        immutability diagnosis, not the coordination one — terminal
+        diagnosis wins over fence diagnosis."""
+        from elspeth.contracts.errors import RunLeadershipLostError
+
+        db, repo, token = _make_repo_with_token(run_id="run-diag-terminal")
+        repo.complete_run("run-diag-terminal", RunStatus.COMPLETED, token=token)
+        _bump_seat_epoch(db, "run-diag-terminal")  # token is now STALE
+
+        with pytest.raises(AuditIntegrityError, match="already terminal") as exc_info:
+            repo.complete_run("run-diag-terminal", RunStatus.FAILED, token=token)
+        assert not isinstance(exc_info.value, RunLeadershipLostError)
+
+        run = repo.get_run("run-diag-terminal")
+        assert run is not None
+        assert run.status == RunStatus.COMPLETED, "the stale finalize mutated nothing"
+
+    def test_fence_mismatch_on_non_terminal_run_is_leadership_lost(self) -> None:
+        from elspeth.contracts.errors import RunLeadershipLostError
+
+        db, repo, token = _make_repo_with_token(run_id="run-diag-fence")
+        _bump_seat_epoch(db, "run-diag-fence")
+
+        with pytest.raises(RunLeadershipLostError):
+            repo.complete_run("run-diag-fence", RunStatus.COMPLETED, token=token)
+
+        run = repo.get_run("run-diag-fence")
+        assert run is not None
+        assert run.status == RunStatus.RUNNING, "the refused finalize mutated nothing"
+
+    def test_residual_work_with_valid_token_is_orchestration_invariant(self) -> None:
+        """One READY journal row + a SUCCESS finalize under a VALID token ⇒
+        the in-statement §D quiescence arm refuses (OrchestrationInvariantError)."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.errors import OrchestrationInvariantError
+        from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+        from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
+
+        db, repo, token = _make_repo_with_token(run_id="run-diag-residual")
+        factory = make_factory(db)
+        source_node = register_test_node(factory.data_flow, "run-diag-residual", "src-1", node_type=NodeType.SOURCE)
+        transform_node = register_test_node(factory.data_flow, "run-diag-residual", "t-1")
+        row = factory.data_flow.create_row(
+            run_id="run-diag-residual",
+            source_node_id=source_node,
+            row_index=0,
+            data={"id": 1},
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        journal_token = factory.data_flow.create_token(row_id=row.row_id)
+        TokenSchedulerRepository(db.engine).enqueue_ready(
+            run_id="run-diag-residual",
+            token_id=journal_token.token_id,
+            row_id=row.row_id,
+            node_id=transform_node,
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=TokenSchedulerRepository.serialize_row_payload(
+                PipelineRow({"id": 1}, SchemaContract(mode="OBSERVED", fields=(), locked=True))
+            ),
+            available_at=datetime.now(UTC),
+        )
+
+        with pytest.raises(OrchestrationInvariantError, match="residual scheduler work"):
+            repo.complete_run("run-diag-residual", RunStatus.COMPLETED, token=token)
+
+        run = repo.get_run("run-diag-residual")
+        assert run is not None
+        assert run.status == RunStatus.RUNNING

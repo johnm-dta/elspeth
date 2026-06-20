@@ -468,17 +468,17 @@ def extract_action_claims(prose: str) -> tuple[ActionClaim, ...]:
 # ---------------------------------------------------------------------------
 
 
-def _lookup_source_field(state: CompositionState, field_name: str) -> str | None:
-    """Read a scalar field off ``state.source``. Returns ``None`` if no source."""
-    if state.source is None:
-        return None
-    if field_name == "on_validation_failure":
-        return state.source.on_validation_failure
-    if field_name == "plugin":
-        return state.source.plugin
-    if field_name == "on_success":
-        return state.source.on_success
-    return None
+def _lookup_source_field_values(state: CompositionState, field_name: str) -> tuple[str, ...]:
+    """Read a scalar field off every source. Returns distinct values."""
+    values: list[str] = []
+    for source in state.sources.values():
+        if field_name == "on_validation_failure":
+            values.append(source.on_validation_failure)
+        elif field_name == "plugin":
+            values.append(source.plugin)
+        elif field_name == "on_success":
+            values.append(source.on_success)
+    return tuple(dict.fromkeys(values))
 
 
 def _lookup_output_field_values(state: CompositionState, field_name: str) -> tuple[str, ...]:
@@ -518,18 +518,22 @@ def verify_state_claims(
     violations: list[GroundingViolation] = []
     for claim in claims:
         if claim.scope == "source":
-            actual = _lookup_source_field(state, claim.field_name)
-            if actual is None:
+            actuals = _lookup_source_field_values(state, claim.field_name)
+            if not actuals:
                 continue
-            if actual.lower() != claim.claimed_value.lower():
+            if not any(claim.claimed_value.lower() == actual.lower() for actual in actuals):
+                actual_repr = ", ".join(sorted(actuals)) if len(actuals) > 1 else actuals[0]
                 violations.append(
                     GroundingViolation(
                         kind="state_claim",
                         field_name=claim.field_name,
                         scope=claim.scope,
                         claimed_value=claim.claimed_value,
-                        actual_value=actual,
-                        explanation=(f"Prose claims source.{claim.field_name} is {claim.claimed_value!r}, but state has {actual!r}."),
+                        actual_value=actual_repr,
+                        explanation=(
+                            f"Prose claims a source's {claim.field_name} is "
+                            f"{claim.claimed_value!r}, but configured sources use {actual_repr!r}."
+                        ),
                     )
                 )
         elif claim.scope == "outputs":

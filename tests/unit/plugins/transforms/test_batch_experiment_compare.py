@@ -1,5 +1,6 @@
 """Tests for BatchExperimentCompare aggregation transform."""
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -156,6 +157,26 @@ class TestBatchExperimentCompare:
         assert result.row["baseline_missing_indices"] == (1,)
         assert result.row["variant_non_finite_indices"] == (3,)
 
+    @pytest.mark.parametrize("variant_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, variant_value: float) -> None:
+        """Non-finite variant group key must error (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+        transform = BatchExperimentCompare({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": "control", "score": 1.0}),
+            _make_row({"variant": variant_value, "score": 2.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_variant"
+        assert result.reason["field"] == "variant"
+        assert not result.retryable
+
     def test_baseline_missing_returns_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
 
@@ -237,6 +258,65 @@ class TestBatchExperimentCompare:
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
 
+    def test_single_value_group_reports_none_stdev_and_ci(self, ctx: PluginContext) -> None:
+        """n=1 stdev is undefined, se=0 -> CI bounds must be None (B4.5-a-experiment_compare)."""
+        from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+        transform = BatchExperimentCompare({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": "control", "score": 3.0}),
+            _make_row({"variant": "treatment", "score": 5.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline_count"] == 1
+        assert result.row["variant_count"] == 1
+        # stdev undefined at n=1 -- honest None, never 0.0
+        assert result.row["baseline_stdev"] is None
+        assert result.row["variant_stdev"] is None
+        # Both arms n=1 -> two-sample SE is undefined, NOT zero. Emit None so no
+        # z-score or CI is fabricated from a zero-variance assumption.
+        assert result.row["standard_error"] is None
+        assert result.row["z_score"] is None
+        assert result.row["confidence_95_low"] is None
+        assert result.row["confidence_95_high"] is None
+
+    def test_singleton_arm_emits_no_inferential_stats(self, ctx: PluginContext) -> None:
+        """One arm with n=1 has UNDEFINED variance; the asymmetric (1-vs-N) case
+        must NOT fabricate SE/z/CI from the other arm's variance alone.
+
+        Regression for the divergence where _stdev() returns None at n=1 but
+        _comparison_row() coerced that None to 0.0 in the variance term, yielding
+        a real standard_error / z_score / 95% CI even though one arm's variance is
+        undefined (B4.5-b-experiment_compare).
+        """
+        from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+        transform = BatchExperimentCompare({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": "control", "score": 3.0}),  # n=1 -> stdev undefined
+            _make_row({"variant": "treatment", "score": 5.0}),  # n=2 -> stdev defined
+            _make_row({"variant": "treatment", "score": 7.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline_count"] == 1
+        assert result.row["variant_count"] == 2
+        # baseline (n=1) stdev undefined; variant (n=2) stdev is a real value
+        assert result.row["baseline_stdev"] is None
+        assert result.row["variant_stdev"] is not None
+        # One arm's variance is undefined -> SE undefined -> no z, no CI.
+        assert result.row["standard_error"] is None
+        assert result.row["z_score"] is None
+        assert result.row["confidence_95_low"] is None
+        assert result.row["confidence_95_high"] is None
+
 
 class TestBatchExperimentCompareConfig:
     @pytest.mark.parametrize("blank_field", ["", "   "])
@@ -315,3 +395,19 @@ class TestBatchExperimentCompareConfig:
                 "z_score",
             }
         )
+
+
+def test_non_finite_decimal_key_guarded() -> None:
+    """B4.5-d: a non-finite Decimal key is caught by the static guard (parity with batch_effect_size).
+
+    Decimal is not an allowed FieldContract type, so a Decimal key can only reach a
+    transform through an object-typed field; the guard must still reject it. Exercised at
+    the helper because the end-to-end path requires an object-typed key column.
+    """
+    from elspeth.plugins.transforms.batch_experiment_compare import BatchExperimentCompare
+
+    guard = BatchExperimentCompare._is_non_finite_variant
+    assert guard(Decimal("nan")) is True
+    assert guard(Decimal("inf")) is True
+    assert guard(Decimal("-inf")) is True
+    assert guard(Decimal("1")) is False

@@ -152,7 +152,7 @@ class TestEndToEndPipelineExecution:
             # Convert to CompositionStateData for saving
             state_d = state.to_dict()
             state_data = CompositionStateData(
-                source=state_d["source"],
+                sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],
@@ -375,7 +375,7 @@ class TestGateRoutedPipelineExecution:
 
             state_d = state.to_dict()
             state_data = CompositionStateData(
-                source=state_d["source"],
+                sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],

@@ -301,6 +301,20 @@ class TestBuildSystemPrompt:
         result = build_system_prompt("")
         assert result == SYSTEM_PROMPT
 
+    def test_core_skill_batches_complex_new_pipeline_builds(self) -> None:
+        """Complex new builds must steer the model away from granular mutation loops."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "### Complex New Pipeline Batching" in result
+        assert "three or more components" in flattened
+        assert "two or more workflow patterns" in flattened
+        assert "submit one `set_pipeline`" in flattened
+        assert "Do not build complex new pipelines tool-by-tool" in flattened
+        assert "`classify -> enrich -> route`" in flattened
+        assert "`classify -> aggregate -> cross-tab`" in flattened
+        assert "`split/expand -> gate-route per branch`" in flattened
+
     def test_core_skill_recommends_prompt_shield_for_internet_content_to_llm(self) -> None:
         """The general skill treats internet-controlled text entering an LLM as a cyber risk."""
         result = build_system_prompt(None)
@@ -362,6 +376,55 @@ class TestBuildSystemPrompt:
         assert "`schema.guaranteed_fields`" in result
         assert "the artifact you wrote is authoritative for its header/column names" in flattened
         assert "Do not stop by saying the source contract is incomplete" in flattened
+
+    def test_core_skill_requires_uploaded_blob_discovery_before_mutation(self) -> None:
+        """Uploaded files must be discovered and inspected before the first build mutation."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "If the user says they uploaded, attached, provided, or already have a file in the session" in flattened
+        assert "discover it before the first source-binding or `set_pipeline` mutation" in flattened
+        assert "Call `list_blobs` or `list_composer_blobs`" in flattened
+        assert "then call `inspect_source` before declaring columns, schema fields, or gate conditions" in flattened
+        assert "Do not synthesize a header-only inline CSV" in flattened
+        assert "ask one narrow file-selection question" in flattened
+
+    def test_core_skill_rejects_persona_column_and_format_fabrication(self) -> None:
+        """Panel-persona prose must not override inspected source facts."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert 'Do not turn persona prose such as "approval status indicator" into a column name like `approval_status`' in flattened
+        assert "inspect the source and use the literal observed header such as `approved`" in flattened
+        assert "For row-file routing/splitting requests, default outputs to the source row format" in flattened
+        assert "CSV source means CSV sinks unless the user explicitly asks for JSON/JSONL" in flattened
+
+    def test_core_skill_requires_draft_first_on_opening_build_turns(self) -> None:
+        """Under-specified opening build asks should mutate state before waiting."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "Opening build turns are action turns" in flattened
+        assert "If the latest user message contains any concrete artifact" in flattened
+        assert "build a plausible draft pipeline before asking for confirmation" in flattened
+        assert "column list, example file path, workflow shape, output filename, or target rubric" in flattened
+        assert "Name missing assumptions after the mutation" in flattened
+        assert "Explain-only responses are reserved for turns where the user explicitly asks for explanation" in flattened
+        assert "If a required file, credential, or connection detail is absent" in flattened
+        assert "commit the buildable scaffold with a named gap" in flattened
+
+    def test_core_skill_rejects_plugin_contract_whiplash(self) -> None:
+        """Plugin schema facts must remain stable across self-correction turns."""
+        result = build_system_prompt(None)
+        flattened = " ".join(result.split())
+
+        assert "Plugin schema facts are stable across turns" in flattened
+        assert "Do not reinterpret a missing config option as a missing output field" in flattened
+        assert "`batch_stats` always emits `count` and `sum`" in flattened
+        assert "`compute_mean` only controls whether `mean` is also emitted" in flattened
+        assert "Never propose `compute_sum` or `compute_count`" in flattened
+        assert "If the state is unchanged and validation passed" in flattened
+        assert "do not reverse a prior plugin-contract conclusion from visible options alone" in flattened
 
     def test_core_skill_treats_authored_rubrics_as_reviewable(self) -> None:
         """LLM-authored scoring semantics must create vague-term review cards."""

@@ -248,6 +248,8 @@ class TestRecordTokenOutcome:
             source_node_id="source_1",
             row_index=0,
             data={"id": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(
             row_id=row.row_id,
@@ -377,7 +379,7 @@ class TestOutcomeContractValidation:
             determinism=Determinism.DETERMINISTIC,
             schema_config=SchemaConfig.from_dict({"mode": "observed"}),
         )
-        row = factory.data_flow.create_row(run.run_id, "src", 0, {"x": 1})
+        row = factory.data_flow.create_row(run.run_id, "src", 0, {"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
         return run, token
 
@@ -513,7 +515,7 @@ class TestGetTokenOutcome:
             determinism=Determinism.DETERMINISTIC,
             schema_config=SchemaConfig.from_dict({"mode": "observed"}),
         )
-        row = factory.data_flow.create_row(run.run_id, "src", 0, {"x": 1})
+        row = factory.data_flow.create_row(run.run_id, "src", 0, {"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
         outcome_id = factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
@@ -565,7 +567,7 @@ class TestExplainIncludesOutcome:
             determinism=Determinism.DETERMINISTIC,
             schema_config=SchemaConfig.from_dict({"mode": "observed"}),
         )
-        row = factory.data_flow.create_row(run.run_id, "src", 0, {"x": 1})
+        row = factory.data_flow.create_row(run.run_id, "src", 0, {"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token.token_id, run_id=run.run_id),
@@ -597,7 +599,7 @@ class TestExplainIncludesOutcome:
             determinism=Determinism.DETERMINISTIC,
             schema_config=SchemaConfig.from_dict({"mode": "observed"}),
         )
-        row = factory.data_flow.create_row(run.run_id, "src", 0, {"x": 1})
+        row = factory.data_flow.create_row(run.run_id, "src", 0, {"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
         # No outcome recorded
 

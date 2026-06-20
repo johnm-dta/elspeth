@@ -211,8 +211,8 @@ class TestStep1Advance:
 
         cs = body["composition_state"]
         assert cs is not None
-        assert cs["source"] is not None
-        assert cs["source"]["plugin"] == "csv"
+        assert cs["sources"].get("source") is not None
+        assert cs["sources"]["source"]["plugin"] == "csv"
 
     def test_step_2_single_select_lists_sink_plugins(self, composer_test_client: TestClient) -> None:
         """The step-2 initial turn is single_select listing registered sink plugins."""
@@ -705,6 +705,47 @@ class TestStep25RecipeAccept:
         assert "split-by-numeric-threshold" in detail, f"client recipe absent from: {detail}"
         assert "mismatch" in detail.lower(), f"binding message absent from: {detail}"
 
+    def test_recipe_accept_tampered_prefilled_slot_returns_400(self, composer_test_client: TestClient) -> None:
+        """Accepting with a changed server-prefilled slot is rejected.
+
+        The browser renders ``payload.prefilled`` as read-only, but a crafted
+        API client can still submit edited slot values.  The server must bind
+        those prefilled slot values to the staged offer, while still allowing
+        unsatisfied slots to be filled by the operator.
+        """
+        session_id = _create_session(composer_test_client)
+        recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
+        output_path = _outputs_path(composer_test_client, "out.jsonl")
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
+
+        tampered_slots = {
+            **payload["prefilled"],
+            "source_blob_id": blob_id,
+            "classifier_template": "Classify: {{ row['text'] }}",
+            "model": "anthropic/claude-3.5-sonnet",
+            "api_key_secret": "OPENROUTER_API_KEY",
+            "required_input_fields": ["text"],
+            "label_field": "text",  # wrong — server prefilled "category"
+            "output_path": output_path,
+        }
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["accept"],
+                "edited_values": {
+                    "recipe_name": offered_recipe,
+                    "slots": tampered_slots,
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert "prefilled" in detail.lower(), f"prefilled binding message absent from: {detail}"
+        assert "label_field" in detail, f"mismatched slot name absent from: {detail}"
+        assert "mismatch" in detail.lower(), f"binding message absent from: {detail}"
+
     def test_recipe_accept_without_prior_offer_returns_400(self, composer_test_client: TestClient) -> None:
         """Accepting a recipe when no recipe was ever offered is rejected with 400.
 
@@ -1179,7 +1220,7 @@ class TestStep1InspectAndConfirmAccept:
         new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
         state_d = state.to_dict()
         state_data = CompositionStateData(
-            source=state_d["source"],
+            sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],

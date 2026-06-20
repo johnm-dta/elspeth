@@ -18,7 +18,7 @@ import yaml
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import CallType, NodeType
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -298,12 +298,19 @@ async def _wait_for_terminal_run(session_service: SessionServiceProtocol, run_id
 
 
 def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landscape_run_id: str) -> _LiveTutorialProjection:
+    # Despite the read-shaped name this is a WRITER surface: it stamps
+    # ``llm_call_count`` / ``seeded_from_cache`` / ``cache_key`` onto the run
+    # row (Tier-1 contract assertion below) in the same transaction as its
+    # projection SELECTs.  ``write_connection()`` declares the write intent
+    # so the transaction begins ``BEGIN IMMEDIATE`` (ADR-030 §D5) — a
+    # read-then-write shape on a DEFERRED BEGIN is exactly the
+    # SQLITE_BUSY_SNAPSHOT hazard the write-intent discipline closes.
     with (
         LandscapeDB.from_url(
             settings.get_landscape_url(),
             passphrase=settings.landscape_passphrase,
         ) as db,
-        db.connection() as conn,
+        db.write_connection() as conn,
     ):
         llm_call_count = _count_calls_for_run(conn, landscape_run_id)
         discarded_row_count = _count_discarded_rows(conn, landscape_run_id)
@@ -363,11 +370,13 @@ def _count_calls_for_run(conn: Any, landscape_run_id: str) -> int:
         select(func.count())
         .select_from(calls_table.join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id))
         .where(node_states_table.c.run_id == landscape_run_id)
+        .where(calls_table.c.call_type == CallType.LLM.value)
     ).scalar_one()
     operation_call_count = conn.execute(
         select(func.count())
         .select_from(calls_table.join(operations_table, calls_table.c.operation_id == operations_table.c.operation_id))
         .where(operations_table.c.run_id == landscape_run_id)
+        .where(calls_table.c.call_type == CallType.LLM.value)
     ).scalar_one()
     return int(state_call_count) + int(operation_call_count)
 
@@ -601,7 +610,8 @@ def _plugin_nodes_from_pipeline_dict(doc: Mapping[str, Any]) -> tuple[tuple[Node
     ``yaml_generator.generate_pipeline_dict`` and consumed by
     ``core.config`` at ``elspeth/core/config.py:1798``):
 
-    - ``source``: single dict with a ``plugin`` key.
+    - ``sources``: dict keyed by source name, values containing ``plugin``.
+    - ``source``: legacy single dict with a ``plugin`` key.
     - ``transforms``: **list[dict]** of plugin entries (each with ``plugin``).
     - ``aggregations``: **list[dict]** of plugin entries (each with ``plugin``).
     - ``sinks``: dict keyed by sink name, values containing ``plugin``.
@@ -613,9 +623,15 @@ def _plugin_nodes_from_pipeline_dict(doc: Mapping[str, Any]) -> tuple[tuple[Node
     either, raise rather than emit a half-truth audit.
     """
     roles: list[tuple[NodeType, str]] = []
-    source = doc["source"] if "source" in doc else None
-    if type(source) is dict and "plugin" in source:
-        roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
+    sources = doc["sources"] if "sources" in doc else None
+    if type(sources) is dict:
+        for source in sources.values():
+            if type(source) is dict and "plugin" in source:
+                roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
+    else:
+        source = doc["source"] if "source" in doc else None
+        if type(source) is dict and "plugin" in source:
+            roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
     _collect_list_form_plugins(doc, "transforms", NodeType.TRANSFORM, roles)
     _collect_list_form_plugins(doc, "aggregations", NodeType.AGGREGATION, roles)
     for routing_section in ("gates", "coalesce"):
@@ -662,9 +678,10 @@ def _plugin_nodes_from_composition_state(record: Any) -> tuple[tuple[NodeType, s
     # KeyError or non-subscriptable TypeError propagate here surfaces the
     # writer bug rather than masking it.
     roles: list[tuple[NodeType, str]] = []
-    source = record.source
-    if source is not None and "plugin" in source:
-        roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
+    sources = record.sources if record.sources is not None else ({"source": record.source} if record.source is not None else {})
+    for source in sources.values():
+        if "plugin" in source:
+            roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
     nodes = record.nodes if record.nodes is not None else ()
     transform_entries: list[Mapping[str, Any]] = []
     aggregation_entries: list[Mapping[str, Any]] = []

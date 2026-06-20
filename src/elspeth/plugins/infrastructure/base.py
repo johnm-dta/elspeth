@@ -1296,8 +1296,8 @@ class BaseSource(ABC):
             def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
                 with open(self.config["path"]) as f:
                     reader = csv.DictReader(f)
-                    for row in reader:
-                        yield SourceRow.valid(row, contract=contract)
+                    for source_row_index, row in enumerate(reader):
+                        yield SourceRow.valid(row, contract=contract, source_row_index=source_row_index)
 
             def close(self) -> None:
                 pass  # File already closed by context manager

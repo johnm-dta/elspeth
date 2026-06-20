@@ -7,17 +7,27 @@ Uses v2 fixtures and production assembly path (BUG-LINEAGE-01).
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import select
 
 from elspeth.cli_helpers import instantiate_plugins_from_config
-from elspeth.contracts import Determinism, NodeType, PipelineRow, RoutingMode, RunStatus, SinkName, SourceRow
-from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts import Determinism, NodeID, NodeType, PipelineRow, RoutingMode, RunStatus, SinkName, SourceRow
+from elspeth.contracts.errors import OrchestrationInvariantError, RuntimePreflightFailedError, SourceGuaranteedFieldsViolation
+from elspeth.contracts.plugin_context import PluginContext
+from elspeth.core.config import ElspethSettings, RetrySettings, SinkSettings, SourceSettings
+from elspeth.core.landscape.schema import rows_table, run_sources_table
+from elspeth.engine.orchestrator import PipelineConfig
+from elspeth.engine.orchestrator.core import Orchestrator
+from elspeth.engine.orchestrator.types import AggregationFlushResult, ExecutionCounters, LoopContext
 from elspeth.plugins.infrastructure.base import BaseTransform
+from elspeth.plugins.infrastructure.clients.llm import RateLimitError
 from elspeth.testing import make_pipeline_row, make_source_row
 from tests.fixtures.base_classes import _TestSchema, _TestSourceBase, as_sink, as_source, as_transform
-from tests.fixtures.landscape import make_factory
+from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource, PassTransform
 
@@ -108,6 +118,7 @@ class ValidationErrorAfterValidRowSource(_TestSourceBase):
             row={"value": "bad"},
             error="source parse failed on second row",
             destination="quarantine",
+            source_row_index=1,
         )
 
 
@@ -125,6 +136,51 @@ class LoadTrackingSource(ListSource):
         yield from super().load(ctx)
 
 
+class OnStartNodeRecordingSource(ListSource):
+    """List source that records lifecycle attribution at on_start()."""
+
+    determinism = Determinism.IO_READ
+
+    def __init__(self, data: list[dict[str, Any]], *, name: str, on_success: str) -> None:
+        super().__init__(data, name=name, on_success=on_success)
+        self.on_start_node_id: str | None = None
+
+    def on_start(self, ctx: Any) -> None:
+        self.on_start_node_id = ctx.node_id
+
+
+class ExplicitSourceRowIndexSource(ListSource):
+    """Source that supplies non-enumeration source row identity."""
+
+    determinism = Determinism.IO_READ
+
+    def load(self, ctx: Any) -> Any:
+        del ctx
+        yield SourceRow.valid(
+            {"value": 7},
+            contract=self._contract_for({"value": 7}),
+            source_row_index=42,
+        )
+
+    def _contract_for(self, row: dict[str, Any]) -> Any:
+        from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+
+        return SchemaContract(
+            mode="OBSERVED",
+            fields=tuple(
+                FieldContract(
+                    normalized_name=key,
+                    original_name=key,
+                    python_type=object,
+                    required=False,
+                    source="inferred",
+                )
+                for key in row
+            ),
+            locked=True,
+        )
+
+
 class RuntimePreflightFailingTransform(PassTransform):
     """Transform whose runtime preflight fails before source iteration."""
 
@@ -134,6 +190,176 @@ class RuntimePreflightFailingTransform(PassTransform):
 
     def runtime_preflight(self, ctx: Any) -> None:
         raise RuntimeError("pre_flight_failed: provider auth exploded")
+
+
+class RuntimePreflightTransientTransform(PassTransform):
+    """Transform whose runtime preflight succeeds after one transient provider failure."""
+
+    name = "runtime_preflight_transient"
+    determinism = Determinism.DETERMINISTIC
+    requires_runtime_preflight = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.preflight_attempts = 0
+
+    def runtime_preflight(self, ctx: Any) -> None:
+        self.preflight_attempts += 1
+        if self.preflight_attempts == 1:
+            raise RuntimePreflightFailedError(
+                plugin_name=self.name,
+                provider="openrouter",
+                cause=RateLimitError("429 Too Many Requests"),
+            )
+
+
+def test_idle_timeout_polling_does_not_mutate_source_context_during_next(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A source generator in flight must keep source node/operation attribution during idle timeout flushes."""
+    orchestrator = Orchestrator(make_landscape_db())
+    source_ctx = PluginContext(
+        run_id="run-idle-context",
+        config={},
+        landscape=None,
+        node_id="source-orders",
+        operation_id="op-source-orders",
+    )
+    timeout_started = threading.Event()
+    source_read = threading.Event()
+    observed_source_identity: list[tuple[str | None, str | None]] = []
+
+    def source_rows() -> Any:
+        assert timeout_started.wait(1.0)
+        observed_source_identity.append((source_ctx.node_id, source_ctx.operation_id))
+        source_read.set()
+        yield make_source_row({"value": 1})
+
+    def fake_check_aggregation_timeouts(**kwargs: Any) -> AggregationFlushResult:
+        timeout_started.set()
+        assert source_read.wait(1.0)
+        return AggregationFlushResult()
+
+    monkeypatch.setattr(
+        "elspeth.engine.orchestrator.source_iteration.check_aggregation_timeouts",
+        fake_check_aggregation_timeouts,
+    )
+    config = PipelineConfig(
+        sources={"primary": MagicMock()},
+        transforms=(),
+        sinks={"default": MagicMock()},
+    )
+    loop_ctx = LoopContext(
+        counters=ExecutionCounters(),
+        pending_tokens={"default": []},
+        processor=MagicMock(),
+        ctx=source_ctx,
+        config=config,
+        agg_transform_lookup={},
+        coalesce_executor=None,
+        coalesce_node_map={},
+    )
+
+    row = orchestrator._source_driver._next_source_item_with_idle_timeout_flushes(
+        iter(source_rows()),
+        loop_ctx,
+        agg_transform_lookup={},
+        coalesce_node_map={},
+        source_id=NodeID("source-orders"),
+        source_operation_id="op-source-orders",
+    )
+
+    assert row.row == {"value": 1}
+    assert observed_source_identity == [("source-orders", "op-source-orders")]
+    assert (source_ctx.node_id, source_ctx.operation_id) == ("source-orders", "op-source-orders")
+
+
+def test_initial_source_pull_uses_idle_timeout_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first source next() must use the same idle-timeout poller as later rows."""
+    orchestrator = Orchestrator(make_landscape_db())
+    monkeypatch.setattr(orchestrator._source_driver, "_SOURCE_IDLE_POLL_INTERVAL_SECONDS", 0.01)
+
+    source_ctx = PluginContext(
+        run_id="run-idle-first-row",
+        config={},
+        landscape=None,
+        node_id="source-orders",
+        operation_id="op-source-orders",
+    )
+    idle_flush_seen = threading.Event()
+
+    class BlockingFirstRowSource:
+        name = "blocking_first_row"
+
+        def __init__(self) -> None:
+            self.config: dict[str, Any] = {}
+
+        def load(self, ctx: PluginContext) -> Any:
+            del ctx
+            if not idle_flush_seen.wait(0.5):
+                raise AssertionError("initial source pull was not wrapped in idle-timeout polling")
+            yield make_source_row({"value": 1})
+
+    def fake_check_aggregation_timeouts(**_kwargs: Any) -> AggregationFlushResult:
+        idle_flush_seen.set()
+        return AggregationFlushResult()
+
+    monkeypatch.setattr(
+        "elspeth.engine.orchestrator.source_iteration.check_aggregation_timeouts",
+        fake_check_aggregation_timeouts,
+    )
+
+    loop_ctx = LoopContext(
+        counters=ExecutionCounters(),
+        pending_tokens={"default": []},
+        processor=MagicMock(),
+        ctx=source_ctx,
+        config=PipelineConfig(
+            sources={"primary": MagicMock()},
+            transforms=(),
+            sinks={"default": MagicMock()},
+        ),
+        agg_transform_lookup={},
+        coalesce_executor=None,
+        coalesce_node_map={},
+    )
+
+    source_iterator = orchestrator._source_driver.load_source_with_events(
+        "run-idle-first-row",
+        source_ctx,
+        active_source=BlockingFirstRowSource(),
+    )
+
+    row = orchestrator._source_driver._next_source_item_with_idle_timeout_flushes(
+        source_iterator,
+        loop_ctx,
+        agg_transform_lookup={},
+        coalesce_node_map={},
+        source_id=NodeID("source-orders"),
+        source_operation_id="op-source-orders",
+    )
+
+    assert row.row == {"value": 1}
+
+
+def test_coalesce_timeouts_enable_idle_polling_without_aggregation_triggers() -> None:
+    """A coalesce timeout alone is time-sensitive and must enable source idle polling."""
+    from elspeth.core.config import CoalesceSettings
+
+    orchestrator = Orchestrator(make_landscape_db())
+    config = PipelineConfig(
+        sources={"primary": MagicMock()},
+        transforms=(),
+        sinks={"default": MagicMock()},
+        coalesce_settings=[
+            CoalesceSettings(
+                name="merge_branches",
+                branches={"fast": "fast", "slow": "slow"},
+                policy="best_effort",
+                timeout_seconds=1.0,
+            )
+        ],
+    )
+
+    assert orchestrator._source_driver._requires_idle_aggregation_polling(config) is True
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +379,7 @@ class TestOrchestrator:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -166,6 +392,61 @@ class TestOrchestrator:
         assert len(sink.results) == 3
         assert sink.results[0] == {"value": 1, "doubled": 2}
 
+    def test_multi_source_on_start_receives_each_source_node_id(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """Each named source lifecycle hook must receive its own source node id."""
+        from elspeth.core.dag import ExecutionGraph
+        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
+
+        orders = OnStartNodeRecordingSource([{"value": 1}], name="orders_source", on_success="output")
+        refunds = OnStartNodeRecordingSource([{"value": 2}], name="refunds_source", on_success="output")
+        sink = CollectSink("output")
+        source_settings = {
+            "orders": SourceSettings(plugin=orders.name, on_success="output"),
+            "refunds": SourceSettings(plugin=refunds.name, on_success="output"),
+        }
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"orders": as_source(orders), "refunds": as_source(refunds)},
+            source_settings_map=source_settings,
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+        )
+        config = PipelineConfig(
+            sources={"orders": as_source(orders), "refunds": as_source(refunds)},
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+        )
+
+        run_result = Orchestrator(landscape_db).run(config, graph=graph, payload_store=payload_store)
+
+        assert run_result.status == RunStatus.COMPLETED
+        assert orders.node_id != refunds.node_id
+        assert orders.on_start_node_id == orders.node_id
+        assert refunds.on_start_node_id == refunds.node_id
+
+    def test_source_authored_source_row_index_is_persisted(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """Source-authored row identity must persist separately from ingest order."""
+        source = ExplicitSourceRowIndexSource([{"value": 7}], name="explicit_source_index", on_success="default")
+        sink = CollectSink()
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[],
+            sinks={"default": as_sink(sink)},
+        )
+        graph = build_production_graph(config)
+
+        run_result = Orchestrator(landscape_db).run(config, graph=graph, payload_store=payload_store)
+
+        assert run_result.status == RunStatus.COMPLETED
+        with landscape_db.engine.connect() as conn:
+            row = conn.execute(
+                select(rows_table.c.row_index, rows_table.c.source_row_index, rows_table.c.ingest_sequence).where(
+                    rows_table.c.run_id == run_result.run_id
+                )
+            ).one()
+        assert row.row_index == 0
+        assert row.source_row_index == 42
+        assert row.ingest_sequence == 0
+
     def test_runtime_preflight_failure_aborts_before_source_load(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Runtime preflight failures must fail the run before any row work starts."""
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -177,7 +458,7 @@ class TestOrchestrator:
         run_id = "run-runtime-preflight-fails-before-load"
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -204,6 +485,93 @@ class TestOrchestrator:
         assert "pre_flight_failed" in operation.error_message
         assert "provider auth exploded" in operation.error_message
 
+    def test_runtime_preflight_retries_transient_failures_before_source_load(
+        self,
+        landscape_db: LandscapeDB,
+        payload_store,
+    ) -> None:
+        """Transient runtime preflight provider failures use the run retry policy."""
+        source = LoadTrackingSource([{"value": 1}])
+        transform = RuntimePreflightTransientTransform()
+        transform.on_success = "default"
+        sink = CollectSink()
+        run_id = "run-runtime-preflight-retries-transient"
+
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[as_transform(transform)],
+            sinks={"default": as_sink(sink)},
+        )
+        settings = ElspethSettings(
+            sources={"primary": SourceSettings(plugin="list", on_success="default")},
+            sinks={"default": SinkSettings(plugin="collect", on_write_failure="discard")},
+            retry=RetrySettings(max_attempts=2, initial_delay_seconds=0.01, max_delay_seconds=0.1),
+        )
+
+        orchestrator = Orchestrator(landscape_db)
+        run_result = orchestrator.run(
+            config,
+            graph=build_production_graph(config),
+            settings=settings,
+            payload_store=payload_store,
+            run_id=run_id,
+        )
+
+        assert run_result.status == RunStatus.COMPLETED
+        assert transform.preflight_attempts == 2
+        assert source.load_started is True
+        assert sink.results == [{"value": 1}]
+
+        factory = make_factory(landscape_db)
+        operations = factory.execution.get_operations_for_run(run_id)
+        runtime_preflight_ops = [op for op in operations if op.operation_type == "runtime_preflight"]
+        assert len(runtime_preflight_ops) == 1
+        assert runtime_preflight_ops[0].status == "completed"
+
+    def test_first_row_inferred_source_contract_persisted_before_processing_failure(self, landscape_db: LandscapeDB, payload_store) -> None:
+        """A first-valid-row contract must reach run_sources before process_row can fail.
+
+        Regression coverage for observed sources whose contract is unavailable
+        when the source is recorded as ``loading``. The source boundary check
+        fails after the row/token have been persisted, leaving resume dependent
+        on source-scoped contract metadata rather than the legacy run singleton.
+        """
+        source = ListSource([{"value": 1}], name="late_contract_source")
+        source.declared_guaranteed_fields = frozenset({"required_field"})
+        sink = CollectSink()
+        run_id = "run-first-row-inferred-source-contract"
+
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[],
+            sinks={"default": as_sink(sink)},
+        )
+        graph = build_production_graph(config)
+        source_node_id = graph.get_sources()[0]
+
+        orchestrator = Orchestrator(landscape_db)
+        with pytest.raises(SourceGuaranteedFieldsViolation, match="required_field"):
+            orchestrator.run(config, graph=graph, payload_store=payload_store, run_id=run_id)
+
+        with landscape_db.engine.connect() as conn:
+            source_record = conn.execute(
+                select(
+                    run_sources_table.c.schema_contract_json,
+                    run_sources_table.c.schema_contract_hash,
+                    run_sources_table.c.lifecycle_state,
+                )
+                .where(run_sources_table.c.run_id == run_id)
+                .where(run_sources_table.c.source_node_id == str(source_node_id))
+            ).one()
+            persisted_rows = conn.execute(
+                select(rows_table.c.row_id).where(rows_table.c.run_id == run_id).where(rows_table.c.source_node_id == str(source_node_id))
+            ).all()
+
+        assert persisted_rows, "the regression must fail after source row persistence"
+        assert source_record.schema_contract_json is not None
+        assert source_record.schema_contract_hash == source.get_schema_contract().version_hash()
+        assert source_record.lifecycle_state == "loading"
+
     def test_source_validation_error_after_transform_is_attributed_to_source_node(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Later generator-step validation errors must not inherit transform node_id."""
         from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -215,7 +583,7 @@ class TestOrchestrator:
         quarantine_sink = CollectSink(name="quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={
                 "default": as_sink(default_sink),
@@ -259,7 +627,7 @@ class TestOrchestrator:
         high_sink = CollectSink(name="high")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[threshold_gate],
@@ -315,7 +683,7 @@ class TestOrchestrator:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={
                 "output": as_sink(output_sink),
@@ -326,7 +694,7 @@ class TestOrchestrator:
         )
 
         settings = ElspethSettings(
-            source={"plugin": "test", "on_success": "source_out", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "source_out", "options": {}}},
             sinks={
                 "output": {"plugin": "test", "on_write_failure": "discard"},
                 "source_sink": {"plugin": "test", "on_write_failure": "discard"},
@@ -388,7 +756,7 @@ class TestOrchestrator:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={
                 "output": as_sink(output_sink),
@@ -399,14 +767,14 @@ class TestOrchestrator:
         )
         graph = build_production_graph(config)
 
-        source_id = graph.get_source()
+        source_id = graph.get_sources()[0]
         assert source_id is not None
 
         assign_plugin_node_ids(
-            source=config.source,
+            sources=config.sources,
             transforms=config.transforms,
             sinks=config.sinks,
-            source_id=source_id,
+            source_id_map={"primary": source_id},
             transform_id_map=graph.get_transform_id_map(),
             sink_id_map=graph.get_sink_id_map(),
         )
@@ -440,7 +808,7 @@ class TestOrchestratorMultipleTransforms:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform1), as_transform(transform2)],
             sinks={"default": as_sink(sink)},
         )
@@ -465,7 +833,7 @@ class TestOrchestratorEmptyPipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -488,7 +856,7 @@ class TestOrchestratorEmptyPipeline:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -520,7 +888,7 @@ class TestOrchestratorEmptyPipeline:
         quarantine_sink = CollectSink(name="quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={
                 "default": as_sink(default_sink),
@@ -543,9 +911,14 @@ class TestOrchestratorEmptyPipeline:
         assert len(default_sink.results) == 0
         assert len(quarantine_sink.results) == 2
 
+        # Per ADR-025 §3 Decision 5 (G6) schema contracts live exclusively in
+        # ``run_sources``; the single-source assertion below reads through that
+        # surface (the deleted run-level singleton was the asymmetry that
+        # elspeth-97bfe206bb resolved).
         factory = make_factory(landscape_db)
-        contract = factory.run_lifecycle.get_run_contract(run_result.run_id)
-        assert contract is not None
+        source_records = factory.run_lifecycle.get_run_source_resume_records(run_result.run_id)
+        assert len(source_records) == 1
+        contract = next(iter(source_records.values())).schema_contract
         assert contract.mode == "FLEXIBLE"
         assert contract.locked is True
         assert [field.normalized_name for field in contract.fields] == ["id"]
@@ -564,15 +937,17 @@ class TestOrchestratorAcceptsGraph:
 
         # Build config and graph from settings
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="output",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="output",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "output.json", "schema": {"mode": "observed"}}
@@ -582,8 +957,8 @@ class TestOrchestratorAcceptsGraph:
         plugins = instantiate_plugins_from_config(settings)
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -597,6 +972,7 @@ class TestOrchestratorAcceptsGraph:
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
         mock_source.source_file_hash = None
+        mock_source.config = {}
         mock_source._on_validation_failure = "discard"
 
         source_node_id_setter = PropertyMock()
@@ -625,7 +1001,7 @@ class TestOrchestratorAcceptsGraph:
         mock_sink.input_schema = schema_mock
 
         pipeline_config = PipelineConfig(
-            source=mock_source,
+            sources={"primary": mock_source},
             transforms=[],
             sinks={"output": mock_sink},
         )
@@ -634,7 +1010,7 @@ class TestOrchestratorAcceptsGraph:
         orchestrator.run(pipeline_config, graph=graph, payload_store=payload_store)
 
         # Verify orchestrator called the node_id setter with correct value from graph
-        expected_source_id = graph.get_source()
+        expected_source_id = graph.get_sources()[0]
         source_node_id_setter.assert_called_once_with(expected_source_id)
 
         # Verify sink node_id was set with correct value from graph's sink_id_map
@@ -652,15 +1028,17 @@ class TestOrchestratorAcceptsGraph:
 
         # Build config with MULTIPLE sinks
         settings = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="output_a",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="output_a",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output_a": SinkSettings(
                     plugin="json", on_write_failure="discard", options={"path": "a.json", "schema": {"mode": "observed"}}
@@ -673,8 +1051,8 @@ class TestOrchestratorAcceptsGraph:
         plugins = instantiate_plugins_from_config(settings)
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -688,6 +1066,7 @@ class TestOrchestratorAcceptsGraph:
         mock_source.determinism = Determinism.IO_READ
         mock_source.plugin_version = "1.0.0"
         mock_source.source_file_hash = None
+        mock_source.config = {}
         mock_source._on_validation_failure = "discard"
 
         source_node_id_setter = PropertyMock()
@@ -731,7 +1110,7 @@ class TestOrchestratorAcceptsGraph:
         mock_sink_b.input_schema = schema_mock
 
         pipeline_config = PipelineConfig(
-            source=mock_source,
+            sources={"primary": mock_source},
             transforms=[],
             sinks={"output_a": mock_sink_a, "output_b": mock_sink_b},
         )
@@ -778,7 +1157,7 @@ class TestOrchestratorAcceptsGraph:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )

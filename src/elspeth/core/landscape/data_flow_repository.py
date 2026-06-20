@@ -10,7 +10,8 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine import Row as SQLAlchemyRow
 
 from elspeth.contracts import (
@@ -30,6 +31,7 @@ from elspeth.contracts import (
     ValidationErrorWithContract,
 )
 from elspeth.contracts.audit import _TERMINAL_PAIR_FIELD_CONSTRAINTS, DISCARD_SINK_NAME, TokenRef
+from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS, CoordinationToken
 from elspeth.contracts.enums import BatchStatus, NodeStateStatus, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.freeze import deep_thaw
@@ -46,6 +48,7 @@ from elspeth.core.landscape.model_loaders import (
     TransformErrorLoader,
     ValidationErrorLoader,
 )
+from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
 from elspeth.core.landscape.schema import (
     artifacts_table,
     batches_table,
@@ -211,6 +214,22 @@ class DataFlowRepository:
         run_id: str = result.run_id
         return run_id
 
+    def resolve_row_ingest_sequence(self, row_id: str) -> int:
+        """Resolve a row's global ingest ordering for scheduler fairness.
+
+        This is Tier 1 audit data. A token continuation can only exist for a
+        persisted row, so a missing row is corruption or an orchestration bug.
+        """
+        query = select(rows_table.c.ingest_sequence).where(rows_table.c.row_id == row_id)
+        result = self._ops.execute_fetchone(query)
+        if result is None:
+            raise AuditIntegrityError(
+                f"Cannot schedule work for row_id={row_id!r}: row does not exist. "
+                "This is Tier 1 data corruption -- scheduler work must reference persisted rows."
+            )
+        ingest_sequence: int = result.ingest_sequence
+        return ingest_sequence
+
     def _resolve_token_ownership(self, token_id: str) -> tuple[str, str]:
         """Resolve the (row_id, run_id) that owns a given token_id.
 
@@ -234,6 +253,84 @@ class DataFlowRepository:
                 f"This is Tier 1 data corruption -- the token should have been created before recording outcomes."
             )
         return result.row_id, result.run_id
+
+    def _prepare_source_row_record(
+        self,
+        run_id: str,
+        source_node_id: str,
+        row_index: int,
+        data: Mapping[str, object],
+        *,
+        source_row_index: int | None,
+        ingest_sequence: int | None,
+        row_id: str | None,
+        quarantined: bool,
+    ) -> Row:
+        row_id = row_id or generate_id()
+        missing_identity_fields = []
+        if source_row_index is None:
+            missing_identity_fields.append("source_row_index")
+        if ingest_sequence is None:
+            missing_identity_fields.append("ingest_sequence")
+        if missing_identity_fields:
+            raise AuditIntegrityError(
+                f"create_row requires explicit source-scoped identity for run_id={run_id!r} row_id={row_id!r} "
+                f"source_node_id={source_node_id!r}; missing {', '.join(missing_identity_fields)}. "
+                "Do not fabricate source_row_index or ingest_sequence from row_index."
+            )
+        assert source_row_index is not None
+        assert ingest_sequence is not None
+
+        # Quarantined rows are Tier-3 external data that may contain non-canonical
+        # values (NaN, Infinity). The coerce-and-record helper returns the canonical
+        # hash or an explicit repr-based fallback per canonical.py docs. Non-quarantined
+        # rows are trusted to be canonical — let stable_hash crash on any anomaly.
+        if quarantined:
+            data_hash = self._canonical_or_recorded_hash(data)
+        else:
+            data_hash = stable_hash(data)
+
+        timestamp = now()
+
+        # Landscape owns payload persistence - serialize and store if configured
+        final_payload_ref: str | None = None
+        if self._payload_store is not None:
+            # Canonical JSON handles pandas/numpy/Decimal/datetime types.
+            # For quarantined data, fall back to json.dumps(repr()) if
+            # canonical serialization fails on non-canonical values.
+            if quarantined:
+                payload_bytes = self._canonical_or_recorded_repr_payload(data).encode("utf-8")
+            else:
+                payload_bytes = canonical_json(data).encode("utf-8")
+            final_payload_ref = self._payload_store.store(payload_bytes)
+
+        return Row(
+            row_id=row_id,
+            run_id=run_id,
+            source_node_id=source_node_id,
+            row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
+            source_data_hash=data_hash,
+            source_data_ref=final_payload_ref,
+            created_at=timestamp,
+        )
+
+    @staticmethod
+    def _row_insert_values(row: Row) -> dict[str, object]:
+        assert row.source_row_index is not None
+        assert row.ingest_sequence is not None
+        return {
+            "row_id": row.row_id,
+            "run_id": row.run_id,
+            "source_node_id": row.source_node_id,
+            "row_index": row.row_index,
+            "source_row_index": row.source_row_index,
+            "ingest_sequence": row.ingest_sequence,
+            "source_data_hash": row.source_data_hash,
+            "source_data_ref": row.source_data_ref,
+            "created_at": row.created_at,
+        }
 
     def _validate_token_run_ownership(self, ref: TokenRef) -> None:
         """Validate that a token belongs to the specified run.
@@ -457,6 +554,8 @@ class DataFlowRepository:
         row_index: int,
         data: Mapping[str, object],
         *,
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
         row_id: str | None = None,
         quarantined: bool = False,
     ) -> Row:
@@ -465,8 +564,10 @@ class DataFlowRepository:
         Args:
             run_id: Run this row belongs to
             source_node_id: Source node that loaded this row
-            row_index: Position in source (0-indexed)
+            row_index: Legacy/display row position
             data: Row data for hashing and optional storage
+            source_row_index: Position within the source (0-indexed)
+            ingest_sequence: Monotonic run-wide ingest order
             row_id: Optional row ID (generated if not provided)
             quarantined: If True, data is Tier-3 external data that may contain
                 non-canonical values (NaN, Infinity). Uses repr_hash fallback.
@@ -483,54 +584,135 @@ class DataFlowRepository:
 
             This ensures Landscape owns its audit format end-to-end.
         """
-        row_id = row_id or generate_id()
-
-        # Quarantined rows are Tier-3 external data that may contain non-canonical
-        # values (NaN, Infinity). The coerce-and-record helper returns the canonical
-        # hash or an explicit repr-based fallback per canonical.py docs. Non-quarantined
-        # rows are trusted to be canonical — let stable_hash crash on any anomaly.
-        if quarantined:
-            data_hash = self._canonical_or_recorded_hash(data)
-        else:
-            data_hash = stable_hash(data)
-
-        timestamp = now()
-
-        # Landscape owns payload persistence - serialize and store if configured
-        final_payload_ref: str | None = None
-        if self._payload_store is not None:
-            # Canonical JSON handles pandas/numpy/Decimal/datetime types.
-            # For quarantined data, fall back to json.dumps(repr()) if
-            # canonical serialization fails on non-canonical values.
-            if quarantined:
-                payload_bytes = self._canonical_or_recorded_repr_payload(data).encode("utf-8")
-            else:
-                payload_bytes = canonical_json(data).encode("utf-8")
-            final_payload_ref = self._payload_store.store(payload_bytes)
-
-        row = Row(
-            row_id=row_id,
+        row = self._prepare_source_row_record(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
-            source_data_hash=data_hash,
-            source_data_ref=final_payload_ref,
-            created_at=timestamp,
+            data=data,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
+            row_id=row_id,
+            quarantined=quarantined,
         )
 
-        self._ops.execute_insert(
-            rows_table.insert().values(
-                row_id=row.row_id,
-                run_id=row.run_id,
-                source_node_id=row.source_node_id,
-                row_index=row.row_index,
-                source_data_hash=row.source_data_hash,
-                source_data_ref=row.source_data_ref,
-                created_at=row.created_at,
-            )
-        )
+        self._ops.execute_insert(rows_table.insert().values(**self._row_insert_values(row)))
 
         return row
+
+    def create_row_with_token(
+        self,
+        run_id: str,
+        source_node_id: str,
+        row_index: int,
+        data: Mapping[str, object],
+        *,
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
+        row_id: str | None = None,
+        token_id: str | None = None,
+        quarantined: bool = False,
+        coordination_token: CoordinationToken | None = None,
+    ) -> tuple[Row, Token]:
+        """Create a source row and its initial token in one audit transaction.
+
+        ``coordination_token`` (ADR-030 §C.4 row 9): an ingest-adjacent
+        durable ``rows`` write at sequence N — when supplied, the
+        verify-and-extend epoch fence is the first statement of the
+        transaction (the boundary-failure and quarantine ingest arms ride
+        this; the happy path composes through the scheduler's fenced
+        ``ingest_row_with_initial_claim`` instead). ``None`` preserves the
+        unfenced legacy arm for direct repository-level callers.
+        """
+        if coordination_token is None:
+            with self._db.write_connection() as conn:
+                return self.insert_row_with_token_on(
+                    conn,
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    row_index=row_index,
+                    data=data,
+                    source_row_index=source_row_index,
+                    ingest_sequence=ingest_sequence,
+                    row_id=row_id,
+                    token_id=token_id,
+                    quarantined=quarantined,
+                )
+        with fenced_leader_transaction(
+            self._db.engine,
+            token=coordination_token,
+            now=now(),
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            verb="create_row_with_token",
+        ) as conn:
+            return self.insert_row_with_token_on(
+                conn,
+                run_id=run_id,
+                source_node_id=source_node_id,
+                row_index=row_index,
+                data=data,
+                source_row_index=source_row_index,
+                ingest_sequence=ingest_sequence,
+                row_id=row_id,
+                token_id=token_id,
+                quarantined=quarantined,
+            )
+
+    def insert_row_with_token_on(
+        self,
+        conn: Connection,
+        *,
+        run_id: str,
+        source_node_id: str,
+        row_index: int,
+        data: Mapping[str, object],
+        source_row_index: int | None = None,
+        ingest_sequence: int | None = None,
+        row_id: str | None = None,
+        token_id: str | None = None,
+        quarantined: bool = False,
+    ) -> tuple[Row, Token]:
+        """Connection-accepting rows+tokens insert: composes into the caller's transaction.
+
+        Extracted from :meth:`create_row_with_token` so the fenced leader
+        ingest (``TokenSchedulerRepository.ingest_row_with_initial_claim``,
+        ADR-030 §C.4 row 9) can compose the rows insert, the tokens insert
+        and the initial enqueue on ONE connection.
+        """
+        row = self._prepare_source_row_record(
+            run_id=run_id,
+            source_node_id=source_node_id,
+            row_index=row_index,
+            data=data,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
+            row_id=row_id,
+            quarantined=quarantined,
+        )
+        token = Token(
+            token_id=token_id or generate_id(),
+            row_id=row.row_id,
+            run_id=run_id,
+            created_at=row.created_at,
+        )
+
+        result = conn.execute(rows_table.insert().values(**self._row_insert_values(row)))
+        if result.rowcount == 0:
+            raise AuditIntegrityError(f"create_row_with_token: row INSERT affected zero rows (row_id={row.row_id})")
+        result = conn.execute(
+            tokens_table.insert().values(
+                token_id=token.token_id,
+                row_id=token.row_id,
+                run_id=token.run_id,
+                fork_group_id=token.fork_group_id,
+                join_group_id=token.join_group_id,
+                branch_name=token.branch_name,
+                created_at=token.created_at,
+            )
+        )
+        if result.rowcount == 0:
+            raise AuditIntegrityError(f"create_row_with_token: token INSERT affected zero rows (token_id={token.token_id})")
+
+        return row, token
 
     def create_token(
         self,
@@ -652,7 +834,7 @@ class DataFlowRepository:
         fork_group_id = generate_id()
         children = []
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             # 1. Create child tokens
             for ordinal, branch_name in enumerate(branches):
                 child_id = generate_id()
@@ -807,7 +989,7 @@ class DataFlowRepository:
         envelope = {"data": dict(merged_payload), "contract": merged_contract.to_checkpoint_format()}
         token_data_ref = self._payload_store.store(checkpoint_dumps(envelope).encode("utf-8"))
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             # Create merged token
             result = conn.execute(
                 tokens_table.insert().values(
@@ -933,7 +1115,7 @@ class DataFlowRepository:
             for payload in child_payloads
         ]
 
-        with self._db.connection() as conn:
+        with self._db.write_connection() as conn:
             for ordinal, payload_ref in enumerate(child_data_refs):
                 child_id = generate_id()
                 timestamp = now()
@@ -1198,6 +1380,100 @@ class DataFlowRepository:
         if result is None:
             return None
         return self._token_outcome_loader.load(result)
+
+    def get_live_buffered_outcomes(self, ref: TokenRef) -> list[TokenOutcome]:
+        """All LIVE BUFFERED outcomes for a token (ADR-030 §E.4 restore read).
+
+        "Live" = the token has no ``completed=1`` outcome; a flushed token's
+        BUFFERED row is dead history and exempt. ``token_outcomes`` has NO
+        non-terminal uniqueness (the only unique index is partial on
+        ``completed=1``), so more than one live BUFFERED row means a deposed
+        leader's unfenced intake wrote a second acceptance — the restore path
+        (``_derive_restored_batch_id``) refuses loudly with Tier-1 instead of
+        the historical silent latest-wins of :meth:`get_token_outcome`. At
+        epoch 21 this is the BACKSTOP behind the adoption CAS, which is the
+        structural guarantee.
+
+        Ordered by ``(recorded_at, outcome_id)`` for deterministic reporting.
+        """
+        terminal = token_outcomes_table.alias("terminal_outcomes")
+        terminal_witness = (
+            select(terminal.c.outcome_id)
+            .where(terminal.c.token_id == ref.token_id)
+            .where(terminal.c.run_id == ref.run_id)
+            .where(terminal.c.completed == 1)
+            .exists()
+        )
+        query = (
+            select(token_outcomes_table)
+            .where(token_outcomes_table.c.token_id == ref.token_id)
+            .where(token_outcomes_table.c.run_id == ref.run_id)
+            .where(token_outcomes_table.c.completed == 0)
+            .where(token_outcomes_table.c.path == TerminalPath.BUFFERED.value)
+            .where(~terminal_witness)
+            .order_by(token_outcomes_table.c.recorded_at, token_outcomes_table.c.outcome_id)
+        )
+        return [self._token_outcome_loader.load(row) for row in self._ops.execute_fetchall(query)]
+
+    def get_failed_unrouted_terminal_token_ids(self, run_id: str, token_ids: Sequence[str]) -> frozenset[str]:
+        """Token ids (from ``token_ids``) holding a terminal FAILURE/UNROUTED outcome.
+
+        The restore-side aggregation reconcile signature (ADR-030 §E.3a
+        aggregation mirror, elspeth-55546a6fd6). A FAILED out-of-claim
+        aggregation flush records a completed FAILURE/UNROUTED token_outcome for
+        every buffered token (``_handle_flush_error``) and THEN releases their
+        BLOCKED scheduler rows in a SEPARATE transaction
+        (``_mark_buffered_scheduler_work_terminal``). A crash between the two
+        strands durable BLOCKED rows whose tokens are already terminally failed:
+        they hold no live BUFFERED outcome, so ``_derive_restored_batch_id``
+        cannot proceed, yet they are genuinely done. The barrier restore
+        reconcile journal-releases exactly these tokens instead of bricking the
+        resume.
+
+        Scoped to the ``(FAILURE, UNROUTED)`` pair so the success-path
+        BATCH_CONSUMED crash residual (elspeth-3977d8ab60, which still owes a
+        sink output and must NOT be silently released) is excluded — any other
+        terminal-while-BLOCKED state keeps hitting the loud restore refusal.
+        """
+        if not token_ids:
+            return frozenset()
+        query = (
+            select(token_outcomes_table.c.token_id)
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.token_id.in_(tuple(token_ids)))
+            .where(token_outcomes_table.c.completed == 1)
+            .where(token_outcomes_table.c.outcome == TerminalOutcome.FAILURE.value)
+            .where(token_outcomes_table.c.path == TerminalPath.UNROUTED.value)
+        )
+        return frozenset(row.token_id for row in self._ops.execute_fetchall(query))
+
+    def find_duplicate_live_buffered_outcomes(self, run_id: str) -> list[tuple[str, int]]:
+        """Run-wide sweep: token_ids holding >1 live BUFFERED outcome.
+
+        The cheap belt to :meth:`get_live_buffered_outcomes`' per-token check,
+        intended to run once at barrier-restore entry for a single loud
+        report. Returns ``(token_id, live_buffered_count)`` pairs ordered by
+        token_id; empty means the adoption-CAS invariant held.
+        """
+        terminal = token_outcomes_table.alias("terminal_outcomes")
+        terminal_witness = (
+            select(terminal.c.outcome_id)
+            .where(terminal.c.token_id == token_outcomes_table.c.token_id)
+            .where(terminal.c.run_id == run_id)
+            .where(terminal.c.completed == 1)
+            .exists()
+        )
+        query = (
+            select(token_outcomes_table.c.token_id, func.count())
+            .where(token_outcomes_table.c.run_id == run_id)
+            .where(token_outcomes_table.c.completed == 0)
+            .where(token_outcomes_table.c.path == TerminalPath.BUFFERED.value)
+            .where(~terminal_witness)
+            .group_by(token_outcomes_table.c.token_id)
+            .having(func.count() > 1)
+            .order_by(token_outcomes_table.c.token_id)
+        )
+        return [(str(row[0]), int(row[1])) for row in self._ops.execute_fetchall(query)]
 
     def get_token_outcomes_for_row(self, run_id: str, row_id: str) -> list[TokenOutcome]:
         """Get all token outcomes for a row in a single query.
@@ -1583,7 +1859,9 @@ class DataFlowRepository:
             contract: SchemaContract with inferred/evolved fields
 
         Note:
-            This is the complement to update_run_contract() for node-level contracts.
+            This is the complement to ``update_run_source_contract()`` for
+            node-level contracts (the per-source ``run_sources`` writer that
+            superseded the deleted run-level singleton ``update_run_contract``).
             Used for dynamic schema discovery and transform schema evolution.
         """
         audit_record = ContractAuditRecord.from_contract(contract)

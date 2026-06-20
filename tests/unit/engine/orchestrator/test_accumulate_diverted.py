@@ -32,6 +32,9 @@ def _make_result(
     result.path = path
     result.token = token or make_token_info()
     result.sink_name = sink_name
+    # RowProcessingResult.scheduler_pending_sink defaults False; PendingOutcome's
+    # offensive guard rejects the Mock a bare attribute access would vivify.
+    result.scheduler_pending_sink = False
     return result
 
 

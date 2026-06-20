@@ -9,6 +9,7 @@ than its input, but incorrectly sets output_schema = input_schema.
 """
 
 import sys
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -289,6 +290,62 @@ class TestBatchStatsFloatOverflow:
         assert result.reason["skipped_non_finite"] == 2
         assert result.reason["skipped_non_finite_indices"] == [0, 1]
 
+    def test_none_value_skipped_and_reported(self, ctx: PluginContext) -> None:
+        """None in value_field is a missing value: skipped-and-reported, never a crash.
+
+        Per CLAUDE.md Tier 2/3 doctrine and every sibling batch transform
+        (batch_distribution_profile etc.), None is missing data — it is skipped
+        from the computation and reported in skipped_missing, NOT raised as a
+        TypeError that aborts the whole run (plugins review C2).
+        """
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount"})
+
+        rows = [
+            _make_row({"id": 1, "amount": 10.0}),
+            _make_row({"id": 2, "amount": None}),
+            _make_row({"id": 3, "amount": 30.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["count"] == 2  # Only present values counted
+        assert result.row["sum"] == 40.0
+        assert result.row["mean"] == 20.0
+        assert result.row["skipped_missing"] == 1
+        assert result.row["skipped_missing_indices"] == (1,)
+
+    def test_all_none_batch_returns_error_not_crash(self, ctx: PluginContext) -> None:
+        """A group with only None values returns an audited error, never count=0/sum=0.
+
+        Without the missing-value branch this hits sum([])=0 then mean=0/0
+        (ZeroDivisionError), crashing the run — and fabricating count=0/sum=0
+        would be a phantom statistic. The honest outcome is a validation_failed
+        error naming each missing row (plugins review C2).
+        """
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount"})
+
+        rows = [
+            _make_row({"id": 1, "amount": None}),
+            _make_row({"id": 2, "amount": None}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["batch_size"] == 2
+        assert result.reason["skipped_count"] == 2
+        assert result.reason["valid_count"] == 0
+        row_error_reasons = {entry["reason"] for entry in result.reason["row_errors"]}
+        assert row_error_reasons == {"missing_value"}
+
     def test_sum_overflow_returns_error(self, ctx: PluginContext) -> None:
         """Summing large valid floats that overflow to inf returns error."""
         from elspeth.plugins.transforms.batch_stats import BatchStats
@@ -353,6 +410,26 @@ class TestBatchStatsGroupByRollups:
         with pytest.raises(PluginConfigError, match="group_by must not be empty"):
             BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": blank_group_by})
 
+    @pytest.mark.parametrize("group_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, group_value: float) -> None:
+        """Non-finite group_by key must error before producing any output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "category"})
+        rows = [
+            _make_row({"amount": 10.0, "category": "A"}),
+            _make_row({"amount": 20.0, "category": group_value}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_group_key"
+        assert result.reason["field"] == "category"
+        assert not result.retryable
+
     def test_homogeneous_group_by_included(self, ctx: PluginContext) -> None:
         """All rows same group_by value — included in output."""
         from elspeth.plugins.transforms.batch_stats import BatchStats
@@ -399,6 +476,45 @@ class TestBatchStatsGroupByRollups:
         assert rollups["returns"]["sum"] == 20.0
         assert rollups["returns"]["mean"] == 20.0
         assert rollups["returns"]["batch_size"] == 1
+
+    def test_distinct_group_keys_do_not_scan_every_prior_group(self, ctx: PluginContext) -> None:
+        """Distinct group_by values are partitioned without quadratic prior-group scans."""
+        from elspeth.plugins.transforms.batch_stats import BatchStats
+
+        class CountingGroupKey:
+            comparisons = 0
+
+            def __init__(self, value: int) -> None:
+                self.value = value
+
+            def __eq__(self, other: object) -> bool:
+                CountingGroupKey.comparisons += 1
+                return isinstance(other, CountingGroupKey) and self.value == other.value
+
+            def __hash__(self) -> int:
+                return hash(self.value)
+
+        transform = BatchStats({"schema": DYNAMIC_SCHEMA, "value_field": "amount", "group_by": "category"})
+        row_count = 64
+        group_values = [CountingGroupKey(row_index) for row_index in range(row_count)]
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                make_field("id", int, original_name="id", required=False, source="inferred"),
+                make_field("amount", float, original_name="amount", required=False, source="inferred"),
+                make_field("category", object, original_name="category", required=False, source="inferred"),
+            ),
+            locked=True,
+        )
+        rows = [
+            make_row({"id": row_index, "amount": 1.0, "category": group_values[row_index]}, contract=contract)
+            for row_index in range(row_count)
+        ]
+
+        grouped = transform._group_rows(rows)
+
+        assert [group_value for group_value, _ in grouped] == group_values
+        assert CountingGroupKey.comparisons <= row_count
 
     def test_two_group_batch_emits_two_rollups(self, ctx: PluginContext) -> None:
         """Mixed group_by values emit one aggregate row per group."""
@@ -824,3 +940,19 @@ class TestBatchStatsGroupByInOutputContract:
                     "group_by": "sum",
                 }
             )
+
+
+def test_non_finite_decimal_key_guarded() -> None:
+    """B4.5-d: a non-finite Decimal key is caught by the static guard (parity with batch_effect_size).
+
+    Decimal is not an allowed FieldContract type, so a Decimal key can only reach a
+    transform through an object-typed field; the guard must still reject it. Exercised at
+    the helper because the end-to-end path requires an object-typed key column.
+    """
+    from elspeth.plugins.transforms.batch_stats import BatchStats
+
+    guard = BatchStats._is_non_finite_group_key
+    assert guard(Decimal("nan")) is True
+    assert guard(Decimal("inf")) is True
+    assert guard(Decimal("-inf")) is True
+    assert guard(Decimal("1")) is False

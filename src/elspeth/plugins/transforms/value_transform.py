@@ -17,7 +17,8 @@ from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
-from elspeth.contracts.schema_contract import PipelineRow
+from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
+from elspeth.contracts.type_normalization import classify_runtime_type, require_supported_contract_type
 from elspeth.core.expression_parser import (
     ExpressionEvaluationError,
     ExpressionParser,
@@ -27,6 +28,28 @@ from elspeth.core.expression_parser import (
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
+
+
+def _retype_contract_field(
+    contract: SchemaContract,
+    field: FieldContract,
+    value: object,
+) -> SchemaContract:
+    """Return a contract with ``field`` rebuilt to match ``value``'s type.
+
+    Used when an operation overwrites an existing typed field with a value of a
+    different type, so the emitted row continues to satisfy its own contract.
+    """
+    retyped = FieldContract(
+        normalized_name=field.normalized_name,
+        original_name=field.original_name,
+        python_type=require_supported_contract_type(value),
+        required=field.required,
+        source=field.source,
+        nullable=field.nullable,
+    )
+    new_fields = tuple(retyped if f.normalized_name == field.normalized_name else f for f in contract.fields)
+    return SchemaContract(mode=contract.mode, fields=new_fields, locked=contract.locked)
 
 
 class OperationSpec(BaseModel):
@@ -115,7 +138,7 @@ class ValueTransform(BaseTransform):
     name = "value_transform"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:522e7300a596508f"
+    source_file_hash: str | None = "sha256:6ae41926c7e56283"
     config_model = ValueTransformConfig
     passes_through_input = True
 
@@ -224,8 +247,17 @@ class ValueTransform(BaseTransform):
 
             # Write result to working copy
             working_data[target] = result
-            if working_contract.find_field(target) is None:
+            existing_field = working_contract.find_field(target)
+            if existing_field is None:
                 working_contract = working_contract.with_field(target, target, result)
+            elif existing_field.python_type is not object and classify_runtime_type(result) is not existing_field.python_type:
+                # Overwriting a typed field with a different-typed result: retype the
+                # field so the emitted row satisfies its OWN contract. Keeping the stale
+                # python_type produces a self-contradictory audit record (the row fails
+                # out.contract.validate(out.to_dict())) — mirrors type_coerce's
+                # _build_output_contract. 'object'/'any' fields accept any value, so
+                # they never need retyping.
+                working_contract = _retype_contract_field(working_contract, existing_field, result)
 
         output_contract = self._align_output_contract(working_contract)
         return TransformResult.success(

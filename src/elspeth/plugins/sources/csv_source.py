@@ -84,7 +84,7 @@ class CSVSource(BaseSource):
     name = "csv"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2365d2d44dc604fe"
+    source_file_hash: str | None = "sha256:586e744a9990aa8c"
     config_model = CSVSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -215,6 +215,7 @@ class CSVSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
             return
 
@@ -243,6 +244,7 @@ class CSVSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
         finally:
             f.close()
@@ -322,6 +324,7 @@ class CSVSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=skip_idx,
                     )
                 return  # Don't continue with corrupted parser state
 
@@ -377,6 +380,7 @@ class CSVSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=0,
                     )
                 return
 
@@ -432,6 +436,7 @@ class CSVSource(BaseSource):
                     row=raw_row,
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
             return
         headers = self._field_resolution.final_headers
@@ -455,6 +460,34 @@ class CSVSource(BaseSource):
                 # next_nonblank_record() returns None at EOF (iteration-protocol
                 # signal, not a Tier-3 data error); csv.Error still propagates.
                 values = next_nonblank_record()
+            except UnicodeDecodeError as e:
+                # Decode failure while reading the next data row. At this point
+                # row_num counts data rows already emitted/quarantined, so it is
+                # also the correct zero-based SourceRow identity for this failed
+                # next row.
+                source_row_index = row_num
+                physical_line = reader.line_num + 1 if reader.line_num > 0 else self._skip_rows + 1
+                raw_row = {
+                    "file_path": str(self._path),
+                    "__encoding__": self._encoding,
+                    "__line_number__": physical_line,
+                    "__row_number__": source_row_index + 1,
+                }
+                error_msg = f"CSV decode error (encoding '{self._encoding}') at line {physical_line}: {e}"
+                ctx.record_validation_error(
+                    row=raw_row,
+                    error=error_msg,
+                    schema_mode="parse",
+                    destination=self._on_validation_failure,
+                )
+                if self._on_validation_failure != "discard":
+                    yield SourceRow.quarantined(
+                        row=raw_row,
+                        error=error_msg,
+                        destination=self._on_validation_failure,
+                        source_row_index=source_row_index,
+                    )
+                return
             except csv.Error as e:
                 # CSV parsing error (bad quoting, unmatched quotes, etc.)
                 # CRITICAL: csv.Error can leave the parser in a corrupted state where
@@ -486,6 +519,7 @@ class CSVSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=row_num - 1,
                     )
                 return  # Don't continue with corrupted parser state
 
@@ -518,6 +552,7 @@ class CSVSource(BaseSource):
                         row=raw_row,
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=row_num - 1,
                     )
                 continue
 
@@ -557,12 +592,14 @@ class CSVSource(BaseSource):
                                 row=validated_row,
                                 error=error_msg,
                                 destination=self._on_validation_failure,
+                                source_row_index=row_num - 1,
                             )
                         continue
 
                 yield SourceRow.valid(
                     validated_row,
                     contract=contract,
+                    source_row_index=row_num - 1,
                 )
             except ValidationError as e:
                 ctx.record_validation_error(
@@ -577,6 +614,7 @@ class CSVSource(BaseSource):
                         row=row,
                         error=str(e),
                         destination=self._on_validation_failure,
+                        source_row_index=row_num - 1,
                     )
 
         # CRITICAL: Handle empty source case (all rows quarantined or no rows)
@@ -620,12 +658,12 @@ class CSVSource(BaseSource):
                     "Call inspect_source before declaring schema.mode: 'fixed' — fixed mode silently drops rows that don't match.",
                     "Decide whether the CSV is headered: without columns CSVSource treats the first non-skipped row as headers; for headerless data set columns=[...] so the first data row stays data. Do not copy a header row into inline source data unless it is real headered CSV.",
                     "If you have been asked to generate CSV rows yourself (the invented_source path): always emit a header row as the first non-skipped line of the generated CSV, and always leave the `columns` option unset so CSVSource treats your first row as headers.",
-                    "When generating CSV rows yourself, declare those generated column names in `schema.fields` (or `schema.guaranteed_fields`).",
-                    "When generating CSV rows yourself, the header row, the `columns` decision, and the schema must all agree. Never generate headerless CSV — the audit trail and downstream contracts need the header to be self-describing.",
+                    "When generating CSV rows yourself, declare those generated column names in `schema.fields` (or `schema.guaranteed_fields`). The header row, the `columns` decision, and the schema must all agree.",
+                    "Never generate headerless CSV — the audit trail and downstream contracts need the header to be self-describing.",
                     "columns tells CSVSource how to parse headerless rows, but downstream DAG validation still needs a schema guarantee. If transforms consume a CSV column, declare it in schema.guaranteed_fields or explicit schema fields.",
                     "CSV source options do not have url_field; if a downstream web_scrape needs URLs, keep the URL column in the CSV schema and set url_field on the web_scrape node.",
-                    "If you authored CSV rows or chose source values for this CSV, bind the exact artifact as a blob-backed source and stage invented_source on source.options.interpretation_requirements.",
-                    "After staging invented_source for an authored CSV, call request_interpretation_review with affected_node_id='source' and llm_draft equal to the exact CSV text.",
+                    "If you authored CSV rows or chose source values for this CSV, bind the exact artifact as a blob-backed source, stage invented_source on source.options.interpretation_requirements.",
+                    "Then call request_interpretation_review with affected_node_id='source' and llm_draft equal to the exact CSV text.",
                     "For source-level interpretation reviews, source is not a transform node; do not search nodes[] for source before calling the review tool.",
                     "Excel-exported CSVs are often cp1252 or have a UTF-16 BOM — verify encoding before pinning schema.",
                     "Set on_validation_failure to a sink name for quarantine/review, or 'discard' to drop with audit. Default is 'discard'.",

@@ -227,7 +227,7 @@ class CompositionStateResponse(_StrictResponse):
     id: str
     session_id: str
     version: int
-    source: CompositionObject | None = None
+    sources: dict[str, CompositionObject] | None = None
     nodes: CompositionObjectList | None = None
     edges: CompositionObjectList | None = None
     outputs: CompositionObjectList | None = None

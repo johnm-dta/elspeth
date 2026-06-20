@@ -37,6 +37,30 @@ def test_three_different_hashes_do_not_trigger_hint() -> None:
     assert should_inject_hint(failures) is False
 
 
+def test_tracker_fires_on_three_same_tool_drift_failures() -> None:
+    """Distinct failed payloads for the same tool are also no-progress drift."""
+    tracker = AntiAnchorTracker()
+    tracker.record_failure("set_pipeline", "hash-a")
+    tracker.record_failure("set_pipeline", "hash-b")
+    tracker.record_failure("set_pipeline", "hash-c")
+
+    assert tracker.should_fire() is True
+    hint = tracker.build_hint()
+    assert "set_pipeline" in hint
+    assert "drift" in hint.lower()
+    assert "different arguments" in hint
+
+
+def test_tracker_does_not_fire_on_mixed_tool_failures() -> None:
+    """Different failing tools may be ordinary exploration, not same-tool drift."""
+    tracker = AntiAnchorTracker()
+    tracker.record_failure("set_source", "hash-a")
+    tracker.record_failure("upsert_node", "hash-b")
+    tracker.record_failure("set_output", "hash-c")
+
+    assert tracker.should_fire() is False
+
+
 def test_two_identical_then_third_different_does_not_trigger() -> None:
     failures = deque([("set_pipeline", "hash-a"), ("set_pipeline", "hash-a"), ("set_pipeline", "hash-b")], maxlen=5)
     assert should_inject_hint(failures) is False
@@ -130,7 +154,7 @@ def test_tracker_uses_bounded_deque() -> None:
     for i in range(20):
         tracker.record_failure("t", f"h-{i}")
     # Only the last 5 are retained; should_fire checks the last 3.
-    assert tracker.should_fire() is False  # last 3 are h-17, h-18, h-19 — all different
+    assert tracker.should_fire() is True  # last 3 are h-17, h-18, h-19 — same-tool drift
     assert len(tracker._failures) == 5  # bounded
 
 
@@ -152,11 +176,9 @@ def test_captured_tier1_red_drift_pattern_does_not_trigger() -> None:
     attempts #2 and #3. So the failure mode was drift-without-convergence-
     then-self-surrender, NOT an anchored loop.
 
-    This test pins the predicate's correct (non-firing) response to the
-    captured RED's actual deque shape, so the next agent doesn't re-misread
-    "0 hint-fires across the cohort" as a bug. The actual fix path for the
-    captured failure mode is §7.6 (broader runtime-preflight error rewrite),
-    not a §7.7 threshold change.
+    This test pins the byte-identical predicate's correct non-firing response
+    while asserting the higher-level tracker now catches the same-tool drift
+    follow-up tracked in elspeth-f555166d73.
     """
     # The three actual `arguments_hash` prefixes from the captured session
     # (full SHA-256 in the audit DB; truncated here to keep the test tight).
@@ -170,3 +192,8 @@ def test_captured_tier1_red_drift_pattern_does_not_trigger() -> None:
     )
     # Drift, not anchor — predicate correctly does not fire.
     assert should_inject_hint(failures) is False
+
+    tracker = AntiAnchorTracker()
+    for tool_name, arguments_hash in failures:
+        tracker.record_failure(tool_name, arguments_hash)
+    assert tracker.should_fire() is True

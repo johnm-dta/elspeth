@@ -105,3 +105,11 @@ class TestBatchThresholdSummaryConfig:
 
         with pytest.raises(PluginConfigError):
             BatchThresholdSummary({"schema": DYNAMIC_SCHEMA, **config})
+
+    def test_excessive_thresholds_rejected_at_config_boundary(self) -> None:
+        from elspeth.plugins.transforms.batch_threshold_summary import BatchThresholdSummary
+
+        thresholds = [{"name": f"threshold_{index}", "operator": ">=", "value": float(index)} for index in range(129)]
+
+        with pytest.raises(PluginConfigError, match="thresholds must contain at most 128 entries"):
+            BatchThresholdSummary({"schema": DYNAMIC_SCHEMA, "value_field": "score", "thresholds": thresholds})

@@ -283,7 +283,7 @@ _TOOLS: dict[str, _ToolDef] = {
         },
     ),
     "list_collisions": _ToolDef(
-        description="List coalesce collision events — shows merge conflicts with winner/loser values",
+        description="List coalesce collision events — shows merge conflicts with winner/loser value fingerprints",
         args=_ArgSpec(
             required_str=("run_id",),
             optional_int=(("limit", 100),),

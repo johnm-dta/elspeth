@@ -330,10 +330,10 @@ class TestPromoteSetPipelineArgErrorRouting:
             ),
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "text"
+        source = result.updated_state.sources["source"]
+        assert source.plugin == "text"
         # The handler resolves blob_ref into source.options authoritatively.
-        assert "blob_ref" in result.updated_state.source.options
+        assert "blob_ref" in source.options
         # Inline content must not leak into the affected/data summary.
         assert "hello" not in str(result.to_dict())
 
@@ -453,7 +453,7 @@ class TestPromoteSetPipelineArgErrorRouting:
         )
 
         assert result.success is False
-        assert result.updated_state.source is None
+        assert "source" not in result.updated_state.sources
         assert SOURCE_AUTHORING_KEY in result.data["error"]
 
     def test_csv_fixed_schema_accepts_advertised_field_definition_shape(self, tmp_path: Path) -> None:
@@ -511,9 +511,9 @@ class TestPromoteSetPipelineArgErrorRouting:
 
         assert result.success is True, result.data
         assert result.validation.is_valid is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "csv"
-        assert result.updated_state.source.options["schema"]["fields"] == ({"name": "url", "field_type": "str"},)
+        source = result.updated_state.sources["source"]
+        assert source.plugin == "csv"
+        assert source.options["schema"]["fields"] == ({"name": "url", "field_type": "str"},)
 
     def test_inline_blob_llm_authored_source_records_authoring_metadata(self, tmp_path: Path) -> None:
         """LLM-authored inline source blobs must stamp source-level provenance."""
@@ -555,8 +555,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         )
 
         assert result.success is True, result.data
-        assert result.updated_state.source is not None
-        options = result.updated_state.source.options
+        assert "source" in result.updated_state.sources
+        options = result.updated_state.sources["source"].options
         assert options["blob_ref"] == result.data["inline_blob"]["blob_id"]
         assert SOURCE_AUTHORING_KEY in options
         assert options[SOURCE_AUTHORING_KEY] == {
@@ -623,8 +623,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         )
 
         assert result.success is True, result.data
-        assert result.updated_state.source is not None
-        requirement = result.updated_state.source.options[INTERPRETATION_REQUIREMENTS_KEY][0]
+        assert "source" in result.updated_state.sources
+        requirement = result.updated_state.sources["source"].options[INTERPRETATION_REQUIREMENTS_KEY][0]
         assert requirement["kind"] == "invented_source"
         assert requirement["user_term"] == "inline_source_url_list"
         assert requirement["draft"] == url_csv
@@ -918,8 +918,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         result = _execute_set_pipeline(args, _empty_state(), context)
 
         assert result.success is True, result.data
-        assert result.updated_state.source is not None
-        options = result.updated_state.source.options
+        assert "source" in result.updated_state.sources
+        options = result.updated_state.sources["source"].options
         assert options[SOURCE_AUTHORING_KEY] == {
             "modality": CreationModality.LLM_GENERATED.value,
             "content_hash": create_result.data["content_hash"],
@@ -986,8 +986,8 @@ class TestPromoteSetPipelineArgErrorRouting:
         )
 
         assert result.success is True, result.data
-        assert result.updated_state.source is not None
-        options = result.updated_state.source.options
+        assert "source" in result.updated_state.sources
+        options = result.updated_state.sources["source"].options
         assert INTERPRETATION_REQUIREMENTS_KEY in options
         assert SOURCE_AUTHORING_KEY in options
         assert len(options[INTERPRETATION_REQUIREMENTS_KEY]) == 1
@@ -1229,3 +1229,108 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
     assert serialized.count(_CANARY_ROUTES) == 1
     assert serialized.count(_CANARY_TRIGGER) == 1
     assert serialized.count(_CANARY_OUTPUT_OPT) == 1
+
+
+# ---------------------------------------------------------------------------
+# TSV-delimiter parity on the inline_blob bind path (bug elspeth-da09ed23d4)
+# ---------------------------------------------------------------------------
+
+
+class TestSetPipelineInlineBlobTsvDelimiter:
+    """The inline_blob bind branch must derive a tab delimiter for a ``.tsv``
+    inline blob, mirroring ``set_source_from_blob`` and ``inspect_blob_content``.
+
+    ``_MIME_TO_SOURCE`` is mime-keyed only, so without the filename-derived
+    delimiter a tab-separated inline blob binds the csv plugin with the comma
+    default and parses as one column at runtime.
+    """
+
+    def _set_pipeline_with_inline_csv_blob(
+        self,
+        *,
+        filename: str,
+        content: str,
+        tmp_path: Path,
+        extra_source_options: dict[str, Any] | None = None,
+    ) -> Any:
+        # Embed the blob content verbatim in the user message so the inline
+        # blob is classified VERBATIM (operator-supplied), avoiding the
+        # LLM-authored provenance requirement for this delimiter-path test.
+        user_message_content = f"Use this tabular file:\n{content}"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+        catalog = _mock_catalog()
+        source_options: dict[str, Any] = {"schema": {"mode": "observed"}}
+        if extra_source_options:
+            source_options.update(extra_source_options)
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": source_options,
+                "inline_blob": {
+                    "filename": filename,
+                    "mime_type": "text/csv",
+                    "content": content,
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [],
+            "edges": [],
+            "outputs": [
+                {
+                    "sink_name": "rows",
+                    "plugin": "csv",
+                    "options": {
+                        "path": str(tmp_path / "outputs" / "out.csv"),
+                        "schema": {"mode": "observed"},
+                        "mode": "write",
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+        return _execute_set_pipeline(
+            args,
+            _empty_state(),
+            ToolContext(
+                catalog=catalog,
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                user_message_id=user_message_id,
+                user_message_content=user_message_content,
+            ),
+        )
+
+    def test_tsv_inline_blob_binds_csv_source_with_tab_delimiter(self, tmp_path: Path) -> None:
+        result = self._set_pipeline_with_inline_csv_blob(
+            filename="rows.tsv",
+            content="a\tb\tc\n1\t2\t3\n",
+            tmp_path=tmp_path,
+        )
+        assert result.success is True, result.to_dict()
+        source = result.updated_state.sources["source"]
+        assert source.plugin == "csv"
+        assert source.options.get("delimiter") == "\t"
+
+    def test_caller_supplied_delimiter_preserved_on_inline_path(self, tmp_path: Path) -> None:
+        result = self._set_pipeline_with_inline_csv_blob(
+            filename="rows.tsv",
+            content="a;b;c\n1;2;3\n",
+            tmp_path=tmp_path,
+            extra_source_options={"delimiter": ";"},
+        )
+        assert result.success is True, result.to_dict()
+        source = result.updated_state.sources["source"]
+        assert source.options.get("delimiter") == ";"
+
+    def test_csv_inline_blob_does_not_inject_delimiter(self, tmp_path: Path) -> None:
+        result = self._set_pipeline_with_inline_csv_blob(
+            filename="rows.csv",
+            content="a,b,c\n1,2,3\n",
+            tmp_path=tmp_path,
+        )
+        assert result.success is True, result.to_dict()
+        source = result.updated_state.sources["source"]
+        assert source.options.get("delimiter") is None

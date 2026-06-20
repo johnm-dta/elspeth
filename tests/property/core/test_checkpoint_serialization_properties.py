@@ -31,6 +31,7 @@ import pytest
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.checkpoint.serialization import (
     CheckpointEncoder,
     _reject_nan_infinity,
@@ -264,28 +265,29 @@ class TestNaNInfinityRejection:
 class TestTypeTagIsolation:
     """Type tags must only trigger for exact datetime tag dicts."""
 
-    def test_datetime_tag_with_extra_keys_preserved_as_dict(self) -> None:
-        """Property: envelope with extra keys is NOT restored as datetime.
+    def test_datetime_tag_with_extra_keys_raises(self) -> None:
+        """Property: a reserved envelope polluted with extra keys fails closed.
 
-        Only dicts with EXACTLY __elspeth_type__ and __elspeth_value__ are type tags.
+        Only dicts with EXACTLY __elspeth_type__ and __elspeth_value__ are valid
+        envelopes. A legitimate checkpoint never produces this shape (user dicts
+        carrying the reserved key are escaped on the write side), so any extra key
+        alongside the reserved pair signals a corrupted/tampered checkpoint and
+        must crash rather than silently round-trip as an ordinary dict.
         """
         data = {"__elspeth_type__": "datetime", "__elspeth_value__": "2024-01-01T00:00:00+00:00", "extra": "value"}
-        restored = _restore_types(data)
-        assert isinstance(restored, dict)
-        assert "__elspeth_type__" in restored
-        assert "extra" in restored
+        with pytest.raises(AuditIntegrityError, match="invalid envelope shape"):
+            _restore_types(data)
 
     @given(
         extra_key=st.text(min_size=1, max_size=20).filter(lambda s: s not in ("__elspeth_type__", "__elspeth_value__")),
         extra_val=json_primitives,
     )
     @settings(max_examples=100)
-    def test_datetime_tag_with_any_extra_key_stays_dict(self, extra_key: str, extra_val) -> None:
-        """Property: Adding ANY extra key to a type envelope prevents restoration."""
+    def test_datetime_tag_with_any_extra_key_raises(self, extra_key: str, extra_val) -> None:
+        """Property: adding ANY extra key to a type envelope fails closed."""
         data = {"__elspeth_type__": "datetime", "__elspeth_value__": "2024-06-15T12:30:00+00:00", extra_key: extra_val}
-        restored = _restore_types(data)
-        assert isinstance(restored, dict)
-        assert not isinstance(restored, datetime)  # type: ignore[unreachable]  # mypy thinks dict & datetime disjoint, but test validates decoder
+        with pytest.raises(AuditIntegrityError, match="invalid envelope shape"):
+            _restore_types(data)
 
     @given(value=st.text(min_size=1, max_size=50))
     @settings(max_examples=100)

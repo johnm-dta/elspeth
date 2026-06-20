@@ -45,6 +45,8 @@ _ANNOTATION_FIELD_SUFFIXES = (
     "z_threshold",
 )
 _BACKWARD_INVARIANT_DROPPED_FIELD = "batch_outlier_annotator_dropped_probe_field"
+_MAX_BATCH_ROWS = 4096
+_MAX_SKIPPED_INDEX_DETAILS = 128
 
 
 def _annotation_fields(output_prefix: str) -> frozenset[str]:
@@ -65,6 +67,7 @@ class _BatchStats:
     median: float
     stdev: float
     mad: float
+    mean_abs_dev: float
     missing_indices: tuple[int, ...]
     non_finite_indices: tuple[int, ...]
 
@@ -142,7 +145,7 @@ class BatchOutlierAnnotator(BaseTransform):
     name = "batch_outlier_annotator"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0fb500fc231b82f9"
+    source_file_hash: str | None = "sha256:63d7304ef9ab7f6e"
     config_model = BatchOutlierAnnotatorConfig
     is_batch_aware = True
     passes_through_input = False
@@ -332,6 +335,16 @@ class BatchOutlierAnnotator(BaseTransform):
         return TransformResult.error(reason, retryable=False)
 
     @staticmethod
+    def _error_for_batch_too_large(*, batch_size: int) -> TransformResult:
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "batch_too_large",
+            "batch_size": batch_size,
+            "expected": f"at most {_MAX_BATCH_ROWS} rows",
+        }
+        return TransformResult.error(reason, retryable=False)
+
+    @staticmethod
     def _median(values: list[float]) -> float:
         return float(statistics.median(values))
 
@@ -349,6 +362,7 @@ class BatchOutlierAnnotator(BaseTransform):
             median = self._require_finite_float(self._median(values), operation="median")
             deviations = [abs(value - median) for value in values]
             mad = self._require_finite_float(self._median(deviations), operation="mad")
+            mean_abs_dev = self._require_finite_float(sum(deviations) / len(deviations), operation="mean_abs_dev")
             stdev = 0.0 if len(values) == 1 else self._require_finite_float(statistics.stdev(values), operation="stdev")
         except OverflowError as exc:
             return (
@@ -358,6 +372,7 @@ class BatchOutlierAnnotator(BaseTransform):
                     median=0.0,
                     stdev=0.0,
                     mad=0.0,
+                    mean_abs_dev=0.0,
                     missing_indices=missing_indices,
                     non_finite_indices=non_finite_indices,
                 ),
@@ -375,6 +390,7 @@ class BatchOutlierAnnotator(BaseTransform):
                 median=median,
                 stdev=stdev,
                 mad=mad,
+                mean_abs_dev=mean_abs_dev,
                 missing_indices=missing_indices,
                 non_finite_indices=non_finite_indices,
             ),
@@ -386,15 +402,33 @@ class BatchOutlierAnnotator(BaseTransform):
 
     def _annotation_for(self, entry: _FiniteEntry, stats: _BatchStats) -> dict[str, object]:
         value = self._coerce_finite_float(entry.value, operation="float_conversion")
-        z_score = 0.0 if stats.stdev == 0.0 else self._require_finite_float((value - stats.mean) / stats.stdev, operation="z_score")
-        robust_z_score = (
-            0.0 if stats.mad == 0.0 else self._require_finite_float(0.6745 * (value - stats.median) / stats.mad, operation="robust_z_score")
+        missing_indices = stats.missing_indices[:_MAX_SKIPPED_INDEX_DETAILS]
+        non_finite_indices = stats.non_finite_indices[:_MAX_SKIPPED_INDEX_DETAILS]
+        # z_score = (x - mean) / stdev is undefined when stdev==0 (all-identical
+        # batch); emit None (honest-absence), never 0.0 (B4.5-c)
+        z_score: float | None = (
+            None if stats.stdev == 0.0 else self._require_finite_float((value - stats.mean) / stats.stdev, operation="z_score")
         )
+        robust_z_score: float | None
+        if stats.mad != 0.0:
+            robust_z_score = self._require_finite_float(0.6745 * (value - stats.median) / stats.mad, operation="robust_z_score")
+        elif stats.mean_abs_dev != 0.0:
+            # Iglewicz-Hoaglin fallback: MAD collapses to 0 whenever >50% of values
+            # are identical (common for score/count data), but real spread remains.
+            # The mean-absolute-deviation modified z-score keeps robust detection
+            # alive instead of fabricating 0.0 for a masked outlier.
+            robust_z_score = self._require_finite_float(
+                0.7979 * (value - stats.median) / stats.mean_abs_dev, operation="robust_z_score_meanad"
+            )
+        else:
+            # All values identical — no spread at all. The robust z-score is
+            # genuinely undefined; emit None (honest-absence doctrine), never 0.0.
+            robust_z_score = None
 
         reasons: list[str] = []
-        if abs(z_score) >= self._z_threshold:
+        if z_score is not None and abs(z_score) >= self._z_threshold:
             reasons.append("z_score")
-        if abs(robust_z_score) >= self._robust_z_threshold:
+        if robust_z_score is not None and abs(robust_z_score) >= self._robust_z_threshold:
             reasons.append("robust_z_score")
 
         return {
@@ -406,8 +440,8 @@ class BatchOutlierAnnotator(BaseTransform):
             self._field("missing_count"): stats.missing_count,
             self._field("non_finite_count"): stats.non_finite_count,
             self._field("skipped_count"): stats.skipped_count,
-            self._field("missing_indices"): stats.missing_indices,
-            self._field("non_finite_indices"): stats.non_finite_indices,
+            self._field("missing_indices"): missing_indices,
+            self._field("non_finite_indices"): non_finite_indices,
             self._field("mean"): stats.mean,
             self._field("median"): stats.median,
             self._field("stdev"): stats.stdev,
@@ -459,6 +493,8 @@ class BatchOutlierAnnotator(BaseTransform):
         """Annotate finite numeric rows in a batch with outlier metrics."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+        if len(rows) > _MAX_BATCH_ROWS:
+            return self._error_for_batch_too_large(batch_size=len(rows))
 
         self._reject_runtime_output_field_collision(rows)
         entries, missing_indices, non_finite_indices = self._finite_entries_for(rows)

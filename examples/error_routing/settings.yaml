@@ -17,20 +17,21 @@
 #   - Every row reaches exactly one terminal sink (no silent drops)
 #   - The audit trail records the full routing decision for every row
 
-source:
-  plugin: csv
-  on_success: raw
-  options:
-    path: examples/error_routing/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'customer: str'
-      - 'amount: int'
-      - 'category: str'
-      - 'notes: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: raw
+    options:
+      path: examples/error_routing/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'customer: str'
+        - 'amount: int'
+        - 'category: str'
+        - 'notes: str'
+      on_validation_failure: discard
 
 transforms:
 # Stage 1: Content filtering — blocked rows divert to quarantine

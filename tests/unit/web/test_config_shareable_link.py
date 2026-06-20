@@ -12,6 +12,7 @@ under test is the new key/lifetime fields.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 import pytest
@@ -225,6 +226,19 @@ def test_signing_key_validator_allows_weak_key_on_loopback() -> None:
         **_other_required_kwargs(),
     )
     assert settings.shareable_link_signing_key.get_secret_value() == b"\x00" * 32
+
+
+def test_signing_key_validator_rejects_known_weak_key_on_loopback_outside_test_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delitem(sys.modules, "pytest", raising=False)
+    monkeypatch.delenv("ELSPETH_ENV", raising=False)
+
+    with pytest.raises(ValidationError, match="known-weak"):
+        WebSettings(
+            host="127.0.0.1",
+            shareable_link_signing_key=b"\x00" * 32,
+            secret_key="non-default-secret-for-loopback-proxy-test",
+            **_other_required_kwargs(),
+        )
 
 
 def test_signing_key_validator_allows_high_entropy_key_on_external_host() -> None:

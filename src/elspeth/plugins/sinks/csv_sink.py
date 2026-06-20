@@ -113,7 +113,7 @@ class CSVSink(BaseSink):
     name = "csv"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5abcccae4baff90d"
+    source_file_hash: str | None = "sha256:f57fef81eeaf6382"
     config_model = CSVSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -475,8 +475,15 @@ class CSVSink(BaseSink):
             )
             try:
                 row_writer.writerow(row)
+                # Trial-encode the produced text with the configured codec so a
+                # character that is unencodable in the target charset (e.g. an
+                # emoji when encoding='cp1252') is caught HERE as a per-row fault
+                # rather than later at file.write(), which would abort the whole
+                # batch. UnicodeEncodeError is a subclass of ValueError so the
+                # except clause below already classifies it correctly.
+                row_buffer.getvalue().encode(self._encoding)
             except (ValueError, csv.Error) as exc:
-                self._divert_row(row, row_index=row_index, reason=f"CSV serialization failed: {exc}")
+                self._divert_row(row, row_index=row_index, reason=f"CSV encoding ({self._encoding}) failed: {exc}")
                 continue
             staging_buffer.write(row_buffer.getvalue())
         return staging_buffer.getvalue()
@@ -682,12 +689,12 @@ class CSVSink(BaseSink):
             return PluginAssistance(
                 plugin_name="csv",
                 issue_code=None,
-                summary="Write rows as CSV. Configurable encoding, quoting, collision_policy, and header-display overrides.",
+                summary="Write rows as CSV. Configurable delimiter, encoding, mode, collision_policy, and header-display overrides.",
                 composer_hints=(
-                    "delimiter and quoting are operator-level concerns — pick deliberately for the consuming tool (Excel prefers ',' + QUOTE_MINIMAL; analytics tools may prefer '\\t').",
-                    "collision_policy: 'fail' (default), 'auto_increment', or 'overwrite'. Pick deliberately — accidental overwrite destroys prior runs.",
+                    "delimiter (default ',', single character) is an operator concern — pick for the consuming tool (Excel: ','; analytics tools may prefer '\\t'). Quoting is fixed (standard csv quoting); only delimiter and encoding are configurable.",
+                    "collision_policy: 'fail_if_exists', 'auto_increment', or 'append_or_create' (only with mode: append). Unset is the default and OVERWRITES/truncates an existing file — set it deliberately to protect prior runs.",
                     "Header row is written once at start. Resume appends must use the same column order; pin headers explicitly with headers when schema can evolve.",
-                    "Set on_write_failure to a quarantine sink so per-row write errors don't crash the run.",
+                    "on_write_failure is REQUIRED (no default): set 'discard' (drop with an audit record) or a quarantine sink name so per-row write errors don't crash the run; omitting it fails validation.",
                 ),
             )
         return None

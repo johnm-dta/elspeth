@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import signal
 import threading
-from unittest.mock import Mock
-
-import structlog.testing
+from unittest.mock import Mock, patch
 
 from elspeth.contracts import RunStatus
 from elspeth.contracts.errors import GracefulShutdownError
@@ -147,66 +145,123 @@ class TestShutdownHandlerContext:
 
 
 class TestCheckpointInterruptedProgress:
-    """Tests for _checkpoint_interrupted_progress warning when no checkpoint is possible."""
+    """Tests for checkpoint_interrupted_progress shutdown-checkpoint behavior."""
 
-    def test_logs_warning_when_no_token_available(self) -> None:
-        """Shutdown checkpoint skip must emit a structured warning, not silently return."""
-        from elspeth.contracts.types import NodeID
-        from elspeth.engine.orchestrator import Orchestrator
-        from tests.fixtures.landscape import make_landscape_db
+    def test_creates_checkpoint_even_with_no_buffered_state(self) -> None:
+        """Shutdown always writes a recovery checkpoint; no state → NULL scalars.
 
-        db = make_landscape_db()
+        With the token anchor deleted (F2) and blob state retired (F1), a
+        shutdown with no in-flight barrier state still produces a resumable
+        checkpoint row, and the empty BarrierScalars from the live executors
+        (``has_state`` False) persists ``barrier_scalars_json IS NULL``.
+        """
+        from sqlalchemy import select
+
+        from elspeth.contracts.barrier_scalars import BarrierScalars
+        from elspeth.core.checkpoint import CheckpointManager
+        from elspeth.core.landscape.schema import checkpoints_table
+        from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
+        from tests.fixtures.factories import make_graph_linear
+        from tests.fixtures.landscape import make_recorder_with_run
+
+        setup = make_recorder_with_run(run_id="run-test-123")
         try:
-            orchestrator = Orchestrator(db=db)
-            # Enable checkpointing so the method doesn't early-return on config check
-            orchestrator._checkpoints._checkpoint_config = Mock()
-            orchestrator._checkpoints._checkpoint_config.enabled = True
-            orchestrator._checkpoints._checkpoint_manager = Mock()
-            orchestrator._checkpoints._active_graph = Mock()
-            orchestrator._checkpoints._sequence_number = 0
+            config = Mock()
+            config.enabled = True
+            coordinator = CheckpointCoordinator(
+                checkpoint_manager=CheckpointManager(setup.db),
+                checkpoint_config=config,
+            )
+            coordinator.set_active_graph(make_graph_linear())
 
-            # Build a LoopContext where all token resolution paths return None:
-            # - no aggregation nodes
-            # - no coalesce pending entries
-            # - no pending sink tokens
-            # - last_token_id is None
             mock_processor = Mock()
-            mock_agg_state = Mock()
-            mock_agg_state.nodes = {}  # Empty — no aggregation buffers
-            mock_processor.get_aggregation_checkpoint_state.return_value = mock_agg_state
-            mock_processor.get_coalesce_checkpoint_state.return_value = None
+            # Live executors with no latched triggers / no recorded losses
+            # compose an empty BarrierScalars.
+            mock_processor.get_barrier_scalars.return_value = BarrierScalars(aggregation={}, coalesce={})
 
             loop_ctx = Mock()
             loop_ctx.processor = mock_processor
             loop_ctx.pending_tokens = {"default": []}  # No pending tokens
-            loop_ctx.last_token_id = None
 
-            with structlog.testing.capture_logs() as captured:
-                orchestrator._checkpoints.checkpoint_interrupted_progress(
-                    run_id="run-test-123",
-                    loop_ctx=loop_ctx,
-                    sink_id_map={},
-                    source_id=NodeID("source_0"),
-                )
-
-            # Verify NO checkpoint was created
-            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_not_called()
-
-            # Verify warning was emitted via structlog
-            events = [entry["event"] for entry in captured]
-            assert "shutdown_checkpoint_skipped" in events, (
-                f"Expected 'shutdown_checkpoint_skipped' warning in structlog output, got: {events}"
+            coordinator.checkpoint_interrupted_progress(
+                run_id="run-test-123",
+                loop_ctx=loop_ctx,
             )
+
+            with setup.db.engine.connect() as conn:
+                rows = conn.execute(select(checkpoints_table)).fetchall()
+            assert len(rows) == 1
+            assert rows[0].run_id == "run-test-123"
+            assert rows[0].sequence_number == 1
+            assert rows[0].barrier_scalars_json is None  # empty scalars → NULL
         finally:
-            db.close()
+            setup.db.close()
 
-    def test_sink_factory_persists_coalesce_completed_keys_only(self) -> None:
-        """Regression: _make_checkpoint_after_sink_factory must persist completed_keys.
+    def test_latched_count_trigger_persists_count_fire_offset(self) -> None:
+        """A latched count trigger writes count_fire_offset into the scalars.
 
-        The sink checkpoint callback filtered on coalesce_state.pending,
-        dropping completed_keys needed for late-arrival detection on resume.
+        Companion to the NULL case: when the live aggregation executor reports
+        a latched count trigger, the shutdown checkpoint row carries the fire
+        offset — and ONLY the trigger latches. Counters are NOT in the scalars;
+        they derive from audit tables at restore (design D3).
         """
-        from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+        import json
+
+        from sqlalchemy import select
+
+        from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
+        from elspeth.core.checkpoint import CheckpointManager
+        from elspeth.core.landscape.schema import checkpoints_table
+        from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
+        from tests.fixtures.factories import make_graph_linear
+        from tests.fixtures.landscape import make_recorder_with_run
+
+        setup = make_recorder_with_run(run_id="run-latched")
+        try:
+            config = Mock()
+            config.enabled = True
+            coordinator = CheckpointCoordinator(
+                checkpoint_manager=CheckpointManager(setup.db),
+                checkpoint_config=config,
+            )
+            coordinator.set_active_graph(make_graph_linear())
+
+            mock_processor = Mock()
+            mock_processor.get_barrier_scalars.return_value = BarrierScalars(
+                aggregation={"agg-1": AggregationNodeScalars(count_fire_offset=2.5, condition_fire_offset=None)},
+                coalesce={},
+            )
+
+            loop_ctx = Mock()
+            loop_ctx.processor = mock_processor
+            loop_ctx.pending_tokens = {"default": []}
+
+            coordinator.checkpoint_interrupted_progress(
+                run_id="run-latched",
+                loop_ctx=loop_ctx,
+            )
+
+            with setup.db.engine.connect() as conn:
+                rows = conn.execute(select(checkpoints_table)).fetchall()
+            assert len(rows) == 1
+            assert rows[0].barrier_scalars_json is not None
+            persisted = json.loads(rows[0].barrier_scalars_json)
+            node_entry = persisted["aggregation"]["agg-1"]
+            assert node_entry["count_fire_offset"] == 2.5
+            assert node_entry["condition_fire_offset"] is None
+            # D3: trigger latches ONLY — no counters in the persisted scalars.
+            assert set(node_entry) == {"_version", "count_fire_offset", "condition_fire_offset"}
+        finally:
+            setup.db.close()
+
+    def test_sink_factory_passes_live_barrier_scalars(self) -> None:
+        """The post-sink checkpoint callback hands live executor scalars through.
+
+        The callback reads processor.get_barrier_scalars() (single composed
+        accessor, F1 Task 2.4) and passes the BarrierScalars verbatim to
+        create_checkpoint — including coalesce lost-branch records.
+        """
+        from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
         from elspeth.contracts.identity import TokenInfo
         from elspeth.engine.orchestrator import Orchestrator
         from tests.fixtures.landscape import make_landscape_db
@@ -221,16 +276,13 @@ class TestCheckpointInterruptedProgress:
             orchestrator._checkpoints._active_graph = Mock()
             orchestrator._checkpoints._sequence_number = 0
 
-            coalesce_state = CoalesceCheckpointState(
-                version="1.0",
-                pending=(),
-                completed_keys=(("merge_1", "row-1"),),
+            scalars = BarrierScalars(
+                aggregation={},
+                coalesce={("merge_1", "row-1"): CoalescePendingScalars(lost_branches={"branch_b": "transform_failed"})},
             )
 
             mock_processor = Mock()
-            mock_agg_state = Mock()
-            mock_processor.get_aggregation_checkpoint_state.return_value = mock_agg_state
-            mock_processor.get_coalesce_checkpoint_state.return_value = coalesce_state
+            mock_processor.get_barrier_scalars.return_value = scalars
 
             factory = orchestrator._checkpoints.make_checkpoint_after_sink_factory("run-x", mock_processor)
             callback = factory("sink_0")
@@ -238,22 +290,104 @@ class TestCheckpointInterruptedProgress:
             token = Mock(spec=TokenInfo)
             token.token_id = "tok-1"
             callback(token)
+            callback.flush()
 
             orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
             call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args.kwargs
-            assert call_kwargs["coalesce_state"] is coalesce_state
+            assert call_kwargs["barrier_scalars"] is scalars
+            mock_processor.mark_sink_bound_scheduler_terminal_many.assert_called_once_with(("tok-1",))
         finally:
             db.close()
 
-    def test_persists_coalesce_state_with_completed_keys_only(self) -> None:
-        """Regression: coalesce state with completed_keys but no pending must be persisted.
+    def test_pending_sink_terminalization_uses_per_token_scheduler_handoff(self) -> None:
+        """Generated sink tokens must not be terminalized as scheduler work.
 
-        Bug: both _make_checkpoint_after_sink_factory and _checkpoint_interrupted_progress
-        filtered on `coalesce_state.pending`, dropping completed_keys needed for
-        late-arrival detection on resume.
+        A sink batch may mix scheduler-backed tokens with tokens generated after
+        a scheduler barrier. Only tokens with a recorded PENDING_SINK handoff
+        should be closed by the post-sink callback.
         """
-        from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-        from elspeth.contracts.types import NodeID
+        from elspeth.contracts import PendingOutcome, TokenInfo
+        from elspeth.contracts.barrier_scalars import BarrierScalars
+        from elspeth.contracts.enums import TerminalOutcome, TerminalPath
+        from elspeth.engine.executors.sink import DiversionCounts
+        from elspeth.engine.orchestrator import Orchestrator
+        from elspeth.engine.orchestrator.types import ExecutionCounters
+        from elspeth.testing import make_row
+        from tests.fixtures.landscape import make_landscape_db
+
+        db = make_landscape_db()
+        try:
+            orchestrator = Orchestrator(db=db)
+            orchestrator._checkpoints._checkpoint_config = Mock()
+            orchestrator._checkpoints._checkpoint_config.enabled = False
+
+            sink = Mock()
+            sink._on_write_failure = None
+            config = Mock()
+            config.sinks = {"output": sink}
+
+            processor = Mock()
+            processor.get_barrier_scalars.return_value = BarrierScalars(aggregation={}, coalesce={})
+            on_token_written_factory = orchestrator._checkpoints.make_checkpoint_after_sink_factory("run-x", processor)
+
+            scheduler_token = TokenInfo(row_id="row-1", token_id="tok-scheduler", row_data=make_row({"value": 1}))
+            generated_token = TokenInfo(row_id="row-2", token_id="tok-generated", row_data=make_row({"value": 2}))
+            pending_tokens = {
+                "output": [
+                    (
+                        generated_token,
+                        PendingOutcome(
+                            outcome=TerminalOutcome.SUCCESS,
+                            path=TerminalPath.COALESCED,
+                            scheduler_pending_sink=False,
+                        ),
+                    ),
+                    (
+                        scheduler_token,
+                        PendingOutcome(
+                            outcome=TerminalOutcome.SUCCESS,
+                            path=TerminalPath.COALESCED,
+                            scheduler_pending_sink=True,
+                        ),
+                    ),
+                ]
+            }
+
+            def write_side_effect(*, tokens, on_token_written, **_kwargs):
+                for token in tokens:
+                    on_token_written(token)
+                return None, DiversionCounts()
+
+            with patch("elspeth.engine.executors.sink.SinkExecutor") as sink_executor_cls:
+                sink_executor_cls.return_value.write.side_effect = write_side_effect
+
+                orchestrator._run_core.write_pending_to_sinks(
+                    factory=Mock(),
+                    run_id="run-x",
+                    config=config,
+                    ctx=Mock(),
+                    counters=ExecutionCounters(),
+                    pending_tokens=pending_tokens,
+                    sink_id_map={"output": "sink-output"},
+                    edge_map={},
+                    sink_step=1,
+                    on_token_written_factory=on_token_written_factory,
+                )
+
+            processor.mark_sink_bound_scheduler_terminal_many.assert_called_once_with(("tok-scheduler",))
+        finally:
+            db.close()
+
+    def test_shutdown_passes_coalesce_lost_branch_scalars_through(self) -> None:
+        """Shutdown hands the composed BarrierScalars through verbatim.
+
+        checkpoint_interrupted_progress reads processor.get_barrier_scalars()
+        (single composed accessor, F1 Task 2.4) and passes the result
+        unconditionally to create_checkpoint — coalesce lost-branch records
+        included. (The blob-era completed_keys concept is gone: late-arrival
+        detection derives from audit tables at restore, design D3.)
+        """
+        from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
         from elspeth.engine.orchestrator import Orchestrator
         from tests.fixtures.landscape import make_landscape_db
 
@@ -266,80 +400,29 @@ class TestCheckpointInterruptedProgress:
             orchestrator._checkpoints._active_graph = Mock()
             orchestrator._checkpoints._sequence_number = 0
 
-            # Coalesce state with NO pending but HAS completed_keys
-            coalesce_state = CoalesceCheckpointState(
-                version="1.0",
-                pending=(),
-                completed_keys=(("merge_1", "row-1"), ("merge_2", "row-2")),
+            scalars = BarrierScalars(
+                aggregation={},
+                coalesce={
+                    ("merge_1", "row-1"): CoalescePendingScalars(lost_branches={"branch_b": "gate_routed_away"}),
+                    ("merge_2", "row-2"): CoalescePendingScalars(lost_branches={"branch_c": "transform_failed"}),
+                },
             )
 
             mock_processor = Mock()
-            mock_agg_state = Mock()
-            mock_agg_state.nodes = {}
-            mock_processor.get_aggregation_checkpoint_state.return_value = mock_agg_state
-            mock_processor.get_coalesce_checkpoint_state.return_value = coalesce_state
+            mock_processor.get_barrier_scalars.return_value = scalars
 
             loop_ctx = Mock()
             loop_ctx.processor = mock_processor
             loop_ctx.pending_tokens = {"default": []}
-            loop_ctx.last_token_id = "token-99"
 
-            source_id = NodeID("source_0")
             orchestrator._checkpoints.checkpoint_interrupted_progress(
-                run_id="run-completed-keys",
+                run_id="run-lost-branches",
                 loop_ctx=loop_ctx,
-                sink_id_map={},
-                source_id=source_id,
             )
 
             orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
             call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args.kwargs
-            assert call_kwargs["coalesce_state"] is coalesce_state
-            assert call_kwargs["coalesce_state"].completed_keys == (
-                ("merge_1", "row-1"),
-                ("merge_2", "row-2"),
-            )
-        finally:
-            db.close()
-
-    def test_creates_checkpoint_when_last_token_available(self) -> None:
-        """When last_token_id is set, the fallback path creates a checkpoint."""
-        from elspeth.contracts.types import NodeID
-        from elspeth.engine.orchestrator import Orchestrator
-        from tests.fixtures.landscape import make_landscape_db
-
-        db = make_landscape_db()
-        try:
-            orchestrator = Orchestrator(db=db)
-            orchestrator._checkpoints._checkpoint_config = Mock()
-            orchestrator._checkpoints._checkpoint_config.enabled = True
-            orchestrator._checkpoints._checkpoint_manager = Mock()
-            orchestrator._checkpoints._active_graph = Mock()
-            orchestrator._checkpoints._sequence_number = 0
-
-            mock_processor = Mock()
-            mock_agg_state = Mock()
-            mock_agg_state.nodes = {}
-            mock_processor.get_aggregation_checkpoint_state.return_value = mock_agg_state
-            mock_processor.get_coalesce_checkpoint_state.return_value = None
-
-            loop_ctx = Mock()
-            loop_ctx.processor = mock_processor
-            loop_ctx.pending_tokens = {"default": []}
-            loop_ctx.last_token_id = "token-42"  # Has a last token
-
-            source_id = NodeID("source_0")
-            orchestrator._checkpoints.checkpoint_interrupted_progress(
-                run_id="run-test-456",
-                loop_ctx=loop_ctx,
-                sink_id_map={},
-                source_id=source_id,
-            )
-
-            # Checkpoint SHOULD have been created with the fallback token
-            orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
-            call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args
-            assert call_kwargs.kwargs["token_id"] == "token-42"
-            assert call_kwargs.kwargs["node_id"] == str(source_id)
+            assert call_kwargs["barrier_scalars"] is scalars
+            assert set(call_kwargs["barrier_scalars"].coalesce) == {("merge_1", "row-1"), ("merge_2", "row-2")}
         finally:
             db.close()

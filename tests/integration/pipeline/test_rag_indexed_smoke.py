@@ -44,19 +44,20 @@ def example_dir(tmp_path: Path) -> Path:
     index_yaml = example_dst / "index_pipeline.yaml"
     index_yaml.write_text(
         f"""\
-source:
-  plugin: csv
-  on_success: output
-  options:
-    path: {example_dst / "documents.csv"}
-    schema:
-      mode: fixed
-      fields:
-      - 'doc_id: str'
-      - 'text_content: str'
-      - 'topic: str'
-      - 'subtopic: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: {example_dst / "documents.csv"}
+      schema:
+        mode: fixed
+        fields:
+        - 'doc_id: str'
+        - 'text_content: str'
+        - 'topic: str'
+        - 'subtopic: str'
+      on_validation_failure: discard
 
 sinks:
   output:
@@ -105,17 +106,18 @@ commencement_gates:
 - name: corpus_ready
   condition: "collections['smoke-test-facts']['count'] > 0"
 
-source:
-  plugin: csv
-  on_success: rag_in
-  options:
-    path: {example_dst / "questions.csv"}
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'question: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: rag_in
+    options:
+      path: {example_dst / "questions.csv"}
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'question: str'
+      on_validation_failure: discard
 
 transforms:
 - name: retrieve

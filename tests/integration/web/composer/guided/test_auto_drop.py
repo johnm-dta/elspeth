@@ -16,10 +16,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
+
+import pytest
+from litellm.exceptions import (
+    BlockedPiiEntityError,
+    BudgetExceededError,
+    GuardrailInterventionNormalStringError,
+    GuardrailRaisedException,
+    OpenAIError,
+)
 
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -503,6 +513,76 @@ class TestI2ChainSolverTransientFailure:
         assert isinstance(errors, list) and len(errors) == 1
         # The error message names the exception class only — no str(exc).
         assert errors[0]["message"] == "Chain solver failed: APIError", errors
+
+    @pytest.mark.parametrize(
+        ("exc_factory", "exc_name"),
+        [
+            (
+                lambda: BudgetExceededError(
+                    current_cost=10.0,
+                    max_budget=5.0,
+                    message="budget exhausted: SECRET_API_KEY=sk-leaks-here",
+                ),
+                "BudgetExceededError",
+            ),
+            (
+                lambda: BlockedPiiEntityError(entity_type="email", guardrail_name="pii"),
+                "BlockedPiiEntityError",
+            ),
+            (
+                lambda: GuardrailRaisedException(
+                    guardrail_name="pii",
+                    message="guardrail blocked SECRET_API_KEY=sk-leaks-here",
+                ),
+                "GuardrailRaisedException",
+            ),
+            (
+                lambda: GuardrailInterventionNormalStringError(message="intervention SECRET_API_KEY=sk-leaks-here"),
+                "GuardrailInterventionNormalStringError",
+            ),
+            (
+                lambda: OpenAIError(original_exception=RuntimeError("provider SECRET_API_KEY=sk-leaks-here")),
+                "OpenAIError",
+            ),
+        ],
+    )
+    def test_step_2_sink_initial_solve_non_api_litellm_errors_auto_drop(
+        self,
+        composer_test_client: TestClient,
+        exc_factory: Callable[[], Exception],
+        exc_name: str,
+    ) -> None:
+        """Non-APIError LiteLLM operational failures follow the auto-drop path."""
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=exc_factory(),
+        ):
+            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        terminal = body.get("terminal")
+        assert terminal is not None, f"expected terminal in body, got: {body}"
+        assert terminal["kind"] == "exited_to_freeform"
+        assert terminal["reason"] == "solver_exhausted"
+
+        body_text = json.dumps(body)
+        assert "SECRET_API_KEY" not in body_text, "exc str leaked into response body"
+        assert "sk-leaks-here" not in body_text, "exc str leaked into response body"
+
+        drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert len(drop_invocations) == 1, f"expected exactly one drop audit event; got {drop_invocations}"
+        drop_args = drop_invocations[0]
+        assert drop_args["drop_reason"] == "solver_exhausted"
+        validation_result = drop_args["validation_result"]
+        assert isinstance(validation_result, dict)
+        errors = validation_result["errors"]
+        assert isinstance(errors, list) and len(errors) == 1
+        assert errors[0]["message"] == f"Chain solver failed: {exc_name}", errors
 
     def test_step_2_5_build_manually_timeout_auto_drops(self, composer_test_client: TestClient) -> None:
         """Site 2: a TimeoutError at build_manually solve auto-drops.

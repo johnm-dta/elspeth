@@ -25,9 +25,9 @@ def _setup_with_token(
     run_id: str = "run-1",
 ) -> tuple[LandscapeDB, RecorderFactory]:
     db, factory = _setup(run_id=run_id)
-    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     factory.data_flow.create_token("row-1", token_id="tok-1")
-    factory.data_flow.create_row(run_id, "source-0", 1, {"name": "test2"}, row_id="row-2")
+    factory.data_flow.create_row(run_id, "source-0", 1, {"name": "test2"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
     factory.data_flow.create_token("row-2", token_id="tok-2")
     return db, factory
 
@@ -84,7 +84,7 @@ def _setup_two_runs_with_batch_integrity_records() -> tuple[LandscapeDB, Recorde
             node_id="sink-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row(run_id, "source-0", 0, {"run": run_id}, row_id=f"row-{suffix}")
+        factory.data_flow.create_row(run_id, "source-0", 0, {"run": run_id}, row_id=f"row-{suffix}", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token(f"row-{suffix}", token_id=f"tok-{suffix}")
         factory.execution.begin_node_state(
             f"tok-{suffix}",
@@ -800,7 +800,7 @@ class TestGetAllBatchMembersForRun:
             node_id="agg-1",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         factory.execution.create_batch("run-1", "agg-1", batch_id="b-1")
         factory.execution.add_batch_member("b-1", "tok-1", ordinal=0)
@@ -825,7 +825,7 @@ class TestGetAllBatchMembersForRun:
             node_id="agg-1",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-2", "source-0", 0, {"x": 2}, row_id="row-2")
+        factory.data_flow.create_row("run-2", "source-0", 0, {"x": 2}, row_id="row-2", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.execution.create_batch("run-2", "agg-1", batch_id="b-2")
         factory.execution.add_batch_member("b-2", "tok-2", ordinal=0)
@@ -1280,7 +1280,7 @@ class TestGetArtifacts:
             node_id="sink-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         factory.execution.begin_node_state(
             "tok-1",
@@ -1321,7 +1321,7 @@ class TestGetArtifacts:
             node_id="sink-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-2", "source-0", 0, {"x": 2}, row_id="row-2")
+        factory.data_flow.create_row("run-2", "source-0", 0, {"x": 2}, row_id="row-2", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.execution.begin_node_state(
             "tok-2",

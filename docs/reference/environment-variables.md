@@ -303,7 +303,7 @@ docker run --rm \
   -e OPENROUTER_API_KEY="${OPENROUTER_API_KEY}" \
   -e DATABASE_URL="sqlite:////app/state/landscape.db" \
   -v $(pwd)/config:/app/config:ro \
-  ghcr.io/johnm-dta/elspeth:v0.5.1 \
+  ghcr.io/johnm-dta/elspeth:v0.5.2 \
   run --settings /app/config/pipeline.yaml --execute
 ```
 

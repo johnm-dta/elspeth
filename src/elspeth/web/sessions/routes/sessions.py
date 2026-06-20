@@ -279,26 +279,29 @@ def register_session_routes(router: APIRouter) -> None:
         """
         session = await _verify_session_ownership(session_id, user, request)
         service = request.app.state.session_service
+        execution_service = request.app.state.execution_service
+        session_key = str(session.id)
+        execution_lock = execution_service.get_session_lock(session_key)
 
-        active_run = await service.get_active_run(session.id)
-        if active_run is not None:
-            raise HTTPException(
-                status_code=409,
-                detail="Cannot delete session while a pipeline run is active. Cancel the run first.",
-            )
+        async with execution_lock:
+            active_run = await service.get_active_run(session.id)
+            if active_run is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot delete session while a pipeline run is active. Cancel the run first.",
+                )
 
-        try:
-            await service.archive_session(session.id)
-        finally:
-            # Clean up ephemeral per-session state regardless of archive outcome.
-            # If archive fails, the session still exists and a retry will re-enter
-            # this path. The lock cleanup is idempotent.
-            execution_service = request.app.state.execution_service
-            execution_service.cleanup_session_lock(str(session.id))
-            compose_lock_registry = _get_session_compose_lock_registry(request)
-            await compose_lock_registry.cleanup_session_lock(str(session.id))
-            progress_registry = _get_composer_progress_registry(request)
-            await progress_registry.clear(str(session.id))
+            try:
+                await service.archive_session(session.id)
+            finally:
+                # Clean up ephemeral per-session state regardless of archive outcome.
+                # If archive fails, the session still exists and a retry will re-enter
+                # this path. The lock cleanup is idempotent.
+                execution_service.cleanup_session_lock(session_key)
+                compose_lock_registry = _get_session_compose_lock_registry(request)
+                await compose_lock_registry.cleanup_session_lock(session_key)
+                progress_registry = _get_composer_progress_registry(request)
+                await progress_registry.clear(session_key)
 
     @router.post(
         "/{session_id}/fork",
@@ -350,7 +353,7 @@ def register_session_routes(router: APIRouter) -> None:
             # self-contained.  Without this, blob_ref and path in the source
             # options still point at the original session's assets.
             if copied_state is not None:
-                source_dict = deep_thaw(copied_state.source) if copied_state.source is not None else None
+                sources_dict = deep_thaw(copied_state.sources) if copied_state.sources is not None else None
                 nodes_data = deep_thaw(copied_state.nodes)
                 edges_data = deep_thaw(copied_state.edges)
                 outputs_data = deep_thaw(copied_state.outputs)
@@ -358,98 +361,95 @@ def register_session_routes(router: APIRouter) -> None:
                 composer_meta_data = deep_thaw(copied_state.composer_meta) if copied_state.composer_meta is not None else None
                 rewritten = False
 
-                if source_dict is not None and not isinstance(source_dict, dict):
+                if sources_dict is not None and type(sources_dict) is not dict:
                     raise AuditIntegrityError(
                         f"Tier 1 audit anomaly: composition_state {copied_state.id} "
-                        f"has source type {type(source_dict).__name__}, expected dict "
+                        f"has sources type {type(sources_dict).__name__}, expected dict "
                         f"before fork blob rewrite for session {new_session.id}."
                     )
 
-                if source_dict is not None and "options" in source_dict and source_dict["options"] is not None:
-                    options = source_dict["options"]
-                    if not isinstance(options, dict):
-                        raise AuditIntegrityError(
-                            f"Tier 1 audit anomaly: composition_state {copied_state.id} "
-                            f"has source.options type {type(options).__name__}, expected "
-                            f"dict before fork blob rewrite for session {new_session.id}."
-                        )
-
-                    rewrite_target = None
-                    # Remap blob_ref to the new blob's ID.
-                    # composition_states.source is Tier 1 ("our data") — the
-                    # composer writes blob_ref as the blob's UUID string
-                    # (composer/tools.py _execute_set_source_from_blob).  A
-                    # non-UUID value here means a write-path bug, DB
-                    # corruption, or tampering — crash with a diagnostic
-                    # rather than silently skipping the remap.  Silent skip
-                    # would leave the forked state's blob_ref pointing at
-                    # the source session's blob, which is the cross-session
-                    # reference class closed at the FK layer by the
-                    # current-schema composite FK and is audit-contradictory
-                    # on its face.  The enclosing ``except Exception``
-                    # block archives the partially-created fork (see the
-                    # cleanup-rollback site below), so this crash does
-                    # not leak artifacts.
-                    if "blob_ref" in options:
-                        old_ref = options["blob_ref"]
-                    else:
-                        old_ref = None
-                    if old_ref is not None:
-                        if not isinstance(old_ref, str):
+                if sources_dict is not None:
+                    for source_name, source_dict in sources_dict.items():
+                        if type(source_dict) is not dict:
                             raise AuditIntegrityError(
-                                f"Tier 1 audit anomaly: composition_state "
-                                f"{copied_state.id} has blob_ref type "
-                                f"{type(old_ref).__name__} in source.options "
-                                f"(expected a UUID string written by "
-                                f"composer/tools.py). Fork aborted to prevent "
-                                f"cross-session blob reference in forked "
-                                f"session {new_session.id}."
+                                f"Tier 1 audit anomaly: composition_state {copied_state.id} "
+                                f"has sources.{source_name} type {type(source_dict).__name__}, "
+                                f"expected dict before fork blob rewrite for session {new_session.id}."
                             )
-                        try:
-                            old_uuid = UUID(old_ref)
-                        except ValueError as exc:
+                        if "options" not in source_dict or source_dict["options"] is None:
+                            continue
+
+                        options = source_dict["options"]
+                        if type(options) is not dict:
                             raise AuditIntegrityError(
-                                f"Tier 1 audit anomaly: composition_state "
-                                f"{copied_state.id} has non-UUID blob_ref "
-                                f"{old_ref!r} in source.options (expected a "
-                                f"UUID string written by composer/tools.py). "
-                                f"Fork aborted to prevent cross-session blob "
-                                f"reference in forked session {new_session.id}."
-                            ) from exc
-                        if old_uuid not in blob_map:
-                            raise AuditIntegrityError(
-                                f"Tier 1 audit anomaly: composition_state "
-                                f"{copied_state.id} has source blob_ref "
-                                f"{old_ref!r}, but the source blob was not "
-                                f"copied into forked session {new_session.id}."
+                                f"Tier 1 audit anomaly: composition_state {copied_state.id} "
+                                f"has sources.{source_name}.options type {type(options).__name__}, expected "
+                                f"dict before fork blob rewrite for session {new_session.id}."
                             )
-                        rewrite_target = blob_map[old_uuid]
 
-                    if rewrite_target is None:
-                        for path_key in ("path", "file"):
-                            if path_key not in options:
-                                continue
-                            path_value = options[path_key]
-                            if isinstance(path_value, str) and path_value in source_blob_path_map:
-                                rewrite_target = source_blob_path_map[path_value]
-                                break
+                        rewrite_target = None
+                        # Remap blob_ref to the new blob's ID.
+                        # composition_states.sources is Tier 1 ("our data") — the
+                        # composer writes blob_ref as the blob's UUID string. A
+                        # non-UUID value here means a write-path bug, DB
+                        # corruption, or tampering — crash with a diagnostic
+                        # rather than silently skipping the remap.
+                        old_ref = options["blob_ref"] if "blob_ref" in options else None
+                        if old_ref is not None:
+                            if type(old_ref) is not str:
+                                raise AuditIntegrityError(
+                                    f"Tier 1 audit anomaly: composition_state "
+                                    f"{copied_state.id} has blob_ref type "
+                                    f"{type(old_ref).__name__} in sources.{source_name}.options "
+                                    f"(expected a UUID string). Fork aborted to prevent "
+                                    f"cross-session blob reference in forked "
+                                    f"session {new_session.id}."
+                                )
+                            try:
+                                old_uuid = UUID(old_ref)
+                            except ValueError as exc:
+                                raise AuditIntegrityError(
+                                    f"Tier 1 audit anomaly: composition_state "
+                                    f"{copied_state.id} has non-UUID blob_ref "
+                                    f"{old_ref!r} in sources.{source_name}.options (expected a "
+                                    f"UUID string). Fork aborted to prevent cross-session blob "
+                                    f"reference in forked session {new_session.id}."
+                                ) from exc
+                            if old_uuid not in blob_map:
+                                raise AuditIntegrityError(
+                                    f"Tier 1 audit anomaly: composition_state "
+                                    f"{copied_state.id} has source blob_ref "
+                                    f"{old_ref!r}, but the source blob was not "
+                                    f"copied into forked session {new_session.id}."
+                                )
+                            rewrite_target = blob_map[old_uuid]
 
-                    if rewrite_target is not None:
-                        options["blob_ref"] = str(rewrite_target.id)
-                        if "path" in options or "file" not in options:
-                            options["path"] = rewrite_target.storage_path
-                        if "file" in options:
-                            options["file"] = rewrite_target.storage_path
-                        rewritten = True
+                        if rewrite_target is None:
+                            for path_key in ("path", "file"):
+                                if path_key not in options:
+                                    continue
+                                path_value = options[path_key]
+                                if type(path_value) is str and path_value in source_blob_path_map:
+                                    rewrite_target = source_blob_path_map[path_value]
+                                    break
 
-                if source_dict is not None:
+                        if rewrite_target is not None:
+                            options["blob_ref"] = str(rewrite_target.id)
+                            if "path" in options or "file" not in options:
+                                options["path"] = rewrite_target.storage_path
+                            if "file" in options:
+                                options["file"] = rewrite_target.storage_path
+                            source_dict["options"] = options
+                            rewritten = True
+
+                if sources_dict is not None:
                     rewritten = (
                         _rewrite_inline_content_blob_refs(
-                            source_dict,
+                            sources_dict,
                             blob_map,
                             composition_state_id=copied_state.id,
                             new_session_id=new_session.id,
-                            field_path="source",
+                            field_path="sources",
                         )
                         or rewritten
                     )
@@ -475,11 +475,11 @@ def register_session_routes(router: APIRouter) -> None:
                 )
 
                 if rewritten:
-                    # Save updated state with remapped source. Preserve the
+                    # Save updated state with remapped sources. Preserve the
                     # source state's composer_meta — fork inherits the
                     # operational provenance of the parent compose.
                     state_data = CompositionStateData(
-                        source=source_dict,
+                        sources=sources_dict,
                         nodes=nodes_data,
                         edges=edges_data,
                         outputs=outputs_data,
@@ -491,15 +491,10 @@ def register_session_routes(router: APIRouter) -> None:
                     copied_state = await service.save_composition_state(
                         new_session.id,
                         state_data,
-                        # Preserves pre-fix labelling. The fork-time source-
-                        # storage rewrite previously wrote ``session_seed``
-                        # under the hardcoded label and continues to do so.
-                        # Whether this row should carry ``session_fork``
-                        # (the rewrite is part of the fork operation) or a
-                        # new ``fork_storage_rewrite`` discriminator is a
-                        # separate audit-attribution question outside the
-                        # scope of elspeth-obs-f217c634aa.
-                        provenance="session_seed",
+                        # The blob-reference rewrite is part of the fork
+                        # operation: it rewrites copied state so the new
+                        # session is self-contained after blob copy.
+                        provenance="session_fork",
                     )
 
                     # The edited user message (last in list) still references

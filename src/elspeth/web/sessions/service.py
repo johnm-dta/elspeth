@@ -19,7 +19,7 @@ from typing import Any, Literal, TypedDict, cast
 from uuid import UUID
 
 import structlog
-from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, func, insert, select, update
+from sqlalchemy import ColumnElement, Connection, Engine, delete, desc, event, func, insert, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError, SQLAlchemyError
 
@@ -68,6 +68,7 @@ from elspeth.web.sessions.models import (
     composition_states_table,
     interpretation_events_table,
     proposal_events_table,
+    run_events_table,
     runs_table,
     sessions_table,
     skill_markdown_history_table,
@@ -77,6 +78,7 @@ from elspeth.web.sessions.protocol import (
     AUDIT_GRADE_VIEW_WRITER_PRINCIPAL,
     LEGAL_RUN_TRANSITIONS,
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
+    SESSION_RUN_EVENT_TYPE_VALUES,
     SESSION_TERMINAL_RUN_STATUS_VALUES,
     AuditAccessLogRecord,
     AuditAccessLogWriteError,
@@ -95,9 +97,11 @@ from elspeth.web.sessions.protocol import (
     ProposalEventRecord,
     ProposalLifecycleStatus,
     RunAlreadyActiveError,
+    RunEventRecord,
     RunRecord,
     SessionNotFoundError,
     SessionRecord,
+    SessionRunEventType,
     SessionRunStatus,
     StaleComposeStateError,
     ToolCallIDMismatchError,
@@ -1043,7 +1047,7 @@ def _resolve_vague_term(
     affected_node_id: str,
     user_term: str,
     accepted_value: str,
-) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], str]:
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, list[Mapping[str, Any]], str]:
     patched_nodes = _patch_llm_transform_prompt(
         state_record,
         affected_node_id=affected_node_id,
@@ -1064,7 +1068,9 @@ def _resolve_vague_term(
             final_nodes.append(node_with_hash)
         else:
             final_nodes.append(n)
-    return state_record.source, final_nodes, resolved_prompt_template_hash
+    # Vague-term review patches only nodes; the sources map is carried forward
+    # unchanged. The legacy singular ``source`` column is dead.
+    return state_record.sources, final_nodes, resolved_prompt_template_hash
 
 
 def _surfacing_prompt_structure_hash(
@@ -1105,7 +1111,7 @@ def _resolve_prompt_template_review(
     user_term: str,
     accepted_value: str,
     surfacing_structure_hash: str | None,
-) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], str]:
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, list[Mapping[str, Any]], str]:
     node = _find_llm_transform_node(
         state_record,
         affected_node_id=affected_node_id,
@@ -1176,7 +1182,9 @@ def _resolve_prompt_template_review(
             final_nodes.append(patched_node)
         else:
             final_nodes.append(current_node)
-    return state_record.source, final_nodes, resolved_prompt_template_hash
+    # Prompt-template review patches only node review metadata; the sources map
+    # is carried forward unchanged. The legacy singular ``source`` column is dead.
+    return state_record.sources, final_nodes, resolved_prompt_template_hash
 
 
 def _resolve_invented_source(
@@ -1187,14 +1195,21 @@ def _resolve_invented_source(
     user_term: str,
     llm_draft: str,
     accepted_value: str,
-) -> tuple[Mapping[str, Any], list[Mapping[str, Any]], None]:
+) -> tuple[Mapping[str, Mapping[str, Any]], list[Mapping[str, Any]], None]:
     if affected_node_id != SOURCE_COMPONENT_ID:
         raise InterpretationNodeMissingError(
             f"resolve_interpretation_event: invented_source must target affected_node_id {SOURCE_COMPONENT_ID!r}"
         )
+    # Multi-source: the default source under review lives in the ``sources`` map
+    # keyed by ``SOURCE_COMPONENT_ID`` (interpretation review is scoped to the
+    # default component). The legacy singular ``source`` column is dead.
+    sources_map = _require_mapping(
+        state_record.sources,
+        message="resolve_interpretation_event: invented_source requires a persisted sources mapping",
+    )
     source = _require_mapping(
-        state_record.source,
-        message="resolve_interpretation_event: invented_source requires a persisted source mapping",
+        sources_map[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in sources_map else None,
+        message=f"resolve_interpretation_event: invented_source requires a persisted {SOURCE_COMPONENT_ID!r} source mapping",
     )
     options = _require_mapping(
         source["options"] if "options" in source else None,
@@ -1235,7 +1250,12 @@ def _resolve_invented_source(
     patched_options[INTERPRETATION_REQUIREMENTS_KEY] = requirements
     patched_source = dict(source)
     patched_source["options"] = patched_options
-    return patched_source, list(state_record.nodes or ()), None
+    # Splice the patched default source back into the sources map so the patch
+    # is persisted (the caller writes the returned map to ``sources``). Other
+    # named sources, if any, are carried forward untouched.
+    patched_sources = dict(sources_map)
+    patched_sources[SOURCE_COMPONENT_ID] = patched_source
+    return patched_sources, list(state_record.nodes or ()), None
 
 
 def _resolve_pipeline_decision_review(
@@ -1246,7 +1266,7 @@ def _resolve_pipeline_decision_review(
     user_term: str,
     llm_draft: str,
     accepted_value: str,
-) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], None]:
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, list[Mapping[str, Any]], None]:
     node = _find_interpretation_review_node(
         state_record,
         affected_node_id=affected_node_id,
@@ -1297,7 +1317,9 @@ def _resolve_pipeline_decision_review(
             final_nodes.append(patched_node)
         else:
             final_nodes.append(current_node)
-    return state_record.source, final_nodes, None
+    # Pipeline-decision review patches only node review metadata; the sources map
+    # is carried forward unchanged. The legacy singular ``source`` column is dead.
+    return state_record.sources, final_nodes, None
 
 
 def _resolve_model_choice_review(
@@ -1308,7 +1330,7 @@ def _resolve_model_choice_review(
     user_term: str,
     llm_draft: str,
     accepted_value: str,
-) -> tuple[Mapping[str, Any] | None, list[Mapping[str, Any]], None]:
+) -> tuple[Mapping[str, Mapping[str, Any]] | None, list[Mapping[str, Any]], None]:
     """Resolve an ``llm_model_choice`` review on an LLM node.
 
     Parallel to :func:`_resolve_pipeline_decision_review`. The reviewed
@@ -1380,7 +1402,9 @@ def _resolve_model_choice_review(
             final_nodes.append(patched_node)
         else:
             final_nodes.append(current_node)
-    return state_record.source, final_nodes, None
+    # Model-choice review patches only node options; the sources map is
+    # carried forward unchanged. The legacy singular ``source`` column is dead.
+    return state_record.sources, final_nodes, None
 
 
 class SessionServiceImpl:
@@ -1505,10 +1529,10 @@ class SessionServiceImpl:
         """Serialize same-session sequence/version allocators.
 
         PostgreSQL uses the transaction-scoped advisory lock. SQLite uses a
-        process-wide per-session RLock around the whole allocator + insert
-        sequence. Every caller that performs ``SELECT MAX(...) + 1`` for
-        ``chat_messages.sequence_no`` or ``composition_states.version`` MUST
-        wrap that read and every dependent INSERT in this context.
+        process-wide per-session RLock held until the surrounding transaction
+        commits or rolls back. Every caller that performs ``SELECT MAX(...) +
+        1`` for ``chat_messages.sequence_no`` or ``composition_states.version``
+        MUST wrap that read and every dependent INSERT in this context.
         """
         key = (id(conn), session_id)
         held = _SESSION_WRITE_LOCK_HELD.get()
@@ -1516,8 +1540,39 @@ class SessionServiceImpl:
         dialect = self._engine.dialect.name
         try:
             if dialect == "sqlite":
-                with self._sqlite_lock_for_session(session_id):
+                lock = self._sqlite_lock_for_session(session_id)
+                lock.acquire()
+                release_state = {"released": False}
+
+                def _release_sqlite_session_lock(_conn: Connection) -> None:
+                    if release_state["released"]:
+                        return
+                    release_state["released"] = True
+                    lock.release()
+
+                def _remove_sqlite_session_lock_listener(
+                    identifier: Literal["commit", "rollback"],
+                    fn: Any,
+                ) -> None:
+                    if event.contains(conn, identifier, fn):
+                        event.remove(conn, identifier, fn)
+
+                def _release_sqlite_session_lock_on_commit(_conn: Connection) -> None:
+                    _release_sqlite_session_lock(_conn)
+                    _remove_sqlite_session_lock_listener("rollback", _release_sqlite_session_lock_on_rollback)
+
+                def _release_sqlite_session_lock_on_rollback(_conn: Connection) -> None:
+                    _release_sqlite_session_lock(_conn)
+                    _remove_sqlite_session_lock_listener("commit", _release_sqlite_session_lock_on_commit)
+
+                if conn.in_transaction():
+                    event.listen(conn, "commit", _release_sqlite_session_lock_on_commit, once=True)
+                    event.listen(conn, "rollback", _release_sqlite_session_lock_on_rollback, once=True)
+                try:
                     yield
+                finally:
+                    if not conn.in_transaction():
+                        _release_sqlite_session_lock(conn)
                 return
             if dialect == "postgresql":
                 self._acquire_session_advisory_lock(conn, session_id)
@@ -1778,7 +1833,8 @@ class SessionServiceImpl:
                 id=allocated_state_id,
                 session_id=session_id,
                 version=int(next_version),
-                source=_enveloped_state_column(state.source),
+                source=None,
+                sources=_enveloped_state_column(state.sources),
                 nodes=_enveloped_state_column(state.nodes),
                 edges=_enveloped_state_column(state.edges),
                 outputs=_enveloped_state_column(state.outputs),
@@ -2725,7 +2781,16 @@ class SessionServiceImpl:
                         f"create_pending_interpretation_event: composition state {state_id_str!r} not found in session {sid!r}"
                     )
                 nodes = self._unwrap_envelope(state_row.nodes)
-                source = self._unwrap_envelope(state_row.source)
+                # Multi-source: the legacy singular ``source`` column is dead
+                # (``_insert_composition_state`` always writes it NULL). The
+                # default source under review lives in the ``sources`` map keyed
+                # by ``SOURCE_COMPONENT_ID``. Interpretation review is scoped to
+                # that default component, so the invented-source writer-boundary
+                # validation below reads it from the map. A missing/malformed
+                # default source leaves ``source`` None and the existing
+                # ``isinstance`` guard raises the same clear error as before.
+                sources = self._unwrap_envelope(state_row.sources)
+                source = sources[SOURCE_COMPONENT_ID] if isinstance(sources, Mapping) and SOURCE_COMPONENT_ID in sources else None
                 if kind is InterpretationKind.INVENTED_SOURCE:
                     if affected_node_id != SOURCE_COMPONENT_ID:
                         raise ValueError(
@@ -2912,11 +2977,11 @@ class SessionServiceImpl:
                     if live_state_row is None:
                         raise AuditIntegrityError(f"create_pending_interpretation_event: session {sid!r} has no composition state to patch")
                     live_state_record = self._row_to_state_record(live_state_row)
-                    final_source: Mapping[str, Any] | None
+                    final_sources: Mapping[str, Mapping[str, Any]] | None
                     final_nodes: list[Mapping[str, Any]]
                     resolved_prompt_template_hash: str | None
                     if kind is InterpretationKind.VAGUE_TERM:
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
                             live_state_record,
                             affected_node_id=affected_node_id,
                             user_term=user_term,
@@ -2926,7 +2991,7 @@ class SessionServiceImpl:
                         # Opt-out auto-resolve fires at create time, so the
                         # surfacing state IS the live state — its skeleton hash
                         # trivially matches the gate.
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
                             live_state_record,
                             event_id=event_id,
                             affected_node_id=affected_node_id,
@@ -2938,7 +3003,7 @@ class SessionServiceImpl:
                             ),
                         )
                     elif kind is InterpretationKind.INVENTED_SOURCE:
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
                             live_state_record,
                             event_id=event_id,
                             affected_node_id=affected_node_id,
@@ -2947,7 +3012,7 @@ class SessionServiceImpl:
                             accepted_value=llm_draft,
                         )
                     elif kind is InterpretationKind.PIPELINE_DECISION:
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
                             live_state_record,
                             event_id=event_id,
                             affected_node_id=affected_node_id,
@@ -2956,7 +3021,7 @@ class SessionServiceImpl:
                             accepted_value=llm_draft,
                         )
                     elif kind is InterpretationKind.LLM_MODEL_CHOICE:
-                        final_source, final_nodes, resolved_prompt_template_hash = _resolve_model_choice_review(
+                        final_sources, final_nodes, resolved_prompt_template_hash = _resolve_model_choice_review(
                             live_state_record,
                             event_id=event_id,
                             affected_node_id=affected_node_id,
@@ -2971,7 +3036,8 @@ class SessionServiceImpl:
 
                     patched_state_record = replace(
                         live_state_record,
-                        source=final_source,
+                        source=None,
+                        sources=final_sources,
                         nodes=final_nodes,
                         is_valid=False,
                         validation_errors=None,
@@ -3012,7 +3078,7 @@ class SessionServiceImpl:
                         session_id=sid,
                         payload=StatePayload(
                             data=CompositionStateData(
-                                source=final_source,
+                                sources=final_sources,
                                 nodes=final_nodes,
                                 edges=live_state_record.edges,
                                 outputs=live_state_record.outputs,
@@ -3221,11 +3287,11 @@ class SessionServiceImpl:
                 if live_state_row is None:
                     raise AuditIntegrityError(f"resolve_interpretation_event: session {sid!r} has no composition state to patch")
                 state_record = self._row_to_state_record(live_state_row)
-                final_source: Mapping[str, Any] | None
+                final_sources: Mapping[str, Mapping[str, Any]] | None
                 final_nodes: list[Mapping[str, Any]]
                 resolved_prompt_template_hash: str | None
                 if kind is InterpretationKind.VAGUE_TERM:
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_vague_term(
                         state_record,
                         affected_node_id=event_row.affected_node_id,
                         user_term=event_row.user_term,
@@ -3248,7 +3314,7 @@ class SessionServiceImpl:
                                 self._row_to_state_record(surfacing_state_row),
                                 affected_node_id=event_row.affected_node_id,
                             )
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_prompt_template_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,
@@ -3257,7 +3323,7 @@ class SessionServiceImpl:
                         surfacing_structure_hash=surfacing_structure_hash,
                     )
                 elif kind is InterpretationKind.INVENTED_SOURCE:
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_invented_source(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,
@@ -3266,7 +3332,7 @@ class SessionServiceImpl:
                         accepted_value=accepted_value,
                     )
                 elif kind is InterpretationKind.PIPELINE_DECISION:
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_pipeline_decision_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,
@@ -3275,7 +3341,7 @@ class SessionServiceImpl:
                         accepted_value=accepted_value,
                     )
                 elif kind is InterpretationKind.LLM_MODEL_CHOICE:
-                    final_source, final_nodes, resolved_prompt_template_hash = _resolve_model_choice_review(
+                    final_sources, final_nodes, resolved_prompt_template_hash = _resolve_model_choice_review(
                         state_record,
                         event_id=eid,
                         affected_node_id=event_row.affected_node_id,
@@ -3296,7 +3362,8 @@ class SessionServiceImpl:
 
                 patched_state_record = replace(
                     state_record,
-                    source=final_source,
+                    source=None,
+                    sources=final_sources,
                     nodes=final_nodes,
                     is_valid=False,
                     validation_errors=None,
@@ -3374,7 +3441,7 @@ class SessionServiceImpl:
                     session_id=sid,
                     payload=StatePayload(
                         data=CompositionStateData(
-                            source=final_source,
+                            sources=final_sources,
                             nodes=final_nodes,
                             edges=state_record.edges,
                             outputs=state_record.outputs,
@@ -4004,7 +4071,8 @@ class SessionServiceImpl:
                             id=str(state_id),
                             session_id=sid,
                             version=version,
-                            source=_enveloped_state_column(state.source),
+                            source=None,
+                            sources=_enveloped_state_column(state.sources),
                             nodes=_enveloped_state_column(state.nodes),
                             edges=_enveloped_state_column(state.edges),
                             outputs=_enveloped_state_column(state.outputs),
@@ -4025,7 +4093,8 @@ class SessionServiceImpl:
             id=state_id,
             session_id=session_id,
             version=version,
-            source=state.source,
+            source=None,
+            sources=state.sources,
             nodes=state.nodes,
             edges=state.edges,
             outputs=state.outputs,
@@ -4104,11 +4173,13 @@ class SessionServiceImpl:
         Seam contract A: metadata_ maps DB column metadata_ back to the
         dataclass field. JSON columns are unwrapped from their _version envelope.
         """
+        row_mapping = row._mapping
         return CompositionStateRecord(
             id=UUID(row.id),
             session_id=UUID(row.session_id),
             version=row.version,
             source=self._unwrap_envelope(row.source),
+            sources=self._unwrap_envelope(row_mapping["sources"] if "sources" in row_mapping else None),
             nodes=self._unwrap_envelope(row.nodes),
             edges=self._unwrap_envelope(row.edges),
             outputs=self._unwrap_envelope(row.outputs),
@@ -4222,6 +4293,59 @@ class SessionServiceImpl:
 
         rows = await self._run_sync(_sync)
         return [self._row_to_run_record(row) for row in rows]
+
+    async def append_run_event(
+        self,
+        *,
+        run_id: UUID,
+        timestamp: datetime,
+        event_type: SessionRunEventType,
+        data: Mapping[str, Any],
+    ) -> RunEventRecord:
+        """Append a structured run event for websocket replay and audit inspection."""
+        if event_type not in SESSION_RUN_EVENT_TYPE_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: run_events.event_type is {event_type!r}, expected one of {sorted(SESSION_RUN_EVENT_TYPE_VALUES)}"
+            )
+        event_id = uuid.uuid4()
+        rid = str(run_id)
+        payload = deep_thaw(dict(data))
+
+        def _sync() -> None:
+            with self._engine.begin() as conn:
+                conn.execute(
+                    insert(run_events_table).values(
+                        id=str(event_id),
+                        run_id=rid,
+                        timestamp=timestamp,
+                        event_type=event_type,
+                        data=payload,
+                    )
+                )
+
+        await self._run_sync(_sync)
+        return RunEventRecord(
+            id=event_id,
+            run_id=run_id,
+            timestamp=timestamp,
+            event_type=event_type,
+            data=cast(Mapping[str, Any], payload),
+        )
+
+    async def list_run_events(self, run_id: UUID) -> list[RunEventRecord]:
+        """List persisted run events in timestamp order."""
+        rid = str(run_id)
+
+        def _sync() -> Any:
+            with self._engine.connect() as conn:
+                return conn.execute(
+                    select(run_events_table)
+                    .where(run_events_table.c.run_id == rid)
+                    .order_by(run_events_table.c.timestamp, run_events_table.c.id)
+                ).fetchall()
+
+        rows = await self._run_sync(_sync)
+        return [self._row_to_run_event_record(row) for row in rows]
 
     async def update_run_status(
         self,
@@ -4490,7 +4614,8 @@ class SessionServiceImpl:
                             session_id=sid,
                             version=new_version,
                             # prior_row.* values are already enveloped — copy as-is
-                            source=prior_row.source,
+                            source=None,
+                            sources=prior_row.sources,
                             nodes=prior_row.nodes,
                             edges=prior_row.edges,
                             outputs=prior_row.outputs,
@@ -4511,7 +4636,8 @@ class SessionServiceImpl:
             id=new_state_id,
             session_id=session_id,
             version=new_version,
-            source=self._unwrap_envelope(prior_row.source),
+            source=None,
+            sources=self._unwrap_envelope(prior_row.sources),
             nodes=self._unwrap_envelope(prior_row.nodes),
             edges=self._unwrap_envelope(prior_row.edges),
             outputs=self._unwrap_envelope(prior_row.outputs),
@@ -4597,9 +4723,29 @@ class SessionServiceImpl:
             reason: Written to the error column so operators can distinguish
                 orphan-cleanup cancellations from user cancellations.
         """
+        cancelled = await self.cancel_all_orphaned_run_records(
+            max_age_seconds=max_age_seconds,
+            exclude_run_ids=exclude_run_ids,
+            reason=reason,
+        )
+        return len(cancelled)
+
+    async def cancel_all_orphaned_run_records(
+        self,
+        max_age_seconds: int | None = None,
+        exclude_run_ids: frozenset[str] = frozenset(),
+        reason: str | None = None,
+    ) -> list[RunRecord]:
+        """Force-cancel orphaned runs and return the cancelled records.
+
+        Startup reconciliation needs the cancelled run ids and their
+        ``landscape_run_id`` anchors so it can terminalize the matching
+        Landscape audit rows. ``cancel_all_orphaned_runs`` keeps the older
+        integer API by delegating here.
+        """
         now = self._now()
 
-        def _sync() -> int:
+        def _sync() -> list[RunRecord]:
             with self._engine.begin() as conn:
                 conditions: list[ColumnElement[bool]] = [runs_table.c.status.in_(["pending", "running"])]
                 if max_age_seconds is not None:
@@ -4614,11 +4760,14 @@ class SessionServiceImpl:
                 if reason is not None:
                     values["error"] = reason
 
+                cancelled: list[RunRecord] = []
                 for row in stale_rows:
                     conn.execute(update(runs_table).where(runs_table.c.id == row.id).values(**values))
-                return len(stale_rows)
+                    updated = conn.execute(select(runs_table).where(runs_table.c.id == row.id)).one()
+                    cancelled.append(self._row_to_run_record(updated))
+                return cancelled
 
-        return cast(int, await self._run_sync(_sync))
+        return cast(list[RunRecord], await self._run_sync(_sync))
 
     async def prune_state_versions(
         self,
@@ -4917,7 +5066,7 @@ class SessionServiceImpl:
                             # docstring for rationale).
                             payload=StatePayload(
                                 data=CompositionStateData(
-                                    source=source_state_record.source,
+                                    sources=source_state_record.sources,
                                     nodes=source_state_record.nodes,
                                     edges=source_state_record.edges,
                                     outputs=source_state_record.outputs,
@@ -4991,7 +5140,8 @@ class SessionServiceImpl:
                 id=copied_state_id,
                 session_id=new_session_id,
                 version=state_version,
-                source=source_state_record.source,
+                source=None,
+                sources=source_state_record.sources,
                 nodes=source_state_record.nodes,
                 edges=source_state_record.edges,
                 outputs=source_state_record.outputs,
@@ -5063,4 +5213,20 @@ class SessionServiceImpl:
             error=row.error,
             landscape_run_id=row.landscape_run_id,
             pipeline_yaml=row.pipeline_yaml,
+        )
+
+    def _row_to_run_event_record(self, row: Any) -> RunEventRecord:
+        """Convert a SQLAlchemy row to a RunEventRecord."""
+        if row.event_type not in SESSION_RUN_EVENT_TYPE_VALUES:
+            raise AuditIntegrityError(
+                f"Tier 1: run_events.event_type is {row.event_type!r}, expected one of {sorted(SESSION_RUN_EVENT_TYPE_VALUES)}"
+            )
+        if not isinstance(row.data, Mapping):
+            raise AuditIntegrityError(f"Tier 1: run_events.data for event {row.id} is not a JSON object")
+        return RunEventRecord(
+            id=UUID(row.id),
+            run_id=UUID(row.run_id),
+            timestamp=self._ensure_utc(row.timestamp),
+            event_type=cast(SessionRunEventType, row.event_type),
+            data=cast(Mapping[str, Any], row.data),
         )

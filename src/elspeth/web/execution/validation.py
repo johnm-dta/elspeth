@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import yaml
@@ -34,6 +34,7 @@ from pydantic import ValidationError as PydanticValidationError
 from elspeth.contracts.blobs import BlobRecord
 from elspeth.contracts.blobs_inline import BlobInlineValidationViolation
 from elspeth.contracts.secrets import SecretRefPlacementViolation, WebSecretResolver
+from elspeth.contracts.trust_boundary import trust_boundary
 from elspeth.core.blobs_inline import (
     BLOB_INLINE_AGGREGATE_BYTE_CAP,
     BLOB_INLINE_PER_REF_BYTE_CAP,
@@ -41,7 +42,7 @@ from elspeth.core.blobs_inline import (
     _validate_blob_content_refs_sync,
 )
 from elspeth.core.config import load_settings_from_yaml_string
-from elspeth.core.dag.models import EdgeContractError, GraphValidationError
+from elspeth.core.dag.models import EdgeContractError, GraphValidationError, GraphValidationWarning
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
@@ -77,16 +78,29 @@ from elspeth.web.execution.preflight import (
 )
 from elspeth.web.execution.protocol import ValidationSettings, YamlGenerator
 from elspeth.web.execution.schemas import (
+    CHECK_BATCH_TRANSFORM_OPTIONS,
+    CHECK_BLOB_INLINE_REFS,
+    CHECK_IDENTITY_NODE_ADVISORY,
+    CHECK_INTERPRETATION_REVIEW,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
     CHECK_OUTCOME_SECRET_REFS_RESOLVED,
     CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
     CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
     CHECK_OUTCOME_SKIPPED_AFTER_FAILURE,
+    CHECK_PATH_ALLOWLIST,
+    CHECK_ROUTE_TARGETS,
+    CHECK_SECRET_REFS,
+    CHECK_SEMANTIC_CONTRACTS,
+    CHECK_SETTINGS,
+    CHECK_VALUE_SOURCE_COMPLIANCE,
+    CHECK_WEB_SCRAPE_NETWORK_POLICY,
+    VALIDATION_BLOCKING_CHECK_NAMES,
     ValidationCheck,
     ValidationError,
     ValidationReadiness,
     ValidationReadinessBlocker,
     ValidationResult,
+    ValidationWarning,
 )
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REVIEW_PENDING_CODE,
@@ -98,17 +112,18 @@ from elspeth.web.interpretation_state import (
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
-_CHECK_PATH_ALLOWLIST = "path_allowlist"
-_CHECK_SECRET_REFS = "secret_refs"
-_CHECK_BLOB_INLINE_REFS = "blob_inline_refs"
-_CHECK_SEMANTIC_CONTRACTS = "semantic_contracts"
-_CHECK_BATCH_TRANSFORM_OPTIONS = "batch_transform_options"
-_CHECK_INTERPRETATION_REVIEW = "interpretation_review"
-_CHECK_SETTINGS = "settings_load"
+_CHECK_PATH_ALLOWLIST = CHECK_PATH_ALLOWLIST
+_CHECK_WEB_SCRAPE_NETWORK_POLICY = CHECK_WEB_SCRAPE_NETWORK_POLICY
+_CHECK_SECRET_REFS = CHECK_SECRET_REFS
+_CHECK_BLOB_INLINE_REFS = CHECK_BLOB_INLINE_REFS
+_CHECK_SEMANTIC_CONTRACTS = CHECK_SEMANTIC_CONTRACTS
+_CHECK_BATCH_TRANSFORM_OPTIONS = CHECK_BATCH_TRANSFORM_OPTIONS
+_CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
+_CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
-_CHECK_VALUE_SOURCE_COMPLIANCE = "value_source_compliance"
+_CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
 _CHECK_GRAPH = RUNTIME_CHECK_GRAPH_STRUCTURE
-_CHECK_ROUTE_TARGETS = "route_target_resolution"
+_CHECK_ROUTE_TARGETS = CHECK_ROUTE_TARGETS
 _CHECK_SCHEMA = RUNTIME_CHECK_SCHEMA_COMPATIBILITY
 assert RUNTIME_GRAPH_VALIDATION_CHECKS == (_CHECK_PLUGINS, _CHECK_GRAPH, _CHECK_SCHEMA)
 
@@ -146,32 +161,30 @@ def _blocked_readiness(
     )
 
 
+def _graph_warning_to_validation_warning(warning: GraphValidationWarning) -> ValidationWarning:
+    component_id = warning.node_ids[0] if warning.node_ids else None
+    return ValidationWarning(
+        component_id=component_id,
+        component_type="graph",
+        message=warning.message,
+        suggestion=None,
+        warning_code=warning.code,
+    )
+
+
 # Advisory check — non-blocking, multi-entry (one ValidationCheck per
 # detected node, all sharing this name).  Deliberately NOT included in
 # _ALL_CHECKS: that list governs the "skipped check" propagation when an
 # earlier pass/fail check fails.  This advisory uses ``passed=True`` for
 # every entry and is emitted only on the happy-path return, so structural
 # errors are never drowned in cosmetic noise.
-_CHECK_IDENTITY_NODE_ADVISORY = "identity_node_advisory"
+_CHECK_IDENTITY_NODE_ADVISORY = CHECK_IDENTITY_NODE_ADVISORY
 
 # _CHECK_VALUE_SOURCE_COMPLIANCE slots between _CHECK_PLUGINS (typed configs
 # now exist) and _CHECK_GRAPH (so a hallucinated model fails before any DAG
 # work). The position is asserted by tests/unit/web/execution/test_validation.py
 # to prevent silent reordering.
-_ALL_CHECKS = [
-    _CHECK_PATH_ALLOWLIST,
-    _CHECK_SECRET_REFS,
-    _CHECK_SEMANTIC_CONTRACTS,
-    _CHECK_BATCH_TRANSFORM_OPTIONS,
-    _CHECK_INTERPRETATION_REVIEW,
-    _CHECK_BLOB_INLINE_REFS,
-    _CHECK_SETTINGS,
-    _CHECK_PLUGINS,
-    _CHECK_VALUE_SOURCE_COMPLIANCE,
-    _CHECK_GRAPH,
-    _CHECK_ROUTE_TARGETS,
-    _CHECK_SCHEMA,
-]
+_ALL_CHECKS = list(VALIDATION_BLOCKING_CHECK_NAMES)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,13 +204,19 @@ def _node_schema_patch_target(component_id: str, component_type: str | None) -> 
     )
 
 
-def _source_schema_patch_target(plugin_name: str | None) -> _EdgePatchTarget:
-    display = "source" if plugin_name is None else f"source '{plugin_name}'"
+def _source_schema_patch_target(source_name: str, plugin_name: str | None) -> _EdgePatchTarget:
+    component_id = "source" if source_name == "source" else f"source:{source_name}"
+    if source_name == "source":
+        display = "source" if plugin_name is None else f"source '{plugin_name}'"
+        schema_patch_tool_call = "patch_source_options(patch={'schema': {...}})"
+    else:
+        display = f"source '{source_name}'" if plugin_name is None else f"source '{source_name}' ({plugin_name})"
+        schema_patch_tool_call = f"patch_source_options(source_name={source_name!r}, patch={{'schema': {{...}}}})"
     return _EdgePatchTarget(
-        component_id="source",
+        component_id=component_id,
         component_type="source",
         display_name=display,
-        schema_patch_tool_call="patch_source_options(patch={'schema': {...}})",
+        schema_patch_tool_call=schema_patch_tool_call,
     )
 
 
@@ -219,13 +238,31 @@ def _unmapped_schema_patch_target(dag_node_id: str, component_type: str | None) 
     )
 
 
+def _source_name_for_dag_source(state: CompositionState, graph: Any, dag_source_id: str) -> str | None:
+    node_info = graph.get_node_info(dag_source_id)
+    config = node_info.config
+    if "source_name" in config:
+        source_name = cast(str, config["source_name"])
+        if source_name in state.sources:
+            return source_name
+    if len(state.sources) == 1:
+        return next(iter(state.sources))
+    return None
+
+
 def _edge_patch_targets_by_dag_id(state: CompositionState, graph: Any) -> dict[str, _EdgePatchTarget]:
     """Map runtime DAG node IDs back to composer patch-tool targets."""
     targets: dict[str, _EdgePatchTarget] = {}
     nodes_by_id = {node.id: node for node in state.nodes}
 
-    if state.source is not None:
-        targets[str(graph.get_source())] = _source_schema_patch_target(state.source.plugin)
+    if state.sources:
+        for source_id in graph.get_sources():
+            dag_source_id = str(source_id)
+            source_name = _source_name_for_dag_source(state, graph, dag_source_id)
+            if source_name is None:
+                continue
+            source = state.sources[source_name]
+            targets[dag_source_id] = _source_schema_patch_target(source_name, source.plugin)
 
     transform_nodes = [node for node in state.nodes if node.node_type == "transform"]
     transform_id_map = graph.get_transform_id_map()
@@ -468,6 +505,14 @@ class _IdentityFinding:
     sink_schema_mode: str | None
 
 
+@trust_boundary(
+    tier=3,
+    source="composer-authored CompositionState sink/node options (Tier-3, operator/LLM-supplied)",
+    source_param="state",
+    suppresses=("R1",),
+    invariant="returns advisory findings; every malformed-options branch returns/continues, never raises on state",
+    non_raising=True,
+)
 def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFinding]:
     """Detect identity-shaped passthrough transforms between a real transform and a sink.
 
@@ -506,8 +551,10 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
         if target not in producer_by_target:
             producer_by_target[target] = producer_id
 
-    if state.source is not None and state.source.on_success:
-        producer_by_target[state.source.on_success] = "source"
+    for source_name, source in state.sources.items():
+        if source.on_success:
+            producer_id = "source" if source_name == "source" else f"source:{source_name}"
+            producer_by_target[source.on_success] = producer_id
     for upstream in state.nodes:
         if upstream.on_success:
             _record(upstream.on_success, upstream.id)
@@ -547,7 +594,7 @@ def _find_identity_node_advisories(state: CompositionState) -> list[_IdentityFin
         # per skill lines 758-768).  ``options`` values are Tier-3 (LLM- or
         # operator-supplied), so isinstance() dispatches the optional schema
         # block legitimately — a non-Mapping value means "no schema declared".
-        schema_block = node.options.get("schema")
+        schema_block = node.options["schema"] if "schema" in node.options else None
         if isinstance(schema_block, Mapping):
             fields = schema_block.get("fields")
             if isinstance(fields, (list, tuple)) and len(fields) > 0:
@@ -633,6 +680,17 @@ def _blob_inline_validation_error(violation: BlobInlineValidationViolation) -> V
     )
 
 
+@trust_boundary(
+    tier=3,
+    source="composer-authored CompositionState (pipeline nodes/options) re-read at dry-run validation",
+    source_param="state",
+    suppresses=("R1",),
+    invariant=(
+        "converts expected user/config validation failures into a ValidationResult and returns it; never raises "
+        "on the shape of state (Tier-1 invariant crashes on the analyzer's own generated YAML still propagate)"
+    ),
+    non_raising=True,
+)
 def validate_pipeline(
     state: CompositionState,
     settings: ValidationSettings,
@@ -695,7 +753,7 @@ def validate_pipeline(
     # subscription guard treats ``empty_pipeline`` as non-broadcast (no chat
     # injection, no validation feedback sent to the LLM) — see
     # ``stores/subscriptions.ts``.
-    if state.source is None and not state.nodes and not state.outputs:
+    if not state.sources and not state.nodes and not state.outputs:
         return ValidationResult(
             is_valid=False,
             checks=[
@@ -737,49 +795,51 @@ def validate_pipeline(
 
     allowed_source_dirs = allowed_source_directories(str(settings.data_dir))
     allowed_sink_dirs = allowed_sink_directories(str(settings.data_dir))
-    # state is a CompositionState (typed domain object). state.source is a
-    # SourceSpec with typed .options attribute (Mapping[str, Any]).
-    source_options = dict(state.source.options) if state.source is not None else {}
     path_checked = False
-    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
-        value = source_options.get(key)
-        if value is not None:
-            path_checked = True
-            resolved = resolve_data_path(value, str(settings.data_dir))
-            if not any(resolved.is_relative_to(d) for d in allowed_source_dirs):
-                return ValidationResult(
-                    is_valid=False,
-                    checks=[
-                        ValidationCheck(
-                            name=_CHECK_PATH_ALLOWLIST,
-                            passed=False,
-                            detail=f"Source {key} '{value}' is outside allowed source directories",
-                            affected_nodes=(),
-                            outcome_code=None,
-                        ),
-                        *_skipped_checks(_CHECK_PATH_ALLOWLIST),
-                    ],
-                    errors=[
-                        ValidationError(
-                            component_id="source",
+    for source_name, source in state.sources.items():
+        source_options = dict(source.options)
+        source_component = "source" if source_name == "source" else f"source:{source_name}"
+        for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+            value = source_options.get(key)
+            if value is not None:
+                path_checked = True
+                resolved = resolve_data_path(value, str(settings.data_dir))
+                if not any(resolved.is_relative_to(d) for d in allowed_source_dirs):
+                    return ValidationResult(
+                        is_valid=False,
+                        checks=[
+                            ValidationCheck(
+                                name=_CHECK_PATH_ALLOWLIST,
+                                passed=False,
+                                detail=f"Source '{source_name}' {key} '{value}' is outside allowed source directories",
+                                affected_nodes=(source_component,),
+                                outcome_code=None,
+                            ),
+                            *_skipped_checks(_CHECK_PATH_ALLOWLIST),
+                        ],
+                        errors=[
+                            ValidationError(
+                                component_id=source_component,
+                                component_type="source",
+                                message=(
+                                    f"Path traversal blocked: source '{source_name}' {key}='{value}' resolves outside allowed directories"
+                                ),
+                                suggestion="Use a file within the blobs directory.",
+                                error_code=None,
+                            ),
+                        ],
+                        readiness=_blocked_readiness(
+                            code="path_allowlist",
+                            detail=f"source '{source_name}' {key} resolves outside allowed source directories",
+                            component_id=source_component,
                             component_type="source",
-                            message=f"Path traversal blocked: {key}='{value}' resolves outside allowed directories",
-                            suggestion="Use a file within the blobs directory.",
-                            error_code=None,
                         ),
-                    ],
-                    readiness=_blocked_readiness(
-                        code="path_allowlist",
-                        detail=f"source {key} resolves outside allowed source directories",
-                        component_id="source",
-                        component_type="source",
-                    ),
-                )
+                    )
 
     # Sink path allowlist — prevents arbitrary file writes via sink options.
     for output in state.outputs or ():
         for key in SINK_LOCAL_PATH_OPTION_KEYS:
-            value = output.options.get(key)
+            value = output.options[key] if key in output.options else None
             if value is not None:
                 path_checked = True
                 resolved = resolve_data_path(value, str(settings.data_dir))
@@ -820,7 +880,7 @@ def validate_pipeline(
     for node in state.nodes:
         if node.node_type != "transform":
             continue
-        provider_config = node.options.get("provider_config")
+        provider_config = node.options["provider_config"] if "provider_config" in node.options else None
         if not isinstance(provider_config, Mapping):
             continue
         for key in NESTED_LOCAL_PATH_OPTION_KEYS:
@@ -880,6 +940,74 @@ def validate_pipeline(
             )
         )
 
+    web_scrape_network_errors: list[ValidationError] = []
+    for node in state.nodes:
+        if node.plugin != "web_scrape":
+            continue
+        http_options = node.options["http"] if "http" in node.options else None
+        if not isinstance(http_options, Mapping):
+            continue
+        if "allowed_hosts" not in http_options:
+            continue
+        allowed_hosts = http_options["allowed_hosts"]
+        if allowed_hosts == "allow_private":
+            message = (
+                "web_scrape.http.allowed_hosts='allow_private' is not permitted in web execution. "
+                "Web-authored pipelines may only use public SSRF policy; private-network fetching requires "
+                "an operator-owned runtime outside the web composer."
+            )
+        elif isinstance(allowed_hosts, Sequence) and not isinstance(allowed_hosts, str):
+            message = (
+                "web_scrape.http.allowed_hosts CIDR allowlists are not permitted in web execution. "
+                "Web-authored pipelines may only use allowed_hosts='public_only'; private-network fetching "
+                "requires an operator-owned runtime outside the web composer."
+            )
+        else:
+            continue
+        web_scrape_network_errors.append(
+            ValidationError(
+                component_id=node.id,
+                component_type="transform",
+                message=message,
+                suggestion="Set web_scrape.http.allowed_hosts to 'public_only' or remove the option.",
+                error_code="web_scrape_private_network_not_allowed",
+            )
+        )
+
+    if web_scrape_network_errors:
+        affected_nodes = tuple(error.component_id for error in web_scrape_network_errors if error.component_id is not None)
+        checks.append(
+            ValidationCheck(
+                name=_CHECK_WEB_SCRAPE_NETWORK_POLICY,
+                passed=False,
+                detail="web_scrape private-network allowlists are not permitted in web execution",
+                affected_nodes=affected_nodes,
+                outcome_code=None,
+            )
+        )
+        checks.extend(_skipped_checks(_CHECK_WEB_SCRAPE_NETWORK_POLICY))
+        return ValidationResult(
+            is_valid=False,
+            checks=checks,
+            errors=web_scrape_network_errors,
+            readiness=_blocked_readiness(
+                code="web_scrape_network_policy",
+                detail="web_scrape private-network allowlists are not permitted in web execution.",
+                component_id=web_scrape_network_errors[0].component_id,
+                component_type="transform",
+            ),
+        )
+
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_WEB_SCRAPE_NETWORK_POLICY,
+            passed=True,
+            detail="No web_scrape private-network allowlists found",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
     # Step 1b: Secret ref validation — check that
     #   (a) every wired ``{secret_ref: ...}`` / inventory ``${NAME}`` resolves
     #       (existing missing-refs gate), AND
@@ -902,18 +1030,19 @@ def validate_pipeline(
     if secret_service is not None and user_id is not None:
         env_ref_names = {item.name for item in secret_service.list_refs(user_id)}
         # Walk source options, node configs, and output options for secret refs
-        if state.source is not None:
-            all_refs.extend(_collect_secret_refs(state.source.options, env_ref_names))
-            fabricated = collect_credential_field_violations(state.source.options, env_ref_names)
+        for source_name, source in state.sources.items():
+            source_component = "source" if source_name == "source" else f"source:{source_name}"
+            all_refs.extend(_collect_secret_refs(source.options, env_ref_names))
+            fabricated = collect_credential_field_violations(source.options, env_ref_names)
             if fabricated:
-                fabricated_components.append(("source", "source", fabricated))
+                fabricated_components.append((source_component, "source", fabricated))
             disallowed = collect_disallowed_secret_ref_markers(
-                state.source.options,
+                source.options,
                 env_ref_names,
-                additional_allowed_fields=allowed_secret_ref_fields("source", state.source.plugin),
+                additional_allowed_fields=allowed_secret_ref_fields("source", source.plugin),
             )
             if disallowed:
-                disallowed_secret_ref_components.append(("source", "source", state.source.plugin, disallowed))
+                disallowed_secret_ref_components.append((source_component, "source", source.plugin, disallowed))
         for node in state.nodes or ():
             all_refs.extend(_collect_secret_refs(node.options, env_ref_names))
             fabricated = collect_credential_field_violations(node.options, env_ref_names)
@@ -1092,7 +1221,7 @@ def validate_pipeline(
         batch_required_error = _batch_aware_required_input_fields_error(node.id, node.plugin, node.options)
         if batch_required_error is not None:
             batch_option_errors.append((node.id, batch_required_error))
-    numeric_contract_errors, _numeric_contract_warnings = _batch_distribution_profile_value_field_entries(state.source, state.nodes)
+    numeric_contract_errors, _numeric_contract_warnings = _batch_distribution_profile_value_field_entries(state.sources, state.nodes)
     for entry in numeric_contract_errors:
         batch_option_errors.append((entry.component.removeprefix("node:"), entry.message))
     if batch_option_errors:
@@ -1518,12 +1647,15 @@ def validate_pipeline(
     try:
         graph = build_runtime_graph(elspeth_settings, bundle)
         graph.validate()
+        graph_warnings = [_graph_warning_to_validation_warning(warning) for warning in graph.validation_warnings]
         checks.append(
             ValidationCheck(
                 name=_CHECK_GRAPH,
                 passed=True,
-                detail="Graph structure is valid",
-                affected_nodes=(),
+                detail="Graph structure is valid"
+                if not graph_warnings
+                else f"Graph structure is valid with {len(graph_warnings)} warning(s)",
+                affected_nodes=tuple(warning.component_id for warning in graph_warnings if warning.component_id is not None),
                 outcome_code=None,
             )
         )
@@ -1578,7 +1710,7 @@ def validate_pipeline(
     # per-pipeline validation failure.
     try:
         assemble_and_validate_pipeline_config(
-            source=bundle.source,
+            sources=bundle.sources,
             transforms=bundle.transforms,
             sinks=bundle.sinks,
             aggregations=bundle.aggregations,
@@ -1727,6 +1859,7 @@ def validate_pipeline(
         is_valid=True,
         checks=checks,
         errors=errors,
+        warnings=graph_warnings,
         readiness=_execution_ready(),
         semantic_contracts=serialize_semantic_contracts(semantic_contracts),
     )

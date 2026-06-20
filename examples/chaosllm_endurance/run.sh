@@ -3,7 +3,7 @@
 # ChaosLLM Endurance Test
 #
 # Stress tests ELSPETH at scale against a noisy LLM backend:
-#   10,000 rows × 2 case studies × 5 criteria = 100,000 LLM calls
+#   10,000 rows x 2 case studies x 5 criteria = 100,000 LLM calls
 #   with ~11% steady-state error injection (8% retryable, 3% quarantine).
 #
 # Usage:
@@ -17,8 +17,21 @@ cd "$PROJECT_ROOT"
 
 CHAOS_CONFIG="examples/chaosllm_endurance/chaos_config.yaml"
 PIPELINE_CONFIG="examples/chaosllm_endurance/settings.yaml"
+DEFAULT_INPUT="examples/chaosllm_endurance/input.csv"
 CHAOS_PORT=8199
+ROWS="${CHAOSLLM_ENDURANCE_ROWS:-10000}"
+SEED="${CHAOSLLM_ENDURANCE_SEED:-42}"
+REGENERATE_INPUT="${CHAOSLLM_ENDURANCE_REGENERATE:-0}"
 CHAOS_PID=""
+
+if [ -n "${CHAOSLLM_ENDURANCE_INPUT_PATH:-}" ]; then
+    INPUT_PATH="$CHAOSLLM_ENDURANCE_INPUT_PATH"
+elif [ "$ROWS" = "10000" ]; then
+    INPUT_PATH="$DEFAULT_INPUT"
+else
+    INPUT_PATH="examples/chaosllm_endurance/input.${ROWS}.csv"
+fi
+export CHAOSLLM_ENDURANCE_INPUT_PATH="$INPUT_PATH"
 
 cleanup() {
     if [ -n "$CHAOS_PID" ] && kill -0 "$CHAOS_PID" 2>/dev/null; then
@@ -37,7 +50,7 @@ rm -f examples/chaosllm_endurance/output/quarantined.json
 
 echo "======================================================="
 echo "  ChaosLLM Endurance Test"
-echo "  10,000 rows × 2 case studies × 5 criteria = 100,000 LLM calls"
+echo "  ${ROWS} rows x 2 case studies x 5 criteria = $((ROWS * 10)) LLM calls"
 echo "======================================================="
 echo ""
 
@@ -67,12 +80,34 @@ if ! curl -sf "http://127.0.0.1:$CHAOS_PORT/health" > /dev/null 2>&1; then
     exit 1
 fi
 
-# Generate input data if not present (deterministic with seed 42)
-if [ ! -f examples/chaosllm_endurance/input.csv ]; then
-    echo "Generating 10,000 row input CSV..."
+input_data_rows() {
+    local path="$1"
+    if [ ! -f "$path" ]; then
+        echo "0"
+        return
+    fi
+    local line_count
+    line_count=$(wc -l < "$path")
+    if [ "$line_count" -le 0 ]; then
+        echo "0"
+        return
+    fi
+    echo $((line_count - 1))
+}
+
+# Generate input data if not present, explicitly requested, or mismatched. Smoke
+# overrides write a separate input.<rows>.csv so they cannot poison the default
+# 10k endurance input.
+EXISTING_ROWS="$(input_data_rows "$INPUT_PATH")"
+if [ "$EXISTING_ROWS" != "$ROWS" ]; then
+    REGENERATE_INPUT="1"
+fi
+if [ ! -f "$INPUT_PATH" ] || [ "$REGENERATE_INPUT" = "1" ]; then
+    mkdir -p "$(dirname "$INPUT_PATH")"
+    echo "Generating ${ROWS} row input CSV at ${INPUT_PATH}..."
     .venv/bin/python -m scripts.generate_test_data multi \
-        --rows 10000 --case-studies 2 --fields-per-cs 3 \
-        --output examples/chaosllm_endurance/input.csv --seed 42
+        --rows "$ROWS" --case-studies 2 --fields-per-cs 3 \
+        --output "$INPUT_PATH" --seed "$SEED"
     echo ""
 fi
 

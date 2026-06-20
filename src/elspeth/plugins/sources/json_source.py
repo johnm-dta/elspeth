@@ -18,13 +18,14 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 
 from elspeth.contracts import Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import SourceContext
-from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLimitExceeded
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
     FieldResolution,
     normalize_field_name,
     resolve_field_names,
@@ -147,7 +148,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:ac50840e05596ce6"
+    source_file_hash: str | None = "sha256:364fafb748508257"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -259,6 +260,7 @@ class JSONSource(BaseSource):
                             ctx=ctx,
                             row=raw_row,
                             error_msg=error_msg,
+                            source_row_index=line_num - 1,
                         )
                         if quarantined is not None:
                             yield quarantined
@@ -281,12 +283,13 @@ class JSONSource(BaseSource):
                             ctx=ctx,
                             row=raw_row,
                             error_msg=error_msg,
+                            source_row_index=line_num - 1,
                         )
                         if quarantined is not None:
                             yield quarantined
                         continue
 
-                    yield from self._validate_and_yield(row, ctx)
+                    yield from self._validate_and_yield(row, ctx, source_row_index=line_num - 1)
         except UnicodeDecodeError as e:
             # Some codecs (notably utf-16/utf-32) can still raise on truncated byte
             # sequences while reading. Treat as an external parse failure.
@@ -297,6 +300,7 @@ class JSONSource(BaseSource):
                 ctx=ctx,
                 row=raw_row,
                 error_msg=error_msg,
+                source_row_index=error_line - 1,
             )
             if quarantined is not None:
                 yield quarantined
@@ -324,6 +328,7 @@ class JSONSource(BaseSource):
                         ctx=ctx,
                         row={"file_path": str(self._path), "error": error_msg},
                         error_msg=error_msg,
+                        source_row_index=0,
                     )
                     if quarantined is not None:
                         yield quarantined
@@ -336,6 +341,7 @@ class JSONSource(BaseSource):
                 ctx=ctx,
                 row={"file_path": str(self._path)},
                 error_msg=error_msg,
+                source_row_index=0,
             )
             if quarantined is not None:
                 yield quarantined
@@ -362,6 +368,7 @@ class JSONSource(BaseSource):
                         row={"file_path": str(self._path), "structure_error": error_msg},
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=0,
                     )
                 return
 
@@ -379,6 +386,7 @@ class JSONSource(BaseSource):
                         row={"file_path": str(self._path), "structure_error": error_msg},
                         error=error_msg,
                         destination=self._on_validation_failure,
+                        source_row_index=0,
                     )
                 return
 
@@ -398,11 +406,12 @@ class JSONSource(BaseSource):
                     row={"file_path": str(self._path), "structure_error": error_msg},
                     error=error_msg,
                     destination=self._on_validation_failure,
+                    source_row_index=0,
                 )
             return
 
-        for row in data:
-            yield from self._validate_and_yield(row, ctx)
+        for source_row_index, row in enumerate(data):
+            yield from self._validate_and_yield(row, ctx, source_row_index=source_row_index)
 
     def _normalize_row_keys(self, row: Any) -> dict[str, Any]:
         """Normalize JSON keys to valid Python identifiers.
@@ -420,7 +429,11 @@ class JSONSource(BaseSource):
         try:
             row_items = list(row.items())
         except AttributeError:
-            raise ValueError(f"Expected JSON object, got {type(row).__name__}") from None
+            # Tier-3 data fault: a non-object element in the JSON array/JSONL stream.
+            # Raise ExternalHeaderError (not plain ValueError) so _validate_and_yield
+            # catches it and quarantines the row rather than crashing the run.
+            # Mirrors azure_blob_source.py:_normalize_row_keys (elspeth-bdcdce6f58).
+            raise ExternalHeaderError(f"Expected JSON object, got {type(row).__name__}") from None
 
         raw_keys = [key for key, _ in row_items]
 
@@ -464,13 +477,17 @@ class JSONSource(BaseSource):
                 normalized[final_name] = value
                 has_unmapped_fields = True
 
-        # If this row had fields not in the initial mapping, rebuild
-        # field resolution from this row's complete key set. This ensures
-        # the resolution mapping used for contract inference covers all
-        # fields, not just those from the (possibly quarantined) first row.
+        # If this row had fields not in the initial mapping, rebuild field
+        # resolution from the UNION of all previously-seen keys and this row's
+        # new keys. Using only list(row.keys()) would REPLACE the mapping with
+        # just the current row's fields, discarding keys from earlier rows and
+        # corrupting the Landscape field-resolution audit record (B4.3).
+        # dict.fromkeys preserves first-seen order while deduplicating.
         if has_unmapped_fields:
+            assert self._field_resolution is not None  # set on first row above
+            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
             self._field_resolution = resolve_field_names(
-                raw_headers=list(row.keys()),
+                raw_headers=union_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
                 require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
@@ -478,7 +495,7 @@ class JSONSource(BaseSource):
 
         return normalized
 
-    def _validate_and_yield(self, row: Any, ctx: SourceContext) -> Iterator[SourceRow]:
+    def _validate_and_yield(self, row: Any, ctx: SourceContext, *, source_row_index: int) -> Iterator[SourceRow]:
         """Validate a row and yield if valid, otherwise quarantine.
 
         Field names are normalized to valid Python identifiers before validation.
@@ -493,14 +510,21 @@ class JSONSource(BaseSource):
         Yields:
             SourceRow.valid() if valid, SourceRow.quarantined() if invalid
         """
-        # Normalize JSON keys at the source boundary (Tier 3 → Tier 2)
+        # Normalize JSON keys at the source boundary (Tier 3 -> Tier 2)
+        # Catch only ExternalHeaderError (Tier-3 data faults: non-object row,
+        # external-header collision after normalization, header normalizes to empty).
+        # Plain ValueError (config faults: bad field_mapping collision, mapping keys
+        # not found, non-identifier mapping value) must propagate and crash -- they
+        # signal OUR config error, not bad source data.  Mirrors azure_blob_source.py
+        # _validate_and_yield (elspeth-bdcdce6f58) and the CSV _load_csv path.
         try:
             normalized_row = self._normalize_row_keys(row)
-        except ValueError as exc:
+        except ExternalHeaderError as exc:
             quarantined = self._record_validation_failure(
                 ctx=ctx,
                 row=row,
                 error_msg=str(exc),
+                source_row_index=source_row_index,
             )
             if quarantined is not None:
                 yield quarantined
@@ -554,15 +578,26 @@ class JSONSource(BaseSource):
                             row=validated_row,
                             error=error_msg,
                             destination=self._on_validation_failure,
+                            source_row_index=source_row_index,
                         )
                     return
 
-            yield SourceRow.valid(validated_row, contract=contract)
+            yield SourceRow.valid(validated_row, contract=contract, source_row_index=source_row_index)
+        except ContractFieldLimitExceeded as e:
+            quarantined = self._record_validation_failure(
+                ctx=ctx,
+                row=normalized_row,
+                error_msg=str(e),
+                source_row_index=source_row_index,
+            )
+            if quarantined is not None:
+                yield quarantined
         except ValidationError as e:
             quarantined = self._record_validation_failure(
                 ctx=ctx,
                 row=normalized_row,
                 error_msg=str(e),
+                source_row_index=source_row_index,
             )
             if quarantined is not None:
                 yield quarantined
@@ -572,6 +607,7 @@ class JSONSource(BaseSource):
         ctx: SourceContext,
         row: Mapping[str, object],
         error_msg: str,
+        source_row_index: int,
     ) -> SourceRow | None:
         """Record a parse error and return quarantined row unless discard mode."""
         row_payload = dict(row)
@@ -587,6 +623,7 @@ class JSONSource(BaseSource):
             row=row_payload,
             error=error_msg,
             destination=self._on_validation_failure,
+            source_row_index=source_row_index,
         )
 
     def _record_validation_failure(
@@ -594,6 +631,7 @@ class JSONSource(BaseSource):
         ctx: SourceContext,
         row: Any,
         error_msg: str,
+        source_row_index: int,
     ) -> SourceRow | None:
         """Record a row-level validation failure unless discard mode."""
         row_payload = row
@@ -609,6 +647,7 @@ class JSONSource(BaseSource):
             row=row_payload,
             error=error_msg,
             destination=self._on_validation_failure,
+            source_row_index=source_row_index,
         )
 
     def get_field_resolution(self) -> tuple[Mapping[str, str], str | None] | None:
@@ -647,8 +686,7 @@ class JSONSource(BaseSource):
                     "Same schema-mode rules as csv: default to 'observed' unless the user asked to project to a smaller schema.",
                     "JSONL is resumable, line-by-line; JSON-array is loaded into memory in one pass — pick JSONL for large inputs.",
                     "If you have been asked to generate JSON rows yourself (the invented_source path): emit a top-level JSON array of objects (or JSONL with one object per line). Every object must carry the same keys you intend downstream nodes to consume.",
-                    "When generating JSON rows yourself, declare those keys in `schema.fields` or `schema.guaranteed_fields`.",
-                    'When generating JSON rows yourself, do not wrap generated content in `{"results": [...]}` or any other envelope — emit the bare array so `data_key` is unnecessary.',
+                    'Declare generated JSON keys in `schema.fields` or `schema.guaranteed_fields`. Do not wrap generated content in `{"results": [...]}` or any other envelope — emit the bare array so `data_key` is unnecessary.',
                 ),
             )
         return None

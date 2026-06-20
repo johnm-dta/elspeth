@@ -129,7 +129,7 @@ class TestRetryAuditTrail:
         sink = sinks["output"]
 
         settings = ElspethSettings(
-            source=SourceSettings(plugin=source.name, on_success=source.on_success, options={}),
+            sources={"retry_source": SourceSettings(plugin=source.name, on_success=source.on_success, options={})},
             transforms=[
                 TransformSettings(
                     name=f"{transform.name}_0",
@@ -155,7 +155,7 @@ class TestRetryAuditTrail:
         assert runtime_retry.exponential_base == 3.0
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"retry_source": as_source(source)},
             transforms=[as_transform(t) for t in transforms],
             sinks={"output": as_sink(sink)},
         )
@@ -263,6 +263,8 @@ class TestRetryAuditTrail:
             source_node_id=source_node_id,
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Create the token record

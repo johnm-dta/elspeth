@@ -1,5 +1,6 @@
 """Tests for BatchDistributionProfile aggregation transform."""
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -163,6 +164,26 @@ class TestBatchDistributionProfile:
         with pytest.raises(TypeError, match="must be numeric"):
             transform.process(rows, ctx)
 
+    @pytest.mark.parametrize("group_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, group_value: float) -> None:
+        """Non-finite group_by key must error before producing any output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score", "group_by": "variant"})
+        rows = [
+            _make_row({"variant": "A", "score": 1.0}),
+            _make_row({"variant": group_value, "score": 2.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_group_key"
+        assert result.reason["field"] == "variant"
+        assert not result.retryable
+
     def test_group_by_emits_one_profile_per_group(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
 
@@ -228,6 +249,21 @@ class TestBatchDistributionProfile:
         assert result.reason is not None
         assert result.reason["reason"] == "empty_batch"
         assert not result.retryable
+
+    def test_single_value_reports_none_stdev(self, ctx: PluginContext) -> None:
+        """n=1 stdev is undefined -- must emit None, never 0.0 (B4.5-a-distribution_profile)."""
+        from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+        transform = BatchDistributionProfile({"schema": DYNAMIC_SCHEMA, "value_field": "score"})
+        rows = [_make_row({"score": 42.0})]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["count"] == 1
+        # stdev undefined at n=1 -- honest None, never 0.0
+        assert result.row["stdev"] is None
 
 
 class TestBatchDistributionProfileConfig:
@@ -332,3 +368,19 @@ class TestBatchDistributionProfileConfig:
                 "variant",
             }
         )
+
+
+def test_non_finite_decimal_key_guarded() -> None:
+    """B4.5-d: a non-finite Decimal key is caught by the static guard (parity with batch_effect_size).
+
+    Decimal is not an allowed FieldContract type, so a Decimal key can only reach a
+    transform through an object-typed field; the guard must still reject it. Exercised at
+    the helper because the end-to-end path requires an object-typed key column.
+    """
+    from elspeth.plugins.transforms.batch_distribution_profile import BatchDistributionProfile
+
+    guard = BatchDistributionProfile._is_non_finite_group_key
+    assert guard(Decimal("nan")) is True
+    assert guard(Decimal("inf")) is True
+    assert guard(Decimal("-inf")) is True
+    assert guard(Decimal("1")) is False

@@ -61,43 +61,31 @@ class TestPhase5CheckpointSchema:
         assert "upstream_topology_hash" in columns, "Missing upstream_topology_hash column"
         assert columns["upstream_topology_hash"].nullable is False, "upstream_topology_hash must be non-nullable for checkpoint validation"
 
-        # checkpoint_node_config_hash must exist and be non-nullable
-        assert "checkpoint_node_config_hash" in columns, "Missing checkpoint_node_config_hash column"
-        assert columns["checkpoint_node_config_hash"].nullable is False, (
-            "checkpoint_node_config_hash must be non-nullable for checkpoint validation"
-        )
-
     def test_checkpoint_model(self) -> None:
         from elspeth.contracts import Checkpoint
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-001",
             run_id="run-001",
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=42,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
         )
         assert checkpoint.sequence_number == 42
 
-    def test_checkpoint_model_with_aggregation_state(self) -> None:
-        """Verify Checkpoint model supports aggregation state."""
+    def test_checkpoint_model_with_barrier_scalars(self) -> None:
+        """Verify Checkpoint model carries barrier scalar metadata (F1)."""
         from elspeth.contracts import Checkpoint
 
         checkpoint = Checkpoint(
             checkpoint_id="cp-002",
             run_id="run-001",
-            token_id="tok-001",
-            node_id="node-001",
             sequence_number=100,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
-            aggregation_state_json='{"buffer": [1, 2, 3]}',
+            barrier_scalars_json='{"aggregation": {}, "coalesce": []}',
         )
-        assert checkpoint.aggregation_state_json == '{"buffer": [1, 2, 3]}'
+        assert checkpoint.barrier_scalars_json == '{"aggregation": {}, "coalesce": []}'
 
 
 class TestBatchStatusType:

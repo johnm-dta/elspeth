@@ -222,6 +222,8 @@ class TestTokenOutcomeContractProperties:
             source_node_id=source_node_id,
             row_index=0,
             data={"value": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         return db, factory, run_id, token.token_id
@@ -358,7 +360,35 @@ class TestTokenOutcomeContractProperties:
 
 
 class TestSchemaContractRoundTripProperties:
-    """Schema contracts stored in runs must survive round-trip."""
+    """Per-source schema contracts (ADR-025) must survive round-trip.
+
+    Contracts are no longer run-level singletons: they live on ``run_sources``
+    rows keyed by source_node_id, written via ``record_run_source`` /
+    ``update_run_source_contract`` and read back via
+    ``get_run_source_resume_records``.
+    """
+
+    @staticmethod
+    def _record_source(factory: RecorderFactory, run_id: str) -> str:
+        """Register a source node and its run_sources row; return the node id."""
+        source = factory.data_flow.register_node(
+            run_id=run_id,
+            plugin_name="test",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={},
+            schema_config=_make_schema_config(),
+        )
+        factory.run_lifecycle.record_run_source(
+            run_id=run_id,
+            source_node_id=source.node_id,
+            source_name="primary",
+            plugin_name="test",
+            config_hash="confighash",
+            lifecycle_state="loading",
+            source_schema_json='{"mode": "observed"}',
+        )
+        return source.node_id
 
     @given(
         field_name=field_names,
@@ -366,7 +396,7 @@ class TestSchemaContractRoundTripProperties:
     )
     @settings(max_examples=50, deadline=None)
     def test_contract_round_trip(self, field_name: str, field_type: type) -> None:
-        """Property: update_run_contract → get_run_contract preserves field info."""
+        """Property: update_run_source_contract → get_run_source_resume_records preserves field info."""
         field = FieldContract(
             normalized_name=field_name,
             original_name=field_name,
@@ -379,14 +409,20 @@ class TestSchemaContractRoundTripProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
+            source_node_id = self._record_source(factory, run.run_id)
 
-            factory.run_lifecycle.update_run_contract(run.run_id, contract)
-            restored = factory.run_lifecycle.get_run_contract(run.run_id)
+            factory.run_lifecycle.update_run_source_contract(
+                run_id=run.run_id,
+                source_node_id=source_node_id,
+                schema_contract=contract,
+            )
+            records = factory.run_lifecycle.get_run_source_resume_records(run.run_id)
 
-            assert restored is not None
+            assert set(records) == {source_node_id}
+            restored = records[source_node_id].schema_contract
             assert restored.mode == "FIXED"
             assert len(restored.fields) == 1
             assert restored.fields[0].normalized_name == field_name
@@ -398,7 +434,7 @@ class TestSchemaContractRoundTripProperties:
     )
     @settings(max_examples=30, deadline=None)
     def test_multi_field_contract_round_trip(self, n_fields: int, data: st.DataObject) -> None:
-        """Property: Multi-field contracts survive round-trip."""
+        """Property: Multi-field per-source contracts survive round-trip."""
         # Generate unique field names
         names = data.draw(
             st.lists(
@@ -423,28 +459,39 @@ class TestSchemaContractRoundTripProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
+            source_node_id = self._record_source(factory, run.run_id)
 
-            factory.run_lifecycle.update_run_contract(run.run_id, contract)
-            restored = factory.run_lifecycle.get_run_contract(run.run_id)
+            factory.run_lifecycle.update_run_source_contract(
+                run_id=run.run_id,
+                source_node_id=source_node_id,
+                schema_contract=contract,
+            )
+            records = factory.run_lifecycle.get_run_source_resume_records(run.run_id)
 
-            assert restored is not None
+            restored = records[source_node_id].schema_contract
             assert len(restored.fields) == n_fields
             restored_names = {f.normalized_name for f in restored.fields}
             for name in names:
                 assert name in restored_names
 
-    def test_no_contract_returns_none(self) -> None:
-        """Property: get_run_contract returns None when no contract stored."""
+    def test_missing_contract_is_refused_on_resume_read(self) -> None:
+        """Property: a recorded source with no stored contract is audit corruption
+        on the resume read path — get_run_source_resume_records refuses loudly
+        instead of returning a record without a contract."""
+        from elspeth.contracts.errors import AuditIntegrityError
+
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
-            assert factory.run_lifecycle.get_run_contract(run.run_id) is None
+            self._record_source(factory, run.run_id)
+            with pytest.raises(AuditIntegrityError, match="no schema contract stored"):
+                factory.run_lifecycle.get_run_source_resume_records(run.run_id)
 
 
 # =============================================================================
@@ -462,7 +509,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -480,6 +527,8 @@ class TestReferentialIntegrityProperties:
                     source_node_id=source.node_id,
                     row_index=i,
                     data={"i": i},
+                    source_row_index=i,
+                    ingest_sequence=i,
                 )
                 factory.data_flow.create_token(row_id=row.row_id)
 
@@ -501,7 +550,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -519,6 +568,8 @@ class TestReferentialIntegrityProperties:
                     source_node_id=source.node_id,
                     row_index=i,
                     data={"i": i},
+                    source_row_index=i,
+                    ingest_sequence=i,
                 )
 
             # Verify no orphan rows
@@ -539,7 +590,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -556,6 +607,8 @@ class TestReferentialIntegrityProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
             parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -575,7 +628,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -591,6 +644,8 @@ class TestReferentialIntegrityProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
             parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -608,7 +663,7 @@ class TestReferentialIntegrityProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -624,6 +679,8 @@ class TestReferentialIntegrityProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data={"v": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
             parent = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -663,7 +720,7 @@ class TestFieldResolutionProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -681,7 +738,7 @@ class TestFieldResolutionProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             assert factory.run_lifecycle.get_source_field_resolution(run.run_id) is None
@@ -702,7 +759,7 @@ class TestRowHashProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -719,12 +776,16 @@ class TestRowHashProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data=data,
+                source_row_index=0,
+                ingest_sequence=0,
             )
             row2 = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=1,
                 data=data,
+                source_row_index=1,
+                ingest_sequence=1,
             )
 
             assert row1.source_data_hash == row2.source_data_hash
@@ -739,7 +800,7 @@ class TestRowHashProperties:
         with make_landscape_db() as db:
             factory = make_factory(db)
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
             source = factory.data_flow.register_node(
@@ -756,12 +817,16 @@ class TestRowHashProperties:
                 source_node_id=source.node_id,
                 row_index=0,
                 data=data1,
+                source_row_index=0,
+                ingest_sequence=0,
             )
             row2 = factory.data_flow.create_row(
                 run_id=run.run_id,
                 source_node_id=source.node_id,
                 row_index=1,
                 data=data2,
+                source_row_index=1,
+                ingest_sequence=1,
             )
 
             assert row1.source_data_hash != row2.source_data_hash

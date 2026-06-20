@@ -26,9 +26,9 @@ Violations are silently replaced with a freshly generated UUID4.  No
 error response is produced — a broken correlation id is operational
 noise, not a client-visible failure.
 
-Layer: L3 (application middleware).  Uses Starlette ``BaseHTTPMiddleware``
-for compatibility with the existing FastAPI wiring pattern in
-``web/app.py``.
+Layer: L3 (application middleware). Implemented as plain ASGI middleware so
+the correlation header can be attached before a downstream unhandled exception
+is re-raised to Starlette's outer server-error middleware.
 """
 
 from __future__ import annotations
@@ -36,10 +36,9 @@ from __future__ import annotations
 import re
 import uuid
 
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import Response
-from starlette.types import ASGIApp
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 REQUEST_ID_HEADER = "X-Request-ID"
 """Header name used for inbound and outbound correlation ids."""
@@ -77,7 +76,7 @@ def _generate_request_id() -> str:
     return str(uuid.uuid4())
 
 
-class RequestIdMiddleware(BaseHTTPMiddleware):
+class RequestIdMiddleware:
     """Attach a correlation id to every request and response.
 
     The assigned id is stored on ``request.state.request_id`` so that
@@ -88,18 +87,37 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     """
 
     def __init__(self, app: ASGIApp) -> None:
-        super().__init__(app)
+        self.app = app
 
-    async def dispatch(self, request: Request, call_next):  # type: ignore[no-untyped-def]
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
         # Tier-3 inbound header. An absent header is an explicit decision to
         # mint a fresh id; a present-but-unsafe value is likewise replaced.
-        supplied = request.headers[REQUEST_ID_HEADER] if REQUEST_ID_HEADER in request.headers else None
+        headers = Headers(scope=scope)
+        supplied = headers.get(REQUEST_ID_HEADER)
         if supplied is not None and _is_safe_request_id(supplied):
             request_id = supplied
         else:
             request_id = _generate_request_id()
-        request.state.request_id = request_id
+        scope.setdefault("state", {})["request_id"] = request_id
 
-        response: Response = await call_next(request)
-        response.headers[REQUEST_ID_HEADER] = request_id
-        return response
+        response_started = False
+
+        async def send_with_request_id(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+                MutableHeaders(scope=message)[REQUEST_ID_HEADER] = request_id
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_id)
+        except Exception:
+            if not response_started:
+                response = Response("Internal Server Error", status_code=500)
+                response.headers[REQUEST_ID_HEADER] = request_id
+                await response(scope, receive, send)
+            raise

@@ -19,7 +19,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.data import CompatibilityResult
 from elspeth.contracts.secrets import ResolvedSecret, SecretInventoryItem
-from elspeth.core.dag.models import EdgeContractError, GraphValidationError
+from elspeth.core.dag.models import EdgeContractError, GraphValidationError, GraphValidationWarning
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.manager import PluginNotFoundError
 from elspeth.web.composer.state import (
@@ -227,6 +227,28 @@ class TestValidatePipelinePathAllowlist:
         assert _check(result, "path_allowlist").passed is False
         assert any("Path traversal" in e.message for e in result.errors)
 
+    def test_second_named_source_path_outside_blobs_blocked(self) -> None:
+        state = CompositionState(
+            source=None,
+            sources={
+                "orders": _make_source({"path": "/tmp/test_data/blobs/orders.csv"}),
+                "refunds": _make_source({"path": "/etc/passwd"}),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock()
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "path_allowlist").passed is False
+        assert any(error.component_id == "source:refunds" and "refunds" in error.message for error in result.errors)
+
     def test_path_traversal_via_dotdot_blocked(self) -> None:
         state = _make_state(
             source_options={"path": "/tmp/test_data/blobs/../../secret.csv"},
@@ -249,6 +271,94 @@ class TestValidatePipelinePathAllowlist:
         path_check = next(c for c in result.checks if c.name == "path_allowlist")
         assert path_check.passed is True
         assert "skipped" in path_check.detail.lower()
+
+
+class TestValidatePipelineWebScrapeNetworkPolicy:
+    """Web-authored web_scrape configs must not widen SSRF allowlists."""
+
+    @staticmethod
+    def _web_scrape_options(allowed_hosts: object = "public_only") -> dict[str, object]:
+        return {
+            "schema": {"mode": "fixed", "fields": ["url: str"]},
+            "url_field": "url",
+            "content_field": "content",
+            "fingerprint_field": "fingerprint",
+            "http": {
+                "abuse_contact": "ops@somecompany.gov.au",
+                "scraping_reason": "User-authorised public web fetch",
+                "allowed_hosts": allowed_hosts,
+            },
+        }
+
+    def test_web_scrape_allow_private_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options=self._web_scrape_options("allow_private"),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "web_scrape_network_policy").passed is False
+        assert result.errors[0].component_id == "test_node"
+        assert result.errors[0].error_code == "web_scrape_private_network_not_allowed"
+        assert "allow_private" in result.errors[0].message
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_web_scrape_explicit_cidr_allowlist_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options=self._web_scrape_options(["10.0.0.0/8"]),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "web_scrape_network_policy").passed is False
+        assert result.errors[0].error_code == "web_scrape_private_network_not_allowed"
+        assert "CIDR" in result.errors[0].message
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_web_scrape_public_only_allowed_to_reach_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options=self._web_scrape_options("public_only"),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert _check(result, "web_scrape_network_policy").passed is True
+        assert all(error.error_code != "web_scrape_private_network_not_allowed" for error in result.errors)
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
 
 
 class TestValidatePipelineBatchTransformOptions:
@@ -504,6 +614,49 @@ class TestValidatePipelinePendingInterpretationPlaceholders:
         assert result.readiness.blockers[0].component_type == "source"
         mock_yaml_gen.generate_yaml.assert_not_called()
 
+    def test_resolved_invented_source_drift_returns_source_readiness(self) -> None:
+        """elspeth-5a94855935: a RESOLVED invented_source whose
+        accepted_artifact_hash drifted from the current source content_hash is a
+        readiness blocker, NOT an uncaught ValueError that escapes
+        validate_pipeline as an HTTP 500."""
+        state = _make_state(
+            source_options={
+                SOURCE_AUTHORING_KEY: {
+                    "modality": "llm_generated",
+                    "content_hash": "a" * 64,
+                    "review_event_id": "event-1",
+                    "resolved_kind": "invented_source",
+                },
+                INTERPRETATION_REQUIREMENTS_KEY: [
+                    {
+                        "id": "source-urls",
+                        "kind": "invented_source",
+                        "user_term": "inline_source_url_list",
+                        "status": "resolved",
+                        "draft": "https://example.gov.au",
+                        "event_id": "event-1",
+                        "accepted_value": "accepted source artifact",
+                        "accepted_artifact_hash": "b" * 64,
+                        "resolved_prompt_template_hash": None,
+                    }
+                ],
+            }
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert result.errors[0].error_code == "interpretation_review_pending"
+        assert result.errors[0].component_id == "source"
+        assert result.errors[0].component_type == "source"
+        assert "invented_source" in result.errors[0].message
+        assert result.readiness.blockers[0].code == "interpretation_review_pending"
+        assert result.readiness.blockers[0].component_id == "source"
+        assert result.readiness.blockers[0].component_type == "source"
+        mock_yaml_gen.generate_yaml.assert_not_called()
+
     def test_legacy_pending_interpretation_placeholder_returns_typed_readiness_by_default(self) -> None:
         state = _make_state(
             nodes=(
@@ -644,6 +797,31 @@ class TestValidatePipelineSinkPathAllowlist:
             result = validate_pipeline(state, settings, mock_yaml_gen)
         path_check = next(c for c in result.checks if c.name == "path_allowlist")
         assert path_check.passed is True
+
+    def test_second_named_source_path_outside_allowed_dirs_is_blocked(self) -> None:
+        """Every named source path must pass the validation allowlist."""
+        state = CompositionState(
+            source=None,
+            sources={
+                "orders": _make_source({"path": "/tmp/test_data/blobs/orders.csv"}),
+                "refunds": _make_source({"path": "/etc/passwd"}),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock()
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        path_check = next(c for c in result.checks if c.name == "path_allowlist")
+        assert path_check.passed is False
+        assert path_check.affected_nodes == ("source:refunds",)
+        assert any("source 'refunds'" in error.message for error in result.errors)
 
     def test_sink_without_path_passes(self) -> None:
         """Sinks without path/file options (e.g. database) skip the check."""
@@ -1147,6 +1325,7 @@ class TestValidatePipelineSuccess:
 
         mock_bundle = MagicMock()
         mock_bundle.source = MagicMock()
+        mock_bundle.sources = {"source": mock_bundle.source}
         mock_bundle.source_settings = MagicMock()
         mock_bundle.transforms = ()
         mock_bundle.sinks = {"primary": MagicMock()}
@@ -1154,6 +1333,7 @@ class TestValidatePipelineSuccess:
         mock_instantiate.return_value = mock_bundle
 
         mock_graph = MagicMock()
+        mock_graph.validation_warnings = ()
         mock_build_graph.return_value = mock_graph
         mock_assemble.return_value = MagicMock()
 
@@ -1162,10 +1342,11 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 12
+        assert len(result.checks) == 13
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
+        assert _check(result, "web_scrape_network_policy").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "blob_inline_refs").passed is True
         assert _check(result, "semantic_contracts").passed is True
@@ -1177,6 +1358,7 @@ class TestValidatePipelineSuccess:
         assert result.readiness.execution_ready is True
         assert result.readiness.completion_ready is True
         assert result.errors == []
+        assert result.warnings == []
 
         # Verify real engine functions were called
         mock_load.assert_called_once()
@@ -1184,16 +1366,69 @@ class TestValidatePipelineSuccess:
         mock_build_graph.assert_called_once()
         mock_graph.validate.assert_called_once()
         mock_assemble.assert_called_once()
+        assert mock_assemble.call_args.kwargs["sources"] == mock_bundle.sources
         mock_graph.validate_edge_compatibility.assert_called_once()
+
+    @patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config")
+    @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
+    @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")
+    @patch("elspeth.web.execution.validation.build_runtime_graph")
+    def test_validate_pipeline_surfaces_graph_warnings(
+        self,
+        mock_build_graph: MagicMock,
+        mock_instantiate: MagicMock,
+        mock_load: MagicMock,
+        mock_assemble: MagicMock,
+    ) -> None:
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        mock_settings = MagicMock()
+        mock_load.return_value = mock_settings
+
+        mock_bundle = MagicMock()
+        mock_bundle.source = MagicMock()
+        mock_bundle.sources = {"source": mock_bundle.source}
+        mock_bundle.source_settings = MagicMock()
+        mock_bundle.transforms = ()
+        mock_bundle.sinks = {"primary": MagicMock()}
+        mock_bundle.aggregations = {}
+        mock_instantiate.return_value = mock_bundle
+
+        mock_graph = MagicMock()
+        mock_graph.validation_warnings = (
+            GraphValidationWarning(
+                code="DIVERT_COALESCE_REQUIRE_ALL",
+                message="Transform 't_a' has on_error routing and feeds require_all coalesce 'join'.",
+                node_ids=("t_a", "join"),
+            ),
+        )
+        mock_build_graph.return_value = mock_graph
+        mock_assemble.return_value = MagicMock()
+
+        state = _make_state()
+        settings = _make_settings()
+
+        result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is True
+        assert len(result.warnings) == 1
+        assert result.warnings[0].component_id == "t_a"
+        assert result.warnings[0].component_type == "graph"
+        assert result.warnings[0].warning_code == "DIVERT_COALESCE_REQUIRE_ALL"
+        assert "require_all coalesce" in result.warnings[0].message
+        graph_check = _check(result, "graph_structure")
+        assert graph_check.passed is True
+        assert graph_check.affected_nodes == ("t_a",)
 
 
 class TestValidatePipelineSettingsFailure:
     def test_file_backed_template_options_fail_during_web_settings_load_before_plugins(self) -> None:
         pipeline_yaml = """
-source:
-  plugin: csv
-  on_success: transform_in
-  options: {}
+sources:
+  source:
+    plugin: csv
+    on_success: transform_in
+    options: {}
 transforms:
   - name: classify
     plugin: llm
@@ -1303,11 +1538,12 @@ class TestValidatePipelinePluginFailure:
     def test_real_text_source_config_error_returns_validation_result(self) -> None:
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: text
-  on_success: transform_in
-  options:
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: text
+    on_success: transform_in
+    options:
+      on_validation_failure: discard
 transforms:
 - name: append_world
   plugin: value_transform
@@ -1518,7 +1754,7 @@ class TestCollectSecretRefs:
         assert _collect_secret_refs({"secret_ref": "API_KEY"}) == ["API_KEY"]
 
     def test_nested_secret_ref(self) -> None:
-        data = {"source": {"options": {"api_key": {"secret_ref": "MY_KEY"}}}}
+        data = {"sources": {"primary": {"options": {"api_key": {"secret_ref": "MY_KEY"}}}}}
         assert _collect_secret_refs(data) == ["MY_KEY"]
 
     def test_multiple_refs(self) -> None:
@@ -1574,6 +1810,36 @@ class TestValidatePipelineSecretRefs:
         # Downstream checks should be skipped
         assert any("Skipped" in c.detail for c in result.checks if c.name == "settings_load")
         assert _check(result, "settings_load").outcome_code == "validation.skipped_after_failure"
+
+    def test_second_named_source_missing_ref_fails_validation(self) -> None:
+        state = CompositionState(
+            source=None,
+            sources={
+                "orders": _make_source({"api_key": {"secret_ref": "ORDERS_KEY"}}),
+                "refunds": _make_source({"api_key": {"secret_ref": "MISSING_REFUNDS_KEY"}}),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock()
+        secret_svc = FakeSecretService(available_refs={"ORDERS_KEY"})
+
+        result = validate_pipeline(
+            state,
+            settings,
+            mock_yaml_gen,
+            secret_service=secret_svc,
+            user_id="user-1",
+        )
+
+        assert result.is_valid is False
+        assert _check(result, "secret_refs").passed is False
+        assert "MISSING_REFUNDS_KEY" in _check(result, "secret_refs").detail
+        assert any("MISSING_REFUNDS_KEY" in error.message for error in result.errors)
 
     def test_all_refs_present_passes(self) -> None:
         """Validation passes when all secret refs are resolvable."""
@@ -1960,7 +2226,7 @@ class TestValidatePipelineFabricatedCredentials:
                         "http": {
                             "abuse_contact": {"secret_ref": "ANY_SECRET"},
                             "scraping_reason": "research",
-                            "allowed_hosts": ["example.com"],
+                            "allowed_hosts": "public_only",
                         },
                     },
                 ),
@@ -2382,12 +2648,13 @@ class TestValidatePipelineRuntimePathResolution:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: main
-  options:
-    path: blobs/session/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: main
+    options:
+      path: blobs/session/input.csv
+      on_validation_failure: discard
 sinks:
   main:
     plugin: csv
@@ -2401,7 +2668,7 @@ sinks:
 
         loaded_yaml = self._loaded_yaml_from_settings_loader(mock_load)
         parsed = yaml.safe_load(loaded_yaml)
-        assert parsed["source"]["options"]["path"] == "/tmp/test_data/blobs/session/input.csv"
+        assert parsed["sources"]["primary"]["options"]["path"] == "/tmp/test_data/blobs/session/input.csv"
         assert parsed["sinks"]["main"]["options"]["path"] == "/tmp/test_data/outputs/out.csv"
 
     def test_validate_pipeline_preserves_absolute_paths_before_settings_load(self) -> None:
@@ -2428,12 +2695,13 @@ sinks:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: main
-  options:
-    path: /tmp/test_data/blobs/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: main
+    options:
+      path: /tmp/test_data/blobs/input.csv
+      on_validation_failure: discard
 sinks:
   main:
     plugin: csv
@@ -2447,7 +2715,7 @@ sinks:
 
         loaded_yaml = self._loaded_yaml_from_settings_loader(mock_load)
         parsed = yaml.safe_load(loaded_yaml)
-        assert parsed["source"]["options"]["path"] == "/tmp/test_data/blobs/input.csv"
+        assert parsed["sources"]["primary"]["options"]["path"] == "/tmp/test_data/blobs/input.csv"
         assert parsed["sinks"]["main"]["options"]["path"] == "/tmp/test_data/outputs/out.csv"
 
 
@@ -2459,12 +2727,15 @@ class TestValidatePipelineRuntimeCheckBoundaries:
             RUNTIME_CHECK_SCHEMA_COMPATIBILITY,
             RUNTIME_GRAPH_VALIDATION_CHECKS,
         )
+        from elspeth.web.execution.schemas import VALIDATION_BLOCKING_CHECK_NAMES
+        from elspeth.web.execution.validation import _ALL_CHECKS
 
         assert RUNTIME_GRAPH_VALIDATION_CHECKS == (
             RUNTIME_CHECK_PLUGIN_INSTANTIATION,
             RUNTIME_CHECK_GRAPH_STRUCTURE,
             RUNTIME_CHECK_SCHEMA_COMPATIBILITY,
         )
+        assert tuple(_ALL_CHECKS) == VALIDATION_BLOCKING_CHECK_NAMES
 
     def test_validate_pipeline_success_surfaces_declared_runtime_graph_checks(self) -> None:
         from elspeth.web.execution.preflight import RUNTIME_GRAPH_VALIDATION_CHECKS
@@ -2476,12 +2747,13 @@ class TestValidatePipelineRuntimeCheckBoundaries:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: primary
-  options:
-    path: /tmp/test_data/blobs/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: primary
+    options:
+      path: /tmp/test_data/blobs/input.csv
+      on_validation_failure: discard
 sinks:
   primary:
     plugin: csv
@@ -2520,12 +2792,13 @@ sinks:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: primary
-  options:
-    path: /tmp/test_data/blobs/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: primary
+    options:
+      path: /tmp/test_data/blobs/input.csv
+      on_validation_failure: discard
 sinks:
   primary:
     plugin: csv
@@ -2564,12 +2837,13 @@ sinks:
         settings = _make_settings(data_dir="/tmp/test_data")
         mock_yaml_gen = MagicMock(spec=YamlGenerator)
         mock_yaml_gen.generate_yaml.return_value = """
-source:
-  plugin: csv
-  on_success: primary
-  options:
-    path: /tmp/test_data/blobs/input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: primary
+    options:
+      path: /tmp/test_data/blobs/input.csv
+      on_validation_failure: discard
 sinks:
   primary:
     plugin: csv
@@ -2727,7 +3001,9 @@ class TestEdgeContractFailureFormatting:
             outputs=(_make_output(name="results"),),
         )
         graph = MagicMock()
-        graph.get_source.return_value = "source_csv_a1b2c3"
+        graph.get_source.side_effect = AssertionError("exact-one source API must not be called")
+        graph.get_sources.return_value = ["source_csv_a1b2c3"]
+        graph.get_node_info.return_value = MagicMock(config={"source_name": "source"})
         graph.get_transform_id_map.return_value = {0: "transform_split_lines_d4e5f6"}
         graph.get_config_gate_id_map.return_value = {}
         graph.get_aggregation_id_map.return_value = {}
@@ -2740,6 +3016,66 @@ class TestEdgeContractFailureFormatting:
         assert "patch_node_options(node_id='transform_split_lines_d4e5f6'" not in suggestion
         assert "patch_source_options(patch={'schema': {...}})" in suggestion
         assert "patch_node_options(node_id='source_csv_a1b2c3'" not in suggestion
+
+    def test_suggestion_maps_multi_source_dag_ids_to_named_source_patch_tool(self) -> None:
+        exc = self._make_edge_error(
+            from_node_id="source_csv_refunds_a1b2c3",
+            to_node_id="transform_normalize_d4e5f6",
+            missing_fields=("refund_id",),
+        )
+        orders = _make_source({"schema": {"mode": "observed"}})
+        refunds = SourceSpec(
+            plugin="csv",
+            on_success="normalize",
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+        state = CompositionState(
+            sources={"orders": orders, "refunds": refunds},
+            nodes=(
+                NodeSpec(
+                    id="normalize",
+                    node_type="transform",
+                    plugin="field_mapper",
+                    input="normalize",
+                    on_success="results",
+                    on_error="discard",
+                    options={},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(_make_output(name="results"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+        graph = MagicMock()
+        graph.get_source.side_effect = GraphValidationError("Expected exactly 1 source node, found 2")
+        graph.get_sources.return_value = ["source_csv_orders_z9y8x7", "source_csv_refunds_a1b2c3"]
+
+        def node_info(node_id: str) -> MagicMock:
+            source_name = "orders" if node_id == "source_csv_orders_z9y8x7" else "refunds"
+            return MagicMock(config={"source_name": source_name})
+
+        graph.get_node_info.side_effect = node_info
+        graph.get_transform_id_map.return_value = {0: "transform_normalize_d4e5f6"}
+        graph.get_config_gate_id_map.return_value = {}
+        graph.get_aggregation_id_map.return_value = {}
+        graph.get_coalesce_id_map.return_value = {}
+        graph.get_sink_id_map.return_value = {"results": "sink_results_f7g8h9"}
+
+        suggestion = _build_edge_contract_suggestion(exc, state=state, graph=graph)
+
+        graph.get_source.assert_not_called()
+        assert "source 'refunds' (csv)" in suggestion
+        assert "patch_source_options(source_name='refunds', patch={'schema': {...}})" in suggestion
+        assert "patch_source_options(patch={'schema': {...}})" not in suggestion
+        assert "patch_node_options(node_id='source_csv_refunds_a1b2c3'" not in suggestion
 
     def test_suggestion_maps_dag_sink_ids_to_output_patch_tool(self) -> None:
         exc = self._make_edge_error(
@@ -2769,7 +3105,9 @@ class TestEdgeContractFailureFormatting:
             outputs=(_make_output(name="results"),),
         )
         graph = MagicMock()
-        graph.get_source.return_value = "source_csv_z9y8x7"
+        graph.get_source.side_effect = AssertionError("exact-one source API must not be called")
+        graph.get_sources.return_value = ["source_csv_z9y8x7"]
+        graph.get_node_info.return_value = MagicMock(config={"source_name": "source"})
         graph.get_transform_id_map.return_value = {0: "transform_clean_text_a1b2c3"}
         graph.get_config_gate_id_map.return_value = {}
         graph.get_aggregation_id_map.return_value = {}

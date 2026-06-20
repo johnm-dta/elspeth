@@ -876,13 +876,14 @@ class SetSourceArgumentsModel(BaseModel):
     the manifest/canonical-arguments parity invariant the adequacy
     guard relies on.
 
-    Field set is exactly the four required keys from the JSON schema at
-    ``tools.py:631-655``.  Fields belonging to neighbouring tools
+    Field set is exactly the four required keys plus optional
+    ``source_name`` from the JSON schema at ``tools.py``.  Fields belonging to neighbouring tools
     (``label``, ``blob_id``, ``inline_blob`` — those are on
     ``set_source_from_blob`` / ``create_blob``) are intentionally absent
     so ``extra="forbid"`` rejects misrouted argument shapes early.
     """
 
+    source_name: str = "source"
     plugin: str
     on_success: str
     options: _LlmJsonObject
@@ -1012,6 +1013,7 @@ class SetSourceFromBlobArgumentsModel(BaseModel):
 
     blob_id: str
     on_success: str
+    source_name: str = "source"
     plugin: str | None = None
     on_validation_failure: str | None = None
     options: _LlmJsonObject = Field(default_factory=dict)
@@ -1514,7 +1516,8 @@ class SetPipelineArgumentsModel(BaseModel):
     ``create_blob``) are rejected before any handler-side logic runs.
     """
 
-    source: _SetPipelineSourceModel
+    source: _SetPipelineSourceModel | None = None
+    sources: dict[str, _SetPipelineSourceModel] | None = None
     nodes: list[_PipelineNodeModel]
     edges: list[_PipelineEdgeModel]
     outputs: list[_PipelineOutputModel]
@@ -1561,6 +1564,7 @@ class PatchSourceOptionsArgumentsModel(BaseModel):
 
     Mirrors the JSON schema declared at ``tools.py:883-897`` for the
     ``patch_source_options`` definition and its ``required: ["patch"]``.
+    ``source_name`` selects the named source root and is not sensitive.
 
     ``patch`` carries :class:`Sensitive` with
     :func:`_summarize_set_source_options` — the merge-patch dict has the same
@@ -1575,6 +1579,7 @@ class PatchSourceOptionsArgumentsModel(BaseModel):
     rejects misrouted argument shapes early.
     """
 
+    source_name: str = "source"
     patch: _LlmJsonObject
 
     model_config = ConfigDict(extra="forbid")
@@ -2194,11 +2199,11 @@ _REMOVE_OUTPUT_REASON = HandlesNoSensitiveDataReason(
 
 
 _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
-    sensitive_data_locations=("composer state — single in-memory source slot being cleared",),
+    sensitive_data_locations=("composer state — selected in-memory source root being cleared",),
     why_arguments_safe=(
-        "clear_source accepts no arguments — the JSON schema at tools.py:1145 declares "
-        "an empty properties object with empty required, so the LLM cannot place any "
-        "value on this surface; the handler clears the source slot unconditionally."
+        "clear_source accepts only an optional source_name selector. Source names are "
+        "structural composer identifiers, not plugin options, file paths, source content, "
+        "or credentials."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary describing the "
@@ -3112,30 +3117,66 @@ def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
     source or blob_ref-less options is the "nothing to redact" outcome,
     recorded explicitly by returning the input unchanged.
     """
-    if "source" not in state_dict:
-        return state_dict
-    source = state_dict["source"]
-    if source is None:
-        return state_dict
 
-    if "options" not in source:
-        return state_dict
-    options = source["options"]
-    if options is None or "blob_ref" not in options:
+    def _redact_one(source: Any) -> tuple[Any, bool]:
+        # An absent/None source is the documented "nothing to redact"
+        # first-party shape (see this function's docstring). A PRESENT,
+        # non-None source that is not a Mapping is NOT a producible
+        # first-party shape: every serializer feeding this surface
+        # (CompositionState.to_dict, _serialize_source,
+        # _serialize_full_pipeline_state) emits source/named-source values
+        # as dicts. A non-Mapping here is a corrupted/regressed Tier-1
+        # serializer output; returning it unchanged would silently pass an
+        # un-redacted storage path through this leak-prevention surface, so
+        # fail closed with provenance instead (matches the offensive posture
+        # of _state_response's direct index and the MCP read-back's
+        # PLUGIN_CRASH reclassification).
+        if source is None:
+            return source, False
+        if not isinstance(source, Mapping):
+            raise AuditIntegrityError(
+                "redact_source_storage_path received a non-Mapping source value "
+                f"(type {type(source).__name__!r}); serialized state source entries "
+                "must be mappings. Refusing to pass through a malformed first-party "
+                "shape that may carry an un-redacted internal storage path."
+            )
+        if "options" not in source:
+            return source, False
+        options = source["options"]
+        if options is None or not isinstance(options, Mapping) or "blob_ref" not in options:
+            return source, False
+        redacted_source = dict(source)
+        redacted_options = dict(options)
+        # Both "path" and "file" are blob storage-path carriers: blob ownership
+        # detection (web/blobs/service.py) and the fork rewrite
+        # (web/sessions/routes/sessions.py) treat them equivalently. Mask both so a
+        # blob-backed source authored with the "file" option shape cannot leak the
+        # internal storage_path through this redaction surface (elspeth-a7aa07b7ce).
+        for storage_path_key in ("path", "file"):
+            if storage_path_key in redacted_options:
+                redacted_options[storage_path_key] = REDACTED_BLOB_SOURCE_PATH
+        redacted_source["options"] = redacted_options
+        return redacted_source, True
+
+    source = state_dict["source"] if "source" in state_dict else None
+    redacted_source, source_changed = _redact_one(source)
+    sources = state_dict["sources"] if "sources" in state_dict else None
+    redacted_sources: dict[str, Any] | None = None
+    sources_changed = False
+    if sources is not None:
+        redacted_sources = {}
+        for source_name, named_source in sources.items():
+            redacted_named_source, changed = _redact_one(named_source)
+            redacted_sources[source_name] = redacted_named_source
+            sources_changed = sources_changed or changed
+
+    if not source_changed and not sources_changed:
         return state_dict
 
     # Shallow copy the chain to avoid mutating the original
     redacted = dict(state_dict)
-    redacted_source = dict(source)
-    redacted_options = dict(options)
-    # Both "path" and "file" are blob storage-path carriers: blob ownership
-    # detection (web/blobs/service.py) and the fork rewrite
-    # (web/sessions/routes/sessions.py) treat them equivalently. Mask both so a
-    # blob-backed source authored with the "file" option shape cannot leak the
-    # internal storage_path through this redaction surface (elspeth-a7aa07b7ce).
-    for storage_path_key in ("path", "file"):
-        if storage_path_key in redacted_options:
-            redacted_options[storage_path_key] = REDACTED_BLOB_SOURCE_PATH
-    redacted_source["options"] = redacted_options
-    redacted["source"] = redacted_source
+    if source_changed:
+        redacted["source"] = redacted_source
+    if sources_changed and redacted_sources is not None:
+        redacted["sources"] = redacted_sources
     return redacted

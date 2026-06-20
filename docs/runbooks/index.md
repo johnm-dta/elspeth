@@ -10,6 +10,7 @@ Operational procedures for ELSPETH pipeline management.
 |---------|-------------|
 | [Resume Failed Run](resume-failed-run.md) | Pipeline crashed or was interrupted |
 | [Investigate Routing](investigate-routing.md) | Need to explain why a row was routed |
+| [Scheduler Lease Recovery](scheduler-lease-recovery.md) | Token work items stuck `leased`, SCREAM invariant fired, `attempt` churn from lease expiries, or (N>1) dead-leader takeover, a wedged lock-holder, or follower recovery |
 | [Database Maintenance](database-maintenance.md) | Audit DB growing large, need cleanup |
 | [Incident Response](incident-response.md) | Production issue needs investigation |
 | [Backup and Recovery](backup-and-recovery.md) | Backup audit trail, restore from backup |

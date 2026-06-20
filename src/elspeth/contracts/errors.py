@@ -7,7 +7,7 @@ recording.
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required, TypedDict, cast
 
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.declaration_contracts import DeclarationContractViolation
@@ -28,6 +28,7 @@ FrameworkBugError = tier_1_error(
 
 if TYPE_CHECKING:
     from elspeth.contracts.coalesce_metadata import CoalesceMetadata
+    from elspeth.contracts.coordination import RegisteredWorker
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +171,7 @@ class ConfigGateReason(TypedDict):
 # RoutingReason union is defined after TransformErrorReason (see RoutingReason below)
 
 
-# Literal type for common transform actions (extensible - str also accepted)
+# Literal type for transform success actions recorded in Tier 1 audit data.
 TransformActionCategory = Literal[
     # Processing actions
     "processed",  # Generic successful processing
@@ -181,14 +182,21 @@ TransformActionCategory = Literal[
     "normalized",  # Data normalization applied
     "filtered",  # Row passed filter criteria
     "classified",  # Classification assigned
+    "coerced",  # Type coercion applied
+    "assembled_report",  # Report assembly completed
     # Skip/passthrough actions
     "passthrough",  # No changes made (intentional)
     "skipped",  # Processing skipped (e.g., data already present)
     "cached",  # Result retrieved from cache
+    # Multi-row/batch actions
+    "split",  # One input row emitted multiple output rows
+    "aggregated",  # Multiple input rows emitted aggregate output
     # Plugin-specific actions
     "query_completed",  # LLM single-query completion
     "multi_query_enriched",  # LLM multi-query execution completed
     "rag_retrieval",  # RAG retrieval pipeline completed
+    # Test/helper action
+    "test",  # Generic test fixture success
 ]
 
 
@@ -206,7 +214,7 @@ class TransformSuccessReason(TypedDict):
 
     Required field:
         action: What the transform did. Use TransformActionCategory values
-                for common actions, or custom strings for plugin-specific actions.
+                for common and plugin-specific actions.
 
     Optional fields:
         fields_modified: List of field names that were changed
@@ -233,7 +241,7 @@ class TransformSuccessReason(TypedDict):
         })
     """
 
-    action: str  # Use TransformActionCategory or custom string
+    action: TransformActionCategory
 
     # Multi-query success context
     queries_completed: NotRequired[int]  # Number of queries completed in multi-query
@@ -327,6 +335,7 @@ TransformErrorCategory = Literal[
     "type_mismatch",
     "validation_failed",
     "invalid_input",
+    "too_many_lines",  # Line-expanding transform input exceeds configured max_lines
     # Template errors
     "template_rendering_failed",
     "template_context_failed",  # Multi-query template context build failed (missing field)
@@ -359,10 +368,13 @@ TransformErrorCategory = Literal[
     "rate_limited",
     # Content extraction errors (Tier 3 boundary - external HTML/text parsing)
     "content_extraction_failed",
+    "non_text_content_type",  # Response content-type is not text/* -- refused before extraction
+    "body_too_large",  # Response body exceeds configured max_body_bytes limit
     # Retrieval errors (RAG retrieval transform)
     "retrieval_failed",
     "no_results",
     "no_regex_match",
+    "regex_timeout",
     # Content filtering
     "blocked_content",
     "content_filtered",
@@ -452,7 +464,7 @@ class TransformErrorReason(TypedDict):
     RAG retrieval context:
         provider: Retrieval provider name (e.g., "azure_search", "chroma")
         cause: Sub-cause within an error category (e.g., "null_value", "empty_query")
-        pattern: Regex pattern string (for no_regex_match errors)
+        pattern: Regex pattern string (for no_regex_match/regex_timeout errors)
         skipped_count: Number of candidate hits rejected before final output
         skipped_reasons: Structured reasons for candidate hits rejected before final output
 
@@ -538,12 +550,16 @@ class TransformErrorReason(TypedDict):
     response_keys: NotRequired[list[str] | None]
     body_preview: NotRequired[str]  # HTTP body preview; absent = empty/unavailable
     content_type: NotRequired[str]
+    body_size: NotRequired[int]  # Actual response body size in bytes (body_too_large errors)
+    max_body_bytes: NotRequired[int]  # Configured limit in bytes (body_too_large errors)
 
     # Type validation context
     expected: NotRequired[str]
     actual: NotRequired[str]
     actual_type: NotRequired[str]
     value: NotRequired[str]
+    line_count: NotRequired[int]  # Observed lines before rejecting line-expanding input
+    max_lines: NotRequired[int]  # Configured line-expansion limit
 
     # Contract violation context
     violation_type: NotRequired[str]
@@ -561,7 +577,7 @@ class TransformErrorReason(TypedDict):
     # RAG retrieval context
     provider: NotRequired[str]  # Retrieval provider name (e.g., "azure_search", "chroma")
     cause: NotRequired[str]  # Sub-cause within error category (e.g., "null_value", "empty_query")
-    pattern: NotRequired[str]  # Regex pattern string (for no_regex_match errors)
+    pattern: NotRequired[str]  # Regex pattern string (for no_regex_match/regex_timeout errors)
     skipped_count: NotRequired[int]  # Candidate hits rejected before final output
     skipped_reasons: NotRequired[list[dict[str, Any]]]  # Structured reasons for rejected candidate hits
 
@@ -588,6 +604,7 @@ class TransformErrorReason(TypedDict):
     errors: NotRequired[list[str | ErrorDetail]]  # Error messages or structured errors
     skipped_non_finite: NotRequired[int]  # Count of NaN/Inf values skipped
     skipped_non_finite_indices: NotRequired[list[int]]  # Row indices with non-finite values
+    duplicate_pair_ids: NotRequired[list[str]]  # Pair IDs with duplicate variant entries (B4.5-e)
 
 
 class SourceQuarantineReason(TypedDict):
@@ -715,20 +732,211 @@ class AuditIntegrityError(Exception):
         self.failed_turn = failed_turn
 
 
+# TIER-2: Multi-worker lease coordination signal — the worker's lease was reaped
+# by a peer (lease expired AND peer-reaper succeeded), so this worker no longer
+# owns the row. The audit trail is intact (the peer-recovered row is a new
+# attempt under a new ``work_item_id``); the original holder must abandon its
+# in-flight work WITHOUT a follow-up ``mark_failed`` (CAS would fail, cascading
+# into a Tier-1 ``AuditIntegrityError``). The drain loop catches this
+# specifically and skips both the result emission and the failure write.
+# Distinct from ``AuditIntegrityError`` because it represents legitimate
+# coordination under multi-worker N>1 (alive-but-slow worker reaped by peer),
+# not framework corruption. See filigree elspeth-ddde8144b6.
+# TIER-2: Legitimate multi-worker coordination — a peer reaped/reassigned the lease; the drain loop manages it cleanly, not audit corruption.
+class SchedulerLeaseLostError(Exception):
+    """Raised when a heartbeat or transition discovers the lease was reaped.
+
+    The lease was either expired (peer reaper claimed the row under a bumped
+    ``attempt`` and new ``work_item_id``) or transferred (peer worker captured
+    the row directly). Either way, this worker no longer owns the row and must
+    abandon its in-flight processing cleanly.
+
+    Attributes:
+        work_item_id: The original work_item_id this worker held the lease on.
+        lease_owner: The lease_owner identity this worker claimed under.
+        run_id: The run_id the lease belonged to.
+    """
+
+    def __init__(self, *, work_item_id: str, lease_owner: str, run_id: str) -> None:
+        self.work_item_id = work_item_id
+        self.lease_owner = lease_owner
+        self.run_id = run_id
+        super().__init__(
+            f"Scheduler lease lost for work_item_id={work_item_id!r} under "
+            f"lease_owner={lease_owner!r} on run_id={run_id!r}: the row has been "
+            "reaped or reassigned by a peer worker. This worker must abandon "
+            "its in-flight processing without a follow-up scheduler write."
+        )
+
+
+# The run's leader seat moved to a new epoch (takeover CAS, ADR-030 §B.4), so
+# this worker's fenced transaction was refused by the verify-and-extend CAS and
+# rolled back with ZERO durable mutation. The audit trail is intact (the refusal
+# itself is best-effort attributed via a fence_refusal coordination event); the
+# deposed worker must abandon cleanly, the same discipline as
+# SchedulerLeaseLostError at the item level. Not corruption: the
+# immutability/uniqueness backstops beneath the fence remain Tier-1.
+# TIER-2: Legitimate multi-worker coordination — a peer took over the leader seat; the fenced write rolled back cleanly with zero mutation, not audit corruption.
+class RunLeadershipLostError(Exception):
+    """Raised when the leader verify-and-extend epoch fence CAS misses (ADR-030 §C.4).
+
+    The first statement of every leader-fenced transaction is a conditional
+    UPDATE on ``run_coordination`` matching ``(run_id, leader_worker_id,
+    leader_epoch)``. Rowcount 0 means the seat was taken over (epoch bumped)
+    or released: the entire transaction rolls back before any payload write,
+    and this worker — a deposed leader — must abandon its run-scoped work
+    without further audit writes.
+
+    Attributes:
+        run_id: The run whose seat fence refused this worker.
+        worker_id: The identity this worker held the (stale) token under.
+        leader_epoch: The stale epoch the refused token carried.
+        verb: The fenced verb that was refused (forensic attribution; also
+            recorded in the best-effort ``fence_refusal`` coordination event).
+    """
+
+    def __init__(self, *, run_id: str, worker_id: str, leader_epoch: int, verb: str) -> None:
+        self.run_id = run_id
+        self.worker_id = worker_id
+        self.leader_epoch = leader_epoch
+        self.verb = verb
+        super().__init__(
+            f"Run leadership lost for run_id={run_id!r}: worker_id={worker_id!r} "
+            f"holds stale leader_epoch={leader_epoch} (refused at verb {verb!r}). "
+            "The seat was taken over or released; this worker must abandon its "
+            "run-scoped work without further audit writes."
+        )
+
+
+# This worker's run_workers registry row left 'active' (evicted by the leader's
+# housekeeping sweep, or departed at finalize). Single-use identity doctrine
+# (ADR-030): the row never returns to 'active'; the drain loop abandons
+# in-flight work cleanly at the next boundary, exactly the
+# SchedulerLeaseLostError discipline.
+# TIER-2: Legitimate multi-worker coordination — registry eviction/departure is a clean abandon signal handled by the drain loop, not audit corruption.
+class RunWorkerEvictedError(Exception):
+    """Raised when a worker discovers its registry row is no longer ``active``.
+
+    Latched from the heartbeat CAS miss (slice-4 thread) or raised directly
+    when a membership-fenced verb (``claim_ready`` / ``claim_pending_sink`` /
+    ``enqueue_ready``, slice 4) refuses with zero rows. The worker abandons
+    in-flight processing without emitting; a returning process mints a fresh
+    worker identity and re-admits.
+
+    Attributes:
+        worker_id: The evicted/departed worker identity.
+        run_id: The run the registration belonged to.
+    """
+
+    def __init__(self, *, worker_id: str, run_id: str) -> None:
+        self.worker_id = worker_id
+        self.run_id = run_id
+        super().__init__(
+            f"Worker {worker_id!r} is no longer an active member of run {run_id!r} "
+            "(evicted or departed). Worker identities are single-use; abandon "
+            "in-flight work and re-admit under a fresh identity if appropriate."
+        )
+
+
+# Joining this run is not currently admissible (run terminal, config-hash
+# mismatch, no live leader, or a failed filesystem preflight). The audit DB is
+# intact; same register as NonResumableRunError on the resume path.
+# TIER-2: Operator-interpretable refuse signal — join admission precondition failed, carried as run_id + reason; the audit DB is intact, not corruption.
+class JoinRefusedError(Exception):
+    """Raised when ``elspeth join`` admission is refused (ADR-030 §B.1).
+
+    Carries ``run_id`` and a human-readable ``reason`` so CLI/API callers can
+    surface a precise refusal (e.g. "run is terminal", "FAILED — use
+    ``elspeth resume``", "no live leader", config-hash mismatch, or an
+    actionable filesystem-writability failure) without parsing text.
+    """
+
+    def __init__(self, run_id: str, reason: str) -> None:
+        self.run_id = run_id
+        self.reason = reason
+        super().__init__(f"Cannot join run {run_id!r}: {reason}")
+
+
+# ADR-030 §B.1 step 5: leader seat expired while a follower was draining.
+# The follower departed cleanly but the run is NOT complete — the operator
+# must use `elspeth resume` to continue.  Distinct from RunWorkerEvictedError
+# (our row left 'active') and JoinRefusedError (admission-time refusal).
+# Seat death during drain is operator-actionable; the run is intact but leaderless.
+# TIER-2: Mid-drain follower abandon signal; the operator must resume the run.
+class FollowerSeatDeadError(Exception):
+    """Raised when the leader seat expires while the follower is draining.
+
+    The follower has already departed cleanly (``depart_worker`` called).
+    The run is NOT complete — the operator must use ``elspeth resume`` to
+    take over the run (design §B.1 step 5, §C.3).
+
+    Attributes:
+        worker_id: The follower's worker identity.
+        run_id: The run the follower was attached to.
+    """
+
+    def __init__(self, *, worker_id: str, run_id: str) -> None:
+        self.worker_id = worker_id
+        self.run_id = run_id
+        super().__init__(
+            f"Follower {worker_id!r} detected no live leader for run {run_id!r}. "
+            "The follower has departed cleanly. "
+            f"Use `elspeth resume {run_id}` to take over the run."
+        )
+
+
+# The audit DB write lock is held by a live or frozen process, so the takeover
+# CAS could not even begin (SQLITE_BUSY after the busy_timeout poll). NOT
+# "leadership held": ADR-030 §B.4 requires BUSY to be reported distinctly from a
+# clean CAS loss. The remediation is operator SIGKILL of the wedged holder
+# (locks release on process death); the registered-worker forensics
+# (pid/hostname) carried here make that actionable.
+# TIER-2: Operator-actionable environmental refusal — a held WAL write lock surfaced with pid forensics for remediation; the audit DB is intact, not corruption.
+class WriteLockHeldError(Exception):
+    """Raised when a coordination write times out on the audit DB write lock.
+
+    Distinct from ``NonResumableRunError`` (clean seat-CAS loss to a live
+    leader): a busy timeout means some process — live or frozen — holds the
+    WAL write lock. Carries the run's registered workers (pid/hostname/role
+    forensics from ``run_workers``) so the operator knows what to inspect or
+    SIGKILL.
+
+    Attributes:
+        run_id: The run whose coordination write was refused.
+        workers: Registered ``run_workers`` rows for the run at refusal time
+            (read on a plain read connection; WAL readers don't block on the
+            writer). May be empty if the registry could not be read.
+    """
+
+    def __init__(self, *, run_id: str, workers: tuple["RegisteredWorker", ...]) -> None:
+        self.run_id = run_id
+        self.workers = workers
+        roster = (
+            "; ".join(f"worker_id={w.worker_id!r} role={w.role} status={w.status} pid={w.pid} hostname={w.hostname!r}" for w in workers)
+            or "<none readable>"
+        )
+        super().__init__(
+            f"The audit DB write lock is held by a live or frozen process; the "
+            f"coordination write for run {run_id!r} timed out at BEGIN IMMEDIATE. "
+            f"Registered workers: {roster}. If a worker is frozen inside a "
+            "transaction, SIGKILL it (SQLite locks release on process death) and retry."
+        )
+
+
 # TIER-2: Config-elected enforcement failure (union collision policy = fail). Not a system corruption; pipeline author chose fail-fast on merge conflicts.
 class CoalesceCollisionError(Exception):
     """Raised when union_collision_policy=fail and a field collision occurs.
 
     This is NOT an engine bug or audit-integrity failure — it's a config-elected
     enforcement. The pipeline author chose to fail-fast on union merge collisions
-    rather than allow last_wins/first_wins resolution. The full CoalesceMetadata
-    is captured BEFORE raising so the orchestrator's failure path can persist
-    the complete collision record (field_origins + collision_values) to the
-    audit trail.
+    rather than allow last_wins/first_wins resolution. The CoalesceMetadata is
+    captured BEFORE raising so the orchestrator's failure path can persist
+    collision provenance and value fingerprints to the audit trail without
+    storing the raw colliding branch values.
 
     Attributes:
         metadata: CoalesceMetadata with union_field_origins and
-                  union_field_collision_values populated.
+                  audit-safe union_field_collision_values populated.
     """
 
     def __init__(self, message: str, *, metadata: "CoalesceMetadata") -> None:
@@ -757,6 +965,81 @@ class OrchestrationInvariantError(Exception):
     """
 
     pass
+
+
+# TIER-2: Operator-interpretable refuse signal — audit DB is intact and truthful (records that no rows were committed); not a corruption or framework bug. Inherits OrchestrationInvariantError so the broad catch still matches, but the semantic tier is Tier-2 (clean refuse with run_id), not Tier-1 (invariant violation).
+class EmptyResumeStateError(OrchestrationInvariantError):
+    """Raised when resume is attempted for a run with no recorded work.
+
+    ADR-025 §3 declares ``ResumeState.schema_contracts_by_source``
+    non-empty by invariant. The construction-time guard in
+    ``ResumeState.__post_init__`` is the chokepoint that pins the
+    invariant; this exception is the upstream refuse path so callers
+    can distinguish "nothing to resume" from "audit corruption
+    invariant violation" without parsing exception messages.
+
+    Empty-state resume is not an invariant violation in the usual
+    Tier-1 sense — the audit DB is intact, it just records that no
+    rows were committed and no ``run_sources`` records were written
+    before the prior run failed (an ``on_start`` failure, a
+    source-level abort before the first ingest, or an infrastructure
+    crash before the first row was persisted). The audit trail is
+    truthful: the run did no work. The correct operator-facing
+    outcome is "start a fresh run", not a crash dump.
+
+    Inherits from :class:`OrchestrationInvariantError` deliberately so
+    every existing ``except OrchestrationInvariantError`` block
+    continues to catch this case — the type contract is preserved.
+    Code paths that want the *interpretable* outcome (clean exit with
+    operator message rather than a Tier-1 fatal traceback) must catch
+    ``EmptyResumeStateError`` explicitly *before* the broader
+    ``OrchestrationInvariantError`` / ``TIER_1_ERRORS`` handler.
+
+    Carries ``run_id`` so the upstream caller (CLI, orchestrator
+    supervisor) has the identifier for its operator-facing message
+    without having to reconstruct it from the exception text.
+    """
+
+    def __init__(self, run_id: str, message: str | None = None) -> None:
+        self.run_id = run_id
+        super().__init__(
+            message
+            or (
+                f"Resume requested for run {run_id!r}, but no rows were "
+                "committed and no run_sources records were written. The "
+                "run failed before any work was persisted to the audit "
+                "trail. Start a fresh run."
+            )
+        )
+
+
+# Operator-interpretable refuse signal — persisted rows can be replayed, but the
+# audit trail proves at least one source was interrupted before it reached a
+# source-complete lifecycle_state (loaded/exhausted). The current resume
+# architecture replays persisted row payloads through NullSource; it cannot prove
+# that unread source rows do not exist. Refuse rather than fabricating completion.
+# TIER-2: Operator-interpretable refuse signal, not audit corruption — resume can't prove source exhaustion, so it refuses.
+class IncompleteSourceResumeError(Exception):
+    """Raised when resume would falsely complete an interrupted source.
+
+    Carries the affected source names so CLI/API callers can surface a
+    precise "not resumable" outcome without treating the audit trail as
+    corrupt. This is distinct from :class:`EmptyResumeStateError`: here the
+    run did commit rows and source metadata, but the source lifecycle proves
+    source exhaustion was not recorded.
+    """
+
+    def __init__(self, run_id: str, source_states: Mapping[str, str]) -> None:
+        if not source_states:
+            raise ValueError("IncompleteSourceResumeError requires at least one source state")
+        self.run_id = run_id
+        self.source_states = dict(source_states)
+        source_summary = ", ".join(f"{source}={state}" for source, state in sorted(source_states.items()))
+        super().__init__(
+            f"Cannot resume run {run_id!r} to completion: source lifecycle is incomplete "
+            f"({source_summary}). Current resume replays only persisted row payloads; "
+            "unread source rows may exist. Start a fresh run or use a source-aware resume path."
+        )
 
 
 class DeclaredRequiredInputFieldsPayload(TypedDict):
@@ -959,6 +1242,9 @@ class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
         self.plugin_name = plugin_name
         self.provider = provider
         self.cause_type = type(cause).__name__
+        retryable_cause = cast(PluginRetryableError, cause) if issubclass(type(cause), PluginRetryableError) else None
+        self.retryable = retryable_cause.retryable if retryable_cause is not None else False
+        self.status_code = retryable_cause.status_code if retryable_cause is not None else None
         message = (
             f"{self.error_class}: {plugin_name} provider {provider} failed runtime preflight "
             f"before row processing: {self.cause_type}: {cause}"
@@ -972,6 +1258,7 @@ class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
             "plugin_name": self.plugin_name,
             "provider": self.provider,
             "cause_type": self.cause_type,
+            "retryable": self.retryable,
             "message": str(self),
         }
 

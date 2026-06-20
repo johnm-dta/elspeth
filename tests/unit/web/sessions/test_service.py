@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import structlog
@@ -19,7 +19,13 @@ from elspeth.web.execution.schemas import (
     RunStatusResponse,
 )
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import composer_completion_events_table
+from elspeth.web.sessions.models import (
+    composer_completion_events_table,
+    composition_states_table,
+    run_events_table,
+    runs_table,
+    sessions_table,
+)
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
     CompositionStateData,
@@ -251,6 +257,67 @@ class TestSessionCRUD:
         assert (quarantine_dir / blob_file.name).read_text() == "col1\nval1"
 
 
+class TestRunEvents:
+    @pytest.mark.asyncio
+    async def test_append_and_list_run_events_preserves_order_and_payload(self, service, engine) -> None:
+        session_id = uuid.uuid4()
+        state_id = uuid.uuid4()
+        run_id = uuid.uuid4()
+        created_at = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                insert(sessions_table).values(
+                    id=str(session_id),
+                    user_id="alice",
+                    title="Run events",
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+            conn.execute(
+                insert(composition_states_table).values(
+                    id=str(state_id),
+                    session_id=str(session_id),
+                    version=1,
+                    is_valid=True,
+                    provenance="session_seed",
+                    created_at=created_at,
+                )
+            )
+            conn.execute(
+                insert(runs_table).values(
+                    id=str(run_id),
+                    session_id=str(session_id),
+                    state_id=str(state_id),
+                    status="running",
+                    started_at=created_at,
+                    rows_processed=0,
+                    rows_failed=0,
+                )
+            )
+
+        await service.append_run_event(
+            run_id=run_id,
+            timestamp=created_at,
+            event_type="progress",
+            data={"source_rows_processed": 1},
+        )
+        await service.append_run_event(
+            run_id=run_id,
+            timestamp=created_at + timedelta(milliseconds=1),
+            event_type="error",
+            data={"message": "bad row", "node_id": None, "row_id": None},
+        )
+
+        records = await service.list_run_events(run_id)
+
+        assert [record.event_type for record in records] == ["progress", "error"]
+        assert records[0].data == {"source_rows_processed": 1}
+        assert records[1].data["message"] == "bad row"
+        with engine.connect() as conn:
+            assert conn.execute(select(run_events_table.c.id)).fetchall()
+
+
 class TestMessagePersistence:
     """Tests for chat message add and retrieval."""
 
@@ -359,6 +426,43 @@ class TestCompositionStateVersioning:
         assert current is not None
         assert current.version == 2
         assert current.is_valid is True
+
+    @pytest.mark.asyncio
+    async def test_named_sources_round_trip_through_session_state(self, service) -> None:
+        session = await service.create_session("alice", "Multi-source", "local")
+        sources = {
+            "orders": {
+                "plugin": "csv",
+                "on_success": "orders_out",
+                "options": {"path": "orders.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_out",
+                "options": {"path": "refunds.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+        }
+
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources=sources,
+                outputs=[
+                    {"name": "orders_out", "plugin": "json", "options": {"path": "orders.jsonl"}, "on_write_failure": "discard"},
+                    {"name": "refunds_out", "plugin": "json", "options": {"path": "refunds.jsonl"}, "on_write_failure": "discard"},
+                ],
+                metadata_={"name": "Multi-source", "description": ""},
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+
+        current = await service.get_current_state(session.id)
+
+        assert current is not None
+        assert current.sources == sources
 
     @pytest.mark.asyncio
     async def test_get_current_state_returns_none_when_empty(
@@ -602,9 +706,36 @@ class TestSetActiveState:
         reverted = await service.set_active_state(session.id, v1.id)
         assert reverted.version == 3
         # Content should match v1, not v2
-        assert reverted.source == v1.source
+        assert reverted.sources == v1.sources
         # Lineage: reverted state records where it came from (D6)
         assert reverted.derived_from_state_id == v1.id
+
+    @pytest.mark.asyncio
+    async def test_revert_preserves_named_sources(self, service) -> None:
+        session = await service.create_session("alice", "Multi-source", "local")
+        sources = {
+            "orders": {"plugin": "csv", "on_success": "orders_rows", "on_validation_failure": "discard", "options": {"path": "orders.csv"}},
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "on_validation_failure": "discard",
+                "options": {"path": "refunds.csv"},
+            },
+        }
+        v1 = await service.save_composition_state(
+            session.id,
+            CompositionStateData(sources=sources, is_valid=True),
+            provenance="session_seed",
+        )
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(source={"plugin": "json", "on_success": "rows", "on_validation_failure": "discard", "options": {}}),
+            provenance="session_seed",
+        )
+
+        reverted = await service.set_active_state(session.id, v1.id)
+
+        assert reverted.sources == sources
 
     @pytest.mark.asyncio
     async def test_revert_preserves_history(self, service) -> None:
@@ -1082,6 +1213,26 @@ class TestCancelAllOrphanedRuns:
 
         updated = await service.get_run(run.id)
         assert updated.status == "cancelled"
+
+    @pytest.mark.asyncio
+    async def test_record_returning_cleanup_preserves_landscape_run_id(self, service) -> None:
+        """Startup reconciliation needs cancelled run records to update Landscape."""
+        session = await service.create_session("alice", "Pipeline", "local")
+        state = await service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        run = await service.create_run(session.id, state.id)
+        await service.update_run_status(run.id, "running", landscape_run_id="lscp-orphan-1")
+
+        cancelled = await service.cancel_all_orphaned_run_records(
+            reason="Orphaned by server restart - no active process",
+        )
+
+        assert len(cancelled) == 1
+        cancelled_run = cancelled[0]
+        assert cancelled_run.id == run.id
+        assert cancelled_run.status == "cancelled"
+        assert cancelled_run.finished_at is not None
+        assert cancelled_run.error == "Orphaned by server restart - no active process"
+        assert cancelled_run.landscape_run_id == "lscp-orphan-1"
 
     @pytest.mark.asyncio
     async def test_cancels_pending_runs_without_age_filter(self, service) -> None:

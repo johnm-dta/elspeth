@@ -208,6 +208,13 @@
   color: var(--color-text-muted);
 }
 
+.plugin-card-variants-hint {
+  margin-bottom: var(--space-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-2xs);
+  line-height: 1.35;
+}
+
 .plugin-card-fields {
   display: flex;
   flex-direction: column;

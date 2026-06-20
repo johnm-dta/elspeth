@@ -25,6 +25,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.errors import ContractMergeError
 from elspeth.contracts.plugin_context import PluginContext
+from elspeth.contracts.union_merge import merge_union_contracts
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from tests.fixtures.base_classes import inject_write_failure
 
@@ -439,10 +440,11 @@ class TestContractWithSinkHeaderModes:
 
 
 class TestContractMergeAtCoalesce:
-    """Test contract merge behavior for coalesce points."""
+    """Test contract merge behavior for coalesce points (merge_union_contracts)."""
 
-    def test_contract_merge_compatible_types(self) -> None:
-        """Contracts with same fields and types merge successfully."""
+    @pytest.mark.parametrize("require_all", [True, False])
+    def test_contract_merge_compatible_types(self, require_all: bool) -> None:
+        """Contracts with same fields and types merge successfully under any policy."""
         contract_a = SchemaContract(
             mode="OBSERVED",
             fields=(
@@ -461,7 +463,11 @@ class TestContractMergeAtCoalesce:
             locked=True,
         )
 
-        merged = contract_a.merge(contract_b)
+        merged = merge_union_contracts(
+            {"a": contract_a, "b": contract_b},
+            require_all=require_all,
+            branch_order=("a", "b"),
+        )
 
         # All fields from both contracts
         assert merged.get_field("id") is not None
@@ -471,8 +477,9 @@ class TestContractMergeAtCoalesce:
         # Merged is locked
         assert merged.locked is True
 
-    def test_contract_merge_type_conflict_raises(self) -> None:
-        """Contracts with conflicting field types raise ContractMergeError."""
+    @pytest.mark.parametrize("require_all", [True, False])
+    def test_contract_merge_type_conflict_raises(self, require_all: bool) -> None:
+        """Contracts with conflicting field types raise ContractMergeError under any policy."""
         contract_a = SchemaContract(
             mode="OBSERVED",
             fields=(FieldContract("amount", "Amount", int, True, "declared"),),
@@ -486,6 +493,10 @@ class TestContractMergeAtCoalesce:
         )
 
         with pytest.raises(ContractMergeError) as exc_info:
-            contract_a.merge(contract_b)
+            merge_union_contracts(
+                {"a": contract_a, "b": contract_b},
+                require_all=require_all,
+                branch_order=("a", "b"),
+            )
 
         assert "amount" in str(exc_info.value)

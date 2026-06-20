@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import sys
 import types
 import typing
 from pathlib import Path
@@ -13,8 +15,28 @@ from pydantic import ValidationError
 from elspeth.web.config import WebSettings
 
 
+def test_playwright_local_backend_secret_key_satisfies_non_pytest_guard() -> None:
+    """The Playwright-managed backend runs outside pytest and needs a 32-byte key."""
+    config_path = Path(__file__).parents[3] / "src/elspeth/web/frontend/playwright.config.ts"
+    match = re.search(r'ELSPETH_WEB__secret_key:\s*"([^"]+)"', config_path.read_text(encoding="utf-8"))
+
+    assert match is not None
+    assert len(match.group(1).encode("utf-8")) >= 32
+
+
 class TestWebSettingsValidation:
     """Tests for field validation."""
+
+    def test_unknown_setting_field_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="extra"):
+            WebSettings(
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\x00" * 32,
+                composer_expose_provder_errors=True,  # type: ignore[call-arg]
+            )
 
     def test_invalid_auth_provider_rejected(self) -> None:
         with pytest.raises(ValueError):
@@ -406,6 +428,20 @@ class TestSecretKeyGuard:
             shareable_link_signing_key=b"\x00" * 32,
         )
         assert settings.secret_key == "change-me-in-production"
+
+    def test_default_secret_key_rejected_on_loopback_outside_test_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delitem(sys.modules, "pytest", raising=False)
+        monkeypatch.delenv("ELSPETH_ENV", raising=False)
+
+        with pytest.raises(ValidationError, match="secret_key must be set"):
+            WebSettings(
+                host="127.0.0.1",
+                composer_max_composition_turns=15,
+                composer_max_discovery_turns=10,
+                composer_timeout_seconds=85.0,
+                composer_rate_limit_per_minute=10,
+                shareable_link_signing_key=b"\xab\xcd" * 16,
+            )
 
     def test_custom_secret_key_allowed_on_any_host(self) -> None:
         # DC-2 FIX-L: non-loopback hosts also need a non-weak signing key.

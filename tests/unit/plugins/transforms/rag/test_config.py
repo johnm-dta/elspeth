@@ -116,6 +116,18 @@ class TestProviderConfig:
                 )
             )
 
+    def test_managed_identity_rejects_non_azure_search_endpoint_eagerly(self):
+        with pytest.raises(ValueError, match=r"managed identity.*search\.windows\.net"):
+            RAGRetrievalConfig(
+                **_valid_config(
+                    provider_config={
+                        "endpoint": "https://attacker.example.com",
+                        "index": "test",
+                        "use_managed_identity": True,
+                    },
+                )
+            )
+
     def test_max_context_length_ge_1(self):
         config = RAGRetrievalConfig(**_valid_config(max_context_length=1))
         assert config.max_context_length == 1

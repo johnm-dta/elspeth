@@ -11,10 +11,11 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select
 
-from elspeth.contracts import NodeType
+from elspeth.contracts import CallStatus, CallType, NodeType
+from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import run_attributions_table
+from elspeth.core.landscape.schema import calls_table, run_attributions_table
 from elspeth.web.composer import tutorial_telemetry as tutorial_telemetry_module
 from elspeth.web.composer.skills import load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialRunOutput
@@ -22,6 +23,7 @@ from elspeth.web.composer.tutorial_service import (
     TutorialRunIntegrityError,
     _cache_seed_skip_reason,
     _coalesce_run_source_hashes,
+    _count_calls_for_run,
     _count_discarded_rows,
     _parse_rows_file,
     _plugin_nodes_from_composition_state,
@@ -49,6 +51,76 @@ def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     }
     values.update(overrides)
     return WebSettings(**values)
+
+
+def test_count_calls_for_run_counts_only_llm_calls() -> None:
+    db = make_landscape_db()
+    factory = make_factory(db)
+    schema_config = SchemaConfig.from_dict({"mode": "observed"})
+    run_id = "run-llm-count"
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    source_node = factory.data_flow.register_node(
+        run_id=run_id,
+        plugin_name="inline_blob",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        schema_config=schema_config,
+    )
+    transform_node = factory.data_flow.register_node(
+        run_id=run_id,
+        plugin_name="llm_rate",
+        node_type=NodeType.TRANSFORM,
+        plugin_version="1.0",
+        config={},
+        schema_config=schema_config,
+    )
+    _row, token = factory.data_flow.create_row_with_token(
+        run_id=run_id,
+        source_node_id=source_node.node_id,
+        row_index=0,
+        source_row_index=0,
+        ingest_sequence=0,
+        data={"url": "https://example.gov"},
+    )
+    state = factory.execution.record_completed_node_state(
+        token_id=token.token_id,
+        node_id=transform_node.node_id,
+        run_id=run_id,
+        step_index=1,
+        input_data={"url": "https://example.gov"},
+        output_data={"rating": 5},
+        duration_ms=1.0,
+    )
+    operation = factory.execution.begin_operation(
+        run_id=run_id,
+        node_id=source_node.node_id,
+        operation_type="source_load",
+    )
+
+    def insert_call(call_id: str, *, call_type: CallType, state_id: str | None = None, operation_id: str | None = None) -> None:
+        with db.write_connection() as conn:
+            conn.execute(
+                calls_table.insert().values(
+                    call_id=call_id,
+                    state_id=state_id,
+                    operation_id=operation_id,
+                    call_index=0 if call_type is CallType.LLM else 1,
+                    call_type=call_type.value,
+                    status=CallStatus.SUCCESS.value,
+                    request_hash=f"{call_id}-request",
+                    response_hash=f"{call_id}-response",
+                    created_at=datetime.now(UTC),
+                )
+            )
+
+    insert_call("state-llm", call_type=CallType.LLM, state_id=state.state_id)
+    insert_call("state-http", call_type=CallType.HTTP, state_id=state.state_id)
+    insert_call("operation-llm", call_type=CallType.LLM, operation_id=operation.operation_id)
+    insert_call("operation-sql", call_type=CallType.SQL, operation_id=operation.operation_id)
+
+    with db.connection() as conn:
+        assert _count_calls_for_run(conn, run_id) == 2
 
 
 def test_count_discarded_rows_counts_only_discard_destination() -> None:
@@ -512,7 +584,7 @@ def test_parser_handles_list_form_transforms_from_production_composer_yaml() -> 
     Tier-1 topology corruption in a different shape than C1.
     """
     doc = {
-        "source": {"plugin": "inline_blob", "options": {"rows": [{"url": "ato.gov.au"}]}},
+        "sources": {"primary": {"plugin": "inline_blob", "options": {"rows": [{"url": "ato.gov.au"}]}}},
         "transforms": [
             {"name": "scrape", "plugin": "web_scrape", "input": "source", "on_success": "rate", "on_error": "abort"},
             {"name": "rate", "plugin": "llm_rate", "input": "scrape", "on_success": "out", "on_error": "abort"},
@@ -535,7 +607,7 @@ def test_parser_handles_list_form_aggregations() -> None:
     name and version and must appear in the synthesised audit topology.
     """
     doc = {
-        "source": {"plugin": "csv"},
+        "sources": {"primary": {"plugin": "csv"}},
         "transforms": [{"name": "norm", "plugin": "passthrough", "input": "source", "on_success": "batch", "on_error": "abort"}],
         "aggregations": [
             {"name": "batch", "plugin": "batch_stats", "input": "norm", "on_success": "out", "on_error": "abort"},
@@ -560,7 +632,7 @@ def test_parser_rejects_gates_in_synthesised_replay_yaml() -> None:
     synthesise a half-truth audit row rather than silently dropping it.
     """
     doc = {
-        "source": {"plugin": "csv"},
+        "sources": {"primary": {"plugin": "csv"}},
         "transforms": [],
         "gates": [{"name": "branch", "input": "source", "condition": "row.x > 0", "routes": []}],
         "sinks": {"out": {"plugin": "jsonl"}},
@@ -571,7 +643,7 @@ def test_parser_rejects_gates_in_synthesised_replay_yaml() -> None:
 
 def test_parser_rejects_coalesce_in_synthesised_replay_yaml() -> None:
     doc = {
-        "source": {"plugin": "csv"},
+        "sources": {"primary": {"plugin": "csv"}},
         "coalesce": [{"name": "merge", "branches": ["a", "b"], "policy": "all", "merge": "concat"}],
         "sinks": {"out": {"plugin": "jsonl"}},
     }
@@ -588,7 +660,7 @@ def test_parser_rejects_dict_form_transforms_no_legacy_compat() -> None:
     rather than partially honouring a non-production format.
     """
     doc = {
-        "source": {"plugin": "csv"},
+        "sources": {"primary": {"plugin": "csv"}},
         "transforms": {"keep": {"plugin": "passthrough"}},
         "sinks": {"out": {"plugin": "jsonl"}},
     }

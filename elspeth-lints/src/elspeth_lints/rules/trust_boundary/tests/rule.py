@@ -90,6 +90,8 @@ from elspeth_lints.rules.trust_boundary.tests.metadata import (
     RULE_METADATA,
     RULE_MISSING,
     RULE_NONLITERAL,
+    RULE_NONRAISING_HAS_TESTREF,
+    RULE_NONRAISING_RAISES,
     RULE_NOTFOUND,
     RULE_PARSE_ERROR,
     RULE_TOO_LARGE,
@@ -102,10 +104,16 @@ from elspeth_lints.rules.trust_boundary.tests.metadata import (
     SUGGESTION_INVARIANT_MISMATCH,
     SUGGESTION_MISSING,
     SUGGESTION_NONLITERAL,
+    SUGGESTION_NONRAISING_HAS_TESTREF,
+    SUGGESTION_NONRAISING_RAISES,
     SUGGESTION_NOTFOUND,
     SUGGESTION_PARSE_ERROR,
     SUGGESTION_TOO_LARGE,
     SUGGESTION_WEAK,
+)
+from elspeth_lints.rules.trust_tier.tier_model.trust_boundary_suppress import (
+    assignment_target_names,
+    subject_is_rooted,
 )
 
 _MAX_TEST_REF_BYTES = 5 * 1024 * 1024
@@ -183,6 +191,50 @@ def analyze_tree(tree: ast.AST, file_path: str, *, repo_root: Path) -> list[Find
         source_param = kwargs.get("source_param")
         invariant = kwargs.get("invariant")
         test_fingerprint = kwargs.get("test_fingerprint")
+        if kwargs.get("non_raising") is True:
+            # Non-raising boundary: the contract is return-a-sentinel on
+            # malformed source_param input, so a raising honesty test cannot
+            # exist. Replace the raising-test gate with a mechanical proof that
+            # no raise in the body is control-dependent on a source_param-derived
+            # guard. ``is True`` is strict: a truthy non-bool falls through to
+            # the raising-test path (and tier_model flags it R_TB_MALFORMED).
+            if test_ref is not None:
+                findings.append(
+                    make_decorator_finding(
+                        metadata=RULE_METADATA,
+                        rule_id=RULE_NONRAISING_HAS_TESTREF,
+                        file_path=file_path,
+                        call=call,
+                        message=(
+                            "@trust_boundary(non_raising=True) also declares test_ref; a non-raising boundary "
+                            "returns a sentinel on malformed input and cannot have a raising test."
+                        ),
+                        suggestion=SUGGESTION_NONRAISING_HAS_TESTREF,
+                        symbol_context=(func_node.name,),
+                    )
+                )
+                continue
+            if not isinstance(source_param, str) or not source_param:
+                # Malformed source_param is enforced by trust_boundary.scope and
+                # trust_tier.tier_model; avoid double-reporting here.
+                continue
+            for raise_node in _nonraising_boundary_raises(func_node, source_param):
+                findings.append(
+                    make_decorator_finding(
+                        metadata=RULE_METADATA,
+                        rule_id=RULE_NONRAISING_RAISES,
+                        file_path=file_path,
+                        call=call,
+                        message=(
+                            f"@trust_boundary(non_raising=True) on {func_node.name!r} declares it never raises on "
+                            f"source_param={source_param!r}, but the raise at line {raise_node.lineno} is guarded by a "
+                            "check on source_param-derived data — the boundary does raise on malformed input."
+                        ),
+                        suggestion=SUGGESTION_NONRAISING_RAISES,
+                        symbol_context=(func_node.name,),
+                    )
+                )
+            continue
         if test_ref is None:
             findings.append(
                 make_decorator_finding(
@@ -775,6 +827,139 @@ def _terminal_attribute_name(expr: ast.expr) -> str | None:
 
 def _is_type_name(name: str) -> bool:
     return bool(name) and name[0].isupper()
+
+
+# =============================================================================
+# Non-raising boundary honesty check (mechanical, no judge, no prose)
+# =============================================================================
+#
+# A ``@trust_boundary(non_raising=True)`` claims the function returns a sentinel
+# on malformed ``source_param`` input and never raises on it. We verify that
+# claim by inspecting the code directly rather than reading a rationale:
+#
+#   1. Build the set of names *structurally* rooted at ``source_param`` —
+#      derived through subscript / attribute / ``.get(...)`` / iteration /
+#      unpacking, but NOT through a function call (a call launders the trust
+#      tier: ``f(state)``'s result is ``f``'s responsibility, not ``state``'s).
+#      This mirrors ``trust_boundary_suppress.subject_is_rooted`` so the honesty
+#      check and the suppression scope agree on what "the boundary" is.
+#   2. Flag every ``raise`` whose control flow is gated by a check on a derived
+#      name. A raise reachable only when a derived value fails a shape check IS
+#      "raising on malformed input" — the boundary is testable and the
+#      non_raising claim is false. Tier-1 invariant raises (guarded by checks on
+#      non-derived / call-laundered data) are correctly left alone.
+#
+# The walk is flow-insensitive (fixpoint over all assignments) and propagates
+# the "guarded" flag down whole subtrees: both deliberately conservative — they
+# can only *over*-report a raise as boundary-coupled, never hide one, so the
+# gate cannot be talked past.
+
+
+def _structurally_derived_names(func_node: ast.FunctionDef | ast.AsyncFunctionDef, source_param: str) -> frozenset[str]:
+    """Return local names rooted at ``source_param`` by structural derivation.
+
+    Flow-insensitive fixpoint: a name becomes derived when it is assigned from
+    (or iterated over) an expression rooted at an already-derived name. Stops at
+    function calls via :func:`subject_is_rooted`, so values laundered through a
+    helper call are not considered part of the boundary.
+    """
+    derived: set[str] = {source_param}
+    changed = True
+    while changed:
+        changed = False
+        for statement in func_node.body:
+            for node in _own_scope_statements(statement):
+                snapshot = frozenset(derived)
+                if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                    value = node.value
+                    if value is None or not subject_is_rooted(value, snapshot):
+                        continue
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        for name in assignment_target_names(target):
+                            if name not in derived:
+                                derived.add(name)
+                                changed = True
+                elif isinstance(node, (ast.For, ast.AsyncFor)):
+                    if not subject_is_rooted(node.iter, snapshot):
+                        continue
+                    for name in assignment_target_names(node.target):
+                        if name not in derived:
+                            derived.add(name)
+                            changed = True
+    return frozenset(derived)
+
+
+def _nonraising_boundary_raises(
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    source_param: str,
+) -> list[ast.Raise]:
+    """Return ``raise`` statements control-dependent on a source_param-derived guard."""
+    derived = _structurally_derived_names(func_node, source_param)
+    violations: list[ast.Raise] = []
+    _collect_guarded_raises(func_node.body, derived=derived, guarded=False, out=violations)
+    return violations
+
+
+def _collect_guarded_raises(
+    body: list[ast.stmt],
+    *,
+    derived: frozenset[str],
+    guarded: bool,
+    out: list[ast.Raise],
+) -> None:
+    """Recurse ``body`` (own scope only), flagging raises under a derived guard.
+
+    ``guarded`` is sticky: once we enter a branch controlled by a derived test,
+    every raise beneath it counts. Nested function / class / lambda scopes are
+    not descended — a raise inside a nested helper is that helper's contract.
+    """
+    for statement in body:
+        if isinstance(statement, ast.Raise):
+            if guarded:
+                out.append(statement)
+        elif isinstance(statement, (ast.If, ast.While)):
+            branch_guarded = guarded or _expr_mentions_any(statement.test, derived)
+            _collect_guarded_raises(statement.body, derived=derived, guarded=branch_guarded, out=out)
+            _collect_guarded_raises(statement.orelse, derived=derived, guarded=branch_guarded, out=out)
+        elif isinstance(statement, (ast.For, ast.AsyncFor)):
+            branch_guarded = guarded or subject_is_rooted(statement.iter, derived)
+            _collect_guarded_raises(statement.body, derived=derived, guarded=branch_guarded, out=out)
+            _collect_guarded_raises(statement.orelse, derived=derived, guarded=guarded, out=out)
+        elif isinstance(statement, (ast.With, ast.AsyncWith)):
+            _collect_guarded_raises(statement.body, derived=derived, guarded=guarded, out=out)
+        elif isinstance(statement, ast.Try):
+            _collect_guarded_raises(statement.body, derived=derived, guarded=guarded, out=out)
+            for handler in statement.handlers:
+                _collect_guarded_raises(handler.body, derived=derived, guarded=guarded, out=out)
+            _collect_guarded_raises(statement.orelse, derived=derived, guarded=guarded, out=out)
+            _collect_guarded_raises(statement.finalbody, derived=derived, guarded=guarded, out=out)
+        elif isinstance(statement, ast.Match):
+            subject_guarded = guarded or _expr_mentions_any(statement.subject, derived)
+            for case in statement.cases:
+                _collect_guarded_raises(case.body, derived=derived, guarded=subject_guarded, out=out)
+        # FunctionDef / AsyncFunctionDef / ClassDef: nested scope, not descended.
+
+
+def _expr_mentions_any(expr: ast.expr, names: frozenset[str]) -> bool:
+    """Return True if ``expr`` references any name in ``names``."""
+    return any(isinstance(node, ast.Name) and node.id in names for node in ast.walk(expr))
+
+
+def _own_scope_statements(statement: ast.stmt) -> list[ast.stmt]:
+    """Flatten a statement into its own-scope descendant statements (no nested defs)."""
+    collected: list[ast.stmt] = []
+    _flatten_own_scope(statement, collected)
+    return collected
+
+
+def _flatten_own_scope(statement: ast.stmt, out: list[ast.stmt]) -> None:
+    out.append(statement)
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return
+    for child in ast.iter_child_nodes(statement):
+        if isinstance(child, ast.stmt):
+            _flatten_own_scope(child, out)
 
 
 RULE = TrustBoundaryTestsRule()

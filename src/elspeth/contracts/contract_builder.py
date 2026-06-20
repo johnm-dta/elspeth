@@ -15,6 +15,12 @@ from typing import Any, cast
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 from elspeth.contracts.type_normalization import UNSUPPORTED_CONTRACT_TYPE, normalize_type_for_contract
 
+_MAX_INFERRED_CONTRACT_FIELDS = 1024
+
+
+class ContractFieldLimitExceeded(ValueError):
+    """Raised when sparse external data would grow a contract beyond its cap."""
+
 
 class ContractBuilder:
     """Manages contract state through first-row inference.
@@ -92,12 +98,22 @@ class ContractBuilder:
         self,
         row: dict[str, Any],
         field_resolution: Mapping[str, str],
+        *,
+        enforce_field_cap: bool = False,
     ) -> SchemaContract:
         """Infer contract metadata for row fields not already in the contract."""
         normalized_to_original = self._normalized_to_original(field_resolution)
 
         updated = self._contract
         declared_names = {f.normalized_name for f in updated.fields}
+        missing_names = tuple(normalized_name for normalized_name in row if normalized_name not in declared_names)
+
+        if enforce_field_cap and len(declared_names) + len(missing_names) > _MAX_INFERRED_CONTRACT_FIELDS:
+            first_excess_index = max(_MAX_INFERRED_CONTRACT_FIELDS - len(declared_names), 0)
+            first_excess_name = missing_names[first_excess_index]
+            raise ContractFieldLimitExceeded(
+                f"row exceeds maximum inferred schema fields ({_MAX_INFERRED_CONTRACT_FIELDS}); field '{first_excess_name}' cannot be added"
+            )
 
         for normalized_name, value in row.items():
             if normalized_name in declared_names:
@@ -169,4 +185,4 @@ class ContractBuilder:
         """
         if self._contract.mode == "FIXED":
             return self._contract
-        return self._infer_missing_fields(row, field_resolution)
+        return self._infer_missing_fields(row, field_resolution, enforce_field_cap=True)

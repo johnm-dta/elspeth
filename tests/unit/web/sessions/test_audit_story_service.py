@@ -42,7 +42,8 @@ def test_audit_story_reads_real_landscape_rows() -> None:
     assert story.run_id == "session-run-1"
     assert story.session_id == "session-1"
     assert story.llm_call_count == 0
-    assert story.output_file_hash == "a7f3e2cached"
+    assert story.source_data_hash == "a7f3e2cached"
+    assert "output_file_hash" not in story.model_dump()
     assert story.started_at == datetime(2026, 5, 15, tzinfo=UTC).replace(tzinfo=None) or story.started_at == datetime(
         2026, 5, 15, tzinfo=UTC
     )
@@ -84,7 +85,7 @@ def test_audit_story_aggregates_multiple_row_source_hashes() -> None:
         session_id="session-1",
     )
 
-    assert story.output_file_hash == stable_hash({"source_data_hashes": list(hashes)})
+    assert story.source_data_hash == stable_hash({"source_data_hashes": list(hashes)})
 
 
 def test_audit_story_missing_run_raises_named_error() -> None:

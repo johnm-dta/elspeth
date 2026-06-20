@@ -957,9 +957,9 @@ class TestDatabaseSinkFalseSuccess:
         engine.dispose()
 
     def test_none_engine_at_insert_raises_invariant_error(self, tmp_path: Path) -> None:
-        """If _ensure_table fails to set engine/table, assertion catches it.
+        """If _ensure_table fails to set engine/table, explicit invariant raises.
 
-        This tests the defense-in-depth assertion. We mock _ensure_table to
+        This tests the defense-in-depth invariant. We mock _ensure_table to
         be a no-op, simulating a code path where the invariant is broken.
         Previously, the code would silently skip INSERT and record SUCCESS.
         """
@@ -982,9 +982,47 @@ class TestDatabaseSinkFalseSuccess:
             operation_type="sink_write",
         )
 
-        # Mock _ensure_table to be a no-op, leaving _engine and _table as None
-        with patch.object(sink, "_ensure_table"), pytest.raises(AssertionError, match=r"engine.*None.*invariant"):
+        # Mock _ensure_table to be a no-op, leaving _engine and _table as None.
+        with patch.object(sink, "_ensure_table"), pytest.raises(RuntimeError, match=r"engine.*None.*invariant"):
             sink.write([{"id": 1, "name": "should_fail"}], ctx)
+
+    def test_drop_without_engine_raises_explicit_invariant_error(self, tmp_path: Path) -> None:
+        """DROP TABLE invariant failures must survive optimized Python."""
+        db_path = tmp_path / "test.db"
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "test_table",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
+        )
+        ctx = make_operation_context(
+            node_id="sink-0",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+
+        with pytest.raises(RuntimeError, match=r"engine.*None.*invariant"):
+            sink._drop_table_if_exists(ctx)
+
+    def test_direct_insert_without_engine_table_raises_explicit_invariant_error(self, tmp_path: Path) -> None:
+        """Per-row diversion helper should not rely on stripped assert statements."""
+        db_path = tmp_path / "test.db"
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": f"sqlite:///{db_path}",
+                    "table": "test_table",
+                    "schema": STRICT_SCHEMA,
+                }
+            )
+        )
+
+        with pytest.raises(RuntimeError, match=r"engine/table.*None.*invariant"):
+            sink._insert_with_per_row_diversion([{"id": 1, "name": "alice"}], [{"id": 1, "name": "alice"}])
 
 
 class TestDDLAuditRecording:
@@ -1320,3 +1358,195 @@ class TestPerRowConstraintDiversion:
         # are durable, because the outer transaction rolled back.
         persisted = self._read_rows(db_url, "output")
         assert [r["id"] for r in persisted] == [100], f"Expected only seed row, got {[r['id'] for r in persisted]}"
+
+    def test_data_error_in_middle_row_diverts_only_that_row(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """B3.3 Half A: A DataError on one row is diverted; the rest commit.
+
+        DataError is a sibling of IntegrityError under DatabaseError -- both are
+        per-row-attributable (e.g. integer overflow on a typed column) but
+        DataError is NOT a subclass of IntegrityError. The old code caught only
+        IntegrityError, so a DataError escaped the divert arm, propagated out
+        of engine.begin() as a batch-integrity crash, and recorded an ERROR
+        rather than a partial SUCCESS.
+
+        We simulate DataError on row index 1 via monkeypatching conn.execute.
+        After the fix, rows 0 and 2 persist; row 1 is diverted; the audit record
+        shows 2 rows committed (not an error).
+        """
+        from unittest.mock import patch
+
+        from sqlalchemy.engine import Connection
+        from sqlalchemy.exc import DataError
+
+        from elspeth.contracts import CallStatus
+
+        db_url = f"sqlite:///{tmp_path / 'test.db'}"
+        schema = {"mode": "fixed", "fields": ["id: int", "name: str"]}
+        sink = inject_write_failure(DatabaseSink({"url": db_url, "table": "output", "schema": schema}))
+
+        # Seed the table so it exists (first write creates it)
+        initial_ctx = make_operation_context(
+            node_id="sink-init",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+        sink.write([{"id": 99, "name": "seed"}], initial_ctx)
+
+        # Capture audit calls
+        original_record_call = ctx.record_call
+        recorded_calls: list[dict[str, Any]] = []
+
+        def tracking_record_call(**kwargs: object) -> None:
+            recorded_calls.append(dict(kwargs))
+            original_record_call(**kwargs)  # type: ignore[arg-type]
+
+        rows: list[dict[str, Any]] = [
+            {"id": 0, "name": "alice"},
+            {"id": 1, "name": "bad-data"},  # will be made to raise DataError
+            {"id": 2, "name": "carol"},
+        ]
+
+        original_execute = Connection.execute
+
+        def data_error_on_second_row(self_conn: Connection, statement: Any, parameters: Any = None, *args: Any, **kwargs: Any) -> Any:
+            # Raise DataError on the batch fast-path (len > 1) to trigger the
+            # per-row fallback, then raise DataError again on the row with id==1
+            # so that row is diverted while rows 0 and 2 commit.
+            params = parameters
+            if isinstance(params, list):
+                if len(params) > 1:
+                    # Batch INSERT - raise DataError to trigger fallback
+                    raise DataError("simulated DataError on batch", None, Exception("data out of range"))
+                if len(params) == 1 and params[0].get("id") == 1:
+                    raise DataError("simulated DataError on row 1", None, Exception("data out of range"))
+            return original_execute(self_conn, statement, parameters, *args, **kwargs)
+
+        with (
+            patch.object(ctx, "record_call", side_effect=tracking_record_call),
+            patch.object(Connection, "execute", data_error_on_second_row),
+        ):
+            result = sink.write(rows, ctx)
+
+        sink.close()
+
+        # Rows 0 and 2 must have persisted; row 1 must be absent.
+        persisted = self._read_rows(db_url, "output")
+        ids = sorted(r["id"] for r in persisted if r["id"] != 99)
+        assert ids == [0, 2], f"Expected rows 0 and 2 persisted (plus seed), got {ids}"
+
+        # Row 1 diverted with correct row_index and row_data.
+        assert len(result.diversions) == 1
+        diversion = result.diversions[0]
+        assert diversion.row_index == 1
+        assert diversion.row_data["id"] == 1
+
+        # Artifact reflects the 2 newly-committed rows (plus seed is from prior write)
+        assert result.artifact.metadata is not None
+        assert result.artifact.metadata["row_count"] == 2
+
+        # The audit trail must record SUCCESS with 2 rows, not an ERROR.
+        insert_calls = [
+            c for c in recorded_calls if c.get("request_data", {}).get("operation") == "INSERT" and c.get("status") == CallStatus.SUCCESS
+        ]
+        assert len(insert_calls) == 1, f"Expected 1 SUCCESS INSERT call, got {insert_calls}"
+        assert insert_calls[0]["request_data"]["row_count"] == 2
+        assert insert_calls[0]["response_data"]["rows_inserted"] == 2
+
+
+class TestFlexibleModeSerializationB33(TestDatabaseSink):
+    """B3.3 Half B: Flexible-mode extra columns get dict/list values serialized.
+
+    In flexible mode, extra (non-declared) columns are created as plain Text
+    columns. The _any_typed_fields set tracks only declared 'any'-typed fields,
+    so extras were invisible to _serialize_any_typed_fields -- raw dicts/lists
+    hit the driver and raised ProgrammingError instead of being stored as JSON.
+    """
+
+    def test_flexible_mode_extra_dict_column_serialized_to_json(self, tmp_path: Path) -> None:
+        """B3.3 Half B: dict value in a flexible extra column is stored as JSON string.
+
+        flexible schema with 'id: int' declared; row has 'extra' key with a dict
+        value. After the fix the row commits and the stored value is a JSON string.
+        Pre-fix: raises sqlite3.ProgrammingError (type 'dict' is not supported).
+        """
+        import json
+
+        db_url = f"sqlite:///{tmp_path / 'test.db'}"
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "flex_test",
+                    "schema": {"mode": "flexible", "fields": ["id: int"]},
+                    "if_exists": "replace",
+                }
+            )
+        )
+        ctx = make_operation_context(
+            node_id="sink-0",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+
+        original_dict = {"k": "v", "n": [1, 2, 3]}
+        # B3.3 pre-fix: this raises ProgrammingError; post-fix: row commits.
+        result = sink.write([{"id": 1, "extra": original_dict}], ctx)
+        sink.close()
+
+        # row_count == 1: row was NOT diverted, it committed.
+        assert result.artifact.metadata is not None
+        assert result.artifact.metadata["row_count"] == 1
+
+        # The stored value must be a JSON string that round-trips to the original.
+        engine = create_engine(db_url)
+        metadata = MetaData()
+        tbl = Table("flex_test", metadata, autoload_with=engine)
+        with engine.connect() as conn:
+            rows_db = list(conn.execute(select(tbl)))
+        engine.dispose()
+        assert len(rows_db) == 1
+        row_dict = dict(rows_db[0]._mapping)
+        assert isinstance(row_dict["extra"], str), f"Expected JSON string, got {type(row_dict['extra'])}: {row_dict['extra']!r}"
+        assert json.loads(row_dict["extra"]) == original_dict
+
+    def test_flexible_mode_extra_list_column_serialized_to_json(self, tmp_path: Path) -> None:
+        """B3.3 Half B: list value in a flexible extra column is stored as JSON string."""
+        import json
+
+        db_url = f"sqlite:///{tmp_path / 'test.db'}"
+        sink = inject_write_failure(
+            DatabaseSink(
+                {
+                    "url": db_url,
+                    "table": "flex_list_test",
+                    "schema": {"mode": "flexible", "fields": ["id: int"]},
+                    "if_exists": "replace",
+                }
+            )
+        )
+        ctx = make_operation_context(
+            node_id="sink-0",
+            plugin_name="database",
+            node_type="SINK",
+            operation_type="sink_write",
+        )
+
+        original_list = [1, 2, {"nested": True}]
+        result = sink.write([{"id": 2, "tags": original_list}], ctx)
+        sink.close()
+
+        assert result.artifact.metadata is not None
+        assert result.artifact.metadata["row_count"] == 1
+
+        engine = create_engine(db_url)
+        metadata = MetaData()
+        tbl = Table("flex_list_test", metadata, autoload_with=engine)
+        with engine.connect() as conn:
+            rows_db = list(conn.execute(select(tbl)))
+        engine.dispose()
+        assert len(rows_db) == 1
+        row_dict = dict(rows_db[0]._mapping)
+        assert isinstance(row_dict["tags"], str)
+        assert json.loads(row_dict["tags"]) == original_list

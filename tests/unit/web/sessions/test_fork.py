@@ -152,9 +152,45 @@ class TestForkSession:
         )
 
         assert copied_state is not None
-        assert copied_state.source == state_v1.source
+        assert copied_state.sources == state_v1.sources
         # v2 had nodes; v1 did not
         assert copied_state.nodes is None
+
+    @pytest.mark.asyncio
+    async def test_fork_preserves_named_sources_at_fork_point(self, service) -> None:
+        session = await service.create_session("alice", "Original", "local")
+        sources = {
+            "orders": {"plugin": "csv", "on_success": "orders_rows", "on_validation_failure": "discard", "options": {"path": "orders.csv"}},
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "on_validation_failure": "discard",
+                "options": {"path": "refunds.csv"},
+            },
+        }
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(sources=sources, is_valid=True),
+            provenance="session_seed",
+        )
+        fork_msg = await service.add_message(
+            session.id,
+            "user",
+            "Build this",
+            composition_state_id=state.id,
+            writer_principal="route_user_message",
+        )
+
+        _, _, copied_state = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="Build that",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        assert copied_state is not None
+        assert copied_state.sources == sources
 
     @pytest.mark.asyncio
     async def test_fork_raises_audit_integrity_error_for_cross_session_fork_message_state(
@@ -717,6 +753,17 @@ def _make_fork_app(
     return app, session_service, blob_service
 
 
+def _read_composition_state_provenances(service: SessionServiceImpl, session_id: str) -> list[str]:
+    from sqlalchemy import text
+
+    with service._engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT provenance FROM composition_states WHERE session_id = :sid ORDER BY version"),
+            {"sid": session_id},
+        ).fetchall()
+    return [row.provenance for row in rows]
+
+
 class TestForkEndpoint:
     """Route-level tests for POST /api/sessions/{id}/fork."""
 
@@ -746,6 +793,58 @@ class TestForkEndpoint:
         msgs = body["messages"]
         assert any(m["role"] == "system" for m in msgs)
         assert any(m["content"] == "Hello universe" for m in msgs)
+
+    @pytest.mark.asyncio
+    async def test_fork_blob_rewrite_persists_session_fork_provenance(self, tmp_path) -> None:
+        """Fork-time blob remapping is still part of the fork writer path."""
+        app, service, blob_service = _make_fork_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Original", "local")
+        blob = await blob_service.create_blob(
+            session.id,
+            "data.csv",
+            b"a,b\n1,2",
+            "text/csv",
+        )
+        source_state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources={
+                    "my_csv": {
+                        "plugin": "csv",
+                        "options": {
+                            "blob_ref": str(blob.id),
+                            "path": blob.storage_path,
+                        },
+                    }
+                },
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Process this",
+            composition_state_id=source_state.id,
+            writer_principal="route_user_message",
+        )
+
+        response = client.post(
+            f"/api/sessions/{session.id}/fork",
+            json={
+                "from_message_id": str(msg.id),
+                "new_message_content": "Process that instead",
+            },
+        )
+
+        assert response.status_code == 201
+        fork_session_id = response.json()["session"]["id"]
+        assert _read_composition_state_provenances(service, fork_session_id) == [
+            "session_fork",
+            "session_fork",
+        ]
 
     @pytest.mark.asyncio
     async def test_fork_endpoint_idor_protection(self, tmp_path) -> None:
@@ -907,8 +1006,7 @@ class TestForkEndpoint:
 
         copied_state = await service.get_current_state(new_session_id)
         assert copied_state is not None
-        assert copied_state.source is not None
-        options = copied_state.source["options"]
+        options = copied_state.sources["source"]["options"]
         assert options["blob_ref"] == str(copied_blob.id)
         assert options[source_key] == copied_blob.storage_path
         assert options[source_key] != original_blob.storage_path
@@ -1468,3 +1566,72 @@ class TestForkEndpoint:
         assert any("permission denied removing blob dir" in note for note in notes)
         # Note must identify the orphan session id so operators can clean up.
         assert any("manual cleanup" in note.lower() for note in notes)
+
+    @pytest.mark.asyncio
+    async def test_fork_top_level_blob_ref_without_copied_blob_fails_closed(self, tmp_path) -> None:
+        """sources[].options.blob_ref must be guarded even when blob_map is empty.
+
+        When copy_blobs_for_fork returns {} (because the referenced blob was
+        deleted from the source session before the fork), the per-source loop
+        was gated on ``blob_map`` being non-empty.  That made the inner guard
+        at ``if old_uuid not in blob_map: raise AuditIntegrityError(...)``
+        unreachable in exactly the case it protects: a source whose options
+        carry a stale blob_ref with no corresponding copied blob.
+
+        The fork must fail-closed with AuditIntegrityError rather than
+        silently carrying the stale cross-session blob_ref into the forked
+        session.  The archive/rollback machinery must clean up the partial
+        fork so the session list remains unchanged.
+        """
+        app, service, _blob_service = _make_fork_app(tmp_path)
+
+        session = await service.create_session("alice", "Original", "local")
+
+        # Persist a composition state whose source options carry a blob_ref
+        # for a blob that does NOT exist (simulating a deleted blob).
+        # No actual blob is created → copy_blobs_for_fork returns {}.
+        missing_blob_id = uuid.uuid4()
+        source_state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources={
+                    "my_csv": {
+                        "plugin": "csv",
+                        "options": {
+                            "blob_ref": str(missing_blob_id),
+                            "path": "/data/deleted.csv",
+                        },
+                    }
+                },
+                is_valid=True,
+            ),
+            provenance="session_seed",
+        )
+        msg = await service.add_message(
+            session.id,
+            "user",
+            "Process this",
+            composition_state_id=source_state.id,
+            writer_principal="route_user_message",
+        )
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        client = TestClient(app)
+        with pytest.raises(AuditIntegrityError) as exc_info:
+            client.post(
+                f"/api/sessions/{session.id}/fork",
+                json={
+                    "from_message_id": str(msg.id),
+                    "new_message_content": "Process that instead",
+                },
+            )
+
+        message = str(exc_info.value)
+        assert "Tier 1" in message
+        assert "source blob was not copied" in message
+
+        # The partial fork session must have been archived so the list
+        # length is unchanged.
+        sessions = await service.list_sessions("alice", "local")
+        assert len(sessions) == 1

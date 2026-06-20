@@ -156,6 +156,8 @@ class TestSinkDurability:
             source_node_id="source",
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         db_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -179,9 +181,8 @@ class TestSinkDurability:
             nonlocal checkpoint_created
             checkpoint_mgr.create_checkpoint(
                 run_id=run.run_id,
-                token_id=token_info.token_id,
-                node_id="sink",
                 sequence_number=0,
+                barrier_scalars=None,
                 graph=mock_graph,
             )
             checkpoint_created = True
@@ -250,6 +251,8 @@ class TestSinkDurability:
             source_node_id="source",
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         db_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -319,6 +322,8 @@ class TestSinkDurability:
             source_node_id="source",
             row_index=0,
             data=row_data,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         db_token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -345,9 +350,8 @@ class TestSinkDurability:
             call_order.append("checkpoint")
             checkpoint_mgr.create_checkpoint(
                 run_id=run.run_id,
-                token_id=token_info.token_id,
-                node_id="sink",
                 sequence_number=0,
+                barrier_scalars=None,
                 graph=mock_graph,
             )
 
@@ -371,4 +375,3 @@ class TestSinkDurability:
         # Verify: Checkpoint was created successfully
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run.run_id)
         assert checkpoint is not None
-        assert checkpoint.token_id == token.token_id

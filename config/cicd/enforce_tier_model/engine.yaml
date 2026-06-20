@@ -49,7 +49,7 @@ per_file_rules:
     to distinguish audit-evidence exceptions from framework/orchestration failures without fabricating
     context.
   expires: null
-  max_hits: 11
+  max_hits: 14
 - pattern: engine/tokens.py
   rules:
   - R5
@@ -234,29 +234,6 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[10]/body[5]/body[0]/handlers[1]'
   judge_metadata_signature: 'hmac-sha256:v2:f9cde699173e19b1a223e94e5829f42bbd1d7d371d66115b423f4f4c457b3125'
-- key: engine/orchestrator/source_iteration.py:R5:SourceIterationDriver:handle_quarantine_row:fp=aa3181c35492e222
-  owner: john
-  reason: |-
-    In SourceIterationDriver.handle_quarantine_row, `quarantine_data = source_item.row if isinstance(source_item.row, dict) else {"_raw": source_item.row}` normalizes a row that FAILED source validation for the audit input_data of the quarantine node_state. SourceRow.row is typed Any, and a non-dict value legitimately reaches this quarantine path (malformed external source data is exactly what source validation rejected). The isinstance is Tier-3 evidence normalization, not bug-hiding or coercion: a dict row is recorded verbatim, a non-dict row is preserved verbatim under the tagged "_raw" key so the auditor sees exactly what the source emitted (the skill's "record the raw payload, tagged as what it is" carve-out). No value is fabricated, no default substituted, no meaning changed; the quarantine_error separately records why the row was rejected, and the pipeline quarantines-and-continues rather than crashing. This is honest Tier-3 audit capture of recoverable bad external input.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:09:42.567637+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. source_item.row is typed Any and originates from external source data that FAILED source validation — this is genuinely Tier-3 data at a quarantine boundary, not a first-party typed contract. The isinstance check normalizes the unvalidated payload for audit recording: a dict is recorded verbatim, a non-dict is preserved under a tagged '_raw' key so the auditor sees exactly what arrived. No value is fabricated, no default substituted, no meaning changed; absence/badness is recorded as-is alongside the quarantine_error. This is meaning-preserving Tier-3 evidence capture, which the policy explicitly permits.
-  judge_signature_version: 2
-  scope_fingerprint: 9c20ead96dabf96d80434ad8af9f8f5ada7a5a5f3fd0221fc71b6688885db390
-  judge_transport: openrouter
-  ast_path: 'body[27]/body[4]/body[13]/value/test'
-  judge_metadata_signature: 'hmac-sha256:v2:b0ace773c494b5e7533745f4a5d3528f196f6d60b6780321c34e5221309a08a0'
-  judge_excerpt_redactions:
-    - pattern: dotenv_secret_assignment
-      byte_count: 56
-      redacted_hash: 99167d0d18059ee8
 - key: engine/commencement.py:R5:evaluate_commencement_gates:fp=18ca009ccd49b5e0
   owner: john
   reason: |-
@@ -282,73 +259,507 @@ allow_hits:
     In SinkExecutor.write (line 540), `if not isinstance(write_result, SinkWriteResult)` guards `write_result = sink.write(rows, ctx)` — the return value of a PLUGIN method dispatched through the BaseSink plugin protocol (the concrete sink is any registered plugin, third-party included). The decisive fact the rule needs: Python does NOT enforce the `-> SinkWriteResult` return annotation at runtime, so a misbehaving or third-party sink can return ANY object; SinkWriteResult being a dataclass does not make the value at THIS call site a guaranteed instance — the annotation is a contract the plugin must honor, not a runtime guarantee. This isinstance is therefore the SOLE runtime enforcement point of the plugin-return contract at the boundary, NOT a redundant re-check of a type our own code constructs. On mismatch it raises a typed PluginContractViolation naming the sink and the actual type (this is a sink plugin bug), strictly more attributable than the bare AttributeError that direct attribute access (write_result.artifact) would produce on a non-instance, and it fails fast before any partial write-state is acted on. This is the CLAUDE.md-sanctioned plugin-returns-wrong-type to CRASH offensive guard; the R5 defensive-isinstance concern does not apply.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
+  expires: '2026-09-15'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:14:51.541849+00:00'
+  judge_recorded_at: '2026-06-17T15:52:44.708570+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
+  judge_confidence: 0.82
   judge_rationale: |-
-    PRESCRIBED FORM. The flagged isinstance guards the return value of a plugin method dispatched through the BaseSink protocol; Python does not enforce the `-> SinkWriteResult` annotation at runtime, so this is the sole runtime enforcement point of the plugin-return contract. On mismatch it raises a typed PluginContractViolation naming the sink and the actual type — the CLAUDE.md-prescribed 'plugin returns wrong type → CRASH, maximally informative' response, not silent coercion or recovery. The rationale plainly states the load-bearing fact (annotation is not runtime-enforced) and the visible code corroborates it (raise with sink name and actual type, no fallback path).
+    PRESCRIBED FORM. The isinstance->raise guards the return value of a plugin method dispatched through BaseSink; Python does not runtime-enforce the `-> SinkWriteResult` annotation, so a misbehaving sink plugin can return any object. The rationale plainly states this and the visible code shows the prescribed offensive response: raise a typed PluginContractViolation naming the sink and actual type — the CLAUDE.md 'plugin returns wrong type -> CRASH, maximally informative' pattern, not silent recovery or coercion. The guard sits at the plugin-return enforcement point and fails fast before downstream attribute access; R5's defensive-isinstance concern does not apply here.
   judge_signature_version: 2
-  scope_fingerprint: 053628fcf97eda3d86c68fe59740374dbe541e3619608f3083f15c74d5ce070f
+  scope_fingerprint: c1b583bdcee9b07ff9764485996176b7db46b3a56faca204edc05f91e88ea03e
   judge_transport: openrouter
   ast_path: 'body[26]/body[8]/body[14]/body[0]/body[1]/body[5]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:f7d1b3fd241451152f4a1cb4f4d74350e638d42c41a032d50d5e04167001cc17'
+  judge_metadata_signature: 'hmac-sha256:v2:a9895fcfc0eeaa4fefa8668dfefc5926d1b8536283ab2c03ce23971879e500bd'
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=333193edcab82132
   owner: john
   reason: |-
     In SinkExecutor.write (line 553), `if not isinstance(artifact_info, ArtifactDescriptor)` guards `write_result.artifact` and raises PluginContractViolation on mismatch. Under the system-owned sink's typed contract, SinkWriteResult.artifact must be an ArtifactDescriptor; per Plugin Ownership a wrong type is a first-party plugin bug we crash on, never coerce. The isinstance→raise is offensive programming (a maximally informative crash naming the sink and the actual type), not coercion, not silent recovery, and not a Tier-3 boundary. Same justification class as fp=8ae24dda2209d609; R5 does not apply.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
+  expires: '2026-09-15'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:14:57.115279+00:00'
+  judge_recorded_at: '2026-06-17T15:52:49.987391+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
   judge_confidence: 0.9
   judge_rationale: |-
-    PRESCRIBED FORM. SinkWriteResult.artifact is a first-party typed contract (the system-owned sink's return shape per Plugin Ownership), so a wrong type is a plugin bug. The isinstance→raise PluginContractViolation is the prescribed offensive CRASH response naming the sink and the actual type — not coercion, not silent recovery, not Tier-3 guarding. The rationale correctly identifies this as the legitimate form R5 is not meant to forbid, and the visible code matches.
+    PRESCRIBED FORM. SinkWriteResult.artifact is a first-party typed contract field returned by a system-owned sink plugin; per Plugin Ownership, a wrong type is a plugin bug that must crash, not be coerced or suppressed. The isinstance→raise here is the offensive-programming form (informative PluginContractViolation naming sink and actual type), not the defensive isinstance-to-suppress that R5 targets. The visible code and rationale together establish conformance: no coercion, no silent recovery, just a maximally informative crash on contract violation.
   judge_signature_version: 2
-  scope_fingerprint: 053628fcf97eda3d86c68fe59740374dbe541e3619608f3083f15c74d5ce070f
+  scope_fingerprint: c1b583bdcee9b07ff9764485996176b7db46b3a56faca204edc05f91e88ea03e
   judge_transport: openrouter
   ast_path: 'body[26]/body[8]/body[14]/body[0]/body[1]/body[7]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:c7583adb8b6b3eb21f49bb6fa63c259d75c7f0d834a335b0642c741a009672ed'
+  judge_metadata_signature: 'hmac-sha256:v2:ca147b13dd2e85874f4c3ef509fa0929e2d28f0ddf3353b99651c8aaf181537f'
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=6bf4f058589b3c6f
   owner: john
   reason: |-
     In SinkExecutor.write (line 794), `if not isinstance(failsink_write_result, SinkWriteResult)` guards `failsink_write_result = failsink.write(enriched_rows, ctx)` — the return value of a PLUGIN method dispatched through the BaseSink plugin protocol (the concrete failsink is any registered plugin, third-party included). The decisive fact the rule needs: Python does NOT enforce the `-> SinkWriteResult` return annotation at runtime, so a misbehaving or third-party failsink can return ANY object; SinkWriteResult being a dataclass does not make the value at THIS call site a guaranteed instance — the annotation is a contract the plugin must honor, not a runtime guarantee. This isinstance is therefore the SOLE runtime enforcement point of the plugin-return contract at the boundary, NOT a redundant re-check of a type our own code constructs. On mismatch it raises a typed PluginContractViolation naming the failsink and the actual type (this is a failsink plugin bug), strictly more attributable than the bare AttributeError that direct attribute access (failsink_write_result.artifact) would produce on a non-instance, and it fails fast before any partial write-state is acted on. This is the CLAUDE.md-sanctioned plugin-returns-wrong-type to CRASH offensive guard; the R5 defensive-isinstance concern does not apply.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
+  expires: '2026-09-15'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:15:04.159286+00:00'
+  judge_recorded_at: '2026-06-17T15:52:56.645959+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
+  judge_confidence: 0.85
   judge_rationale: |-
-    PRESCRIBED FORM. The isinstance→raise sits at the plugin return boundary: failsink.write() returns a value whose -> SinkWriteResult annotation is not runtime-enforced, and the failsink can be any registered plugin. Per Plugin Ownership, a plugin returning the wrong type must CRASH with a maximally informative error, which is exactly what PluginContractViolation does (named plugin, actual type, identified as a plugin bug) — strictly more attributable than the AttributeError that direct .artifact access would yield. The rationale plainly states the unenforced-annotation fact and the code's behavior matches; the R5 defensive concern does not apply here.
+    PRESCRIBED FORM. The isinstance->raise guards a plugin method return (failsink.write) dispatched through the BaseSink protocol; Python does not runtime-enforce the SinkWriteResult return annotation, so a misbehaving plugin can return any object. The rationale plainly states this and the visible code shows the prescribed Plugin-Ownership response: detect wrong type, raise a typed PluginContractViolation naming the plugin and actual type — a maximally informative crash, not coercion or silent recovery. This matches the 'plugin returns wrong type -> CRASH' row of the Plugin Ownership table, and the R5 concern (defensive isinstance hiding bugs) does not apply.
   judge_signature_version: 2
-  scope_fingerprint: 053628fcf97eda3d86c68fe59740374dbe541e3619608f3083f15c74d5ce070f
+  scope_fingerprint: c1b583bdcee9b07ff9764485996176b7db46b3a56faca204edc05f91e88ea03e
   judge_transport: openrouter
   ast_path: 'body[26]/body[8]/body[22]/body[2]/body[3]/body[8]/body[0]/body[3]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:c360de28ba68dc8891f964c03e7a36790132896e98904152ff3a8ca60503baaf'
+  judge_metadata_signature: 'hmac-sha256:v2:5a10334305a43a630e2c847d2310eddb8b39c22328948239e54550e4caad8909'
 - key: engine/executors/sink.py:R5:SinkExecutor:write:fp=00755313e7e139d5
   owner: john
   reason: |-
     In SinkExecutor.write (line 808, the failsink write path), `if not isinstance(failsink_artifact_info, ArtifactDescriptor)` guards `failsink_write_result.artifact` and raises PluginContractViolation on mismatch. Under the system-owned failsink's typed contract, SinkWriteResult.artifact must be an ArtifactDescriptor; per Plugin Ownership a wrong type is a first-party plugin bug we crash on, never coerce. The isinstance→raise is offensive programming producing a maximally informative crash (naming the failsink and the actual type), not coercion, not silent recovery, and not a Tier-3 boundary. Same justification class as fp=6bf4f058589b3c6f; R5 does not apply.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
+  expires: '2026-09-15'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:15:10.997597+00:00'
+  judge_recorded_at: '2026-06-17T15:53:02.146208+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. SinkWriteResult.artifact is a first-party typed contract field returned by a system-owned failsink plugin; per Plugin Ownership, a wrong type is a plugin bug that must crash, not be coerced. The isinstance→raise PluginContractViolation is the prescribed offensive-programming form: it produces a maximally informative crash naming the failsink and the actual type, with no swallowing or coercion. R5's concern (isinstance hiding bugs) does not apply — this surfaces the bug rather than masking it.
+  judge_signature_version: 2
+  scope_fingerprint: c1b583bdcee9b07ff9764485996176b7db46b3a56faca204edc05f91e88ea03e
+  judge_transport: openrouter
+  ast_path: 'body[26]/body[8]/body[22]/body[2]/body[3]/body[8]/body[0]/body[5]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:d8299863bc34727976b87da5db7e112682bea4d7f4a043fc78b76dc3c671ab48'
+- key: engine/coalesce_executor.py:R1:CoalesceExecutor:restore_from_journal:fp=1c1ce4d9897d3e41
+  owner: john
+  reason: |-
+    Prescribed offensive invariant check, not a Tier-3 boundary and not a defensive default. In `engine/coalesce_executor.py:397`, `if attempt_offsets.get(item.token_id) is None:` is used only to reify a Tier-1 audit/journal mismatch into an immediate `AuditIntegrityError`; lines 399-402 state the invariant: `"audit-derived offsets must cover every BLOCKED journal row."` The function then trusts the mapping and indexes it directly at `engine/coalesce_executor.py:443` with `attempt_offsets[branch_item.token_id]`. This suppression is valid only while the `.get()` remains this exact preflight guard that crashes before state mutation; if it ever supplies a default, skips a token, or treats absence as recoverable, this finding must BLOCK.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:56:51.742657+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The `.get()` here is an offensive preflight that detects a Tier-1 audit/journal mismatch and raises `AuditIntegrityError` immediately — it does not supply a default, skip the token, or continue. The visible code confirms the invariant is stated in the raised message and that surrounding checks all follow the same crash-on-anomaly pattern for our own audit data. The `.get(...) is None` idiom is being used precisely to make the crash maximally informative (named error with full context) rather than relying on the bare KeyError at the later direct index. Rationale is site-specific and consistent with the excerpt.
+  judge_signature_version: 2
+  scope_fingerprint: 9ab5441e921ff1e52666eabdbba986ffb548dde106502061a2d3af2e942c8b3d
+  judge_transport: openrouter
+  ast_path: 'body[31]/body[5]/body[3]/body[5]/test/left'
+  judge_metadata_signature: 'hmac-sha256:v2:dfb107cbb1a523dffe24da3a9a8e40840936bc346fad7520285c2613116f1658'
+- key: engine/coalesce_executor.py:R1:CoalesceExecutor:restore_from_journal:fp=bc1e7dbf113bc03e
+  owner: john
+  reason: |-
+    This is an offensive Tier-1 audit-consistency check, not a defensive default. In `src/elspeth/engine/coalesce_executor.py:341-345`, `state_ids` is documented as the per-token PENDING `node_states` hold id derived from audit tables, and "Every journal token must be covered". At `src/elspeth/engine/coalesce_executor.py:404-414`, the flagged `if state_ids.get(item.token_id) is None:` immediately raises `AuditIntegrityError` with the site-specific corruption claim: "every BLOCKED coalesce row holds a PENDING node_state in the audit trail; a missing hold is an audit inconsistency." The same function later consumes the value with direct indexing at `src/elspeth/engine/coalesce_executor.py:449`, so this `.get()` is only reifying the audit invariant with a contextual crash before state mutation, not substituting a default or continuing past corruption. Drift that changes this site to return, skip, default, or otherwise continue would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:56:58.683456+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The .get() here is the offensive Tier-1 audit-integrity check: state_ids is derived from our own audit tables (Tier-1 our-authored data), and the code uses .get(...) is None solely to detect a corruption invariant violation and immediately raise AuditIntegrityError with a site-specific message — no default substitution, no continuation. This matches the policy's offensive-programming pattern (detect invalid state, raise meaningful typed exception) and mirrors the adjacent attempt_offsets check. Direct indexing would also crash, but with a less informative KeyError; the .get-is-None form produces the prescribed maximally-informative crash.
+  judge_signature_version: 2
+  scope_fingerprint: 9ab5441e921ff1e52666eabdbba986ffb548dde106502061a2d3af2e942c8b3d
+  judge_transport: openrouter
+  ast_path: 'body[31]/body[5]/body[3]/body[6]/test/left'
+  judge_metadata_signature: 'hmac-sha256:v2:38c7dde6b2bc12981b06c0590d67f3fce6f708b8db29d429fb84bb049d476682'
+- key: engine/coalesce_executor.py:R8:CoalesceExecutor:restore_from_journal:fp=677b8ff982a77906
+  owner: john
+  reason: |-
+    This `setdefault` is a local accumulator bucket, not a defensive read of Tier-1 journal data. The function initializes the accumulator itself at `src/elspeth/engine/coalesce_executor.py:361` as `grouped: dict[tuple[str, str], dict[str, TokenWorkItem]] = {}`, validates the journal item invariants before grouping, then derives the grouping key at `src/elspeth/engine/coalesce_executor.py:416` with `key = (item.coalesce_name, item.row_id)`. The flagged line `src/elspeth/engine/coalesce_executor.py:417` — `branch_items = grouped.setdefault(key, {})` — only creates the per-`(coalesce_name, row_id)` branch map for the first observed branch in that group. It is not hiding a missing required key from `item`, `state_ids`, `attempt_offsets`, or persisted audit data: those missing/corrupt cases are explicitly crashed earlier, e.g. `if not item.coalesce_name: raise AuditIntegrityError(...)`, `if not item.branch_name: raise AuditIntegrityError(...)`, `if attempt_offsets.get(item.token_id) is None: raise AuditIntegrityError(...)`, and `if state_ids.get(item.token_id) is None: raise AuditIntegrityError(...)`. The duplicate-branch invariant is then checked offensively at lines 418-426 before insertion. Suppression is valid only for this local grouping construction shape; if future code uses `setdefault` here to supply defaults for persisted journal/audit fields, this rationale no longer applies.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:57:06.481654+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    RULE MISFIRES. The R8 rule targets `setdefault` used to hide missing-key bugs in data reads, but here `grouped` is a local accumulator dict initialized empty in this same function, and `setdefault(key, {})` is the standard idiom for building a nested grouping structure — the first occurrence of a `(coalesce_name, row_id)` key legitimately has no entry yet. The code crashes offensively on every real invariant (missing coalesce_name, branch_name, attempt_offsets, state_ids, duplicate branch) before and after this line, so no defensive suppression is occurring. The rationale correctly identifies the construct as local accumulator construction, not a defensive read on Tier-1 journal data.
+  judge_signature_version: 2
+  scope_fingerprint: 9ab5441e921ff1e52666eabdbba986ffb548dde106502061a2d3af2e942c8b3d
+  judge_transport: openrouter
+  ast_path: 'body[31]/body[5]/body[3]/body[8]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:40f8ce88e252c46a6f70ec0be2b83abc2f03d0ea18acc9c4779b7220d1d3394f'
+  judge_excerpt_redactions:
+    - pattern: dotenv_secret_assignment
+      byte_count: 32
+      redacted_hash: 04501c91fe0e32f1
+- key: engine/coalesce_executor.py:R1:CoalesceExecutor:restore_from_journal:fp=bbbe1b48bca070be
+  owner: john
+  reason: |-
+    This `dict.get()` is not hiding missing Tier-1 audit data. In `src/elspeth/engine/coalesce_executor.py:333-336`, `scalars` is explicitly a sparse checkpoint sidecar: "A key with journal items but no scalars entry restores with empty lost_branches (the writer only emits keys with recorded losses — D3)." The use at `src/elspeth/engine/coalesce_executor.py:452-456` implements that exact prescribed shape: `key_scalars = scalars.get(key)` followed by `lost_branches=dict(key_scalars.lost_branches) if key_scalars is not None else {}`. Future drift would invalidate this suppression if `scalars` stops being documented as sparse/loss-only checkpoint data, or if absence of a key becomes an audit inconsistency rather than the empty-loss case.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:57:13.878171+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES. The rationale identifies a documented sparse-sidecar contract: the writer only emits scalars entries for keys with recorded losses, so absence of a key in `scalars` is the prescribed empty-loss case, not a missing-field bug. The code at lines 452-456 implements exactly that contract — `scalars.get(key)` returning None is meaningfully different from a present entry, and the `if key_scalars is not None else {}` branch makes the semantics explicit rather than swallowing a missing value with a default. The surrounding stale-key handling (line 474) corroborates that scalars and grouped keys are intentionally non-coincident. This is meaning-preserving boundary handling of a documented-sparse data structure, not the defensive Tier-2 shape re-check R1 targets.
+  judge_signature_version: 2
+  scope_fingerprint: 9ab5441e921ff1e52666eabdbba986ffb548dde106502061a2d3af2e942c8b3d
+  judge_transport: openrouter
+  ast_path: 'body[31]/body[5]/body[6]/body[4]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:fd2f58fdbf327e00ec02b3ea1bf4db7d0e659583973c86e5b92a02a3fe0c5dbf'
+  judge_excerpt_redactions:
+    - pattern: dotenv_secret_assignment
+      byte_count: 32
+      redacted_hash: 04501c91fe0e32f1
+- key: engine/coalesce_executor.py:R1:CoalesceExecutor:has_recorded_branch_loss:fp=90af82c2104ec29b
+  owner: john
+  reason: |-
+    `src/elspeth/engine/coalesce_executor.py:1645` is a deliberate presence probe in a replay-dedup predicate, not defensive masking of required Tier-1 audit data. The enclosing docstring states the invariant being encoded: "`A completed/unknown key returns False`" at lines 1642-1643, and the implementation is exactly that: `pending = self._pending.get((coalesce_name, row_id))` followed by `if pending is None: return False` at lines 1645-1647. This suppression is valid only while `has_recorded_branch_loss()` remains a boolean "already recorded?" check whose missing `_pending` entry means completed/unknown and whose only data access after presence is `branch_name in pending.lost_branches` at line 1648. If future code treats the pending entry as required state for this path, this rationale no longer applies and the lookup must reify the invariant or crash.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:57:20.780923+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES — this is a presence probe, not defensive masking. The function's documented contract is a tri-state predicate ('already recorded?') where absence from `_pending` is a meaningful, expected state meaning 'completed/unknown', returning False. This is the legitimate use of `.get()`: testing membership where absence is a contractually valid outcome, not a Tier-1 invariant break. Direct subscript would crash on the explicitly-allowed missing-key case, which would be wrong. The rationale plainly states the invariant and the code excerpt confirms it (lines 1642-1648).
+  judge_signature_version: 2
+  scope_fingerprint: 4fad12cd599fa1b3873f20f0afb01387d60e6ba42d35d707d70f18d8b5c0ac65
+  judge_transport: openrouter
+  ast_path: 'body[31]/body[20]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:5775a341d6fda03970d934e801efa565b148cc025d96a8c5aadb9a5dc4ebf741'
+- key: engine/processor.py:R1:RowProcessor:_derive_restored_batch_id:fp=d6a1d268fcff84e3
+  owner: john
+  reason: |-
+    This is a sparse internal remap lookup where absence is the intended identity case, not defensive masking of corrupt Tier-1 audit data. The enclosing function documents that BUFFERED token_outcomes carry original batch ids and must be "read through the ``handle_incomplete_batches`` old->retry remap" when a crash interrupted flush at `src/elspeth/engine/processor.py:1074-1079`. The flagged line, `resolved = restore.batch_id_remap.get(outcome.batch_id, outcome.batch_id)`, is the prescribed old->retry-or-original resolution: if `outcome.batch_id` was retried, use the remapped batch id; if it was not retried, keep the original batch id. The code does not silently trust the result: it immediately enforces audit invariants by requiring one resolved batch for the node and then crashes if the resolved batch row is missing or belongs to another aggregation node at `src/elspeth/engine/processor.py:1120-1136`. A future drift that made `batch_id_remap` exhaustive, removed the fallback-valid DRAFT/original-batch case, or stopped the subsequent `get_batch` / `aggregation_node_id` checks would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:58:31.315554+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES. The `.get(key, default)` here is not defensive masking of a missing key — it is the prescribed sparse-remap-lookup semantic where absence means 'this batch was not retried, keep the original id'. The remap is intentionally non-exhaustive: only retried batches appear in `batch_id_remap`, and the fallback to `outcome.batch_id` is the meaningful identity case, not a fabricated default. The resolved value is then immediately subjected to strict audit-integrity checks (single-batch-per-node, `get_batch` existence, `aggregation_node_id` match) that crash on any anomaly, so the code is not silently trusting the lookup result. The rationale plainly states this semantic and the visible code corroborates it.
+  judge_signature_version: 2
+  scope_fingerprint: 65918bae0ce4c4f0276f1f0385aa533ca6b7740b61f26ff858965e5ccc6d737a
+  judge_transport: openrouter
+  ast_path: 'body[61]/body[5]/body[3]/body[4]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:9105bd3cb038bb4b49d93936613ef8ef9a1de9990f5568df19d85b4a303c0b0c'
+- key: engine/processor.py:R9:RowProcessor:_token_for_intake:fp=8376f8feee2ade96
+  owner: john
+  reason: |-
+    Prescribed state-machine fallback, not a hidden missing-key defect. In `src/elspeth/engine/processor.py:3786-3794`, `_token_for_intake()` documents that barrier intake intentionally checks the live in-memory stash first, then rehydrates from the journal for resume takeover: `"Live stash first"` and `"journal rehydration ... fallback (leader takeover)"`. The flagged line `src/elspeth/engine/processor.py:3795` uses `hold = self._live_barrier_holds.pop(row.token_id, None)` to distinguish those two valid paths. If the stash is missing during a non-resume run, the code does not silently continue: `src/elspeth/engine/processor.py:3798-3804` raises `AuditIntegrityError` with the invariant that every fresh-leader intake row must be either `"this leader's own hold (stashed) or takeover inheritance (resume provenance set)."`. Only resume-provenance rows continue to `token_from_journal_item(...)` at `src/elspeth/engine/processor.py:3805-3810`, deriving the token from audit journal state.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:58:38.822882+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
   judge_confidence: 0.88
   judge_rationale: |-
-    PRESCRIBED FORM. The isinstance check guards the .artifact attribute of a SinkWriteResult returned by a system-owned failsink plugin — first-party code under a typed contract (Plugin Ownership scope). A wrong type here is a plugin bug, and the code's response is exactly the prescribed offensive form: isinstance→raise PluginContractViolation with an informative message naming the failsink and the actual type. No coercion, no silent recovery, no default substitution; the raise is unhandled by the surrounding except (TIER_1_ERRORS re-raises; the generic Exception handler is for upstream write failures, not contract violations from our own plugin). Rationale correctly identifies the tier and the prescribed response.
+    RULE MISFIRES — the `.pop(..., None)` is not a defensive missing-key swallow; it is a deliberate two-state discriminator between 'live stash hit' and 'must rehydrate from journal'. The very next lines branch on `hold is not None`: a hit returns the stashed token, a miss is then strictly gated by `self._resume_checkpoint_id is None` raising `AuditIntegrityError`, with only legitimate takeover-inheritance rows proceeding to journal rehydration. The default sentinel is consumed by control flow that enforces the invariant offensively, exactly the prescribed form for a multi-source lookup where absence is a meaningful state, not an error to hide.
   judge_signature_version: 2
-  scope_fingerprint: 053628fcf97eda3d86c68fe59740374dbe541e3619608f3083f15c74d5ce070f
+  scope_fingerprint: e79eb1c8255fa5288d822d7dbb9bbfed417769ffcdc3400c44e742667a7bc0f9
   judge_transport: openrouter
-  ast_path: 'body[26]/body[8]/body[22]/body[2]/body[3]/body[8]/body[0]/body[5]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:e32b15f25c026300bb7fa4713afe8a19d650992bbd0ac076a8f11e72bdff123e'
+  ast_path: 'body[61]/body[68]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:83969dfee1e7708059e27bb1e435f70b5d516e5eae10738e452cdf78d2d974c7'
+- key: engine/processor.py:R1:RowProcessor:_token_for_intake:fp=48f652daeda9bcf7
+  owner: john
+  reason: |-
+    ACCEPT because `src/elspeth/engine/processor.py:3805-3809` is not masking a required key in an in-memory Tier-1 object; it is consuming an intentionally sparse aggregate query result whose API defines absence as "no prior node_states rows". The enclosing `_token_for_intake` path first rejects impossible fresh-leader adoption without resume provenance at `src/elspeth/engine/processor.py:3798-3804`, then derives resume attempt offset from audit state with `max_attempts = self._execution.get_max_node_state_attempts(self._run_id, [row.token_id])` and `attempt_offset=max_attempts.get(row.token_id, -1) + 1`. The callee's contract at `src/elspeth/core/landscape/execution_repository.py:630-634` says: "Tokens with no node_states rows are absent from the result (callers treat absence as max_attempt = -1, i.e. offset 0)." This suppression is bound to that exact sparse-result contract; if the repository later guarantees one entry per requested token or changes absence semantics, this `.get(row.token_id, -1)` justification no longer applies and the site must be re-reviewed.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:58:46.339249+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES. The repository contract explicitly defines a sparse result shape — tokens with no node_states rows are absent from the returned mapping, with absence meaning max_attempt = -1 (offset 0). The `.get(row.token_id, -1)` is not masking a missing key in a first-party guaranteed-complete dict; it is the prescribed way to consume an intentionally sparse aggregate, and the default value preserves (not fabricates) the documented semantics. The rationale names the exact callee contract and ties the suppression to it, so a future contract change will force re-review.
+  judge_signature_version: 2
+  scope_fingerprint: e79eb1c8255fa5288d822d7dbb9bbfed417769ffcdc3400c44e742667a7bc0f9
+  judge_transport: openrouter
+  ast_path: 'body[61]/body[68]/body[5]/value/keywords[0]/value/left'
+  judge_metadata_signature: 'hmac-sha256:v2:168e5177179910b84a68e627e8d2c7c90c01f139b8b6ab5c3822f4d0e22c05a6'
+- key: engine/processor.py:R1:RowProcessor:_row_result_from_pending_sink:fp=bb04b2d71dc48cc8
+  owner: john
+  reason: |-
+    This `.get()` is not swallowing corrupt Tier-1 audit data; it implements the called repository method's explicit sparse-result contract for resume attempt derivation. In `engine/processor.py:4564-4569`, `_row_result_from_pending_sink` scopes the aggregate to the sink step, then computes the next retry offset: `max_attempts = self._execution.get_max_node_state_attempts(..., step_index=self.resolve_sink_step())` and `attempt_offset = max_attempts.get(scheduled.token_id, -1) + 1`. The contract being consumed is site-specific: `execution_repository.py:633-634` says `Tokens with no node_states rows are absent from the result (callers treat absence as max_attempt = -1, i.e. offset 0).` The following guard at `engine/processor.py:4570-4575` still crashes if an offset above zero lacks resume checkpoint provenance, so the defensive invariant is preserved. A drift that changed `get_max_node_state_attempts` to always return every requested token, or changed no-row semantics away from offset 0, would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:58:54.619963+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    RULE MISFIRES on the sparse-mapping contract. The rationale identifies that `get_max_node_state_attempts` returns a sparse dict where absent token_ids signal 'no prior attempts' and callers must treat absence as -1 (yielding offset 0). This is a documented sparse-result contract at the repository boundary, not a defensive guard against a guaranteed-shape Tier-1/Tier-2 dict — absence is a meaningful, contractual signal that maps to a specific semantic value (offset 0), not a fabricated default substituting for missing data. The subsequent guard at 4570-4575 crashes loudly if the offset>0 path lacks resume provenance, preserving the audit-integrity invariant. The rationale also names the exact drift scenarios that would invalidate the suppression, making it a well-formed audit record.
+  judge_signature_version: 2
+  scope_fingerprint: 6ce38c2cec63ec5035a4cfaa3eba1037be16912973f2349b15c6078837d687d3
+  judge_transport: openrouter
+  ast_path: 'body[61]/body[82]/body[3]/value/left'
+  judge_metadata_signature: 'hmac-sha256:v2:d0bcd821c4550aae82833203e1e87cc2474e6d1f76e7806fd312c0c7c14acafe'
+  judge_excerpt_redactions:
+    - pattern: dotenv_secret_assignment
+      byte_count: 41
+      redacted_hash: c0645cae3c6fa2a8
+    - pattern: dotenv_secret_assignment
+      byte_count: 18
+      redacted_hash: 5e37b92d1950a9c1
+- key: engine/orchestrator/follower.py:R4:FollowerProcessor:_best_effort_depart:fp=01d63348996b1aed
+  owner: john
+  reason: |-
+    SITE: src/elspeth/engine/orchestrator/follower.py:399-411, _best_effort_depart (R4). This is best-effort terminal teardown hygiene, not a defensive guard over a load-bearing tier-1 read. depart_worker is a courtesy WRITE attempted only as a worker process exits; its result feeds no downstream computation. All five call sites are exit paths (follower.py:250/254 eviction, 262 SIGINT, 269 seat-death, 276 clean terminal exit), and in four of them a primary exception is already propagating — crashing here would abort during teardown and mask the real cause. heartbeat.stop() runs in the enclosing finally (line 278). Suppression is faithfully recovered: the documented idempotent path inside depart_worker (member-None early return at run_coordination_repository.py:847, failed-CAS no-op at 857) does NOT raise, so the except catches only genuine write failures (DB-locked, IO). When such a write fails and is swallowed, the row stays 'active', the stopped heartbeat lets heartbeat_expires_at lapse, and the leader's §C.2 housekeeping sweep — evict_worker at run_coordination_repository.py:868-927, invoked at processor.py:3718 — CAS-flips active->evicted gated on heartbeat_expires_at < now - grace (lines 911-912), after first refusing to evict any worker still holding a live lease (894-905). The membership table converges either way (clean worker_depart event, or a downgraded worker_evict event), never to a row that lingers 'active' forever. This is the prescribed best-effort idempotent teardown pattern, so the tier-1 crash-on-anomaly rule (which protects reads of durable state whose corruption must halt computation) does not apply. CAVEAT (non-blocking): the debug log at lines 408-410 attributes the swallowed exception to the idempotent finalize-already-departed race; that race is the no-op return inside depart_worker and never reaches this except. The except actually catches real write failures whose recovery is heartbeat-expiry eviction. This is a comment-accuracy nit only and does not change the disposition.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:19:10.660735+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    PRESCRIBED FORM. R4 fires on the broad except, and the rationale establishes that this is the policy-prescribed best-effort terminal teardown: depart_worker is a courtesy write on exit paths (four of five with a primary exception already propagating), no downstream computation depends on its result, and the membership table converges via the leader's heartbeat-expiry eviction sweep regardless. Crashing here during teardown would mask the real exception and provide no integrity benefit, since the audit/coordination invariant is preserved by the eviction CAS path. The except logs with exc_info so the swallowed failure is observable; the comment-accuracy nit the agent self-flagged is non-blocking.
+  judge_signature_version: 2
+  scope_fingerprint: f9064a7eb1118fe2e1ddbc62c24b8730510ffdf9f88074c323961d013cb26396
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[5]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:cd9559685beed45d2c1a79a5673265d380d535253e070f23e747e1ef252abb02'
+- key: engine/orchestrator/heartbeat.py:R4:RunHeartbeatThread:_beat_once:fp=b5fa63cc983f2a28
+  owner: john
+  reason: |-
+    SITE: src/elspeth/engine/orchestrator/heartbeat.py:256 `except Exception as exc:` in RunHeartbeatThread._beat_once, running on a daemon background thread (heartbeat.py:134) that shares zero Python state with the drain loop and communicates only via two threading.Event latches.
+    
+    CLASSIFICATION — availability/liveness probe boundary, NOT a Tier-1 durable-state read/repair sink. The handler reads typed attributes off a frozen CoordinationSnapshot dataclass (contracts/coordination.py:108, frozen+slots) with no fallback; it does not coerce, default, or repair any field. There is no 'continue with garbage' path a Tier-3 defensive default would create — the body (heartbeat.py:259-268) only does `_consecutive_busy += 1`, a DEBUG log, and `_emit_degraded()` past threshold k.
+    
+    CONTRACT-PINNED, not defensive. The breadth is mandated verbatim by two documented invariants (heartbeat.py:19-26): BUSY = liveness-unknown (a heartbeat OperationalError is logged and counted toward the degraded threshold; the thread never latches on a DB error) and Never self-terminate on DB errors (the per-tick try/except swallows all exceptions and continues; only _stop_event.set() exits).
+    
+    RE-RAISE IS STRICTLY WORSE. _run (heartbeat.py:185-192) has no try/except above _beat_once, and Thread(target=self._run) has no caller barrier that converts a thread death into a run failure. A re-raise therefore kills the daemon SILENTLY — the seat stops being refreshed while the main-thread drain loop runs on oblivious until leader_heartbeat_expires_at lapses and another process deposes the seat, converting an immediate diagnosable anomaly into a delayed mysterious eviction. 'Crash for provenance' is an offensive-Tier-1 tactic for SYNCHRONOUS code whose caller surfaces the error; on this daemon it produces the exact silent-dead-heartbeat failure the module was architected to prevent.
+    
+    THE ONE GENUINE Tier-1 CASE (AuditIntegrityError for an unregistered worker, run_coordination_repository.py:726) is not durably hidden as success: when the heartbeat stops latching/refreshing, the worker loses coordination and the drain loop's heartbeat.check_and_raise() (follower.py:339) raises RunWorkerEvictedError loudly at the next boundary, stopping the run. Absence/anomaly is faithfully surfaced — via the degraded counter (diagnostic) and the eviction latch consumed by check_and_raise (fatal) — just on the correct thread, never accepted as success.
+    
+    CONCLUSION: the breadth is intentional and contract-pinned for a background liveness probe; suppression is legitimate, not a defensive default over durable state.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:19:19.083185+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    PRESCRIBED FORM. R4 fires on a broad except, and the rationale establishes the policy-conforming case: this is a background daemon liveness probe whose documented invariant (cited at heartbeat.py:19-26) is BUSY=liveness-unknown and never self-terminate on DB errors. The handler does not coerce/fabricate state — it increments a busy counter and emits a degraded event past threshold; the genuine Tier-1 eviction case is surfaced loudly on the drain thread via check_and_raise/RunWorkerEvictedError, so anomalies are not durably hidden. Re-raising would silently kill the daemon thread (no barrier above _run), converting an observable degraded signal into a delayed mystery eviction — the exception type/structure routing argument from the policy applies. The breadth is contract-pinned to the thread's role, not defensive suppression of first-party bugs.
+  judge_signature_version: 2
+  scope_fingerprint: 6eec0e98e7e9da35e0d3e7065c64f1bd2942e1e5e5376e25a6347f476e5615bf
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[7]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:a2d880824fbd37de292aa9ef97a8d87327fad751e1ec0ad30d4113a6bc88705b'
+- key: engine/orchestrator/source_iteration.py:R5:SourceIterationDriver:handle_quarantine_row:fp=17fb14baaba5c6cb
+  owner: john
+  reason: |-
+    This is a prescribed Tier-3/source-ingestion quarantine normalization, not defensive handling of Tier-1 audit data. In `src/elspeth/engine/orchestrator/source_iteration.py:97-124`, `handle_quarantine_row` is explicitly the quarantine workflow for a source row that failed validation. Immediately before the finding, the code treats the payload as source-originated invalid data and normalizes it for audit persistence: `source_item = replace(source_item, row=sanitize_for_canonical(source_item.row))` at `src/elspeth/engine/orchestrator/source_iteration.py:166`. The flagged line then preserves mapping-shaped rows and wraps non-mapping malformed source payloads for `begin_node_state(input_data=...)`: `quarantine_data = source_item.row if isinstance(source_item.row, dict) else {"_raw": source_item.row}` at `src/elspeth/engine/orchestrator/source_iteration.py:186`.
+    
+    The drift-sensitive reason this suppression is valid is that `SourceRow` explicitly declares quarantined source payloads as external malformed data that may be non-dicts: `row: Any` because "quarantined rows from external data may not be dicts" at `src/elspeth/contracts/results.py:694-697`, and `SourceRow.quarantined(..., row: Any, ...)` documents `row` as "The original row data (before validation). May be non-dict for malformed external data" at `src/elspeth/contracts/results.py:752-765`. If this site stops handling `SourceRow.quarantined` payloads before `begin_node_state`, or if `SourceRow.row` becomes validated Tier-1/Tier-2 data only, this justification no longer applies.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:19:36.203318+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES — the rationale establishes that SourceRow.row is typed `Any` precisely because quarantined source payloads from external data may be non-dicts (Tier-3 origin), so the isinstance check here is the boundary-shape discriminator that decides whether to pass the mapping through or wrap a non-mapping malformed payload as `{'_raw': ...}` before handing it to `begin_node_state(input_data=...)`. This is the prescribed Tier-3 quarantine normalization, not a redundant guard on first-party contracted data: the shape is explicitly NOT guaranteed at this point. The surrounding code (sanitize_for_canonical, quarantine token, FAILED node_state) confirms this is the source-validation-failure lifecycle, and the isinstance result is used to preserve absence/origin honestly rather than fabricate a dict.
+  judge_signature_version: 2
+  scope_fingerprint: 6eba0f273098db665f1a78839a103d551da51b13f43e7807d8022f310a5b4ae0
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[5]/body[13]/value/test'
+  judge_metadata_signature: 'hmac-sha256:v2:b0f7d7ece011a33d592bd04ebfa1aef4f923ddb172ed4c49e3601c27381d0609'
+  judge_excerpt_redactions:
+    - pattern: dotenv_secret_assignment
+      byte_count: 56
+      redacted_hash: 5f090a5ceda3dd16
+    - pattern: dotenv_secret_assignment
+      byte_count: 35
+      redacted_hash: 6eda39bb2b982af6
+- key: engine/orchestrator/source_iteration.py:R4:SourceIterationDriver:_next_source_item_with_idle_timeout_flushes:poll_idle_flushes_guarded:fp=3dacb3d6b437e8fa
+  owner: john
+  reason: |-
+    This is a prescribed cross-thread exception propagation pattern, not suppression. In `src/elspeth/engine/orchestrator/source_iteration.py:450-456`, the helper-thread wrapper catches `BaseException` only because an uncaught exception in `threading.Thread(target=poll_idle_flushes_guarded, daemon=True)` would not be raised on the orchestrator thread. The caught exception is preserved exactly with `error_queue.put_nowait(exc)` and the polling loop is stopped via `stop_idle_polling.set()`. The enclosing caller then joins the poller, reads the queue, and re-raises the same object at `src/elspeth/engine/orchestrator/source_iteration.py:475-480`: `if idle_error is not None: raise idle_error`. Drift that removes the `error_queue.put_nowait(exc)` handoff or the later `raise idle_error` would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:19:42.394344+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. The R4 broad-except here is the canonical cross-thread exception propagation pattern: a daemon helper thread must catch BaseException because exceptions raised on a thread other than the orchestrator's are otherwise lost. The code visibly preserves the exception object verbatim via error_queue.put_nowait(exc), stops the polling loop, and the caller re-raises the same object on the orchestrator thread (lines 475-480). This is re-raise-after-handoff, not suppression — matching the rule's own remediation guidance.
+  judge_signature_version: 2
+  scope_fingerprint: 07300a0321130985942ec57c399ef74e57eef15100a1ca5698b18687483b142a
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[12]/body[5]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:d98910ec83e2501e6e027f506b1e1e31a9c141c729834d6e5e951d864263e826'
+- key: engine/orchestrator/source_iteration.py:R7:SourceIterationDriver:_next_source_item_with_idle_timeout_flushes:poll_idle_flushes_guarded:fp=8b850abad0c57fbc
+  owner: john
+  reason: |-
+    This is a prescribed bounded cross-thread error handoff, not suppression of the idle flush failure itself. In `src/elspeth/engine/orchestrator/source_iteration.py:429`, the helper thread reports through a one-slot `error_queue = queue.Queue(maxsize=1)`. If `poll_idle_flushes()` raises, `poll_idle_flushes_guarded()` catches the exception and records it with `error_queue.put_nowait(exc)` at lines 451-455, then stops polling at line 456. The `with suppress(queue.Full):` at line 454 only ignores the secondary condition that the one-slot error channel already contains an earlier exception; it does not let the run continue silently, because the orchestrator thread reads `idle_error = error_queue.get_nowait()` at line 476 and immediately `raise idle_error` at line 480. Future drift that removed the one-slot queue, the `put_nowait(exc)`, or the later `raise idle_error` would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:19:50.189198+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The R7 finding fires on `with suppress(queue.Full)`, but the suppressed condition is narrowly the secondary failure mode of a one-slot `queue.Queue(maxsize=1)` already holding a prior exception — not suppression of the original `poll_idle_flushes` exception, which is captured into `exc` and handed across threads via `put_nowait`. The orchestrator thread then reads `error_queue.get_nowait()` at line 476 and unconditionally `raise idle_error` at line 480, so the exception is re-raised on the caller thread; the `queue.Full` path can only occur when an earlier exception is already queued and will itself be raised. This is the correct narrow, structural use of `suppress` for a known benign secondary condition, and the rationale identifies the exact lines that establish the re-raise invariant.
+  judge_signature_version: 2
+  scope_fingerprint: 07300a0321130985942ec57c399ef74e57eef15100a1ca5698b18687483b142a
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[12]/body[5]/body[0]/handlers[0]/body[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:8ba8ca585491d841bdc170ef3519a0b528a1f0ccdfe98e2b119a987029ef14c7'
+- key: engine/orchestrator/source_iteration.py:R6:SourceIterationDriver:_next_source_item_with_idle_timeout_flushes:fp=e42ae0db35feb10b
+  owner: john
+  reason: |-
+    This is not a swallowed exception. In `src/elspeth/engine/orchestrator/source_iteration.py:467-468`, iterator exhaustion is captured as control flow with `except StopIteration:` followed by `source_stop = True`, because the function must first stop and join the idle-timeout poller in `finally` (`stop_idle_polling.set()` / `poller.join()` at lines 471-473) and then prioritize any helper-thread failure (`if idle_error is not None: raise idle_error` at lines 479-480). After that cleanup/error arbitration, the original iterator-exhaustion signal is explicitly re-raised at lines 483-484: `if source_stop:` / `raise StopIteration`. Future drift that removes the line 484 re-raise or lets `source_stop` return normally would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:19:56.032572+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    RULE MISFIRES. The except StopIteration at line 467 does not swallow the exception; it captures iterator exhaustion as a control-flow flag (source_stop) so that the finally block can deterministically stop and join the idle-timeout poller before deciding what to raise. The arbitration that follows explicitly re-raises in priority order: idle_error (line 480), source_exc (line 482), and finally StopIteration itself (line 484). This is a legitimate raise-deferred pattern for cleanup+error-arbitration, not a silent-except, and the code excerpt fully corroborates the rationale.
+  judge_signature_version: 2
+  scope_fingerprint: c58a936c57abdc27a1f696a46b3198742b815b81f9abdd36f4d467b1d6d42670
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[12]/body[11]/body[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:b42077e20477618e44d535cc5f45494c86dd0c8c1d2781aa7313050763a44dab'
+- key: engine/orchestrator/source_iteration.py:R4:SourceIterationDriver:_next_source_item_with_idle_timeout_flushes:fp=a84d39c745815c65
+  owner: john
+  reason: |-
+    This is a prescribed let-it-crash lifecycle handoff, not a suppression. In `src/elspeth/engine/orchestrator/source_iteration.py:469-470`, the source iterator exception is captured only as `source_exc = exc` while the `finally` block at `472-473` stops and joins the idle timeout poller. The same exception object is then re-raised at `481-482` via `if source_exc is not None:` / `raise source_exc`. Drift that removed the delayed re-raise or replaced it with an error result would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:20:02.313472+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The broad `except BaseException` here is not swallowing — it captures the exception into `source_exc`, runs the `finally` block to stop and join the idle-poller thread (lifecycle cleanup that must happen regardless of exception type), and then re-raises the original exception at line 481-482. This is the standard pattern for ensuring a background thread is cleanly joined before propagating a source-iterator failure, and BaseException (not Exception) is correct because KeyboardInterrupt/SystemExit also must trigger poller shutdown before propagating. The visible code confirms the re-raise; the rule's concern (suppressed bugs) does not apply.
+  judge_signature_version: 2
+  scope_fingerprint: c58a936c57abdc27a1f696a46b3198742b815b81f9abdd36f4d467b1d6d42670
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[12]/body[11]/body[0]/handlers[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:1dccbfa81025538ae8331e57704e639a38239ca998f0e6df1d5397cb1dfb9f58'
+- key: engine/orchestrator/source_iteration.py:R6:SourceIterationDriver:_next_source_item_with_idle_timeout_flushes:fp=8c743e7a9e80688f
+  owner: john
+  reason: |-
+    ACCEPT as a prescribed non-error control-flow probe, not a swallowed defensive exception. In `src/elspeth/engine/orchestrator/source_iteration.py:450-456`, the helper thread converts any real idle-flush failure into `error_queue.put_nowait(exc)` and stops polling. After the source iterator and poller are both stopped/joined, `src/elspeth/engine/orchestrator/source_iteration.py:475-480` performs a nonblocking read of that internal error channel: `idle_error = error_queue.get_nowait()`; `except queue.Empty:` means the helper reported no exception, so the code explicitly sets `idle_error = None`. Real failures are not suppressed: `if idle_error is not None: raise idle_error` at lines 479-480, and source-thread exceptions are separately re-raised at lines 481-482. Drift would invalidate this suppression if `queue.Empty` stopped being tied only to the private `error_queue` absence-of-helper-error condition, or if line 480 no longer re-raised queued failures.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:20:08.881042+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    RULE MISFIRES. The `except queue.Empty` is not a swallowed exception in the R6 sense — `queue.Empty` is the documented nonblocking-get sentinel meaning 'no item present', used here as control flow to distinguish 'helper reported an error' from 'helper reported nothing'. The code explicitly re-raises any queued idle-poll exception at line 480 and the separately captured source exception at line 481-482, so real failures are not suppressed. The handler converts a sentinel into `idle_error = None` and then branches; this is the prescribed use of `queue.Empty`, not silent error handling.
+  judge_signature_version: 2
+  scope_fingerprint: c58a936c57abdc27a1f696a46b3198742b815b81f9abdd36f4d467b1d6d42670
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[12]/body[12]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:cdfa789736aee36d1b99d425f68af3c16a0c1b1596df3421a239c9c94ec991d1'
+- key: engine/orchestrator/source_iteration.py:R6:SourceIterationDriver:load_source_with_events:_source_iter:fp=047cae2106785361
+  owner: john
+  reason: |-
+    This is a prescribed iterator-boundary control-flow suppression, not a defensive-programming defect. In `src/elspeth/engine/orchestrator/source_iteration.py:661-666`, `_source_iter` converts the Python iterator protocol's empty-source signal into the source phase lifecycle completion path: `first_row = next(source_iterator)` followed by `except StopIteration:`, `self._events.emit(PhaseCompleted(...))`, and `return`. The enclosing function documents that actual source-load errors must be emitted and re-raised (`src/elspeth/engine/orchestrator/source_iteration.py:640-644`), and the surrounding outer handler does exactly that for non-exhaustion exceptions at `src/elspeth/engine/orchestrator/source_iteration.py:667-669`: `self._ceremony.emit_phase_error(...); raise`. This suppression is valid only while the caught exception is exactly `StopIteration` from the first iterator pull and the branch emits `PhaseCompleted` before returning; widening the catch or swallowing load failures would invalidate this allowance.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:20:16.295985+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES. The R6 rule targets silent exception swallowing, but StopIteration is not an error here — it is Python's iterator-protocol signal for empty source. The except branch is not silent: it emits PhaseCompleted (the lifecycle completion event) before returning, which is the prescribed control-flow translation from iterator-protocol-empty to source-phase-complete. Genuine load errors are handled by the surrounding outer except at lines 667-669, which calls emit_phase_error and re-raises. This is the protocol-boundary form the rule's plain-language description does not cover.
+  judge_signature_version: 2
+  scope_fingerprint: 81427e5dc6429d36e6af5d2fc1aaa9e8def3592117162d85201ac07a3d9e9b62
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[15]/body[1]/body[3]/body[0]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:735983e5cc9182cea6fd28e9f02717e5032243964e79bf5e35c0891c2e9c1d91'
+- key: engine/orchestrator/source_iteration.py:R6:SourceIterationDriver:run_main_processing_loop:fp=4203bfdd217d8817
+  owner: john
+  reason: |-
+    This is not a swallowed error; it is the iterator protocol's normal end-of-input sentinel being reified into the loop state. In `SourceIterationDriver.run_main_processing_loop`, the first source item is prefetched at `src/elspeth/engine/orchestrator/source_iteration.py:759-772`; the only caught exception is `StopIteration`, and the handler does exactly one state transition: `source_exhausted = True`. That state is then consumed by the mandatory post-loop finalization call at `src/elspeth/engine/orchestrator/source_iteration.py:940-954`, which passes `source_exhausted=source_exhausted` into `finalize_source_iteration(...)`. The same function later treats non-exhaustion as the exceptional lifecycle case for recording `LOADED` at `src/elspeth/engine/orchestrator/source_iteration.py:955-972`, so changing this `except StopIteration:` to crash would make a normally exhausted or empty source fail instead of completing the source lifecycle. This suppression is drift-sensitive to the exact control-flow shape: `except StopIteration:` immediately followed by `source_exhausted = True`, with that flag passed to `finalize_source_iteration`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:20:22.651980+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES. R6 flags silent-except, but StopIteration here is not an error being swallowed — it is the iterator protocol's normal end-of-input sentinel. The handler performs a meaningful state transition (source_exhausted = True) that is consumed by the downstream finalize_source_iteration call to drive the LOADED lifecycle path. Re-raising would convert a normal empty/exhausted source into a crash. The rationale plainly identifies the control-flow shape and the consumer of the flag, and the excerpt corroborates the immediate state-transition with no error suppression.
+  judge_signature_version: 2
+  scope_fingerprint: f3d27b365a5ce92e76da35b9a7dc5420c33c1cdb16e7956bd4cb64d131679463
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[16]/body[11]/body[7]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:19be941c6d254d8fb18fbd495456ab63aa8efd4d851e93cb469751b73566ec72'
+- key: engine/orchestrator/source_iteration.py:R6:SourceIterationDriver:run_main_processing_loop:fp=84faac49d9ece280
+  owner: john
+  reason: |-
+    This is not swallowing an unexpected internal failure. In `SourceIterationDriver.run_main_processing_loop`, line 812 performs the iterator protocol call, `source_item = next(source_iterator)`, and line 813 catches only `StopIteration` from that call. The handler immediately converts the protocol signal into the run lifecycle state: line 814 sets `source_exhausted = True` and line 815 exits the loop with `break`. That state is later consumed by finalization at lines 940-954, while non-`StopIteration` failures still flow to the broad phase-error handler at lines 974-976, which emits the process-phase error and re-raises. This is a prescribed iterator/end-of-input boundary, not a Tier-1 audit-data violation or defensive-programming suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:20:28.185237+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. The except catches only StopIteration — the iterator protocol's normal end-of-input signal — and translates it into explicit lifecycle state (source_exhausted = True; break) consumed by downstream finalization. This is not silent swallowing: StopIteration is a control-flow signal, not an error, and the handler converts it to an explicit state transition rather than discarding it. Non-StopIteration failures continue to propagate to the broad phase-error handler as the rationale describes and the narrow except clause confirms.
+  judge_signature_version: 2
+  scope_fingerprint: f3d27b365a5ce92e76da35b9a7dc5420c33c1cdb16e7956bd4cb64d131679463
+  judge_transport: openrouter
+  ast_path: 'body[30]/body[16]/body[11]/body[14]/body[1]/body[0]/orelse[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:b778f85dc0bc390aa9859968bcedc9bfa3bff20bf6547a6d36cd1972dd852ce5'
+- key: engine/orchestrator/heartbeat.py:R7:RunHeartbeatThread:_emit_degraded:fp=c2dddee2bcc6399b
+  owner: john
+  reason: |-
+    contextlib.suppress is the ONLY guard preventing degraded-telemetry emission from raising and crashing the heartbeat thread. A heartbeat that dies on a telemetry hiccup is a liveness regression. Correct must-not-raise discipline.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: OVERRIDDEN_BY_OPERATOR
+  judge_model_verdict: BLOCKED
+  judge_recorded_at: '2026-06-17T17:36:26.522548+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.78
+  judge_rationale: |-
+    GENUINE VIOLATION. Per policy, audit (Landscape) fires first, synchronous and crash-on-failure; telemetry fires second as best-effort. The call here is `record_heartbeat_degraded` on `self._repo` — by naming and by the policy's primacy order, this is an AUDIT-channel write, not telemetry. Wrapping an audit-repo write in `contextlib.suppress(Exception)` silently swallows audit failures, which is exactly the forbidden pattern ("No inference — if it's not recorded, it didn't happen"). The rationale asserts "telemetry hiccup" and "must-not-raise discipline" but the visible code shows an audit repo call, and the rationale never reconciles that. If the heartbeat truly must not die, the fix is structural (route to a real telemetry channel, or let the outer beat loop's existing `except Exception` on line 256 catch it) — not to launder an audit write through suppress.
+  judge_signature_version: 2
+  scope_fingerprint: 4f4880808c2a8efef2f0da02f16d5427b7f080cd8a8aaa2aa49c16937b768da0
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[8]/body[1]'
+  judge_metadata_signature: 'hmac-sha256:v2:14768f7b4f3ecbfb983cbf00756fe2f50de9210226ce1d9d3ea3aefd4e5f3d23'

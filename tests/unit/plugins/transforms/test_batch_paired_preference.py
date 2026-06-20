@@ -1,5 +1,6 @@
 """Tests for BatchPairedPreference aggregation transform."""
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -212,6 +213,28 @@ class TestBatchPairedPreference:
         with pytest.raises(TypeError, match="must be numeric"):
             transform.process(rows, ctx)
 
+    @pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, non_finite: float) -> None:
+        """Non-finite variant key must error before producing output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.5}),
+            _make_row({"case_id": "p1", "variant": non_finite, "score": 0.8}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_variant"
+        assert result.reason["field"] == "variant"
+        assert not result.retryable
+
     def test_no_complete_pairs_returns_error(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
 
@@ -244,6 +267,98 @@ class TestBatchPairedPreference:
         assert result.status == "error"
         assert result.reason is not None
         assert result.reason["reason"] == "empty_batch"
+        assert not result.retryable
+
+    def test_excessive_batch_size_is_rejected_before_pair_work(self, ctx: PluginContext, monkeypatch: pytest.MonkeyPatch) -> None:
+        import elspeth.plugins.transforms.batch_paired_preference as module
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        monkeypatch.setattr(module, "_MAX_BATCH_ROWS", 3, raising=False)
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.4}),
+            _make_row({"case_id": "p1", "variant": "B", "score": 0.7}),
+            _make_row({"case_id": "p2", "variant": "A", "score": 0.5}),
+            _make_row({"case_id": "p2", "variant": "B", "score": 0.8}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "batch_too_large"
+        assert result.reason["batch_size"] == 4
+        assert result.reason["expected"] == "at most 3 rows"
+        assert not result.retryable
+
+    def test_all_ties_reports_none_preference_rate(self, ctx: PluginContext) -> None:
+        """All-tie batch: wins+losses==0 -> preference_rate must be None (B4.5-b)."""
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.5}),
+            _make_row({"case_id": "p1", "variant": "B", "score": 0.5}),
+            _make_row({"case_id": "p2", "variant": "A", "score": 0.8}),
+            _make_row({"case_id": "p2", "variant": "B", "score": 0.8}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["wins"] == 0
+        assert result.row["losses"] == 0
+        assert result.row["ties"] == 2
+        # preference_rate = wins/(wins+losses) is 0/0 -- honest None, never 0.0
+        assert result.row["preference_rate"] is None
+
+    def test_single_compared_pair_reports_none_ci(self, ctx: PluginContext) -> None:
+        """compared<=1 -> se=0 -> CI bounds must be None (B4.5-a-paired_pref-CI)."""
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.4}),
+            _make_row({"case_id": "p1", "variant": "B", "score": 0.7}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["compared_pair_count"] == 1
+        # standard_error undefined at n<=1 -- CI bounds must be None, never 0.0
+        assert result.row["standard_error_delta"] is None
+        assert result.row["confidence_95_low"] is None
+        assert result.row["confidence_95_high"] is None
+
+    def test_duplicate_variant_in_pair_returns_error(self, ctx: PluginContext) -> None:
+        """Two rows with the same pair_id and same variant must error (B4.5-e)."""
+        from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+        transform = BatchPairedPreference(
+            {"schema": DYNAMIC_SCHEMA, "pair_field": "case_id", "variant_field": "variant", "score_field": "score"}
+        )
+        rows = [
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.4}),
+            _make_row({"case_id": "p1", "variant": "A", "score": 0.7}),  # duplicate variant within pair
+            _make_row({"case_id": "p1", "variant": "B", "score": 0.6}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "duplicate_variant_in_pair"
         assert not result.retryable
 
 
@@ -329,3 +444,19 @@ class TestBatchPairedPreferenceConfig:
                 "wins",
             }
         )
+
+
+def test_non_finite_decimal_key_guarded() -> None:
+    """B4.5-d: a non-finite Decimal key is caught by the static guard (parity with batch_effect_size).
+
+    Decimal is not an allowed FieldContract type, so a Decimal key can only reach a
+    transform through an object-typed field; the guard must still reject it. Exercised at
+    the helper because the end-to-end path requires an object-typed key column.
+    """
+    from elspeth.plugins.transforms.batch_paired_preference import BatchPairedPreference
+
+    guard = BatchPairedPreference._is_non_finite_variant
+    assert guard(Decimal("nan")) is True
+    assert guard(Decimal("inf")) is True
+    assert guard(Decimal("-inf")) is True
+    assert guard(Decimal("1")) is False

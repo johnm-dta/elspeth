@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -62,6 +63,108 @@ class TestSourceSpec:
             }
         )
         assert restored == s
+
+
+class TestCompositionStateNamedSources:
+    def _source(self, plugin: str, on_success: str) -> SourceSpec:
+        return SourceSpec(
+            plugin=plugin,
+            on_success=on_success,
+            options={"schema": {"mode": "observed"}},
+            on_validation_failure="discard",
+        )
+
+    def test_sources_mapping_preserves_named_source_order_without_singular_facade(self) -> None:
+        state = CompositionState(
+            source=None,
+            sources={
+                "customers": self._source("csv", "customer_rows"),
+                "orders": self._source("json", "order_rows"),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="customer_rows", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        assert tuple(state.sources) == ("customers", "orders")
+        assert state.to_dict()["sources"]["orders"]["on_success"] == "order_rows"
+        assert not hasattr(state, "source")
+
+    def test_named_source_mutations_add_update_and_remove_one_source(self) -> None:
+        state = CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
+
+        state = state.with_named_source("customers", self._source("csv", "customer_rows"))
+        state = state.with_named_source("orders", self._source("json", "order_rows"))
+        updated = state.with_named_source("customers", self._source("csv", "updated_customer_rows"))
+        removed = updated.without_named_source("orders")
+
+        assert tuple(updated.sources) == ("customers", "orders")
+        assert updated.sources["customers"].on_success == "updated_customer_rows"
+        assert tuple(removed.sources) == ("customers",)
+        assert removed.sources["customers"].on_success == "updated_customer_rows"
+
+    def test_from_dict_restores_sources_mapping(self) -> None:
+        original = CompositionState(
+            source=None,
+            sources={"customers": self._source("csv", "customer_rows"), "orders": self._source("json", "order_rows")},
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=7,
+        )
+
+        restored = CompositionState.from_dict(original.to_dict())
+
+        assert restored == original
+
+    def test_validation_warnings_and_suggestions_cover_all_named_sources(self) -> None:
+        """Named-source advisory checks must not stop at the compatibility source."""
+        state = CompositionState(
+            source=None,
+            sources={
+                "customers": self._source("csv", "customer_rows"),
+                "orders": SourceSpec(
+                    plugin="json",
+                    on_success="order_rows",
+                    options={"path": "/data/orders.json"},
+                    on_validation_failure="missing_failures",
+                ),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="customer_rows", plugin="json", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = state.validate()
+
+        assert any(w.component == "source:orders" and "on_validation_failure" in w.message for w in result.warnings)
+        assert any(s.component == "source:orders" and "no explicit schema" in s.message for s in result.suggestions)
+
+    def test_sources_mapping_is_the_only_domain_and_serialized_source_shape(self) -> None:
+        """CompositionState must not expose a singular first-source facade."""
+        state = CompositionState(
+            sources={
+                "customers": self._source("csv", "customer_rows"),
+                "orders": self._source("json", "order_rows"),
+            },
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        serialized = state.to_dict()
+        restored = CompositionState.from_dict(serialized)
+
+        assert not hasattr(state, "source")
+        assert "source" not in serialized
+        assert tuple(restored.sources) == ("customers", "orders")
 
 
 class TestNodeSpec:
@@ -432,8 +535,8 @@ class TestCompositionState:
         src = self._make_source()
         new_state = state.with_source(src)
         assert new_state is not state
-        assert new_state.source is src
-        assert state.source is None  # original unchanged
+        assert new_state.sources["source"] is src
+        assert state.sources == {}  # original unchanged
 
     def test_with_source_increments_version(self) -> None:
         state = self._empty_state()
@@ -603,8 +706,8 @@ class TestCompositionState:
         d = state.to_dict()
         assert isinstance(d, dict)
         assert isinstance(d["nodes"], list)
-        assert isinstance(d["source"]["options"], dict)
-        assert isinstance(d["source"]["options"]["nested"], dict)
+        assert isinstance(d["sources"]["source"]["options"], dict)
+        assert isinstance(d["sources"]["source"]["options"]["nested"], dict)
         assert isinstance(d["outputs"], list)
 
     def test_to_dict_roundtrip_yaml(self) -> None:
@@ -635,7 +738,7 @@ class TestCompositionState:
         new_state = state.with_source(src)
         assert isinstance(new_state.nodes, tuple)
         with pytest.raises(TypeError):
-            new_state.source.options["new"] = "x"  # type: ignore[union-attr, index]
+            new_state.sources["source"].options["new"] = "x"  # type: ignore[index]
 
     # --- from_dict round-trip ---
 
@@ -723,12 +826,11 @@ class TestCompositionState:
         )
         state = state.with_source(src)
         restored = CompositionState.from_dict(state.to_dict())
-        assert restored.source is not None
-        assert restored.source.options is not None
+        assert restored.sources["source"].options is not None
         with pytest.raises(TypeError):
-            restored.source.options["new"] = "x"  # type: ignore[index]
+            restored.sources["source"].options["new"] = "x"  # type: ignore[index]
         with pytest.raises(TypeError):
-            restored.source.options["nested"]["mutate"] = "y"
+            restored.sources["source"].options["nested"]["mutate"] = "y"
 
 
 class TestStage1Validation:
@@ -866,7 +968,7 @@ class TestStage1Validation:
                 on_error=None,
                 options={},
                 condition="True",
-                routes={},
+                routes={"true": "fork", "false": "fork"},
                 fork_to=("path_a", "path_b"),
                 branches=None,
                 policy=None,
@@ -2111,7 +2213,7 @@ class TestStage1Validation:
             on_error=None,
             options={},
             condition="row['score'] >= 0.5",
-            routes={"high": "main", "low": "errors"},
+            routes={"true": "main", "false": "errors"},
             fork_to=None,
             branches=None,
             policy=None,
@@ -2135,6 +2237,60 @@ class TestStage1Validation:
         assert result.is_valid, result.errors
         assert result.warnings == ()
         assert result.suggestions == ()
+
+    def _gate_pipeline(self, *, condition: str, routes: dict[str, str]) -> CompositionState:
+        """Minimal source -> gate -> sink pipeline for route-parity checks."""
+        state = self._empty_state()
+        state = state.with_source(self._make_source(on_success="g1"))
+        state = state.with_node(
+            NodeSpec(
+                id="g1",
+                node_type="gate",
+                plugin=None,
+                input="g1",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition=condition,
+                routes=routes,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_output(self._make_output("main"))
+        state = state.with_edge(self._make_edge("e0", "source", "g1"))
+        return state
+
+    def test_gate_boolean_condition_custom_labels_invalid(self) -> None:
+        """Boolean gate condition with non-true/false labels is rejected (parity with GateSettings).
+
+        Regression for elspeth-08e17b9253: composer validate() previously
+        green-lit a shape runtime GateSettings.validate_boolean_routes rejects.
+        """
+        result = self._gate_pipeline(condition="row['x'] > 0", routes={"high": "main", "low": "main"}).validate()
+        assert result.is_valid is False
+        assert any("boolean condition" in e.message and e.severity == "high" for e in result.errors), [e.message for e in result.errors]
+
+    def test_gate_numeric_condition_invalid(self) -> None:
+        """Provably-numeric gate condition can never be a route label; rejected for any labels."""
+        result = self._gate_pipeline(condition="row['x'] + 1", routes={"a": "main"}).validate()
+        assert result.is_valid is False
+        assert any("numeric value" in e.message and e.severity == "high" for e in result.errors), [e.message for e in result.errors]
+
+    def test_gate_boolean_condition_true_false_labels_valid(self) -> None:
+        """Boolean gate condition with exactly {true,false} labels stays valid."""
+        result = self._gate_pipeline(condition="row['x'] > 0", routes={"true": "main", "false": "main"}).validate()
+        assert result.is_valid is True, [e.message for e in result.errors]
+
+    def test_gate_string_route_condition_custom_labels_valid(self) -> None:
+        """POSITIVE CONTROL: a string-returning condition with custom labels is NOT over-rejected."""
+        result = self._gate_pipeline(
+            condition='"high" if row["x"] > 0 else "low"',
+            routes={"high": "main", "low": "main"},
+        ).validate()
+        assert result.is_valid is True, [e.message for e in result.errors]
 
 
 class TestWebScrapeAbuseContactValidation:
@@ -2375,6 +2531,35 @@ class TestWebScrapeAbuseContactValidation:
         result = state.validate()
         assert not result.is_valid
         assert any("abuse_contact" in e.message for e in result.errors)
+
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("abuse_contact", "<OPERATOR_REQUIRED>"),
+            ("abuse_contact", "operator required"),
+            ("scraping_reason", "<OPERATOR_REQUIRED>"),
+            ("scraping_reason", "operator required"),
+        ],
+    )
+    def test_rejects_wire_visible_identity_placeholders(self, field_name: str, value: str) -> None:
+        """Composer validation must block placeholder values before preview/execution."""
+        state = self._state_with_web_scrape("ops@somecompany.gov.au")
+        http = dict(state.nodes[0].options["http"])
+        http[field_name] = value
+        options = dict(state.nodes[0].options)
+        options["http"] = http
+        node = replace(state.nodes[0], options=options)
+        state = replace(state, nodes=(node,))
+
+        messages = self._web_scrape_identity_error_messages(state)
+        assert messages, f"Expected reject for {field_name}={value!r}, got no web_scrape identity error"
+        assert field_name in messages[0]
+        assert "placeholder" in messages[0]
+
+    def test_accepts_real_wire_visible_identity_values(self) -> None:
+        state = self._state_with_web_scrape("ops@somecompany.gov.au")
+        messages = self._web_scrape_identity_error_messages(state)
+        assert not messages
 
 
 class TestSchemaContractValidation:
@@ -2704,6 +2889,49 @@ class TestSchemaContractValidation:
         assert sink_contract.consumer_requires == ("body",)
         assert sink_contract.satisfied is True
 
+    def test_named_non_first_source_contract_violation_is_reported(self) -> None:
+        """Schema validation must inspect every named source, not only the compatibility source."""
+        state = CompositionState(
+            source=None,
+            sources={
+                "customers": self._make_source(
+                    on_success="customer_rows",
+                    options={"schema": {"mode": "fixed", "fields": ["customer_id: str"]}},
+                    on_validation_failure="discard",
+                ),
+                "orders": self._make_source(
+                    on_success="order_rows",
+                    plugin="json",
+                    options={"schema": {"mode": "fixed", "fields": ["refund_id: str"]}},
+                    on_validation_failure="discard",
+                ),
+            },
+            nodes=(
+                self._make_transform(
+                    "validate_orders",
+                    "order_rows",
+                    "main",
+                    options={"required_input_fields": ["order_id"]},
+                ),
+            ),
+            edges=(),
+            outputs=(self._make_output("main"), self._make_output("customer_rows")),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = state.validate()
+
+        assert not result.is_valid
+        contract = next(edge for edge in result.edge_contracts if edge.to_id == "validate_orders")
+        assert contract.from_id == "source:orders"
+        assert contract.producer_guarantees == ("refund_id",)
+        assert contract.consumer_requires == ("order_id",)
+        assert contract.missing_fields == ("order_id",)
+        assert any(
+            error.component == "source:orders" and "'source:orders' -> 'validate_orders'" in error.message for error in result.errors
+        )
+
     def test_contract_probe_constructor_exception_falls_back_instead_of_crashing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Constructor-time probe failures must not escape Stage 1 validation."""
         state = self._empty_state()
@@ -2896,7 +3124,7 @@ class TestSchemaContractValidation:
         )
 
         with pytest.raises(RuntimeError, match="framework bug inside field_mapper __init__"):
-            _check_schema_contracts(source, (field_mapper_node,), (sink,))
+            _check_schema_contracts({"source": source}, (field_mapper_node,), (sink,))
 
     def test_contract_probe_redacts_exception_detail_from_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Regression (P2c): the constructor-time exception message is the
@@ -3428,7 +3656,7 @@ class TestSchemaContractValidation:
                 on_error=None,
                 options={},
                 condition="True",
-                routes={},
+                routes={"true": "fork", "false": "fork"},
                 fork_to=("branch_a", "branch_b"),
                 branches=None,
                 policy=None,
@@ -3482,7 +3710,7 @@ class TestSchemaContractValidation:
             self._make_gate(
                 "g1",
                 "gate_in",
-                {"high": "main", "low": "errors"},
+                {"true": "main", "false": "errors"},
             )
         )
         state = state.with_node(
@@ -3518,7 +3746,7 @@ class TestSchemaContractValidation:
             self._make_gate(
                 "g1",
                 "gate_in",
-                {"a": "path_a", "b": "path_b"},
+                {"true": "path_a", "false": "path_b"},
             )
         )
         state = state.with_node(
@@ -3570,7 +3798,7 @@ class TestSchemaContractValidation:
                 on_error=None,
                 options={},
                 condition="True",
-                routes={},
+                routes={"true": "fork", "false": "fork"},
                 fork_to=("path_a", "path_b"),
                 branches=None,
                 policy=None,
@@ -3755,7 +3983,7 @@ class TestSchemaContractValidation:
             self._make_gate(
                 "g1",
                 "gate_in",
-                {"high": "sink_a", "low": "sink_b"},
+                {"true": "sink_a", "false": "sink_b"},
             )
         )
         state = state.with_output(
@@ -3806,7 +4034,7 @@ class TestSchemaContractValidation:
             self._make_gate(
                 "g1",
                 "gate_in",
-                {"a": "path_a", "b": "path_b"},
+                {"true": "path_a", "false": "path_b"},
             )
         )
         state = state.with_node(
@@ -4164,6 +4392,48 @@ class TestSchemaContractValidation:
 
         assert not result.is_valid
         assert any("reserved" in e.message.lower() for e in result.errors)
+
+    def test_node_id_source_namespace_prefix_is_reserved(self) -> None:
+        """Nodes cannot collide with named-source producer ids such as source:orders."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                options={"schema": {"mode": "fixed", "fields": ["text: str"]}},
+            )
+        )
+        state = state.with_node(
+            self._make_transform(
+                "source:orders",
+                "t1",
+                "main",
+                options={"required_input_fields": ["text"]},
+            )
+        )
+        state = state.with_output(self._make_output())
+        state = state.with_edge(self._make_edge("e1", "source", "source:orders"))
+
+        result = state.validate()
+
+        assert not result.is_valid
+        assert any(error.component == "node:source:orders" and "source producer namespace" in error.message for error in result.errors)
+
+    @pytest.mark.parametrize("source_name", ["Orders", "bad name", "continue", "__system", "x" * 39])
+    def test_plural_source_names_follow_runtime_identifier_constraints(self, source_name: str) -> None:
+        """Composer Stage 1 rejects names that runtime settings would reject later."""
+        state = CompositionState(
+            source=None,
+            sources={source_name: self._make_source("main")},
+            nodes=(),
+            edges=(),
+            outputs=(self._make_output("main"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = state.validate()
+
+        assert not result.is_valid
+        assert any(error.component in {"source", f"source:{source_name}"} for error in result.errors)
 
     def test_bare_string_required_input_fields_emits_error(self) -> None:
         """Bare-string required_input_fields fails closed."""

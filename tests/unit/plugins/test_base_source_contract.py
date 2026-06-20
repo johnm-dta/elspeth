@@ -26,7 +26,7 @@ class StubSource(BaseSource):
         self.output_schema = PluginSchema
 
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
-        yield SourceRow.valid({"id": 1}, contract=make_contract({"id": 1}))
+        yield SourceRow.valid({"id": 1}, contract=make_contract({"id": 1}), source_row_index=0)
 
     def close(self) -> None:
         pass

@@ -37,10 +37,12 @@ def make_settings_yaml_for_test_plugins(
             "options": sink_spec.get("options", sink_spec.get("config", {})),
         }
     payload: dict[str, object] = {
-        "source": {
-            "plugin": source_plugin,
-            "on_success": source_on_success,
-            "options": source_options,
+        "sources": {
+            "primary": {
+                "plugin": source_plugin,
+                "on_success": source_on_success,
+                "options": source_options,
+            }
         },
         "sinks": sink_payload,
     }
@@ -68,8 +70,8 @@ def _pipeline_from_settings(
     install_adr019_test_plugin_manager(monkeypatch)
     bundle = instantiate_plugins_from_config(settings)
     graph = ExecutionGraph.from_plugin_instances(
-        source=bundle.source,
-        source_settings=bundle.source_settings,
+        sources=bundle.sources,
+        source_settings_map=bundle.source_settings_map,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
         aggregations=bundle.aggregations,
@@ -77,7 +79,7 @@ def _pipeline_from_settings(
         coalesce_settings=(list(settings.coalesce) if settings.coalesce else None),
     )
     config = assemble_and_validate_pipeline_config(
-        source=bundle.source,
+        sources=bundle.sources,
         transforms=bundle.transforms,
         sinks=bundle.sinks,
         aggregations=bundle.aggregations,
@@ -138,6 +140,12 @@ def _yaml_for_source_quarantine(rows: list[dict[str, object]]) -> str:
 
 
 def _yaml_for_gate_route(rows: list[dict[str, object]]) -> str:
+    # NOTE: the sink that captures the gate "false" branch is named
+    # ``gate_default_sink`` (not ``primary``) because the migration to plural
+    # ``sources:`` uses the source-name token ``primary`` by default; reusing
+    # ``primary`` for a sink would collide with the source key and fail
+    # ``ElspethSettings`` validation ("Node name 'primary' is used by both
+    # source and sink").
     return make_settings_yaml_for_test_plugins(
         source_plugin="list_source",
         source_config={"rows": rows, "on_success": "default"},
@@ -146,17 +154,19 @@ def _yaml_for_gate_route(rows: list[dict[str, object]]) -> str:
                 "name": "gate",
                 "input": "default",
                 "condition": "row['route'] == 'move'",
-                "routes": {"true": "routed", "false": "primary"},
+                "routes": {"true": "routed", "false": "gate_default_sink"},
             }
         ],
         sinks={
             "routed": {"plugin": "collect_sink", "config": {"name": "routed"}},
-            "primary": {"plugin": "collect_sink", "config": {"name": "primary"}},
+            "gate_default_sink": {"plugin": "collect_sink", "config": {"name": "gate_default_sink"}},
         },
     )
 
 
 def _yaml_for_on_error_route(rows: list[dict[str, object]]) -> str:
+    # NOTE: ``primary`` would collide with the implicit source key; the
+    # success sink is named ``success_sink`` instead. See ``_yaml_for_gate_route``.
     return make_settings_yaml_for_test_plugins(
         source_plugin="list_source",
         source_config={"rows": rows, "on_success": "default"},
@@ -165,13 +175,13 @@ def _yaml_for_on_error_route(rows: list[dict[str, object]]) -> str:
                 "name": "maybe_fail",
                 "plugin": "conditional_error",
                 "input": "default",
-                "on_success": "primary",
+                "on_success": "success_sink",
                 "on_error": "error_sink",
                 "options": {},
             }
         ],
         sinks={
-            "primary": {"plugin": "collect_sink", "config": {"name": "primary"}},
+            "success_sink": {"plugin": "collect_sink", "config": {"name": "success_sink"}},
             "error_sink": {"plugin": "collect_sink", "config": {"name": "error_sink"}},
         },
     )

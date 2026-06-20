@@ -85,6 +85,8 @@ class TestRecorderFactoryRouting:
             source_node_id=source.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -160,6 +162,8 @@ class TestRecorderFactoryRouting:
             source_node_id=gate.node_id,
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -237,6 +241,8 @@ class TestRecorderFactoryRouting:
                 source_node_id=source.node_id,
                 row_index=0,
                 data={},
+                source_row_index=0,
+                ingest_sequence=0,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             state = factory.execution.begin_node_state(
@@ -322,6 +328,8 @@ class TestRecorderFactoryRouting:
                 source_node_id=gate.node_id,
                 row_index=0,
                 data={},
+                source_row_index=0,
+                ingest_sequence=0,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             state = factory.execution.begin_node_state(
@@ -404,7 +412,7 @@ def _run_mixed_move_and_divert_pipeline(
         "error_sink": CollectSink(name="error_sink"),
     }
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(transform)],
         sinks={name: as_sink(sink) for name, sink in sinks.items()},
         gates=[gate],
@@ -611,6 +619,8 @@ class TestRoutingEventDistinguishability:
             source_node_id=source.node_id,
             row_index=0,
             data={"id": 1, "fail": True},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         ref = TokenRef(token_id=token.token_id, run_id=run.run_id)

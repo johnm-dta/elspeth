@@ -7,6 +7,8 @@ All functions accept (db, factory) as their first two parameters.
 
 from __future__ import annotations
 
+from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.mcp.types import (
@@ -16,6 +18,47 @@ from elspeth.mcp.types import (
     FieldNotFoundError,
     RunContractReport,
 )
+
+
+class _ContractLookupError(Exception):
+    """Internal signal: the per-source contract is unavailable for ``run_id``.
+
+    Carries an MCP-shaped ``ErrorResult`` payload so callers can return it
+    directly to the MCP surface. Defined for the in-module signalling
+    contract between ``_load_first_source_contract`` and the public
+    ``get_run_contract`` / ``explain_field`` entry points; not raised
+    outside this module.
+    """
+
+    def __init__(self, payload: ErrorResult) -> None:
+        super().__init__(payload["error"])
+        self.payload = payload
+
+
+def _load_first_source_contract(factory: RecorderFactory, run_id: str) -> SchemaContract:
+    """Return the contract of the lowest-ordered source for ``run_id``.
+
+    Per ADR-025 §3 Decision 5 (G6) schema contracts live exclusively in
+    ``run_sources``; the run-level singleton was deleted because writes and
+    integrity reads had drifted across surfaces. This MCP layer originally
+    surfaced "the run contract" — the post-G6 equivalent is the first source's
+    contract sorted by ``source_node_id`` (matching the deterministic pick
+    ``RecoveryManager.verify_contract_integrity`` returns for the same
+    legacy single-source view).
+
+    Raises ``_ContractLookupError`` carrying an ``ErrorResult`` payload
+    when the run has no contract stored or the per-source metadata is
+    corrupt; the public entry points translate the payload back into
+    the MCP-surface ``ErrorResult`` shape.
+    """
+    try:
+        source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
+    except AuditIntegrityError as exc:
+        raise _ContractLookupError({"error": f"Run '{run_id}' has corrupt source-contract metadata: {exc}"}) from exc
+    if not source_records:
+        raise _ContractLookupError({"error": f"Run '{run_id}' has no contract stored"})
+    first_source_node_id = sorted(source_records)[0]
+    return source_records[first_source_node_id].schema_contract
 
 
 def get_run_contract(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> RunContractReport | ErrorResult:
@@ -33,14 +76,22 @@ def get_run_contract(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> 
 
     Returns:
         Contract details or {"error": "..."} if not found
+
+    Notes:
+        Multi-source runs return the lowest-ordered source's contract
+        (deterministic by ``source_node_id``) for back-compatibility with the
+        single-contract MCP surface. Use the per-source surfaces in
+        ``RunLifecycleRepository.get_run_source_resume_records`` for
+        complete plural-by-source visibility.
     """
     run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
-    contract = factory.run_lifecycle.get_run_contract(run_id)
-    if contract is None:
-        return {"error": f"Run '{run_id}' has no contract stored"}
+    try:
+        contract = _load_first_source_contract(factory, run_id)
+    except _ContractLookupError as exc:
+        return exc.payload
 
     # Convert contract to JSON-serializable format
     fields = [
@@ -83,14 +134,20 @@ def explain_field(
 
     Returns:
         Field provenance details or {"error": "..."} if not found
+
+    Notes:
+        Multi-source runs resolve against the lowest-ordered source's contract
+        (deterministic by ``source_node_id``). For per-source field
+        provenance, consult ``RunLifecycleRepository.get_run_source_resume_records``.
     """
     run = factory.run_lifecycle.get_run(run_id)
     if run is None:
         return {"error": f"Run '{run_id}' not found"}
 
-    contract = factory.run_lifecycle.get_run_contract(run_id)
-    if contract is None:
-        return {"error": f"Run '{run_id}' has no contract stored"}
+    try:
+        contract = _load_first_source_contract(factory, run_id)
+    except _ContractLookupError as exc:
+        return exc.payload
 
     # Resolve field using canonical name resolution (normalized_name takes precedence)
     normalized = contract.find_name(field_name)

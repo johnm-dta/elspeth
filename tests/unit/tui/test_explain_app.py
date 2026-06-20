@@ -56,3 +56,31 @@ class TestExplainApp:
             await pilot.press("q")
             # App should exit
             assert not app.is_running
+
+    def test_app_passes_lineage_selectors_to_screen(self) -> None:
+        """ExplainApp must not drop CLI row/token/sink selectors."""
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.tui.explain_app import ExplainApp
+        from elspeth.tui.screens.explain_screen import LoadingFailedState
+
+        mock_db = MagicMock()
+        app = ExplainApp(
+            db=mock_db,
+            run_id="run-123",
+            row_id="row-456",
+            token_id="tok-123",
+            sink="main",
+        )
+
+        with patch("elspeth.tui.explain_app.ExplainScreen") as MockScreen:
+            MockScreen.return_value.state = LoadingFailedState(db=mock_db, run_id="run-123", error="boom")
+            list(app.compose())
+
+        MockScreen.assert_called_once_with(
+            db=mock_db,
+            run_id="run-123",
+            row_id="row-456",
+            token_id="tok-123",
+            sink="main",
+        )

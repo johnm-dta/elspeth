@@ -56,6 +56,7 @@ class _StateRecord:
     edges: Any
     outputs: Any
     source: Any
+    sources: Any
     composer_meta: Any
     created_at: datetime
 
@@ -109,6 +110,7 @@ def state_record(session_id: UUID, state_id: UUID) -> _StateRecord:
         edges=(),
         outputs=(),
         source=None,
+        sources=None,
         composer_meta=None,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
@@ -140,6 +142,7 @@ def session_engine_with_row(engine, session_record: _SessionRecord, state_record
                 session_id=str(session_record.id),
                 version=state_record.version,
                 source=None,
+                sources=None,
                 nodes=[],
                 edges=[],
                 outputs=[],
@@ -215,6 +218,7 @@ def _build_service_with_fresh_telemetry(  # type: ignore[no-untyped-def]
 
     execution_service = MagicMock()
     execution_service.validate = AsyncMock(return_value=_ok_validation())
+    execution_service.validate_state = AsyncMock(return_value=_ok_validation())
 
     readiness_service = MagicMock()
     readiness_service.compute_snapshot = AsyncMock(return_value=readiness)

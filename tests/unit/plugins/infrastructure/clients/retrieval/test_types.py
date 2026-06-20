@@ -31,6 +31,16 @@ class TestRetrievalChunkScoreValidation:
         assert chunk.score == 0.75
 
 
+class TestRetrievalChunkIdentityValidation:
+    def test_empty_content_raises(self):
+        with pytest.raises(ValueError, match="content must not be empty"):
+            RetrievalChunk(content="", score=0.5, source_id="doc1", metadata={})
+
+    def test_empty_source_id_raises(self):
+        with pytest.raises(ValueError, match="source_id must not be empty"):
+            RetrievalChunk(content="text", score=0.5, source_id="", metadata={})
+
+
 class TestRetrievalChunkMetadataValidation:
     def test_valid_metadata(self):
         chunk = RetrievalChunk(

@@ -20,11 +20,6 @@ Import patterns:
     from elspeth.core.config import RetrySettings, ElspethSettings
 """
 
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
 from elspeth.contracts.audit import (
     Artifact,
     Batch,
@@ -56,6 +51,11 @@ from elspeth.contracts.audit import (
     ValidationErrorRecord,
 )
 from elspeth.contracts.auth import AuthProviderType
+from elspeth.contracts.barrier_scalars import (
+    AggregationNodeScalars,
+    BarrierScalars,
+    CoalescePendingScalars,
+)
 from elspeth.contracts.batch_runtime import BatchTransformRuntimeProtocol
 from elspeth.contracts.call_data import (
     CallPayload,
@@ -67,13 +67,8 @@ from elspeth.contracts.call_data import (
     LLMCallResponse,
     RawCallPayload,
 )
-from elspeth.contracts.checkpoint import ResumeCheck, ResumePoint
+from elspeth.contracts.checkpoint import ResumeCheck, ResumedRow, ResumePoint
 from elspeth.contracts.cli import ExecutionResult, ProgressEvent
-from elspeth.contracts.coalesce_checkpoint import (
-    CoalesceCheckpointState,
-    CoalescePendingCheckpoint,
-    CoalesceTokenCheckpoint,
-)
 from elspeth.contracts.coalesce_enums import CoalescePolicy, MergeStrategy
 from elspeth.contracts.coalesce_metadata import ArrivalOrderEntry, CoalesceMetadata
 
@@ -169,11 +164,13 @@ from elspeth.contracts.errors import (
     ContractViolation,
     DependencyFailedError,
     DuplicateDocumentError,
+    EmptyResumeStateError,
     ErrorDetail,
     ExecutionError,
     ExtraFieldViolation,
     FrameworkBugError,
     GracefulShutdownError,
+    IncompleteSourceResumeError,
     MaxRetriesExceeded,
     MissingFieldViolation,
     OrchestrationInvariantError,
@@ -258,6 +255,7 @@ from elspeth.contracts.routing import (
     RoutingAction,
     RoutingSpec,
 )
+from elspeth.contracts.scheduler import SchedulerEvent, SchedulerEventType, TokenWorkItem, TokenWorkStatus
 
 # Schema contracts — core types
 from elspeth.contracts.schema_contract import (
@@ -314,8 +312,10 @@ __all__ = [  # Grouped by category for readability
     "CommencementGateFailedError",
     "DependencyFailedError",
     "DuplicateDocumentError",
+    "EmptyResumeStateError",
     "FrameworkBugError",
     "GracefulShutdownError",
+    "IncompleteSourceResumeError",
     "OrchestrationInvariantError",
     "MaxRetriesExceeded",
     "PassThroughContractViolation",
@@ -412,15 +412,19 @@ __all__ = [  # Grouped by category for readability
     "error_edge_label",
     # identity
     "TokenInfo",
+    # scheduler
+    "SchedulerEvent",
+    "SchedulerEventType",
+    "TokenWorkItem",
+    "TokenWorkStatus",
+    # barrier scalars (post-F1 checkpoint column)
+    "AggregationNodeScalars",
+    "BarrierScalars",
+    "CoalescePendingScalars",
     # checkpoint
-    "AggregationCheckpointState",
-    "AggregationNodeCheckpoint",
-    "AggregationTokenCheckpoint",
-    "CoalesceCheckpointState",
-    "CoalescePendingCheckpoint",
-    "CoalesceTokenCheckpoint",
     "ResumeCheck",
     "ResumePoint",
+    "ResumedRow",
     # coalesce enums
     "CoalescePolicy",
     "MergeStrategy",

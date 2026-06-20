@@ -178,6 +178,35 @@ def _make_fork_coalesce_pipeline() -> CompositionState:
     )
 
 
+def _make_named_sources_pipeline() -> CompositionState:
+    return CompositionState(
+        source=None,
+        sources={
+            "customers": SourceSpec(
+                plugin="csv",
+                on_success="customer_rows",
+                options={"path": "/data/customers.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            "orders": SourceSpec(
+                plugin="json",
+                on_success="order_rows",
+                options={"path": "/data/orders.json", "schema": {"mode": "observed"}},
+                on_validation_failure="bad_orders",
+            ),
+        },
+        nodes=(),
+        edges=(),
+        outputs=(
+            OutputSpec(name="customer_rows", plugin="json", options={"path": "/data/customer_rows.json"}, on_write_failure="discard"),
+            OutputSpec(name="order_rows", plugin="json", options={"path": "/data/order_rows.json"}, on_write_failure="discard"),
+            OutputSpec(name="bad_orders", plugin="json", options={"path": "/data/bad_orders.json"}, on_write_failure="discard"),
+        ),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
 class TestGenerateYaml:
     def test_generate_pipeline_dict_matches_generate_yaml_shape(self) -> None:
         state = _make_fork_coalesce_pipeline()
@@ -185,7 +214,7 @@ class TestGenerateYaml:
         pipeline_dict = generate_pipeline_dict(state)
 
         assert pipeline_dict == yaml.safe_load(generate_yaml(state))
-        assert set(pipeline_dict) == {"source", "gates", "coalesce", "sinks"}
+        assert set(pipeline_dict) == {"sources", "gates", "coalesce", "sinks"}
 
     def test_generate_pipeline_dict_strips_web_metadata(self) -> None:
         state = _make_linear_pipeline().with_source(
@@ -199,8 +228,10 @@ class TestGenerateYaml:
 
         pipeline_dict = generate_pipeline_dict(state)
 
-        assert "blob_ref" not in pipeline_dict["source"]["options"]
-        assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["source"]["options"]
+        # ``with_source(...)`` stores the default named source under the
+        # composer key ``"source"``; YAML always emits plural ``sources``.
+        assert "blob_ref" not in pipeline_dict["sources"]["source"]["options"]
+        assert "blob_ref" not in yaml.safe_load(generate_yaml(state))["sources"]["source"]["options"]
 
     def test_generate_pipeline_dict_strips_source_authoring_metadata(self) -> None:
         state = _make_linear_pipeline().with_source(
@@ -223,9 +254,9 @@ class TestGenerateYaml:
         )
 
         pipeline_dict = generate_pipeline_dict(state)
-        yaml_options = yaml.safe_load(generate_yaml(state))["source"]["options"]
+        yaml_options = yaml.safe_load(generate_yaml(state))["sources"]["source"]["options"]
 
-        assert SOURCE_AUTHORING_KEY not in pipeline_dict["source"]["options"]
+        assert SOURCE_AUTHORING_KEY not in pipeline_dict["sources"]["source"]["options"]
         assert SOURCE_AUTHORING_KEY not in yaml_options
         assert yaml_options["schema"] == {"mode": "observed"}
 
@@ -261,6 +292,17 @@ class TestGenerateYaml:
         assert options["prompt_template"] == "Rate resolved meaning: {{ row.text }}"
         assert options["resolved_prompt_template_hash"] == "sha256-rfc8785-v1:abc123"
 
+    def test_generate_pipeline_dict_emits_sources_mapping_for_named_sources(self) -> None:
+        state = _make_named_sources_pipeline()
+
+        pipeline_dict = generate_pipeline_dict(state)
+
+        assert "source" not in pipeline_dict
+        assert pipeline_dict["sources"]["customers"]["plugin"] == "csv"
+        assert pipeline_dict["sources"]["customers"]["options"]["on_validation_failure"] == "discard"
+        assert pipeline_dict["sources"]["orders"]["options"]["on_validation_failure"] == "bad_orders"
+        assert yaml.safe_load(generate_yaml(state)) == pipeline_dict
+
     def test_generate_pipeline_dict_rejects_unknown_node_type(self) -> None:
         """YAML export must not silently drop nodes outside the closed set."""
         state = _make_linear_pipeline().with_node(
@@ -292,10 +334,10 @@ class TestGenerateYaml:
         parsed = yaml.safe_load(yaml_str)
 
         # Source
-        assert parsed["source"]["plugin"] == "csv"
-        assert parsed["source"]["on_success"] == "transform_1"
-        assert parsed["source"]["options"]["path"] == "/data/input.csv"
-        assert parsed["source"]["options"]["on_validation_failure"] == "quarantine"
+        assert parsed["sources"]["source"]["plugin"] == "csv"
+        assert parsed["sources"]["source"]["on_success"] == "transform_1"
+        assert parsed["sources"]["source"]["options"]["path"] == "/data/input.csv"
+        assert parsed["sources"]["source"]["options"]["on_validation_failure"] == "quarantine"
 
         # Transform
         assert len(parsed["transforms"]) == 1
@@ -427,10 +469,10 @@ class TestGenerateYaml:
         parsed = yaml.safe_load(yaml_str)
 
         # blob_ref must not appear in the YAML
-        assert "blob_ref" not in parsed["source"]["options"]
+        assert "blob_ref" not in parsed["sources"]["source"]["options"]
         # Other options should still be present
-        assert parsed["source"]["options"]["path"] == "/data/input.txt"
-        assert parsed["source"]["options"]["column"] == "line"
+        assert parsed["sources"]["source"]["options"]["path"] == "/data/input.txt"
+        assert parsed["sources"]["source"]["options"]["column"] == "line"
 
     def test_bind_source_mode_stripped_with_blob_ref(self) -> None:
         """A blob-bound source carries a ``mode: bind_source`` marker alongside
@@ -460,10 +502,10 @@ class TestGenerateYaml:
         )
         parsed = yaml.safe_load(generate_yaml(state))
 
-        assert "blob_ref" not in parsed["source"]["options"]
-        assert "mode" not in parsed["source"]["options"]
-        assert parsed["source"]["options"]["path"] == "/data/input.txt"
-        assert parsed["source"]["options"]["column"] == "line"
+        assert "blob_ref" not in parsed["sources"]["source"]["options"]
+        assert "mode" not in parsed["sources"]["source"]["options"]
+        assert parsed["sources"]["source"]["options"]["path"] == "/data/input.txt"
+        assert parsed["sources"]["source"]["options"]["column"] == "line"
 
     def test_mode_retained_when_not_bind_source_marker(self) -> None:
         """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine
@@ -485,7 +527,7 @@ class TestGenerateYaml:
         )
         parsed = yaml.safe_load(generate_yaml(state))
 
-        assert parsed["source"]["options"]["mode"] == "observed"
+        assert parsed["sources"]["source"]["options"]["mode"] == "observed"
 
     def test_on_error_emitted_when_set(self) -> None:
         state = CompositionState(
@@ -717,9 +759,9 @@ class TestGenerateYaml:
         # State has been through freeze_fields() -- options are MappingProxyType
         yaml_str = generate_yaml(state)
         parsed = yaml.safe_load(yaml_str)
-        assert parsed["source"]["plugin"] == "csv"
+        assert parsed["sources"]["source"]["plugin"] == "csv"
         # Nested frozen options must serialize correctly
-        assert parsed["source"]["options"]["schema"]["fields"] == ["name", "age"]
+        assert parsed["sources"]["source"]["options"]["schema"]["fields"] == ["name", "age"]
 
     def test_empty_state_minimal_yaml(self) -> None:
         """Empty state produces minimal valid YAML (no source, no sinks)."""

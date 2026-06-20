@@ -20,11 +20,6 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import Determinism, NodeType, RunStatus
-from elspeth.contracts.aggregation_checkpoint import (
-    AggregationCheckpointState,
-    AggregationNodeCheckpoint,
-    AggregationTokenCheckpoint,
-)
 from elspeth.contracts.contract_records import ContractAuditRecord
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -124,20 +119,16 @@ class TestCheckpointRecoveryIntegration:
         run_id = self._setup_partial_run(db, checkpoint_mgr, mock_graph)
 
         # Create additional checkpoints at different sequence numbers
-        # Use token IDs that were created by _setup_partial_run (tok-001-003, tok-001-004)
-        # and use matching node_id from _setup_partial_run (default run_suffix="001")
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="tok-001-003",
-            node_id="node-001",
             sequence_number=3,
+            barrier_scalars=None,
             graph=mock_graph,
         )
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="tok-001-004",
-            node_id="node-001",
             sequence_number=4,
+            barrier_scalars=None,
             graph=mock_graph,
         )
 
@@ -153,71 +144,6 @@ class TestCheckpointRecoveryIntegration:
         latest = checkpoint_mgr.get_latest_checkpoint(run_id)
         assert latest is not None
         assert latest.sequence_number == max(c.sequence_number for c in checkpoints)
-
-    def test_recovery_with_aggregation_state(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
-        """Verify aggregation state is preserved across recovery."""
-        checkpoint_mgr = test_env["checkpoint_manager"]
-        recovery_mgr = test_env["recovery_manager"]
-        db = test_env["db"]
-
-        run_id = self._setup_partial_run(db, checkpoint_mgr, mock_graph)
-
-        # Create checkpoint with aggregation state — typed DTO
-        # Use token ID that was created by _setup_partial_run (tok-001-003)
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                "test_agg": AggregationNodeCheckpoint(
-                    tokens=(
-                        AggregationTokenCheckpoint(
-                            token_id="tok-001-001",
-                            row_id="row-001-001",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"id": 1, "value": 100},
-                            contract_version="test",
-                            contract={"mode": "FIXED", "locked": True, "version_hash": "test", "fields": []},
-                        ),
-                        AggregationTokenCheckpoint(
-                            token_id="tok-001-002",
-                            row_id="row-001-002",
-                            branch_name=None,
-                            fork_group_id=None,
-                            join_group_id=None,
-                            expand_group_id=None,
-                            row_data={"id": 2, "value": 200},
-                            contract_version="test",
-                            contract={"mode": "FIXED", "locked": True, "version_hash": "test", "fields": []},
-                        ),
-                    ),
-                    batch_id="batch-001",
-                    elapsed_age_seconds=0.0,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=2,
-                    completed_flush_count=0,
-                ),
-            },
-        )
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id,
-            token_id="tok-001-003",
-            node_id="node-001",
-            sequence_number=3,
-            aggregation_state=agg_state,
-            graph=mock_graph,
-        )
-
-        # Get resume point — aggregation_state is now typed DTO
-        resume_point = recovery_mgr.get_resume_point(run_id, mock_graph)
-        assert resume_point is not None
-        assert resume_point.aggregation_state is not None
-        assert "test_agg" in resume_point.aggregation_state.nodes
-        node_ckpt = resume_point.aggregation_state.nodes["test_agg"]
-        assert len(node_ckpt.tokens) == 2
-        assert node_ckpt.tokens[0].row_data == {"id": 1, "value": 100}
 
     def test_checkpoint_cleanup_after_completion(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
         """Verify checkpoints are cleaned up after successful run."""
@@ -252,8 +178,6 @@ class TestCheckpointRecoveryIntegration:
 
         assert resume_point is not None
         assert checkpoint is not None
-        assert resume_point.token_id == checkpoint.token_id
-        assert resume_point.node_id == checkpoint.node_id
         assert resume_point.sequence_number == checkpoint.sequence_number
 
     def test_multiple_runs_independent_checkpoints(self, test_env: dict[str, Any], mock_graph: ExecutionGraph) -> None:
@@ -289,6 +213,7 @@ class TestCheckpointRecoveryIntegration:
         from elspeth.core.landscape.schema import (
             nodes_table,
             rows_table,
+            run_sources_table,
             runs_table,
             token_outcomes_table,
             tokens_table,
@@ -297,6 +222,7 @@ class TestCheckpointRecoveryIntegration:
         run_id = f"test-run-{run_suffix}"
         now = datetime.now(UTC)
         node_id = f"node-{run_suffix}"
+        source_node_id = f"source-{run_suffix}"
 
         # Add node to graph if it doesn't exist
         if not graph.has_node(node_id):
@@ -305,7 +231,9 @@ class TestCheckpointRecoveryIntegration:
         contract_json, contract_hash, _contract = _create_test_schema_contract()
 
         with db.engine.connect() as conn:
-            # Create run (failed status)
+            # Create run (failed status). ADR-025 §3 Decision 5 (G6) deleted
+            # the run-level singleton schema-contract columns; the contract is
+            # written below via the per-source ``run_sources`` insert.
             conn.execute(
                 runs_table.insert().values(
                     run_id=run_id,
@@ -314,8 +242,6 @@ class TestCheckpointRecoveryIntegration:
                     settings_json="{}",
                     canonical_version="sha256-rfc8785-v1",
                     status=RunStatus.FAILED,
-                    schema_contract_json=contract_json,
-                    schema_contract_hash=contract_hash,
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
@@ -336,6 +262,38 @@ class TestCheckpointRecoveryIntegration:
                 )
             )
 
+            # Add a SOURCE node so the run_sources FK (which requires node_type=SOURCE)
+            # is satisfied. Per ADR-025 §3 Decision 5 ``verify_contract_integrity``
+            # reads the contract from ``run_sources`` exclusively.
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id=source_node_id,
+                    run_id=run_id,
+                    plugin_name="test_source",
+                    node_type=NodeType.SOURCE,
+                    plugin_version="1.0",
+                    determinism=Determinism.DETERMINISTIC,
+                    config_hash="src_x",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    source_name="primary",
+                    plugin_name="test_source",
+                    lifecycle_state="loaded",
+                    config_hash="src_x",
+                    schema_json="{}",
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create multiple rows
             for i in range(5):
                 row_id = f"row-{run_suffix}-{i:03d}"
@@ -346,6 +304,8 @@ class TestCheckpointRecoveryIntegration:
                         run_id=run_id,
                         source_node_id=f"node-{run_suffix}",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"hash{i}",
                         created_at=now,
                     )
@@ -379,9 +339,8 @@ class TestCheckpointRecoveryIntegration:
         # Create checkpoint at row 2 (simulating partial progress)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=f"tok-{run_suffix}-002",
-            node_id=f"node-{run_suffix}",
             sequence_number=2,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -428,8 +387,8 @@ class TestCheckpointTopologyHashAtomicity:
         )
 
         # Create run
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1")
 
         # Register nodes in database
         schema_config = SchemaConfig(mode="observed", fields=None)
@@ -460,8 +419,10 @@ class TestCheckpointTopologyHashAtomicity:
             source_node_id="source",
             row_index=0,
             data={"test": "data"},
+            source_row_index=0,
+            ingest_sequence=0,
         )
-        token = factory.data_flow.create_token(row_id=row.row_id)
+        factory.data_flow.create_token(row_id=row.row_id)
 
         # Compute expected hash for current graph state
         # BUG-COMPAT-01: CheckpointManager now uses full topology hash (not upstream-only)
@@ -471,9 +432,8 @@ class TestCheckpointTopologyHashAtomicity:
         # Create checkpoint with current graph state
         checkpoint = checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=token.token_id,
-            node_id="transform_a",
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -509,8 +469,8 @@ class TestCheckpointTopologyHashAtomicity:
         factory = make_factory(db)
 
         # Create minimal run
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1")
 
         # Register source node
         schema_config = SchemaConfig(mode="observed", fields=None)
@@ -531,75 +491,18 @@ class TestCheckpointTopologyHashAtomicity:
             source_node_id="source",
             row_index=0,
             data={},
+            source_row_index=0,
+            ingest_sequence=0,
         )
-        token = factory.data_flow.create_token(row_id=row.row_id)
+        factory.data_flow.create_token(row_id=row.row_id)
 
         # Attempt to create checkpoint with None graph
         with pytest.raises(ValueError, match="graph parameter is required"):
             checkpoint_mgr.create_checkpoint(
                 run_id=run.run_id,
-                token_id=token.token_id,
-                node_id="test_node",
                 sequence_number=0,
+                barrier_scalars=None,
                 graph=None,
-            )
-
-    def test_checkpoint_validates_node_exists_in_graph(self, test_env: dict[str, Any]) -> None:
-        """Verify create_checkpoint() rejects node_id not in graph (Bug #9 early fix)."""
-        from elspeth.contracts.schema import SchemaConfig
-
-        checkpoint_mgr = test_env["checkpoint_manager"]
-        db = test_env["db"]
-        factory = make_factory(db)
-
-        # Create graph with one node
-        graph = ExecutionGraph()
-        graph.add_node("existing_node", node_type=NodeType.TRANSFORM, plugin_name="test", config={"schema": {"mode": "observed"}})
-
-        # Create minimal run
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1", schema_contract=test_contract)
-
-        # Register nodes in database (need source for row creation)
-        schema_config = SchemaConfig(mode="observed", fields=None)
-        factory.data_flow.register_node(
-            run_id=run.run_id,
-            node_id="source",
-            plugin_name="test",
-            node_type=NodeType.SOURCE,
-            plugin_version="1.0",
-            config={},
-            determinism=Determinism.DETERMINISTIC,
-            schema_config=schema_config,
-        )
-        factory.data_flow.register_node(
-            run_id=run.run_id,
-            node_id="existing_node",
-            plugin_name="test",
-            node_type=NodeType.TRANSFORM,
-            plugin_version="1.0",
-            config={},
-            determinism=Determinism.DETERMINISTIC,
-            schema_config=schema_config,
-        )
-
-        # Create row/token
-        row = factory.data_flow.create_row(
-            run_id=run.run_id,
-            source_node_id="source",
-            row_index=0,
-            data={},
-        )
-        token = factory.data_flow.create_token(row_id=row.row_id)
-
-        # Attempt to create checkpoint with non-existent node_id
-        with pytest.raises(ValueError, match="does not exist in graph"):
-            checkpoint_mgr.create_checkpoint(
-                run_id=run.run_id,
-                token_id=token.token_id,
-                node_id="nonexistent_node",
-                sequence_number=0,
-                graph=graph,
             )
 
 
@@ -659,8 +562,8 @@ class TestResumeCheckpointCleanup:
 
         # Create run and required parent records
         factory = make_factory(db)
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="v1")
 
         now = datetime.now(UTC)
         with db.engine.begin() as conn:
@@ -685,15 +588,16 @@ class TestResumeCheckpointCleanup:
             source_node_id="source",
             row_index=0,
             data={"id": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
-        token = factory.data_flow.create_token(row_id=row.row_id)
+        factory.data_flow.create_token(row_id=row.row_id)
 
         # Create checkpoint
         checkpoint = checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=token.token_id,
-            node_id="source",
             sequence_number=0,
+            barrier_scalars=None,
             graph=simple_graph,
         )
 
@@ -763,8 +667,8 @@ class TestCanResumeErrorHandling:
         graph.add_edge("source", "transform", label="continue")
 
         # Create run with FAILED status (required for resume eligibility)
-        _cj, _ch, test_contract = _create_test_schema_contract()
-        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1", schema_contract=test_contract)
+        _cj, _ch, _test_contract = _create_test_schema_contract()
+        run = factory.run_lifecycle.begin_run(config={}, canonical_version="test-v1")
 
         # Register nodes
         schema_config = SchemaConfig(mode="observed", fields=None)
@@ -790,8 +694,10 @@ class TestCanResumeErrorHandling:
         )
 
         # Create row/token
-        row = factory.data_flow.create_row(run_id=run.run_id, source_node_id="source", row_index=0, data={})
-        token = factory.data_flow.create_token(row_id=row.row_id)
+        row = factory.data_flow.create_row(
+            run_id=run.run_id, source_node_id="source", row_index=0, data={}, source_row_index=0, ingest_sequence=0
+        )
+        factory.data_flow.create_token(row_id=row.row_id)
 
         # Mark run as failed
         factory.run_lifecycle.update_run_status(run.run_id, status=RunStatus.FAILED)
@@ -799,9 +705,8 @@ class TestCanResumeErrorHandling:
         # Create checkpoint
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=token.token_id,
-            node_id="transform",
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
 

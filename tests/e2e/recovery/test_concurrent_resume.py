@@ -1,225 +1,1059 @@
-"""E2E tests for concurrent resume and edge-case resume scenarios.
+"""E2E crash + concurrent-resume proofs over the durable scheduler journal.
 
-Tests verify that resume operations are correctly rejected when
-inappropriate: completed runs, non-existent runs, and runs without
-checkpoints.
+Ticket elspeth-40886ef9f8: the old ``test_concurrent_resume.py`` only tested
+resume *rejection* (now ``test_resume_rejection.py``). This file is the real
+coverage for the three gaps that ticket names:
 
-Uses file-based SQLite and real payload stores. No mocks except
-external services.
+1. **Mid-claim crash, then resume** — a worker dies holding a LEASED
+   ``token_work_items`` row; a later resume's recovery sweep reclaims it
+   after lease expiry (attempt bump + work_item_id rotation), the run
+   completes, and the audit DB shows exactly-once terminal token outcomes.
+2. **Expired-lease reclaim under contention** — a population of crashed
+   workers' leases with different expiries: the drain refuses atomically
+   while ANY peer lease is still live (ADR-026 Precondition #9), then
+   reclaims everything once all leases age out, with per-item attempt
+   offsets visible in both the journal ``attempt`` column and the
+   ``node_states`` attempt identity.
+3. **Two resume() calls racing on the same run_id** — DESIGNED CONTRACTS at
+   epoch 21 (ADR-030, the §H test-#1 flip; the characterization died here):
+   *loser-during* is refused by the seat-acquisition CAS
+   (``acquire_run_leadership`` rowcount 0 ⇒
+   ``NonResumableRunError("run leadership is held by …")``) BEFORE any
+   durable write — a designed coordination outcome, not an
+   immutability-guard side effect; *loser-after* (winner COMPLETED) is
+   refused at the resume() entry guard with "Run is terminal", the durable
+   immutability guards retained beneath as the backstop (independently
+   pinned in tests/unit/core/landscape/). The mid-flight interleaving is the
+   entry guard's RUNNING arm (elspeth-2f23292372, option b), which at slice 2
+   gained §B.3 live-seat precision: a RUNNING run under a LIVE seat is
+   refused naming the incumbent and directing to ``elspeth join``.
+
+Durability-unification (F1) survival contract: every ASSERTION below reads
+PUBLIC, durable surfaces only — the ``token_work_items`` journal columns
+(status/attempt/lease_owner), ``scheduler_events``, terminal-outcome journal,
+``node_states``, ``runs``, ``run_coordination``/``run_workers``/
+``run_coordination_events``, terminal RunStatus, and the public
+``Orchestrator.resume()`` API. Nothing asserts on checkpoint internals
+(the blob layer is deleted — Task 4.1), and resume points are treated as
+opaque handles (never dereferenced).
+
+The construction technique and the checkpoint-coupled harness seams live in
+``tests/e2e/recovery/harness.py`` (extracted verbatim from this file so the
+slice-2 fence suites reuse them); see its module docstring for the honest
+construction notes and the epoch-21 seat assumption.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+import re
+import types
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from unittest.mock import patch
 
-from elspeth.contracts import (
-    Determinism,
-    NodeType,
-    RunStatus,
+import pytest
+from sqlalchemy import insert, select, update
+
+from elspeth.contracts import RunStatus
+from elspeth.contracts.scheduler import TokenWorkStatus
+from elspeth.core.checkpoint.recovery import NonResumableRunError
+from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
+from elspeth.engine.clock import MockClock
+from elspeth.engine.orchestrator import Orchestrator
+from tests.e2e.recovery.harness import (
+    _DEFAULT_LEASE_SECONDS,
+    _SOURCE_ROWS,
+    _T0,
+    _build_pipeline,
+    _completed_outcome_tokens,
+    _coord,
+    _coordination_events,
+    _coordination_row,
+    _craft_crashed_lease,
+    _duplicate_terminal_outcome_tokens,
+    _node_state_identities,
+    _recovery_events,
+    _recovery_manager,
+    _resume,
+    _resume_point,
+    _run_to_interrupted_checkpoint,
+    _run_workers,
+    _work_items_by_token,
 )
-from elspeth.contracts.contract_records import ContractAuditRecord
-from elspeth.contracts.schema_contract import FieldContract, SchemaContract
-from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
-from elspeth.core.dag import ExecutionGraph
-from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import (
-    nodes_table,
-    rows_table,
-    runs_table,
-    tokens_table,
-)
-from elspeth.core.payload_store import FilesystemPayloadStore
-from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-from tests.fixtures.base_classes import as_sink, as_source
-from tests.fixtures.pipeline import build_linear_pipeline
-from tests.fixtures.plugins import CollectSink, ListSource
 
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
+# The resume() entry guard and can_resume() evaluate seat liveness with the
+# WALL clock (datetime.now(UTC)), while the harness MockClock lives at the
+# fixed _T0 epoch (June 2025). A production-sized 80 s window minted in the
+# MockClock domain therefore reads as long-expired to the guard. The
+# live-seat tests mint the winner's seat with this deliberately huge window
+# so "live" holds under both clock domains; the expired-seat companion arm
+# stamps an explicit past expiry instead.
+_GUARD_LIVE_SEAT_WINDOW_SECONDS = 10**9
 
 
-def _create_test_schema_contract() -> tuple[str, str]:
-    """Create a minimal schema contract for test runs.
+@pytest.mark.timeout(120)
+class TestMidClaimCrashResume:
+    """Ticket item 1: mid-claim crash -> lease expiry -> sweep -> completion."""
 
-    Returns:
-        Tuple of (schema_contract_json, schema_contract_hash)
-    """
-    field_contracts = (
-        FieldContract(
-            normalized_name="id",
-            original_name="id",
-            python_type=int,
-            required=True,
-            source="declared",
-        ),
-        FieldContract(
-            normalized_name="value",
-            original_name="value",
-            python_type=int,
-            required=True,
-            source="declared",
-        ),
-    )
-    contract = SchemaContract(fields=field_contracts, mode="FIXED", locked=True)
-    audit_record = ContractAuditRecord.from_contract(contract)
-    return audit_record.to_json(), contract.version_hash()
+    def test_mid_claim_crash_resume_recovers_leased_item_exactly_once(self, tmp_path: Path) -> None:
+        """A LEASED journal row left by a dead worker is recovered exactly once.
 
-
-class TestConcurrentResume:
-    """Tests for resume rejection scenarios."""
-
-    def test_second_resume_of_completed_run_rejected(self, tmp_path: Path) -> None:
-        """Run pipeline, let it complete, try to resume.
-
-        Verify can_resume() returns False for completed runs.
+        Invariants pinned (all durable surfaces):
+        - the public resume claims the crashed item only AFTER lease expiry,
+          via the recovery sweep: the journal row rotates to attempt=2 and
+          reaches 'terminal'; exactly one RECOVER_EXPIRED_LEASE event exists
+          (from_attempt=1, to_attempt=2, from_lease_owner=the dead worker,
+          caller_owner=a different identity — the G1 self-steal guard);
+        - the run completes COMPLETED with cumulative rows_processed=4 and
+          the recovered row reaches the sink exactly once;
+        - exactly-once token outcomes: every token has exactly one completed
+          terminal outcome — including the crashed token, under its ORIGINAL
+          token_id (the journal re-drive does not mint a replacement token);
+        - the re-drive records the transform node_state at attempt=1 (the
+          journal attempt offset, claimed.attempt-1), with no attempt-0 row
+          for the crashed token (the dead worker never got that far) and no
+          duplicate (token_id, node_id, attempt) identity anywhere;
+        - no source replay: the resume-side source plugin is never load()ed.
         """
-        db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
-        payload_store = FilesystemPayloadStore(tmp_path / "payloads")
-
-        source_data = [{"id": i, "value": i * 10} for i in range(3)]
-        source = ListSource(source_data)
-        sink = CollectSink("default")
-
-        config = PipelineConfig(
-            source=as_source(source),
-            transforms=[],
-            sinks={"default": as_sink(sink)},
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        crashed_token = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
         )
 
-        # Use from_plugin_instances() for production-path fidelity
-        _source_for_graph, _transforms, _sinks, graph = build_linear_pipeline(source_data)
+        # The dead worker's lease must age out before recovery is possible.
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
 
-        orchestrator = Orchestrator(db)
-        result = orchestrator.run(config, graph=graph, payload_store=payload_store)
+        result, resume_sink, resume_source = _resume(crashed)
 
         assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 4
+        assert resume_sink.results == [{"id": 3, "value": 30}]
+        assert resume_source.load_invocations == 0, "scheduler-drain resume must not replay the source"
 
-        # Try to resume the completed run
-        checkpoint_mgr = CheckpointManager(db)
-        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        items = _work_items_by_token(crashed.db, crashed.run_id)
+        assert len(items) == 4
+        assert all(item["status"] == TokenWorkStatus.TERMINAL.value for item in items.values())
+        assert items[crashed_token]["attempt"] == 2
+        assert all(item["attempt"] == 1 for token_id, item in items.items() if token_id != crashed_token)
 
-        check = recovery_mgr.can_resume(result.run_id, graph)
-        assert check.can_resume is False
-        assert check.reason is not None
-        assert "completed" in check.reason.lower()
+        events = _recovery_events(crashed.db, crashed.run_id)
+        assert len(events) == 1
+        (event,) = events
+        assert event["token_id"] == crashed_token
+        assert event["from_attempt"] == 1
+        assert event["to_attempt"] == 2
+        assert event["from_lease_owner"] == "crashed-worker-1"
+        assert event["caller_owner"] != "crashed-worker-1"
 
-        db.close()
+        # Exactly-once terminal outcomes, for the original token identity.
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+        completed_tokens = _completed_outcome_tokens(crashed.db, crashed.run_id)
+        assert crashed_token in completed_tokens
+        assert len(completed_tokens) == 4
 
-    def test_resume_of_non_existent_run_rejected(self, tmp_path: Path) -> None:
-        """Try to resume a run_id that doesn't exist.
+        # node_states attempt identity: re-drive at the journal attempt offset.
+        identities = _node_state_identities(crashed.db, crashed.run_id)
+        assert len(identities) == len(set(identities)), "duplicate node_states identity"
+        crashed_attempts = {(node_id, attempt) for token_id, node_id, attempt in identities if token_id == crashed_token}
+        transform_attempts = {attempt for node_id, attempt in crashed_attempts if node_id.startswith("transform_")}
+        assert transform_attempts == {1}, f"expected re-drive at attempt offset 1, got {sorted(transform_attempts)}"
 
-        Verify can_resume() returns False with appropriate reason.
+        # Full completion is already durably proven above (terminal
+        # RunStatus, all-TERMINAL journal, exactly-once outcomes); the
+        # checkpoint store's delete-on-completion lifecycle is deliberately
+        # NOT asserted — that layer dissolves with F1.
+        crashed.db.close()
+
+
+@pytest.mark.timeout(120)
+class TestExpiredLeaseReclaimUnderContention:
+    """Ticket item 2: a population of crashed leases with attempt offsets."""
+
+    def test_contended_reclaim_partial_then_full_after_all_leases_expire(self, tmp_path: Path) -> None:
+        """Two crashed workers' leases, different expiries and attempt history.
+
+        Slice-4 demotion of peer_active_leases refusal to diagnostic:
+        a concurrent peer holding an UNEXPIRED lease is no longer a hard
+        refusal. Partial progress is now expected and correct.
+
+        Construction: worker-a dies holding token-3 at attempt=1 (300s lease).
+        token-4 was already recovered once and re-claimed by worker-b at
+        attempt=2 with a 7200s lease before the kill.
+
+        Invariants pinned (slice-4 behavior):
+        - Resume #1 at T+3600 (token-3 expired, token-4 still live):
+          no AuditIntegrityError; recover_expired_leases reaps token-3
+          (expired + no run_workers row → owner_registry_dead=True); token-4
+          is NOT expired so its lease is untouched; token-3 is processed
+          (journal TERMINAL, outcome recorded in audit trail) but its result
+          does NOT reach the sink — the OrchestrationInvariantError for
+          "non-terminal scheduler work" (token-4 still LEASED) is raised
+          INSIDE run_resume_processing_loop before flush_and_write_sinks is
+          called, so the sink remains empty for this resume attempt;
+        - after all leases expire, Resume #2 recovers token-4 AND re-drives
+          token-3's durable PENDING_SINK via _drain_preexisting_pending_sinks,
+          writing both to the sink in the same flush; run completes;
+        - attempt offsets land in the audit DB: the re-driven transforms record
+          at attempt = journal_attempt - 1; no duplicate node_states identities;
+        - exactly-once terminal outcomes across all 5 tokens, run COMPLETED.
         """
-        db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
+        from elspeth.contracts.errors import OrchestrationInvariantError
 
-        checkpoint_mgr = CheckpointManager(db)
-        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
 
-        # Build a minimal graph for the can_resume call
-        # NOTE: Manual ExecutionGraph construction is acceptable here
-        # because we are testing resume rejection, not pipeline execution.
-        # No checkpoint or pipeline data exists for this fake run_id.
-        graph = ExecutionGraph()
-        schema_config: dict[str, Any] = {"schema": {"mode": "observed"}}
-        graph.add_node(
-            "source",
-            node_type=NodeType.SOURCE,
-            plugin_name="test",
-            config=schema_config,
+        token_3 = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-a",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        token_4 = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=4,
+            lease_owner="crashed-worker-b",
+            lease_seconds=60,
         )
 
-        check = recovery_mgr.can_resume("non-existent-run-id-12345", graph)
-        assert check.can_resume is False
-        assert check.reason is not None
-        assert "not found" in check.reason.lower()
+        # Production attempt history for token-4: its first lease expires and
+        # the prior process's own maintenance sweep (a different owner — the
+        # G1 self-steal guard requires it) recovers it, then worker-b
+        # re-claims at attempt=2 with a long lease... and dies holding it.
+        clock.advance(120)  # token-4's 60s lease is expired; token-3's 300s is not
+        assert (
+            crashed.repo.recover_expired_leases(
+                run_id=crashed.run_id,
+                now=clock.now_utc(),
+                caller_owner="row-processor:prior-attempt-sweeper",
+            )
+            == 1
+        )
+        reclaimed = crashed.repo.claim_ready(
+            run_id=crashed.run_id,
+            lease_owner="crashed-worker-b",
+            lease_seconds=7200,
+            now=clock.now_utc(),
+        )
+        assert reclaimed is not None and reclaimed.token_id == token_4 and reclaimed.attempt == 2
 
-        db.close()
+        # ---- Resume #1: token-3 expired; token-4's 7200s lease is NOT expired ----
+        # Slice-4 behavior: no AuditIntegrityError refusal. The drain proceeds,
+        # recovers token-3 (expired + no registry row → dead) and processes it
+        # (journal TERMINAL, outcome written to audit trail). Then
+        # has_unresolved_scheduler_work() sees token-4 still LEASED → raises
+        # OrchestrationInvariantError BEFORE flush_and_write_sinks is called.
+        clock.advance(3600)
+        resume_point = _resume_point(crashed)
+        assert resume_point is not None
+        config_1, graph_1, sink_1, _source_1 = _build_pipeline(_SOURCE_ROWS)
+        with pytest.raises(OrchestrationInvariantError, match=r"non-terminal scheduler work"):
+            crashed.resume_orchestrator().resume(resume_point, config_1, graph_1, payload_store=crashed.payload_store)
 
-    def test_resume_without_checkpoint_rejected(self, tmp_path: Path) -> None:
-        """Create a failed run without any checkpoint.
+        # Token-3 WAS recovered (expired, no run_workers row → dead) and
+        # processed (journal TERMINAL, outcome recorded in audit trail), but
+        # its result was NOT delivered to the sink: the OrchestrationInvariantError
+        # is raised inside run_resume_processing_loop, BEFORE flush_and_write_sinks
+        # is called, so the pending_tokens accumulation is discarded with the
+        # exception. The sink remains empty for this resume attempt.
+        assert sink_1.results == []
 
-        Verify can_resume() returns False because there is no checkpoint
-        to resume from.
+        items = _work_items_by_token(crashed.db, crashed.run_id)
+        # token-3 rotated to attempt=2 and reached PENDING_SINK (sink-bound result
+        # produced, but flush_and_write_sinks was aborted by the exception before
+        # the actual write and terminal handoff).
+        assert items[token_3]["status"] == TokenWorkStatus.PENDING_SINK.value
+        assert items[token_3]["attempt"] == 2
+        # token-4 still LEASED (7200s lease not yet expired) — untouched by reap.
+        assert items[token_4]["status"] == TokenWorkStatus.LEASED.value
+        assert items[token_4]["attempt"] == 2
+        assert items[token_4]["lease_owner"] == "crashed-worker-b"
+
+        # The failure ceremony re-finalized FAILED, so the run stays resumable.
+        with crashed.db.engine.connect() as conn:
+            status = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
+        assert status == RunStatus.FAILED.value
+
+        # ---- Resume #2: token-4's 7200s lease has aged out (T+120+7200=T+7320) ----
+        clock.advance(7200)
+        result, resume_sink, _resume_source = _resume(crashed)
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 5
+        # Resume #2 writes BOTH token-3 (pending-sink re-drive) and token-4
+        # (fresh processing after lease expiry) in the same flush.
+        assert sorted(resume_sink.results, key=lambda r: r["id"]) == [
+            {"id": 3, "value": 30},
+            {"id": 4, "value": 40},
+        ]
+
+        items = _work_items_by_token(crashed.db, crashed.run_id)
+        assert all(item["status"] == TokenWorkStatus.TERMINAL.value for item in items.values())
+        assert items[token_3]["attempt"] == 2
+        assert items[token_4]["attempt"] == 3
+
+        # Recovery journal: the crafted prior-process sweep (token-4 1->2),
+        # Resume #1's sweep (token-3 1->2), Resume #2's sweep (token-4 2->3).
+        events = _recovery_events(crashed.db, crashed.run_id)
+        assert [(event["token_id"], event["from_attempt"], event["to_attempt"], event["from_lease_owner"]) for event in events] == [
+            (token_4, 1, 2, "crashed-worker-b"),
+            (token_3, 1, 2, "crashed-worker-a"),
+            (token_4, 2, 3, "crashed-worker-b"),
+        ]
+        # Resume #1 and Resume #2 each have their own scheduler lease owner
+        # (different RowProcessor instances), so there are two distinct
+        # caller_owner values across events[1:]. Both must be legitimate
+        # resume workers — not the crashed workers' identities.
+        final_sweep_callers = {event["caller_owner"] for event in events[1:]}
+        assert len(final_sweep_callers) == 2
+        assert final_sweep_callers.isdisjoint({"crashed-worker-a", "crashed-worker-b"})
+
+        # Attempt offsets in the audit DB: node_states attempt identity is
+        # journal_attempt - 1 for the re-driven transform segment.
+        identities = _node_state_identities(crashed.db, crashed.run_id)
+        assert len(identities) == len(set(identities)), "duplicate node_states identity"
+
+        def _transform_attempts(token_id: str) -> set[int]:
+            return {attempt for tid, node_id, attempt in identities if tid == token_id and node_id.startswith("transform_")}
+
+        assert _transform_attempts(token_3) == {1}
+        assert _transform_attempts(token_4) == {2}
+
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+        assert len(_completed_outcome_tokens(crashed.db, crashed.run_id)) == 5
+        crashed.db.close()
+
+
+@pytest.mark.timeout(120)
+class TestTwoResumesSameRunId:
+    """Ticket item 3 — the two deterministic interleavings of a resume race.
+
+    Epoch 21 (ADR-030, the §H test-#1 flip — the characterization is DEAD,
+    both interleavings are ENFORCED DESIGNED CONTRACTS):
+
+    - loser-DURING: the seat-acquisition CAS ``acquire_run_leadership`` is
+      resume()'s first durable act and the race arbiter — the second
+      acquisition's rowcount-0 raises
+      ``NonResumableRunError("run leadership is held by …")`` BEFORE any
+      durable write (§B.4; this is what CLOSED the documented TOCTOU);
+    - loser-AFTER-winner: refused at the resume() ENTRY GUARD with
+      "Run is terminal" — the immutable-success durable backstops
+      (``acquire_run_leadership``'s in-CAS arm and the run_lifecycle
+      conditional UPDATEs) are retained BENEATH and independently pinned in
+      tests/unit/core/landscape/;
+    - loser-while-RUNNING: the entry guard (elspeth-2f23292372, option b),
+      which at slice 2 gained the §B.3 live-seat precision arm.
+    """
+
+    def test_two_resumes_loser_during_refused_at_seat_cas(self, tmp_path: Path) -> None:
+        """The loser-during interleaving: refused AT the seat CAS, zero mutation.
+
+        HONESTY NOTE (why this drives the repository verb, not public
+        resume()): after the winner's atomic acquire the run is RUNNING, so
+        a loser entering through public ``resume()`` is refused at the entry
+        guard (that arm is
+        ``test_entry_guard_refuses_resume_while_run_status_running``). The
+        seat CAS and the FAILED→RUNNING status flip being ONE transaction is
+        exactly WHY the TOCTOU is closed; this test pins the closure — the
+        CAS-loss arm itself — not a re-creation of the window. The winner's
+        first durable resume act (``acquire_run_leadership``) is executed
+        for real; the loser presents at the same arbiter.
+
+        The winner's subsequent completion is likewise driven through the
+        production verbs UNDER ITS TOKEN (recover → claim → mark_terminal →
+        fenced complete_run): public resume() cannot legally re-enter a
+        RUNNING run in slice 2 (the dead-leader takeover admission is the
+        slice-4 guard flip), so "the seat loss did not poison the winner" is
+        proven on the journal + runs surfaces rather than a sink list.
         """
-        db = LandscapeDB(f"sqlite:///{tmp_path}/audit.db")
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        crashed_token = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
 
-        run_id = "failed-no-checkpoint-run"
-        now = datetime.now(UTC)
-        contract_json, contract_hash = _create_test_schema_contract()
+        coord = _coord(crashed)
+        winner_id = f"worker:{crashed.run_id}:winner"
+        loser_id = f"worker:{crashed.run_id}:loser"
 
-        # Create a failed run with rows but NO checkpoint
-        with db.engine.connect() as conn:
-            conn.execute(
-                runs_table.insert().values(
-                    run_id=run_id,
-                    started_at=now,
-                    config_hash="test",
-                    settings_json="{}",
-                    canonical_version="sha256-rfc8785-v1",
-                    status=RunStatus.FAILED,
-                    schema_contract_json=contract_json,
-                    schema_contract_hash=contract_hash,
-                    openrouter_catalog_sha256="0" * 64,
-                    openrouter_catalog_source="bundled",
-                )
+        # The winner's FIRST durable resume act, executed for real: one
+        # IMMEDIATE transaction = seat takeover + FAILED→RUNNING flip.
+        winner_token = coord.acquire_run_leadership(
+            run_id=crashed.run_id,
+            worker_id=winner_id,
+            now=clock.now_utc(),
+            window_seconds=80.0,
+        )
+        assert winner_token.leader_epoch == 2, "takeover of the begin_run epoch-1 seat"
+
+        # Snapshot EVERY durable surface the refused loser must not touch.
+        seat_before = _coordination_row(crashed.db, crashed.run_id)
+        events_before = _coordination_events(crashed.db, crashed.run_id)
+        workers_before = _run_workers(crashed.db, crashed.run_id)
+        items_before = _work_items_by_token(crashed.db, crashed.run_id)
+        outcomes_before = _completed_outcome_tokens(crashed.db, crashed.run_id)
+        identities_before = sorted(_node_state_identities(crashed.db, crashed.run_id))
+
+        # ---- the loser arrives at the arbiter ----
+        with pytest.raises(NonResumableRunError, match=r"run leadership is held by") as exc_info:
+            coord.acquire_run_leadership(
+                run_id=crashed.run_id,
+                worker_id=loser_id,
+                now=clock.now_utc(),
+                window_seconds=80.0,
             )
+        assert winner_id in str(exc_info.value), "the refusal names the incumbent"
 
-            conn.execute(
-                nodes_table.insert().values(
-                    node_id="source",
-                    run_id=run_id,
-                    plugin_name="test_source",
-                    node_type=NodeType.SOURCE,
-                    plugin_version="1.0",
-                    determinism=Determinism.DETERMINISTIC,
-                    config_hash="test",
-                    config_json="{}",
-                    registered_at=now,
-                )
+        # Zero mutation ("BEFORE any durable write", design §B.4 :196).
+        assert _coordination_row(crashed.db, crashed.run_id) == seat_before, (
+            "seat byte-identical: leader still winner, epoch unchanged, expiry NOT extended"
+        )
+        assert _run_workers(crashed.db, crashed.run_id) == workers_before
+        assert all(worker["worker_id"] != loser_id for worker in _run_workers(crashed.db, crashed.run_id))
+        events_after = _coordination_events(crashed.db, crashed.run_id)
+        assert events_after == events_before, "no second leader_acquire, no fence_refusal — CAS-loss at acquisition is not a fence refusal"
+        with crashed.db.engine.connect() as conn:
+            status = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
+        assert status == RunStatus.RUNNING.value
+        items_after = _work_items_by_token(crashed.db, crashed.run_id)
+        assert items_after == items_before, "journal rows untouched"
+        assert items_after[crashed_token]["status"] == TokenWorkStatus.LEASED.value
+        assert items_after[crashed_token]["attempt"] == 1
+        assert items_after[crashed_token]["lease_owner"] == "crashed-worker-1"
+        assert _recovery_events(crashed.db, crashed.run_id) == []
+        assert _completed_outcome_tokens(crashed.db, crashed.run_id) == outcomes_before
+        assert sorted(_node_state_identities(crashed.db, crashed.run_id)) == identities_before
+
+        # ---- the winner completes normally under its token ----
+        assert (
+            crashed.repo.recover_expired_leases(
+                run_id=crashed.run_id,
+                now=clock.now_utc(),
+                caller_owner=winner_id,
+                coordination_token=winner_token,
             )
+            == 1
+        )
+        claimed = crashed.repo.claim_ready(
+            run_id=crashed.run_id,
+            lease_owner=winner_id,
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+            now=clock.now_utc(),
+        )
+        assert claimed is not None and claimed.token_id == crashed_token and claimed.attempt == 2
+        crashed.repo.mark_terminal(work_item_id=claimed.work_item_id, now=clock.now_utc(), expected_lease_owner=winner_id)
+        crashed.factory.run_lifecycle.complete_run(crashed.run_id, RunStatus.COMPLETED, token=winner_token)
+        coord.release_seat(token=winner_token, now=clock.now_utc())
 
-            # Create a row so the run has data
-            conn.execute(
-                rows_table.insert().values(
-                    row_id="row-000",
-                    run_id=run_id,
-                    source_node_id="source",
-                    row_index=0,
-                    source_data_hash="hash-0",
-                    created_at=now,
-                )
-            )
-            conn.execute(
-                tokens_table.insert().values(
-                    token_id="tok-000",
-                    row_id="row-000",
-                    run_id=run_id,
-                    created_at=now,
-                )
-            )
-            conn.commit()
+        with crashed.db.engine.connect() as conn:
+            final_status = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
+        assert final_status == RunStatus.COMPLETED.value, "the seat loss did not poison the winner"
+        final_items = _work_items_by_token(crashed.db, crashed.run_id)
+        assert all(item["status"] == TokenWorkStatus.TERMINAL.value for item in final_items.values())
+        assert final_items[crashed_token]["attempt"] == 2
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+        seat_final = _coordination_row(crashed.db, crashed.run_id)
+        assert seat_final["leader_worker_id"] is None, "graceful release after finalize"
+        crashed.db.close()
 
-        # No checkpoint was created
+    def test_two_resumes_loser_after_winner_refused_at_entry_guard(self, tmp_path: Path) -> None:
+        """THE FLIP (design §H :467): the loser-after refusal is the designed
+        entry guard's "Run is terminal" — a clean operator-facing
+        NonResumableRunError — NOT AuditIntegrityError("...from COMPLETED
+        ...immutable") surfacing from the durable backstop. The backstop
+        itself is independently pinned (tests/unit/core/landscape/
+        test_run_lifecycle_repository.py and
+        test_run_coordination_repository.py).
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        crashed_token = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
 
-        checkpoint_mgr = CheckpointManager(db)
-        recovery_mgr = RecoveryManager(db, checkpoint_mgr)
+        # Both racing operators fetch equally-valid resume points from the
+        # same durable FAILED state — the cross-process race decision point.
+        resume_point_winner = _resume_point(crashed)
+        resume_point_loser = _resume_point(crashed)
+        assert resume_point_winner is not None and resume_point_loser is not None
 
-        # Build a minimal graph for the can_resume call
-        graph = ExecutionGraph()
-        schema_config_dict: dict[str, Any] = {"schema": {"mode": "observed"}}
-        graph.add_node(
-            "source",
-            node_type=NodeType.SOURCE,
-            plugin_name="test_source",
-            config=schema_config_dict,
+        config_w, graph_w, sink_w, _source_w = _build_pipeline(_SOURCE_ROWS)
+        result_winner = crashed.resume_orchestrator().resume(resume_point_winner, config_w, graph_w, payload_store=crashed.payload_store)
+        assert result_winner.status == RunStatus.COMPLETED
+        assert sink_w.results == [{"id": 3, "value": 30}]
+
+        with crashed.db.engine.connect() as conn:
+            completed_at_after_winner = conn.execute(
+                select(runs_table.c.completed_at).where(runs_table.c.run_id == crashed.run_id)
+            ).scalar_one()
+        items_after_winner = _work_items_by_token(crashed.db, crashed.run_id)
+        events_after_winner = _coordination_events(crashed.db, crashed.run_id)
+        seat_after_winner = _coordination_row(crashed.db, crashed.run_id)
+
+        # The loser arrives with its (now stale) resume point.
+        clock.advance(10)
+        config_l, graph_l, sink_l, _source_l = _build_pipeline(_SOURCE_ROWS)
+        with pytest.raises(NonResumableRunError, match=r"terminal") as exc_info:
+            crashed.resume_orchestrator().resume(resume_point_loser, config_l, graph_l, payload_store=crashed.payload_store)
+        assert exc_info.value.run_id == crashed.run_id
+
+        # Audit integrity after the race: the loser changed NOTHING.
+        assert sink_l.results == []
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+        assert len(_completed_outcome_tokens(crashed.db, crashed.run_id)) == 4
+        identities = _node_state_identities(crashed.db, crashed.run_id)
+        assert len(identities) == len(set(identities))
+        with crashed.db.engine.connect() as conn:
+            status = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
+            completed_at_after_loser = conn.execute(
+                select(runs_table.c.completed_at).where(runs_table.c.run_id == crashed.run_id)
+            ).scalar_one()
+        assert status == RunStatus.COMPLETED.value
+        assert completed_at_after_loser == completed_at_after_winner
+        assert _work_items_by_token(crashed.db, crashed.run_id) == items_after_winner
+        assert items_after_winner[crashed_token]["attempt"] == 2
+
+        # Coordination surfaces: exactly one COMPLETED finalize event (the
+        # winner's — the original run's graceful-shutdown ceremony also
+        # finalized, as INTERRUPTED, before the harness crafted the crash
+        # image); the loser appended NO coordination event of any type; the
+        # seat row is unchanged from the post-winner image.
+        finalize_events = _coordination_events(crashed.db, crashed.run_id, "finalize")
+        completed_finalizes = [event for event in finalize_events if '"completed"' in str(event["context_json"])]
+        assert len(completed_finalizes) == 1
+        assert _coordination_events(crashed.db, crashed.run_id) == events_after_winner
+        assert _coordination_row(crashed.db, crashed.run_id) == seat_after_winner
+        crashed.db.close()
+
+    def test_entry_guard_refuses_resume_while_run_status_running(self, tmp_path: Path) -> None:
+        """Arm (a) of the entry guard (design §B.3, re-pinned at slice 2).
+
+        The winner's mid-flight image is now produced by the PRODUCTION
+        takeover CAS — ``acquire_run_leadership`` atomically seats the
+        winner and flips FAILED→RUNNING — instead of the old bare
+        ``update_run_status(RUNNING)``. The guard (whose status+seat check
+        lives in the SHARED ``check_run_status_resumable``, so can_resume
+        and resume() can never drift) then refuses the competing loser
+        NAMING the live leader, the seat expiry, and the ``elspeth join``
+        direction.
+
+        The old KNOWN RESIDUAL TOCTOU (two resumes both observing FAILED at
+        the guard) is CLOSED at epoch 21 by the seat CAS — exactly one racer
+        commits ``acquire_run_leadership``; the guard now only closes the
+        caller-convention gap, and check-then-act here is acceptable because
+        the leadership CAS is the arbiter (ADR-030 §B.3).
+
+        Slice ownership of the remaining arms: (b) ``elspeth join`` admits a
+        follower — slice 5; (c) RUNNING + EXPIRED seat became resumable
+        (dead-leader takeover; the guard learned seat liveness) — slice 4,
+        now landed. The companion arm at the bottom records the slice-4 flip.
+
+        Durable surfaces pinned — the refused loser changed NOTHING:
+        - the crashed worker's LEASED journal row is untouched
+          (status/attempt/lease_owner intact), no recovery events appended;
+        - no new token outcomes, no new node_states identities;
+        - the runs row still says RUNNING (the winner's state);
+        - the coordination surfaces are untouched (winner still seated, epoch
+          unchanged, expiry NOT extended; no loser run_workers row; zero
+          fence_refusal events — the guard refusal is pre-CAS, pre-fence);
+        - the loser's sink receives nothing.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        crashed_token = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+
+        resume_point_loser = _resume_point(crashed)
+        assert resume_point_loser is not None
+
+        # The winner's first durable resume write — the PRODUCTION image:
+        # one IMMEDIATE transaction = live seat + FAILED→RUNNING.
+        winner_id = f"worker:{crashed.run_id}:winner"
+        _coord(crashed).acquire_run_leadership(
+            run_id=crashed.run_id,
+            worker_id=winner_id,
+            now=clock.now_utc(),
+            window_seconds=_GUARD_LIVE_SEAT_WINDOW_SECONDS,
         )
 
-        check = recovery_mgr.can_resume(run_id, graph)
-        assert check.can_resume is False
+        # Advisory surface refuses, naming all three components: the live
+        # leader, an ISO-8601 seat expiry, and the join direction.
+        check = _recovery_manager(crashed).can_resume(crashed.run_id, crashed.graph)
+        assert not check.can_resume
         assert check.reason is not None
-        assert "checkpoint" in check.reason.lower()
+        assert winner_id in check.reason
+        assert re.search(r"seat expires \d{4}-\d{2}-\d{2}T\d{2}:\d{2}", check.reason)
+        assert "elspeth join" in check.reason
 
-        db.close()
+        # Snapshot every durable surface the refused loser must not touch.
+        items_before = _work_items_by_token(crashed.db, crashed.run_id)
+        outcomes_before = _completed_outcome_tokens(crashed.db, crashed.run_id)
+        identities_before = sorted(_node_state_identities(crashed.db, crashed.run_id))
+        seat_before = _coordination_row(crashed.db, crashed.run_id)
+        workers_before = _run_workers(crashed.db, crashed.run_id)
+        events_before = _coordination_events(crashed.db, crashed.run_id)
+
+        # ...and the public resume() refuses with the SAME reason (the
+        # elspeth-2f23292372 parity contract), at entry, before any mutation.
+        config_l, graph_l, sink_l, _source_l = _build_pipeline(_SOURCE_ROWS)
+        with pytest.raises(NonResumableRunError, match=r"in progress under live leader") as exc_info:
+            crashed.resume_orchestrator().resume(resume_point_loser, config_l, graph_l, payload_store=crashed.payload_store)
+        assert exc_info.value.run_id == crashed.run_id
+        assert exc_info.value.reason == check.reason
+
+        # The refused loser changed NOTHING durable.
+        assert sink_l.results == []
+        items_after = _work_items_by_token(crashed.db, crashed.run_id)
+        assert items_after == items_before
+        assert items_after[crashed_token]["status"] == TokenWorkStatus.LEASED.value
+        assert items_after[crashed_token]["attempt"] == 1
+        assert items_after[crashed_token]["lease_owner"] == "crashed-worker-1"
+        assert _recovery_events(crashed.db, crashed.run_id) == []
+        assert _completed_outcome_tokens(crashed.db, crashed.run_id) == outcomes_before
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+        assert sorted(_node_state_identities(crashed.db, crashed.run_id)) == identities_before
+        with crashed.db.engine.connect() as conn:
+            status = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
+        assert status == RunStatus.RUNNING.value
+        assert _coordination_row(crashed.db, crashed.run_id) == seat_before, (
+            "winner still seated, epoch unchanged, expiry not extended by the refused loser"
+        )
+        assert _run_workers(crashed.db, crashed.run_id) == workers_before, "no run_workers row for the loser"
+        assert _coordination_events(crashed.db, crashed.run_id) == events_before
+        assert _coordination_events(crashed.db, crashed.run_id, "fence_refusal") == [], "guard refusal is pre-CAS, pre-fence"
+
+        # COMPANION ARM (slice-4 flip): seat usurped-then-EXPIRED is now
+        # RESUMABLE — the guard learns seat liveness in slice 4 (§H test #2(c)).
+        # The full takeover arm (RUNNING + expired seat → admitted, takeover CAS
+        # bumps epoch, identity-evicts incumbent, run completes exactly once) is
+        # pinned below as test_running_with_dead_seat_is_resumable_takeover_completes_once.
+        crashed.db.close()
+
+    def test_running_with_dead_seat_is_resumable_takeover_completes_once(self, tmp_path: Path) -> None:
+        """§H test #2(c) flip (slice 4): RUNNING + expired seat is RESUMABLE.
+
+        Before slice 4 the entry guard returned "Run is still in progress" for
+        any RUNNING run, regardless of seat liveness — a dead-leader run was
+        permanently wedged.  Slice 4 makes RUNNING + (expired OR absent) seat
+        RESUMABLE: the expired seat IS the proof of lost custody, and the
+        resume-side ``acquire_run_leadership`` CAS is the true arbiter.
+
+        Construction (reuses harness verbatim):
+        1. Crash the run mid-claim (``_craft_crashed_lease``).
+        2. Seat an incumbent winner via the REAL production CAS
+           (``acquire_run_leadership``), which atomically flips FAILED→RUNNING
+           and installs the seat at epoch 2.
+        3. Force-expire the seat by stamping a past ``leader_heartbeat_expires_at``.
+        4. Call the advisory ``can_resume`` surface — must return True (the flip).
+        5. Call the public ``resume()`` — must complete COMPLETED exactly once.
+
+        Invariants pinned (full list from the slice-4 test campaign spec):
+
+        1. Resumable predicate: ``can_resume`` returns True (the polarity flip).
+        2. Takeover completes via public resume(), exactly once.
+        3. Epoch bump: seat epoch advanced to epoch_before + 1 (== 3).
+        4. Identity-eviction event: the wedged incumbent is evicted by the
+           takeover worker; exactly one ``worker_evict`` event with
+           reason=``deposed_leader_takeover``.
+        5. NO follower bulk-eviction: a seeded active follower stays 'active'.
+        6. Exactly-once sink delivery + outcomes: no duplicate terminal
+           outcomes, all 4 tokens terminal, the crashed token at attempt=2.
+        7. N=1 statement: this is a pure behavior IMPROVEMENT — a single
+           operator can now recover its own dead-leader run that was previously
+           permanently wedged; the success path is unchanged.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        crashed_token = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+
+        # Step 2: seat the incumbent winner as a REAL takeover leader (epoch 2).
+        winner_id = f"worker:{crashed.run_id}:winner"
+        _coord(crashed).acquire_run_leadership(
+            run_id=crashed.run_id,
+            worker_id=winner_id,
+            now=clock.now_utc(),
+            window_seconds=80.0,
+        )
+
+        # Step 3: force-expire the seat — the wedged-leader image.
+        # The guard evaluates seat liveness with wall-clock datetime.now(UTC);
+        # stamping 2020-01-01 is unambiguously expired in all time domains.
+        with crashed.db.engine.begin() as conn:
+            conn.execute(
+                update(run_coordination_table)
+                .where(run_coordination_table.c.run_id == crashed.run_id)
+                .values(leader_heartbeat_expires_at=datetime(2020, 1, 1, tzinfo=UTC).replace(tzinfo=None))
+            )
+
+        # Capture the seat state before the takeover.
+        seat_before = _coordination_row(crashed.db, crashed.run_id)
+        epoch_before = int(seat_before["leader_epoch"])  # == 2
+        assert epoch_before == 2, "precondition: incumbent acquired epoch 2"
+
+        # Seed an active follower to assert no bulk-eviction at takeover.
+        follower_id = "worker-follower-slice4"
+        with crashed.db.engine.begin() as conn:
+            conn.execute(
+                insert(run_workers_table).values(
+                    worker_id=follower_id,
+                    run_id=crashed.run_id,
+                    role="follower",
+                    status="active",
+                    registered_at=clock.now_utc().replace(tzinfo=None),
+                    heartbeat_expires_at=(clock.now_utc() + timedelta(hours=1)).replace(tzinfo=None),
+                    entry_point="join",
+                )
+            )
+
+        # Step 4 — Resumable predicate (advisory parity, the POLARITY FLIP).
+        check = _recovery_manager(crashed).can_resume(crashed.run_id, crashed.graph)
+        assert check.can_resume is True, "RUNNING + expired seat must be admissible (slice-4 §H test #2(c) flip)"
+
+        # Step 5 — Takeover completes via public resume(), exactly once.
+        result, resume_sink, resume_source = _resume(crashed)
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 4
+        assert resume_sink.results == [{"id": 3, "value": 30}]
+        assert resume_source.load_invocations == 0, "no source replay — scheduler-drain takeover"
+
+        # Step 3 (post) — Epoch bump: the takeover CAS bumped the epoch past
+        # the wedged incumbent (epoch_before == 2 → new epoch == 3).
+        # After graceful finalize+release the seat is vacated; assert epoch
+        # monotonicity on the row, not liveness.
+        seat_after = _coordination_row(crashed.db, crashed.run_id)
+        assert int(seat_after["leader_epoch"]) == epoch_before + 1, (
+            f"epoch must advance to {epoch_before + 1} (takeover from epoch {epoch_before})"
+        )
+
+        # Find the takeover worker_id from the leader_acquire event.
+        all_acquire_events = [
+            e
+            for e in _coordination_events(crashed.db, crashed.run_id)
+            if e["event_type"] == "leader_acquire" and e["leader_epoch"] == epoch_before + 1
+        ]
+        assert len(all_acquire_events) == 1
+        takeover_worker_id = all_acquire_events[0]["worker_id"]
+
+        # Step 4 — Identity-eviction event.
+        workers = {w["worker_id"]: w for w in _run_workers(crashed.db, crashed.run_id)}
+        assert winner_id in workers, "incumbent must have a registry row"
+        deposed = workers[winner_id]
+        assert deposed["status"] == "evicted", "deposed leader must be evicted by IDENTITY"
+        assert deposed["evicted_at"] is not None
+        assert deposed["evicted_by_worker_id"] == takeover_worker_id
+
+        evict_events = [
+            e for e in _coordination_events(crashed.db, crashed.run_id) if e["event_type"] == "worker_evict" and e["worker_id"] == winner_id
+        ]
+        assert len(evict_events) == 1, "exactly one worker_evict event for the deposed leader"
+        (evict_event,) = evict_events
+        ctx = json.loads(str(evict_event["context_json"]))
+        assert ctx == {
+            "evicted_by_worker_id": takeover_worker_id,
+            "reason": "deposed_leader_takeover",
+        }
+
+        # Step 5 — NO follower bulk-eviction at the takeover CAS.
+        # The follower may have been departed by the graceful run finalization,
+        # but it must NOT have been evicted (status='evicted' with
+        # evicted_by_worker_id set).  Bulk eviction at takeover would set
+        # status='evicted'; natural departure at finalize sets status='departed'.
+        assert workers[follower_id]["status"] != "evicted", (
+            "seeded follower must not be bulk-evicted by the takeover CAS (correction-2 invariant)"
+        )
+        assert workers[follower_id]["evicted_by_worker_id"] is None, (
+            "no evicted_by_worker_id on the follower — it was departed, not evicted"
+        )
+
+        # Step 6 — Exactly-once sink delivery + outcomes.
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+        completed = _completed_outcome_tokens(crashed.db, crashed.run_id)
+        assert len(completed) == 4
+        assert crashed_token in completed, "crashed token must reach terminal under its ORIGINAL token_id"
+        items = _work_items_by_token(crashed.db, crashed.run_id)
+        assert items[crashed_token]["status"] == TokenWorkStatus.TERMINAL.value
+        assert items[crashed_token]["attempt"] == 2, "recovered item must be at attempt=2"
+        identities = _node_state_identities(crashed.db, crashed.run_id)
+        assert len(identities) == len(set(identities)), "no duplicate (token_id, node_id, attempt) identities"
+
+        # Step 7 — N=1 statement: this test pins a pure behavior IMPROVEMENT.
+        # At N=1 a single operator's run can now be recovered when its own
+        # leader seat expires (previously wedged permanently). Nothing in the
+        # success path regresses; the takeover CAS is identical to the
+        # FAILED-run takeover path, now admitted for RUNNING+expired-seat too.
+
+        crashed.db.close()
+
+    def test_join_attaches_follower_to_running_run(self, tmp_path: Path) -> None:
+        """§H test #2(b) (design :471): join_run admits a follower atomically.
+
+        A follower attached to a RUNNING run via ``join_run`` (NOT resume)
+        claims a READY item under its own worker_id exactly once, leaving the
+        leader's records untouched.  The run finalizes exactly once.
+
+        Construction
+        ------------
+        1. Crash the run mid-claim (_run_to_interrupted_checkpoint + one
+           _craft_crashed_lease at ingest_sequence=3 / leader="crashed-worker-1").
+        2. Seat a LIVE leader via acquire_run_leadership (flips FAILED→RUNNING,
+           epoch 2).  Window = _GUARD_LIVE_SEAT_WINDOW_SECONDS so the seat reads
+           live under both MockClock and wall-clock.
+        3. Seed ONE fresh READY row at ingest_sequence=5 via _craft_crashed_lease
+           (produces a LEASED row) then reset it to READY — the item the follower
+           will claim.
+        4. Assert config_hash equality as a PRECONDITION (never fabricate).
+
+        Invariants pinned (design §H :471-483)
+        ---------------------------------------
+        A1  join-not-resume: join_run returns, seat epoch unchanged, run_workers
+            has leader (active) + crashed-worker-1 + NEW follower (active,
+            role=follower, entry_point=join).  Exactly one new worker_register
+            event, worker_id == follower_id, context role=follower/
+            entry_point=join, leader_epoch IS NULL.  NO leader_acquire from
+            the join — resume would bump the epoch.
+        A2  Follower claims the READY row under its OWN worker_id exactly once.
+            Follower NEVER claims the crashed LEASED row (not READY).
+            NEVER calls claim_pending_sink.  attempt==1, no duplicate identity,
+            exactly one completed terminal outcome for seq=5.
+        A3  Leader records untouched: crashed_token byte-equal (LEASED/attempt=1/
+            lease_owner crashed-worker-1); seat row byte-identical (epoch
+            unchanged, expiry NOT extended); no fence_refusal events.
+        A4  Finalizes exactly once: complete_run with D quiescence predicate →
+            COMPLETED once.  Follower row flipped to departed by §D hygiene
+            (evicted_by_worker_id IS NULL).  _duplicate_terminal_outcome_tokens==[].
+            All journal rows TERMINAL.  Seat released (leader_worker_id IS NULL).
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        # Step 1: seed the crashed-worker-1 LEASED row.
+        crashed_token = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        # Advance so the crashed lease is stale (not a live registry row per
+        # the liveness-aware reaper) but NOT so far that our big-window seat
+        # looks dead — the MockClock is still well before NOW+1e9.
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+
+        # Step 2: seat a LIVE leader (epoch 2, huge window → live under both clocks).
+        leader_id = f"worker:{crashed.run_id}:leader"
+        leader_token = _coord(crashed).acquire_run_leadership(
+            run_id=crashed.run_id,
+            worker_id=leader_id,
+            now=clock.now_utc(),
+            window_seconds=_GUARD_LIVE_SEAT_WINDOW_SECONDS,
+        )
+        assert leader_token.leader_epoch == 2, "takeover of begin_run epoch-1 seat"
+        seat_after_leader = _coordination_row(crashed.db, crashed.run_id)
+
+        # Step 3: seed one READY item for the follower via _craft_crashed_lease
+        # (which produces LEASED), then reset it to READY.
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        fresh_token = _craft_crashed_lease(
+            crashed,
+            ingest_sequence=5,
+            lease_owner="worker-temp-fresh-5",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        with crashed.db.engine.connect() as conn:
+            fresh_work_item_id = conn.execute(
+                select(token_work_items_table.c.work_item_id).where(token_work_items_table.c.token_id == fresh_token)
+            ).scalar_one()
+        with crashed.db.engine.begin() as conn:
+            conn.execute(
+                update(token_work_items_table)
+                .where(token_work_items_table.c.work_item_id == fresh_work_item_id)
+                .values(
+                    status=TokenWorkStatus.READY.value,
+                    lease_owner=None,
+                    lease_expires_at=None,
+                )
+            )
+
+        # Step 4: assert config_hash equality as a precondition (never fabricate).
+        with crashed.db.engine.connect() as conn:
+            db_config_hash = conn.execute(select(runs_table.c.config_hash).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
+        assert db_config_hash is not None, "runs.config_hash must be set by begin_run"
+
+        # ── A1: join_run admits the follower ───────────────────────────────
+        # Mock stable_hash(resolve_config(settings)) to return the ACTUAL hash
+        # stored in the runs table (the real hash from the real run).
+        fake_settings = types.SimpleNamespace()
+        with (
+            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_config_hash),
+        ):
+            orch = Orchestrator(crashed.db, clock=crashed.clock)
+            follower_id = orch.join_run(
+                run_id=crashed.run_id,
+                settings=fake_settings,
+                now=clock.now_utc(),
+                window_seconds=_GUARD_LIVE_SEAT_WINDOW_SECONDS,
+            )
+
+        # join_run returns a valid worker_id (NOT a resume point — no epoch bump).
+        assert follower_id.startswith(f"worker:{crashed.run_id}:")
+        assert len(follower_id.rsplit(":", 1)[1]) == 32  # uuid4().hex
+
+        # Seat epoch UNCHANGED (resume would bump it; join does not).
+        seat_after_join = _coordination_row(crashed.db, crashed.run_id)
+        assert int(seat_after_join["leader_epoch"]) == leader_token.leader_epoch, "join_run must NOT bump the leader_epoch (not a resume)"
+        assert seat_after_join == seat_after_leader, "join_run must not touch the seat row at all"
+
+        # run_workers: leader(role=leader,active) + crashed-worker-1 + NEW follower.
+        workers = {w["worker_id"]: w for w in _run_workers(crashed.db, crashed.run_id)}
+        assert leader_id in workers
+        assert workers[leader_id]["role"] == "leader"
+        assert workers[leader_id]["status"] == "active"
+        assert "crashed-worker-1" in workers
+        assert follower_id in workers
+        follower_row = workers[follower_id]
+        assert follower_row["role"] == "follower"
+        assert follower_row["status"] == "active"
+        assert follower_row["entry_point"] == "join"
+
+        # Exactly one new worker_register event for the follower.
+        all_events = _coordination_events(crashed.db, crashed.run_id)
+        register_events = [e for e in all_events if e["event_type"] == "worker_register" and e["worker_id"] == follower_id]
+        assert len(register_events) == 1, "exactly one worker_register for the follower"
+        reg_ctx = json.loads(str(register_events[0]["context_json"]))
+        assert reg_ctx["role"] == "follower"
+        assert reg_ctx["entry_point"] == "join"
+        assert register_events[0]["leader_epoch"] is None, "follower register has no epoch"
+
+        # NO leader_acquire from the join.
+        leader_acquire_events = [e for e in all_events if e["event_type"] == "leader_acquire" and e["worker_id"] == follower_id]
+        assert leader_acquire_events == [], "join_run must not emit a leader_acquire event"
+
+        # ── A2: follower claims the READY row under its own worker_id ─────
+        # Simulate the follower claiming via claim_ready (the production verb).
+        # The follower is ACTIVE in run_workers, so the membership fence admits it.
+        now = clock.now_utc()
+        follower_claimed = crashed.repo.claim_ready(
+            run_id=crashed.run_id,
+            lease_owner=follower_id,
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+            now=now,
+        )
+        assert follower_claimed is not None, "follower must claim the READY row"
+        assert follower_claimed.token_id == fresh_token, "follower claims the seq=5 token only"
+        assert follower_claimed.lease_owner == follower_id
+
+        # Follower NEVER claims the crashed LEASED row.
+        items_mid = _work_items_by_token(crashed.db, crashed.run_id)
+        assert items_mid[crashed_token]["status"] == TokenWorkStatus.LEASED.value, (
+            "crashed LEASED row must be untouched by the follower claim"
+        )
+        assert items_mid[crashed_token]["lease_owner"] == "crashed-worker-1"
+
+        # Mark the fresh token terminal (follower completed it).
+        crashed.repo.mark_terminal(
+            work_item_id=follower_claimed.work_item_id,
+            now=clock.now_utc(),
+            expected_lease_owner=follower_id,
+        )
+
+        items_after_follower = _work_items_by_token(crashed.db, crashed.run_id)
+        assert items_after_follower[fresh_token]["status"] == TokenWorkStatus.TERMINAL.value
+        # mark_terminal clears lease_owner; attribution is in scheduler_events.
+        assert items_after_follower[fresh_token]["attempt"] == 1
+
+        # ── A3: leader records untouched ──────────────────────────────────
+        # Crashed token row byte-equal.
+        assert items_after_follower[crashed_token] == items_mid[crashed_token], "crashed_token row must be byte-identical"
+        # Seat row byte-identical (epoch not extended by follower claim).
+        assert _coordination_row(crashed.db, crashed.run_id) == seat_after_leader, (
+            "seat must be byte-identical after follower claim (no verify-and-extend from followers)"
+        )
+        # No fence_refusal events.
+        fence_refusals = _coordination_events(crashed.db, crashed.run_id, "fence_refusal")
+        assert fence_refusals == [], "no fence_refusal events expected"
+
+        # ── A4: finalize exactly once ─────────────────────────────────────
+        # The leader recovers the crashed lease (expired, registry dead) then
+        # finalizes.  The D quiescence predicate (no READY/LEASED/PENDING_SINK
+        # rows except the crashed one recovered first) must be satisfied.
+        recovered = crashed.repo.recover_expired_leases(
+            run_id=crashed.run_id,
+            now=clock.now_utc(),
+            caller_owner=leader_id,
+            coordination_token=leader_token,
+        )
+        assert recovered == 1, "exactly one expired lease recovered (crashed-worker-1)"
+
+        # Claim + drive the recovered item to TERMINAL.
+        recovered_claim = crashed.repo.claim_ready(
+            run_id=crashed.run_id,
+            lease_owner=leader_id,
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+            now=clock.now_utc(),
+        )
+        assert recovered_claim is not None and recovered_claim.token_id == crashed_token
+        crashed.repo.mark_terminal(
+            work_item_id=recovered_claim.work_item_id,
+            now=clock.now_utc(),
+            expected_lease_owner=leader_id,
+        )
+
+        # Depart the follower first (simulating follower clean exit via depart_worker).
+        crashed.factory.run_coordination.depart_worker(
+            worker_id=follower_id,
+            now=clock.now_utc(),
+        )
+        follower_row_departed = next(w for w in _run_workers(crashed.db, crashed.run_id) if w["worker_id"] == follower_id)
+        assert follower_row_departed["status"] == "departed"
+
+        # Now finalize: complete_run with §D quiescence (all items TERMINAL).
+        crashed.factory.run_lifecycle.complete_run(crashed.run_id, RunStatus.COMPLETED, token=leader_token)
+
+        # Exactly one finalize event with status=completed.
+        finalize_events = _coordination_events(crashed.db, crashed.run_id, "finalize")
+        completed_finalizes = [e for e in finalize_events if json.loads(str(e["context_json"])).get("status") == "completed"]
+        assert len(completed_finalizes) == 1, "finalize exactly once"
+
+        # Follower row: departed (either by explicit depart or §D hygiene), evicted_by IS NULL.
+        follower_row_final = next(w for w in _run_workers(crashed.db, crashed.run_id) if w["worker_id"] == follower_id)
+        assert follower_row_final["status"] == "departed"
+        assert follower_row_final["evicted_by_worker_id"] is None, "follower must not be evicted, only departed"
+
+        # _duplicate_terminal_outcome_tokens == [].
+        assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
+
+        # All journal rows TERMINAL.
+        all_items = _work_items_by_token(crashed.db, crashed.run_id)
+        assert all(item["status"] == TokenWorkStatus.TERMINAL.value for item in all_items.values()), (
+            "all journal rows must be TERMINAL after finalization"
+        )
+
+        # Run is COMPLETED.
+        with crashed.db.engine.connect() as conn:
+            final_status = conn.execute(select(runs_table.c.status).where(runs_table.c.run_id == crashed.run_id)).scalar_one()
+        assert final_status == RunStatus.COMPLETED.value
+
+        crashed.db.close()

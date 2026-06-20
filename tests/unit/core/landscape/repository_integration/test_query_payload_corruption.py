@@ -34,6 +34,8 @@ def _record_row_with_payload(tmp_path: Path) -> tuple[RecorderFactory, str, str,
         source_node_id=source.node_id,
         row_index=0,
         data={"field": "value", "number": 42},
+        source_row_index=0,
+        ingest_sequence=0,
     )
 
     assert row.source_data_ref is not None

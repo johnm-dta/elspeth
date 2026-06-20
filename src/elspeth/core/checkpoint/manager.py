@@ -2,28 +2,30 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import asc, delete, desc, select
 
 from elspeth.contracts import Checkpoint
-from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError
-from elspeth.core.canonical import compute_full_topology_hash, stable_hash
+from elspeth.contracts.coordination import DEFAULT_RUN_LIVENESS_WINDOW_SECONDS
+from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint.serialization import checkpoint_dumps
-from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import checkpoints_table, tokens_table
+from elspeth.core.landscape.database import LandscapeDB, begin_write
+from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction
+from elspeth.core.landscape.schema import checkpoints_table
 
-logger = logging.getLogger(__name__)
-
-_LARGE_AGGREGATION_CHECKPOINT_BYTES = 1_000_000
-_MAX_CHECKPOINT_STATE_BYTES = 10_000_000
+_MAX_BARRIER_SCALARS_BYTES = 10_000_000
 
 if TYPE_CHECKING:
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+    from contextlib import AbstractContextManager
+
+    from sqlalchemy.engine import Connection
+
+    from elspeth.contracts.barrier_scalars import BarrierScalars
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.core.dag import ExecutionGraph
 
 
@@ -43,50 +45,35 @@ class CheckpointCorruptionError(Exception):
     pass
 
 
-def _validate_checkpoint_state_json_size(
-    *,
-    state_name: Literal["aggregation", "coalesce"],
-    serialized: str,
-    total_rows: int | None = None,
-    node_count: int | None = None,
-    pending_joins: int | None = None,
-) -> None:
-    """Validate serialized checkpoint state at the single persistence boundary."""
+def _validate_barrier_scalars_json_size(serialized: str) -> None:
+    """Hard-fail size guard at the single checkpoint persistence boundary.
+
+    Post-F1, the checkpoint carries only scalar barrier metadata (two float
+    trigger latches per in-flight aggregation node plus lost-branch records
+    per pending coalesce key) — payloads are tiny by construction. A payload
+    anywhere near the limit indicates corrupted state construction upstream,
+    not a large pipeline, so this is a crash, not a warning.
+    """
     serialized_bytes = len(serialized.encode("utf-8"))
-    size_mb = serialized_bytes / 1_000_000
-
-    if state_name == "aggregation" and serialized_bytes > _LARGE_AGGREGATION_CHECKPOINT_BYTES:
-        logger.warning(
-            "Large checkpoint: %.1fMB for %d buffered rows across %d nodes",
-            size_mb,
-            total_rows or 0,
-            node_count or 0,
-        )
-
-    if serialized_bytes <= _MAX_CHECKPOINT_STATE_BYTES:
+    if serialized_bytes <= _MAX_BARRIER_SCALARS_BYTES:
         return
-
-    if state_name == "aggregation":
-        raise OrchestrationInvariantError(
-            f"Checkpoint size {size_mb:.1f}MB exceeds 10MB limit. "
-            f"Buffer contains {total_rows or 0} total rows across {node_count or 0} nodes. "
-            f"Solutions: (1) Reduce aggregation count trigger to <5000 rows, "
-            f"(2) Reduce row_data payload size, or (3) Implement checkpoint retention "
-            f"policy"
-        )
-
-    raise RuntimeError(f"Coalesce checkpoint size {size_mb:.1f}MB exceeds 10MB limit. Pending joins: {pending_joins or 0}.")
+    raise OrchestrationInvariantError(
+        f"Checkpoint barrier_scalars size {serialized_bytes / 1_000_000:.1f}MB exceeds 10MB limit. "
+        f"Barrier scalars carry only trigger latches and lost-branch records; "
+        f"a payload this large indicates a bug in barrier state construction."
+    )
 
 
 class CheckpointManager:
     """Manages checkpoint creation and retrieval.
 
-    Checkpoints capture run progress at row boundaries, enabling
-    resume after crash. Each checkpoint records:
-    - Which token was being processed
-    - Which node it was at
+    Checkpoints capture run progress at sink-durability boundaries,
+    enabling resume after crash. Each checkpoint records:
     - A monotonic sequence number for ordering
-    - Optional aggregation state for stateful plugins
+    - The full-topology hash for compatibility validation
+    - Optional scalar barrier metadata (BarrierScalars) for in-flight
+      aggregation/coalesce barriers — buffered tokens themselves live in
+      token_work_items journal BLOCKED rows (F1 durability unification)
     """
 
     def __init__(self, db: LandscapeDB) -> None:
@@ -97,52 +84,68 @@ class CheckpointManager:
         """
         self._db = db
 
+    def _fenced_or_plain_write(
+        self,
+        *,
+        coordination_token: CoordinationToken | None,
+        verb: str,
+    ) -> AbstractContextManager[Connection]:
+        """One write-intent transaction, leader-fenced when a token is supplied.
+
+        ADR-030 §C.4 row 5: the verify-and-extend epoch fence runs as the
+        FIRST statement of the checkpoint write transaction — a deposed
+        leader's checkpoint INSERT/DELETE is refused before the
+        duplicate-sequence guard or the UNIQUE constraint is even reached
+        (both stay beneath as the durable backstop). ``None`` preserves the
+        unfenced legacy arm for direct repository-level callers (tests,
+        tooling); the orchestrator's CheckpointCoordinator always threads the
+        token it bound at run/resume start.
+        """
+        if coordination_token is None:
+            return begin_write(self._db.engine)
+        return fenced_leader_transaction(
+            self._db.engine,
+            token=coordination_token,
+            now=datetime.now(UTC),
+            window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
+            verb=verb,
+        )
+
     def create_checkpoint(
         self,
+        *,
         run_id: str,
-        token_id: str,
-        node_id: str,
         sequence_number: int,
+        barrier_scalars: BarrierScalars | None,
         graph: ExecutionGraph,
-        aggregation_state: AggregationCheckpointState | None = None,
-        coalesce_state: CoalesceCheckpointState | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> Checkpoint:
         """Create a checkpoint at current progress point.
 
         Args:
             run_id: The run being checkpointed
-            token_id: Current token being processed
-            node_id: Current node in the pipeline
             sequence_number: Monotonic progress marker
+            barrier_scalars: Scalar barrier metadata for in-flight
+                aggregation/coalesce barriers, or None. Empty scalars
+                (``has_state`` False) persist NULL, same as None.
             graph: Execution graph for topology validation (REQUIRED)
-            aggregation_state: Optional serializable aggregation buffers
-            coalesce_state: Optional serializable pending coalesce state
+            coordination_token: Leader fencing token (ADR-030). When
+                supplied, the verify-and-extend epoch fence is the first
+                statement of the write transaction; a stale epoch raises
+                ``RunLeadershipLostError`` with zero mutation.
 
         Returns:
             The created Checkpoint
 
         Raises:
-            ValueError: If graph is None or node_id not in graph
+            ValueError: If graph is None
         """
         # Validate parameters early
         if graph is None:
             raise ValueError("graph parameter is required for checkpoint creation")
-        if not graph.has_node(node_id):
-            raise ValueError(f"node_id '{node_id}' does not exist in graph")
 
         # All checkpoint data generation happens INSIDE transaction for atomicity
-        with self._db.engine.begin() as conn:
-            # Verify token belongs to the specified run (Tier 1 invariant).
-            # Cross-run checkpoint contamination is audit corruption.
-            token_row = conn.execute(select(tokens_table.c.run_id).where(tokens_table.c.token_id == token_id)).fetchone()
-            if token_row is None:
-                raise AuditIntegrityError(f"Cannot create checkpoint: token '{token_id}' does not exist")
-            if token_row.run_id != run_id:
-                raise AuditIntegrityError(
-                    f"Cannot create checkpoint: token '{token_id}' belongs to run "
-                    f"'{token_row.run_id}' but checkpoint targets run '{run_id}'. "
-                    f"Cross-run checkpoint contamination is audit corruption."
-                )
+        with self._fenced_or_plain_write(coordination_token=coordination_token, verb="create_checkpoint") as conn:
             existing_sequence = conn.execute(
                 select(checkpoints_table.c.checkpoint_id)
                 .where((checkpoints_table.c.run_id == run_id) & (checkpoints_table.c.sequence_number == sequence_number))
@@ -158,52 +161,31 @@ class CheckpointManager:
             checkpoint_id = f"cp-{uuid.uuid4().hex}"
             created_at = datetime.now(UTC)
 
-            # Prepare aggregation state JSON
+            # Serialize barrier scalars JSON.
             # checkpoint_dumps() handles:
-            # - datetime serialization with type tags for round-trip fidelity
             # - NaN/Infinity rejection per CLAUDE.md audit integrity requirements
-            # Note: We don't use canonical_json because it normalizes floats to integers,
-            # breaking round-trip for aggregation state
-            agg_json: str | None = None
-            if aggregation_state is not None:
-                agg_json = checkpoint_dumps(aggregation_state.to_dict())
-                _validate_checkpoint_state_json_size(
-                    state_name="aggregation",
-                    serialized=agg_json,
-                    total_rows=sum(len(node.tokens) for node in aggregation_state.nodes.values()),
-                    node_count=len(aggregation_state.nodes),
-                )
+            # Note: We don't use canonical_json because it normalizes floats to
+            # integers, breaking round-trip for the float trigger-offset latches.
+            scalars_json: str | None = None
+            if barrier_scalars is not None and barrier_scalars.has_state:
+                scalars_json = checkpoint_dumps(barrier_scalars.to_dict())
+                _validate_barrier_scalars_json_size(scalars_json)
 
-            coalesce_json: str | None = None
-            if coalesce_state is not None:
-                coalesce_json = checkpoint_dumps(coalesce_state.to_dict())
-                _validate_checkpoint_state_json_size(
-                    state_name="coalesce",
-                    serialized=coalesce_json,
-                    pending_joins=len(coalesce_state.pending),
-                )
-
-            # Compute topology hashes inside transaction
+            # Compute topology hash inside transaction
             # This ensures hash matches graph state at exact moment of checkpoint creation
-            # Use FULL topology hash instead of upstream-only hash.
+            # Use FULL topology hash (every node's id + config hash + all edges).
             # This ensures changes to ANY branch (including sibling sink branches)
             # are detected during resume validation, enforcing "one run = one config".
             upstream_topology_hash = compute_full_topology_hash(graph)
-            node_info = graph.get_node_info(node_id)
-            checkpoint_node_config_hash = stable_hash(node_info.config)
 
             conn.execute(
                 checkpoints_table.insert().values(
                     checkpoint_id=checkpoint_id,
                     run_id=run_id,
-                    token_id=token_id,
-                    node_id=node_id,
                     sequence_number=sequence_number,
-                    aggregation_state_json=agg_json,
-                    coalesce_state_json=coalesce_json,
+                    barrier_scalars_json=scalars_json,
                     created_at=created_at,
                     upstream_topology_hash=upstream_topology_hash,
-                    checkpoint_node_config_hash=checkpoint_node_config_hash,
                     format_version=Checkpoint.CURRENT_FORMAT_VERSION,
                 )
             )
@@ -212,14 +194,10 @@ class CheckpointManager:
         return Checkpoint(
             checkpoint_id=checkpoint_id,
             run_id=run_id,
-            token_id=token_id,
-            node_id=node_id,
             sequence_number=sequence_number,
             created_at=created_at,
             upstream_topology_hash=upstream_topology_hash,
-            checkpoint_node_config_hash=checkpoint_node_config_hash,
-            aggregation_state_json=agg_json,
-            coalesce_state_json=coalesce_json,
+            barrier_scalars_json=scalars_json,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
 
@@ -250,14 +228,10 @@ class CheckpointManager:
             checkpoint = Checkpoint(
                 checkpoint_id=result.checkpoint_id,
                 run_id=result.run_id,
-                token_id=result.token_id,
-                node_id=result.node_id,
                 sequence_number=result.sequence_number,
                 created_at=result.created_at,
                 upstream_topology_hash=result.upstream_topology_hash,
-                checkpoint_node_config_hash=result.checkpoint_node_config_hash,
-                aggregation_state_json=result.aggregation_state_json,
-                coalesce_state_json=result.coalesce_state_json,
+                barrier_scalars_json=result.barrier_scalars_json,
                 format_version=result.format_version,  # None for legacy checkpoints
             )
         except ValueError as e:
@@ -291,14 +265,10 @@ class CheckpointManager:
                     Checkpoint(
                         checkpoint_id=r.checkpoint_id,
                         run_id=r.run_id,
-                        token_id=r.token_id,
-                        node_id=r.node_id,
                         sequence_number=r.sequence_number,
                         created_at=r.created_at,
                         upstream_topology_hash=r.upstream_topology_hash,
-                        checkpoint_node_config_hash=r.checkpoint_node_config_hash,
-                        aggregation_state_json=r.aggregation_state_json,
-                        coalesce_state_json=r.coalesce_state_json,
+                        barrier_scalars_json=r.barrier_scalars_json,
                         format_version=r.format_version,  # None for legacy checkpoints
                     )
                 )
@@ -308,7 +278,7 @@ class CheckpointManager:
                 ) from e
         return checkpoints
 
-    def delete_checkpoints(self, run_id: str) -> int:
+    def delete_checkpoints(self, run_id: str, *, coordination_token: CoordinationToken | None = None) -> int:
         """Delete all checkpoints for a completed run.
 
         Called after successful run completion to clean up. Checkpoints are deletable
@@ -318,11 +288,14 @@ class CheckpointManager:
 
         Args:
             run_id: The run to clean up
+            coordination_token: Leader fencing token (ADR-030 §C.4 row 5) —
+                a deposed leader must not destroy the new leader's resume
+                anchors. Fence-first when supplied.
 
         Returns:
             Number of checkpoints deleted
         """
-        with self._db.engine.begin() as conn:
+        with self._fenced_or_plain_write(coordination_token=coordination_token, verb="delete_checkpoints") as conn:
             result = conn.execute(delete(checkpoints_table).where(checkpoints_table.c.run_id == run_id))
             # begin() auto-commits on clean exit, auto-rollbacks on exception
             return result.rowcount

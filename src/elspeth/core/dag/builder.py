@@ -49,6 +49,7 @@ if TYPE_CHECKING:
         AggregationSettings,
         CoalesceSettings,
         GateSettings,
+        QueueSettings,
         SourceSettings,
     )
     from elspeth.core.dag.graph import ExecutionGraph
@@ -114,19 +115,38 @@ def _parse_contract_schema_config(
 
 def build_execution_graph(
     cls: type[ExecutionGraph],
-    source: SourceProtocol,
-    source_settings: SourceSettings,
-    transforms: Sequence[WiredTransform],
-    sinks: Mapping[str, SinkProtocol],
-    aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]],
-    gates: Sequence[GateSettings],
+    *,
+    sources: Mapping[str, SourceProtocol],
+    source_settings_map: Mapping[str, SourceSettings],
+    transforms: Sequence[WiredTransform] = (),
+    sinks: Mapping[str, SinkProtocol] | None = None,
+    aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]] | None = None,
+    gates: Sequence[GateSettings] = (),
     coalesce_settings: Sequence[CoalesceSettings] | None = None,
+    queues: Mapping[str, QueueSettings] | None = None,
 ) -> ExecutionGraph:
     """Build an ExecutionGraph from plugin instances.
 
     Called by ExecutionGraph.from_plugin_instances() facade. See that method
     for full documentation of parameters and semantics.
+
+    Per ADR-025 §2 the source surface is plural-only — callers pass
+    ``sources`` and ``source_settings_map`` keyed by source name. The
+    pre-ADR singular ``source=`` / ``source_settings=`` keyword shim
+    and its ``legacy_single_source_invocation`` branch are deleted.
     """
+    if not sources:
+        raise GraphValidationError("ExecutionGraph requires at least one source")
+    if sinks is None:
+        raise GraphValidationError("ExecutionGraph requires at least one sink")
+    if aggregations is None:
+        aggregations = {}
+    if set(sources) != set(source_settings_map):
+        raise GraphValidationError(
+            f"Source plugin names and source settings names must match. plugins={sorted(sources)}, settings={sorted(source_settings_map)}"
+        )
+
+    queue_settings = queues or {}
     graph = cls()
 
     def node_id(prefix: str, name: str, config: NodeConfig, sequence: int | None = None) -> NodeID:
@@ -200,23 +220,32 @@ def build_execution_graph(
     def _sink_name_set() -> set[str]:
         return {str(name) for name in sink_ids}
 
-    # Add source
-    source_config = source.config
-    source_schema_config = _parse_contract_schema_config(
-        source_config,
-        owner=f"source:{source.name}",
-        component_id=source.name,
-        component_type="source",
-    )
-    source_id = node_id("source", source.name, source_config)
-    graph.add_node(
-        source_id,
-        node_type=NodeType.SOURCE,
-        plugin_name=source.name,
-        config=source_config,
-        output_schema=source.output_schema,  # SourceProtocol requires this
-        output_schema_config=source_schema_config,
-    )
+    # Add sources. Per ADR-025 §2 source node identity always includes the
+    # configured source name in the config hash so two instances of the same
+    # plugin remain distinct DAG roots and audit records. There is no
+    # singular checkpoint-identity reservation; the prior "source" literal
+    # name shortcut is gone with the legacy facade.
+    source_ids: dict[str, NodeID] = {}
+    for source_name, source_instance in sources.items():
+        source_config = source_instance.config
+        source_schema_config = _parse_contract_schema_config(
+            source_config,
+            owner=f"source:{source_name}",
+            component_id=source_name,
+            component_type="source",
+        )
+        source_node_config = dict(source_config)
+        source_node_config["source_name"] = source_name
+        source_id = node_id("source", source_name, source_node_config)
+        source_ids[source_name] = source_id
+        graph.add_node(
+            source_id,
+            node_type=NodeType.SOURCE,
+            plugin_name=source_instance.name,
+            config=source_node_config,
+            output_schema=source_instance.output_schema,  # SourceProtocol requires this
+            output_schema_config=source_schema_config,
+        )
 
     # Add sinks
     sink_ids: dict[SinkName, NodeID] = {}
@@ -241,6 +270,25 @@ def build_execution_graph(
         )
 
     graph.set_sink_id_map(sink_ids)
+
+    # Build declared scheduling queues. V1 queue semantics are pass-through
+    # coordination only: queues do not merge fields or synthesize guarantees
+    # across sources, so their schema contract is deliberately observed.
+    queue_ids: dict[str, NodeID] = {}
+    observed_queue_schema = SchemaConfig(mode="observed", fields=None)
+    for queue_name, queue_config in queue_settings.items():
+        queue_node_config: NodeConfig = {"name": queue_name}
+        if queue_config.description is not None:
+            queue_node_config["description"] = queue_config.description
+        qid = node_id("queue", queue_name, queue_node_config)
+        queue_ids[queue_name] = qid
+        graph.add_node(
+            qid,
+            node_type=NodeType.QUEUE,
+            plugin_name=f"queue:{queue_name}",
+            config=queue_node_config,
+            output_schema_config=observed_queue_schema,
+        )
 
     # Build transforms
     transform_ids_by_name: dict[str, NodeID] = {}
@@ -538,9 +586,13 @@ def build_execution_graph(
     # ===== BUILD PRODUCER REGISTRY =====
     producers: dict[str, tuple[NodeID, str]] = {}
     producer_desc: dict[str, str] = {}
+    queue_input_edges: defaultdict[str, list[tuple[NodeID, str, str]]] = defaultdict(list)
     gate_connection_route_labels: defaultdict[tuple[NodeID, str], list[str]] = defaultdict(list)
 
     def register_producer(connection_name: str, node_id: NodeID, label: str, description: str) -> None:
+        if connection_name in queue_ids:
+            queue_input_edges[connection_name].append((node_id, label, description))
+            return
         if connection_name in producers:
             existing_node, _existing_label = producers[connection_name]
             raise GraphValidationError(
@@ -551,14 +603,15 @@ def build_execution_graph(
         producers[connection_name] = (node_id, label)
         producer_desc[connection_name] = description
 
-    source_on_success = source_settings.on_success
-    if SinkName(source_on_success) not in sink_ids:
-        register_producer(
-            source_on_success,
-            source_id,
-            "continue",
-            f"source '{source.name}'",
-        )
+    for source_name, source_settings_entry in source_settings_map.items():
+        source_on_success = source_settings_entry.on_success
+        if SinkName(source_on_success) not in sink_ids:
+            register_producer(
+                source_on_success,
+                source_ids[source_name],
+                "continue",
+                f"source '{source_name}'",
+            )
 
     for wired in transforms:
         tid = transform_ids_by_name[wired.settings.name]
@@ -583,6 +636,10 @@ def build_execution_graph(
                     "continue",
                     f"coalesce '{coalesce_config.name}'",
                 )
+
+    for queue_name, queue_id in queue_ids.items():
+        producers[queue_name] = (queue_id, "continue")
+        producer_desc[queue_name] = f"queue '{queue_name}'"
 
     # Register fork branches as produced connections (only for branches with transforms).
     # Identity branches use direct COPY edges and don't need connection registration.
@@ -653,6 +710,17 @@ def build_execution_graph(
         if target in producers and producers[target][0] == gate_id:
             continue
         register_producer(target, gate_id, route_label, f"gate route '{route_label}' from '{gate_id}'")
+
+    for queue_name, upstream_edges in queue_input_edges.items():
+        if not upstream_edges:
+            raise GraphValidationError(
+                f"Queue '{queue_name}' has no upstream producers.",
+                component_id=queue_name,
+                component_type="queue",
+            )
+        queue_id = queue_ids[queue_name]
+        for upstream_node_id, edge_label, _description in upstream_edges:
+            graph.add_edge(upstream_node_id, queue_id, label=edge_label, mode=RoutingMode.MOVE)
 
     # ===== VALIDATE CONNECTION NAMESPACES =====
     cls._validate_connection_namespaces(
@@ -791,23 +859,32 @@ def build_execution_graph(
                 mode=RoutingMode.MOVE,
             )
 
-    if SinkName(source_on_success) in sink_ids:
-        # For source-only pipelines, create direct source -> sink edge.
-        if not transforms and not gates and not aggregations:
+    for source_name, source_settings_entry in source_settings_map.items():
+        source_on_success = source_settings_entry.on_success
+        source_display_name = sources[source_name].name if len(sources) == 1 and source_name == "source" else source_name
+        if SinkName(source_on_success) in sink_ids:
             graph.add_edge(
-                source_id,
+                source_ids[source_name],
                 sink_ids[SinkName(source_on_success)],
                 label="on_success",
                 mode=RoutingMode.MOVE,
             )
-    elif source_on_success not in consumers:
-        suggestions = _suggest_similar(source_on_success, sorted(str(s) for s in sink_ids))
-        hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
-        raise GraphValidationError(
-            f"Source '{source.name}' on_success '{source_on_success}' is neither a sink nor a known connection.{hint}",
-            component_id=source.name,
-            component_type="source",
-        )
+        elif source_on_success in queue_ids:
+            if source_on_success not in consumers:
+                raise GraphValidationError(
+                    f"Source '{source_display_name}' on_success '{source_on_success}' "
+                    f"references queue '{source_on_success}' with no downstream consumer.",
+                    component_id=source_name,
+                    component_type="source",
+                )
+        elif source_on_success not in consumers and source_on_success not in queue_ids:
+            suggestions = _suggest_similar(source_on_success, sorted(str(s) for s in sink_ids))
+            hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+            raise GraphValidationError(
+                f"Source '{source_display_name}' on_success '{source_on_success}' is neither a sink nor a known connection.{hint}",
+                component_id=source_name,
+                component_type="source",
+            )
 
     # Re-run namespace validation with dangling-output checks enabled now
     # that terminal on_success sink/connection validation has completed.
@@ -829,16 +906,17 @@ def build_execution_graph(
     # failures (orchestrator.py), not by traversing the edge during
     # normal processing.
 
-    # Source quarantine edge
+    # Source quarantine edges
     # _on_validation_failure is defined on SourceProtocol (protocols.py:78)
-    quarantine_dest = source._on_validation_failure
-    if quarantine_dest != "discard" and SinkName(quarantine_dest) in sink_ids:
-        graph.add_edge(
-            source_id,
-            sink_ids[SinkName(quarantine_dest)],
-            label="__quarantine__",
-            mode=RoutingMode.DIVERT,
-        )
+    for source_name, source_instance in sources.items():
+        quarantine_dest = source_instance._on_validation_failure
+        if quarantine_dest != "discard" and SinkName(quarantine_dest) in sink_ids:
+            graph.add_edge(
+                source_ids[source_name],
+                sink_ids[SinkName(quarantine_dest)],
+                label="__quarantine__",
+                mode=RoutingMode.DIVERT,
+            )
 
     # Transform error edges
     for wired in transforms:
@@ -882,6 +960,7 @@ def build_execution_graph(
 
     # ===== PIPELINE ORDERING (TOPOLOGICAL) =====
     processing_node_ids: set[NodeID] = set()
+    processing_node_ids.update(queue_ids.values())
     processing_node_ids.update(transform_ids_by_name.values())
     processing_node_ids.update(aggregation_ids.values())
     processing_node_ids.update(config_gate_ids.values())
@@ -1065,7 +1144,7 @@ def build_execution_graph(
 
     # Warn about DIVERT edges feeding require_all coalesces (non-fatal).
     if coalesce_id_to_config:
-        graph.warn_divert_coalesce_interactions(coalesce_id_to_config)
+        graph.set_validation_warnings(graph.warn_divert_coalesce_interactions(coalesce_id_to_config))
 
     # Deep-freeze all NodeInfo configs now that schema resolution is complete.
     # NodeInfo.__post_init__ cannot freeze config because the builder mutates

@@ -20,7 +20,7 @@ from pydantic import Field, ValidationError, field_validator, model_validator
 import elspeth.contracts.errors as contract_errors
 from elspeth.contracts import CallStatus, CallType, Determinism, PluginSchema, SourceRow
 from elspeth.contracts.contexts import LifecycleContext, SourceContext
-from elspeth.contracts.contract_builder import ContractBuilder
+from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLimitExceeded
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
@@ -37,6 +37,7 @@ from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
     FieldResolution,
     normalize_field_name,
     resolve_field_names,
@@ -206,7 +207,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:91c44790cfe3408f"
+    source_file_hash: str | None = "sha256:d50608e3bb7dae07"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -448,13 +449,17 @@ class DataverseSource(BaseSource):
                 has_unmapped_fields = True
             result[normalized_name] = v
 
-        # If this row had fields not in the initial mapping, rebuild
-        # field resolution from this row's complete key set. This ensures
-        # the resolution mapping used for contract inference covers all
-        # fields, not just those from the (possibly quarantined) first row.
+        # If this row had fields not in the initial mapping, rebuild from the
+        # UNION of previously-seen keys and this row's new keys. Using only
+        # list(row.keys()) would REPLACE the mapping with just the current row's
+        # fields, discarding keys from earlier rows and corrupting the Landscape
+        # field-resolution audit record (B4.3, elspeth-594221617d).
+        # dict.fromkeys preserves first-seen order while deduplicating.
         if has_unmapped_fields:
+            assert self._field_resolution is not None  # set on first row above
+            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
             self._field_resolution = resolve_field_names(
-                raw_headers=list(row.keys()),
+                raw_headers=union_keys,
                 field_mapping=self._field_mapping,
                 columns=None,
                 require_all_mapping_keys=False,  # sparse Dataverse entities may omit optional mapped attributes
@@ -556,6 +561,7 @@ class DataverseSource(BaseSource):
         pages_fetched = 0
         rows_yielded = 0
         quarantine_count = 0
+        source_row_index = 0
 
         # Client must be constructed by on_start() before load()
         if self._client is None:
@@ -601,6 +607,8 @@ class DataverseSource(BaseSource):
 
                 # Process rows
                 for raw_row in page.rows:
+                    current_source_row_index = source_row_index
+                    source_row_index += 1
                     # Strip OData metadata
                     try:
                         cleaned_row = self._strip_odata_metadata(raw_row)
@@ -618,17 +626,22 @@ class DataverseSource(BaseSource):
                                 row=raw_row,
                                 error=str(e),
                                 destination=self._on_validation_failure,
+                                source_row_index=current_source_row_index,
                             )
                         continue
 
-                    # Normalize field names — Tier 3 boundary: field names from
-                    # Dataverse can be arbitrary strings. normalize_field_name()
-                    # raises ValueError if a name normalizes to empty string
-                    # (e.g., all-special-character field names). Quarantine the
-                    # row rather than crashing the entire load.
+                    # Normalize field names -- Tier-3 boundary: field names from
+                    # Dataverse can be arbitrary strings. Catch only
+                    # ExternalHeaderError (data faults: header normalizes to empty,
+                    # normalization collision in the entity's own field names).
+                    # Plain ValueError (config faults: bad field_mapping collision,
+                    # mapping keys not found, non-identifier mapping value) must
+                    # propagate and crash -- they signal OUR config error, not bad
+                    # source data. Mirrors azure_blob_source.py _validate_and_yield
+                    # and the CSV _load_csv path (elspeth-594221617d).
                     try:
                         normalized_row = self._normalize_row_fields(cleaned_row, is_first_row)
-                    except ValueError as e:
+                    except ExternalHeaderError as e:
                         quarantine_count += 1
                         ctx.record_validation_error(
                             row=cleaned_row,
@@ -641,6 +654,7 @@ class DataverseSource(BaseSource):
                                 row=cleaned_row,
                                 error=f"Field normalization failed: {e}",
                                 destination=self._on_validation_failure,
+                                source_row_index=current_source_row_index,
                             )
                         continue
                     is_first_row = False
@@ -662,6 +676,7 @@ class DataverseSource(BaseSource):
                                 row=normalized_row,
                                 error=str(e),
                                 destination=self._on_validation_failure,
+                                source_row_index=current_source_row_index,
                             )
                         continue
 
@@ -688,10 +703,26 @@ class DataverseSource(BaseSource):
                         # metadata before validation and yield.
                         if self._field_resolution is None:
                             raise ValueError("field_resolution must be established before sparse-field contract inference")
-                        contract = self._contract_builder.process_sparse_fields(
-                            validated_row,
-                            self._field_resolution.resolution_mapping,
-                        )
+                        try:
+                            contract = self._contract_builder.process_sparse_fields(
+                                validated_row,
+                                self._field_resolution.resolution_mapping,
+                            )
+                        except ContractFieldLimitExceeded as e:
+                            ctx.record_validation_error(
+                                row=validated_row,
+                                error=str(e),
+                                schema_mode=self._schema_config.mode,
+                                destination=self._on_validation_failure,
+                            )
+                            if self._on_validation_failure != "discard":
+                                yield SourceRow.quarantined(
+                                    row=validated_row,
+                                    error=str(e),
+                                    destination=self._on_validation_failure,
+                                    source_row_index=current_source_row_index,
+                                )
+                            continue
                         self.set_schema_contract(contract)
 
                     if contract.locked:
@@ -709,11 +740,12 @@ class DataverseSource(BaseSource):
                                     row=validated_row,
                                     error=error_msg,
                                     destination=self._on_validation_failure,
+                                    source_row_index=current_source_row_index,
                                 )
                             continue
 
                     rows_yielded += 1
-                    yield SourceRow.valid(validated_row, contract=contract)
+                    yield SourceRow.valid(validated_row, contract=contract, source_row_index=current_source_row_index)
 
         except DataverseClientError as e:
             # Use the actual failing URL from the error when available

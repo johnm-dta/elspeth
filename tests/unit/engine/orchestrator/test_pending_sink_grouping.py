@@ -30,7 +30,7 @@ from elspeth.testing import make_token_info
 # =============================================================================
 
 
-def _pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str]:
+def _pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str, bool]:
     """Replica of the pending_sort_key closure from _write_pending_to_sinks.
 
     This must stay in sync with the production code. If the production sort key
@@ -38,9 +38,9 @@ def _pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bo
     """
     pending = pair[1]
     if pending is None:
-        return (True, "", "", "")
+        return (True, "", "", "", False)
     outcome_value = pending.outcome.value if pending.outcome is not None else ""
-    return (False, outcome_value, pending.path.value, pending.error_hash or "")
+    return (False, outcome_value, pending.path.value, pending.error_hash or "", pending.scheduler_pending_sink)
 
 
 def _completed_pending() -> PendingOutcome:
@@ -123,6 +123,24 @@ class TestPendingSortKey:
         key_completed = _pending_sort_key((tok_c, _completed_pending()))
 
         assert key_routed != key_completed
+
+    def test_scheduler_handoff_sorts_separately(self) -> None:
+        """Scheduler-backed and generated sink tokens must not share a callback group."""
+        tok_scheduler = make_token_info(token_id="tok-scheduler")
+        tok_generated = make_token_info(token_id="tok-generated")
+
+        scheduler_pending = PendingOutcome(
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.COALESCED,
+            scheduler_pending_sink=True,
+        )
+        generated_pending = PendingOutcome(
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.COALESCED,
+            scheduler_pending_sink=False,
+        )
+
+        assert _pending_sort_key((tok_scheduler, scheduler_pending)) != _pending_sort_key((tok_generated, generated_pending))
 
     def test_same_outcome_same_error_hash_produces_equal_keys(self) -> None:
         """Two QUARANTINED tokens with the same error_hash should have equal sort keys."""

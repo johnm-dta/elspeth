@@ -101,10 +101,24 @@ from sqlalchemy.types import JSON
 #   18 → sessions.forked_from_session_id self-referential foreign key constraint
 #        removed to allow physical deletion of parent sessions (no-durable-history
 #        archive path) when child forks exist.
-SESSION_SCHEMA_EPOCH = 18
+#   19 → ``composition_states.sources`` added so named multi-source composer
+#        states survive save/load instead of collapsing to the legacy singular
+#        ``source`` compatibility column.
+#   20 → ``sessions.forked_from_message_id`` gains an ON DELETE SET NULL
+#        foreign key to ``chat_messages.id`` so source-message deletion cannot
+#        leave dangling fork provenance.
+#   21 → ``sessions.auth_provider_type`` and
+#        ``user_secrets.auth_provider_type`` gain closed-list CHECK
+#        constraints for the supported auth-provider namespaces.
+#   22 → ``composition_states.provenance`` closed enum gains the
+#        ``post_compose`` value for successful send-message/recompose state
+#        advances. SQLite cannot ALTER a CHECK constraint in place, so
+#        pre-release policy remains delete-and-recreate for stale session DBs.
+SESSION_SCHEMA_EPOCH = 22
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
+_AUTH_PROVIDER_TYPE_CHECK = "auth_provider_type IN ('local', 'oidc', 'entra')"
 
 
 def _sql_non_blank_text(column_name: str, *, dialect: Literal["sqlite", "postgresql"]) -> str:
@@ -214,6 +228,12 @@ sessions_table = Table(
         nullable=True,
     ),
     Column("forked_from_message_id", String, nullable=True),
+    ForeignKeyConstraint(
+        ["forked_from_message_id"],
+        ["chat_messages.id"],
+        name="fk_sessions_forked_from_message",
+        ondelete="SET NULL",
+    ),
     # ``interpretation_review_disabled`` — per-session "stop asking" toggle for
     # LLM-surfaced interpretation review. Fast-path read by the compose loop;
     # the authoritative audit record is the ``opted_out``
@@ -248,6 +268,10 @@ sessions_table = Table(
     CheckConstraint(
         "density_default IN ('high', 'medium', 'low')",
         name="ck_sessions_density_default",
+    ),
+    CheckConstraint(
+        _AUTH_PROVIDER_TYPE_CHECK,
+        name="ck_sessions_auth_provider_type",
     ),
 )
 
@@ -361,6 +385,7 @@ composition_states_table = Table(
     ),
     Column("version", Integer, nullable=False),
     Column("source", JSON, nullable=True),
+    Column("sources", JSON, nullable=True),
     Column("nodes", JSON, nullable=True),
     Column("edges", JSON, nullable=True),
     Column("outputs", JSON, nullable=True),
@@ -403,7 +428,7 @@ composition_states_table = Table(
     # Adding a value here without amending the spec creates an
     # untraceable writer category in the audit DB.
     #
-    # All seven original values were actively written as of
+    # The original persist-path values were actively written as of
     # elspeth-obs-f217c634aa (closed by the same commit that retired the
     # dormant-value friction block here). The previous block warned that
     # three values (``convergence_persist``, ``plugin_crash_persist``,
@@ -434,12 +459,15 @@ composition_states_table = Table(
     #                                    historical audit rows remain representable;
     #                                    re-activation is a governance action per
     #                                    the NO SILENT EXTENSION block below.
+    #   - ``post_compose``            — routes/messages.py send_message and
+    #                                    routes/composer.py recompose successful
+    #                                    LLM-driven state advances, including the
+    #                                    transition_consumed metadata-only row.
     #   - ``session_seed``            — service.py create_session + set_active_state
-    #                                    (also: routes.py post-compose state advance
-    #                                     + fork source-storage rewrite — these two
-    #                                     are pre-existing mis-attributions, see the
-    #                                     comments at those call sites)
-    #   - ``session_fork``            — service.py fork_session_at_message
+    #   - ``session_fork``            — service.py fork_session_at_message and
+    #                                    routes/sessions.py fork blob-reference
+    #                                    rewrite, which is part of the same fork
+    #                                    writer path.
     #   - ``interpretation_resolve``  — routes.py /resolve handler:
     #                                    a composition-state row written when the
     #                                    user resolves an LLM-surfaced interpretation
@@ -447,7 +475,7 @@ composition_states_table = Table(
     #                                    prompt template is committed alongside the
     #                                    ``interpretation_events`` row.
     #
-    # NO SILENT EXTENSION. Adding a ninth value MUST include all three
+    # NO SILENT EXTENSION. Adding another value MUST include all three
     # of: (a) a spec amendment documenting the writer path and the audit
     # semantics that distinguish it from neighbouring values; (b) an
     # integration test that drives the writer and asserts the row was
@@ -459,7 +487,7 @@ composition_states_table = Table(
     # IN PHASE 1A" block below for the same closed-list-of-permitted-
     # writers posture.
     CheckConstraint(
-        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'tutorial_normalization', 'session_seed', 'session_fork', 'interpretation_resolve')",
+        "provenance IN ('tool_call', 'convergence_persist', 'plugin_crash_persist', 'preflight_persist', 'tutorial_normalization', 'post_compose', 'session_seed', 'session_fork', 'interpretation_resolve')",
         name="ck_composition_states_provenance",
     ),
 )
@@ -917,6 +945,11 @@ composer_completion_events_table = Table(
         "composition_state_id IS NOT NULL",
         name="ck_composer_completion_events_composition_state_id_required",
     ),
+    ForeignKeyConstraint(
+        ["composition_state_id", "session_id"],
+        ["composition_states.id", "composition_states.session_id"],
+        name="fk_composer_completion_events_state_session",
+    ),
 )
 
 Index(
@@ -1277,12 +1310,10 @@ blobs_table = Table(
     # side.
     #
     # The shared name ``ck_blobs_ready_hash`` lets the schema validator
-    # (sessions/schema.py:_validate_named_checks) treat the two
-    # CheckConstraints as one named constraint via set dedup; only the
-    # dialect-active one is created by ``metadata.create_all`` because of
-    # the ``ddl_if(dialect=...)`` filter, so the inspector reports
-    # exactly one CHECK named ``ck_blobs_ready_hash`` per dialect and
-    # set comparison passes on both.
+    # (sessions/schema.py:_validate_named_checks) pair the live constraint
+    # with the dialect-active metadata constraint. The SQL text is still
+    # compared after the ``ddl_if(dialect=...)`` filter, so a same-named
+    # stale CHECK with weaker semantics is rejected at startup.
     #
     # If a third dialect is introduced, add its V0 check expression here
     # with a matching ``ddl_if(dialect=...)`` instead of adding a
@@ -1408,6 +1439,10 @@ user_secrets_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("name", "user_id", "auth_provider_type", name="uq_user_secret_name_user_provider"),
+    CheckConstraint(
+        _AUTH_PROVIDER_TYPE_CHECK,
+        name="ck_user_secrets_auth_provider_type",
+    ),
 )
 Index("ix_user_secrets_user_provider", user_secrets_table.c.user_id, user_secrets_table.c.auth_provider_type)
 

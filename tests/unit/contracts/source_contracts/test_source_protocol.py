@@ -82,8 +82,8 @@ class _SourceContractExemplarSource(BaseSource):
 
     def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
         contract = self.require_schema_contract()
-        for row in self._rows:
-            yield SourceRow.valid(dict(row), contract=contract)
+        for source_row_index, row in enumerate(self._rows):
+            yield SourceRow.valid(dict(row), contract=contract, source_row_index=source_row_index)
 
     def close(self) -> None:
         pass

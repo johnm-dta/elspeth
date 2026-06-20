@@ -18,11 +18,22 @@ class TestFieldOnlyMode:
         result = builder.build({"question": "What is RAG?"})
         assert result.query == "What is RAG?"
 
-    def test_missing_field_crashes(self):
-        """Missing field is a contract violation (Tier 2) — crash, don't quarantine."""
+    def test_missing_field_returns_error(self):
+        """Missing query_field returns a typed missing_field error, never crashes.
+
+        ADR-013 / DeclaredRequiredFieldsContract pre-empts this in the engine
+        pipeline (the engine catches the missing field before process() runs).
+        The defensive guard here ensures that direct callers of build() -- unit
+        tests, batch paths, or non-engine callers -- receive a typed error
+        result rather than a bare builtin KeyError with no audit record.
+        Mirrors the null_value guard below and the azure/base.py missing_field
+        pattern (base.py lines ~304-307).
+        """
         builder = QueryBuilder(query_field="question")
-        with pytest.raises(KeyError):
-            builder.build({"other_field": "value"})
+        result = builder.build({"other_field": "value"})
+        assert result.error is not None
+        assert result.error["reason"] == "missing_field"
+        assert result.error["field"] == "question"
 
     def test_none_value_returns_error(self):
         builder = QueryBuilder(query_field="question")
@@ -142,15 +153,19 @@ class TestRegexMode:
 
     def test_timeout_on_catastrophic_backtracking(self):
         """ReDoS protection: pathological pattern with adversarial input."""
+        pattern = "".join(("(", "a+", ")", "+", "b"))
         builder = QueryBuilder(
             query_field="text",
-            query_pattern="".join(("(", "a+", ")", "+", "b")),
+            query_pattern=pattern,
             regex_timeout=0.1,  # Short timeout for test
         )
         result = builder.build({"text": "a" * 30})
         assert result.error is not None
-        assert result.error["reason"] == "no_regex_match"
-        assert result.error["cause"] == "regex_timeout"
+        assert result.error["reason"] == "regex_timeout"
+        assert result.error["reason"] != "no_regex_match"
+        assert result.error["field"] == "text"
+        assert result.error["pattern"] == pattern
+        assert result.error["max_seconds"] == 0.1
 
 
 # =============================================================================

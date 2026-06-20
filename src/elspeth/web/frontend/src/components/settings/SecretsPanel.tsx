@@ -8,6 +8,13 @@ interface SecretsPanelProps {
   onClose: () => void;
 }
 
+const SECRET_FORM_ERROR_ID = "secret-form-error";
+
+interface SecretFormErrorTargets {
+  name: boolean;
+  value: boolean;
+}
+
 function ScopeBadge({ scope }: { scope: SecretInventoryItem["scope"] }) {
   const colors: Record<SecretInventoryItem["scope"], { bg: string; text: string }> = {
     user: { bg: "var(--color-accent-muted)", text: "var(--color-accent)" },
@@ -42,13 +49,13 @@ function AvailabilityDot({ available }: { available: boolean }) {
         borderRadius: "50%",
         boxSizing: "border-box",
         backgroundColor: available
-          ? "var(--color-success, #16a34a)"
+          ? "var(--color-success)"
           : "transparent",
         border: available
-          ? "1px solid var(--color-success, #16a34a)"
-          : "1.5px solid var(--color-text-muted, #9ca3af)",
+          ? "1px solid var(--color-success)"
+          : "1.5px solid var(--color-text-muted)",
         boxShadow: available
-          ? "0 0 0 2px var(--color-success-bg, rgba(20, 176, 174, 0.12))"
+          ? "0 0 0 2px var(--color-success-bg)"
           : "none",
         flexShrink: 0,
       }}
@@ -64,6 +71,28 @@ function reasonLabel(reason: SecretInventoryItem["reason"]): string | null {
     value_decryption_failed: "Stored value could not be decrypted",
   };
   return labels[reason];
+}
+
+function secretFormErrorTargets(error: string | null): SecretFormErrorTargets {
+  if (!error) {
+    return { name: false, value: false };
+  }
+
+  const normalized = error.toLowerCase();
+  if (
+    normalized.includes("secret name") ||
+    normalized.includes("name already exists")
+  ) {
+    return { name: true, value: false };
+  }
+  if (normalized.includes("secret value")) {
+    return { name: false, value: true };
+  }
+  if (normalized.includes("failed to save secret")) {
+    return { name: true, value: true };
+  }
+
+  return { name: false, value: false };
 }
 
 /**
@@ -85,6 +114,8 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
   const [value, setValue] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const modalRef = useRef<HTMLDivElement>(null);
+  const formErrorTargets = secretFormErrorTargets(error);
+  const hasFormErrorTarget = formErrorTargets.name || formErrorTargets.value;
   useFocusTrap(modalRef, true, "#secret-name");
 
   useEffect(() => {
@@ -159,7 +190,7 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
           maxHeight: "calc(100vh - 64px)",
           display: "flex",
           flexDirection: "column",
-          backgroundColor: "var(--color-surface, #fff)",
+          backgroundColor: "var(--color-surface)",
           borderRadius: 8,
           boxShadow: "0 8px 32px rgba(0,0,0,0.25)",
           border: "1px solid var(--color-border)",
@@ -203,6 +234,10 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
                   <input
                     id="secret-name"
                     type="text"
+                    aria-invalid={formErrorTargets.name ? true : undefined}
+                    aria-describedby={
+                      formErrorTargets.name ? SECRET_FORM_ERROR_ID : undefined
+                    }
                     autoComplete="off"
                     spellCheck={false}
                     placeholder="e.g. OPENAI_API_KEY"
@@ -223,6 +258,10 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
                   <input
                     id="secret-value"
                     type="password"
+                    aria-invalid={formErrorTargets.value ? true : undefined}
+                    aria-describedby={
+                      formErrorTargets.value ? SECRET_FORM_ERROR_ID : undefined
+                    }
                     autoComplete="new-password"
                     placeholder="Paste your secret value here"
                     value={value}
@@ -244,6 +283,7 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
           {/* Error banner */}
           {error && (
             <div
+              id={hasFormErrorTarget ? SECRET_FORM_ERROR_ID : undefined}
               role="alert"
               style={{
                 marginTop: 12,

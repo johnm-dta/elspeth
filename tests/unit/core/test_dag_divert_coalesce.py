@@ -136,6 +136,18 @@ class TestDivertCoalesceWarning:
         assert "t_a" in w.node_ids
         assert "coalesce" in w.node_ids
 
+    def test_graph_stores_builder_warnings_as_immutable_tuple(self) -> None:
+        warning = GraphValidationWarning(
+            code="DIVERT_COALESCE_REQUIRE_ALL",
+            message="Transform diverts before coalesce",
+            node_ids=("t_a", "coalesce"),
+        )
+        graph = ExecutionGraph()
+
+        graph.set_validation_warnings([warning])
+
+        assert graph.validation_warnings == (warning,)
+
     def test_divert_on_branch_transform_with_best_effort_no_warning(self) -> None:
         """Transform with DIVERT + best_effort coalesce → no warning."""
         graph, configs = _build_graph_with_divert(

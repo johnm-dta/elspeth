@@ -1,11 +1,11 @@
 # What ELSPETH Guarantees
 
-> **LAYERED ASSURANCE APPENDIX — RC-3 contract language with RC-5.2 additions.**
-> §1 through §6 preserve the RC-3 guarantees as originally drafted (3 March 2026) because downstream engineering and audit references cite that wording. §7 has been amended to reflect that the **no-multi-user / no-access-control** disclaimer is no longer true as of RC-4 and RC-5. §11 through §14 document RC-5.2 guarantees for authentication, secret references, multi-user sessions, and composer authoring. Read this as a versioned assurance appendix, not as marketing copy.
+> **LAYERED ASSURANCE APPENDIX — RC-3 contract language with RC-5.2 and RC-6 additions.**
+> §1 through §6 preserve the RC-3 guarantees as originally drafted (3 March 2026) because downstream engineering and audit references cite that wording. §7 has been amended to reflect that the **no-multi-user / no-access-control** disclaimer is no longer true as of RC-4 and RC-5. §11 through §14 document RC-5.2 guarantees for authentication, secret references, multi-user sessions, and composer authoring. §15 documents RC-6 guarantees for multi-source execution and durable token scheduling; §7.1's "single-threaded in RC-3" statement is amended to scope it to RC-3 history. Read this as a versioned assurance appendix, not as marketing copy.
 
-**Versions:** RC-3 (§1–§10) + RC-5.2 additions (§11–§14)
+**Versions:** RC-3 (§1–§10) + RC-5.2 additions (§11–§14) + RC-6 additions (§15)
 **Original date:** 3 March 2026 (§1–§10)
-**Refreshed:** 19 May 2026 (§7 amendment; §11–§14 additions)
+**Refreshed:** 19 May 2026 (§7 amendment; §11–§14 additions); 10 June 2026 (§7.1 amendment; §15 addition)
 **Audience:** Users, integrators, auditors, and assurance staff evaluating contractual claims
 **Register:** Technical / contractual
 
@@ -121,10 +121,8 @@ When a row forks to parallel paths:
 | Trigger | Behavior |
 |---------|----------|
 | Count | Fires when count threshold reached |
-| Timeout | Fires when next row arrives after timeout period* |
+| Timeout | Fires when timeout period elapses, including while the source is idle |
 | End-of-source | Always fires when source exhausted |
-
-*Known limitation: Timeout requires next row arrival. True idle timeout not supported without heartbeat.
 
 ### 2.5 Retry Semantics
 
@@ -247,12 +245,14 @@ LLM plugins include built-in rate limiting:
 
 ## 7. WHAT ELSPETH DOES NOT GUARANTEE
 
-### 7.1 Performance
+### 7.1 Performance — AMENDED in RC-6
 
 ELSPETH prioritizes correctness and auditability over throughput. It is not designed for:
 - High-throughput streaming (use Kafka/Flink)
 - Sub-millisecond latency (audit recording has overhead)
 - Concurrent processing (single-threaded in RC-3)
+
+> **§7.1 amendment (RC-6, 10 June 2026):** "Single-threaded in RC-3" remains accurate as a description of the RC-3 engine. As of RC-6 the engine processes rows through a durable, lease-based token work queue: token lifecycles overlap — a later row's token can advance while an earlier row's token is durably parked at an aggregation barrier or awaiting a sink write — but compute remains one token at a time in a single worker process. There is no thread- or process-level parallelism, multi-worker operation is not enabled, and cross-source ingest is sequential in configuration declaration order by design. The non-guarantee stands: ELSPETH still does not promise concurrent processing as a performance property. What the scheduler does guarantee — deterministic ordering, durable work state, and crash recovery — is documented in §15.
 
 ### 7.2 Access Control — AMENDED in RC-5
 
@@ -273,9 +273,12 @@ ELSPETH records what external systems return, but cannot guarantee:
 
 ### 7.4 True Idle Timeouts
 
-Timeout triggers fire when the next row arrives, not during complete idle periods. If no rows arrive, buffered data waits for:
-- A new row (triggering timeout check)
-- Source completion (triggering end-of-source flush)
+Aggregation timeout triggers are polled while source iteration waits, so buffered
+aggregation batches can flush during complete source idle periods without
+requiring heartbeat rows. The same idle-polling pass also checks coalesce
+timeouts in mixed aggregation/coalesce pipelines. Coalesce-only streaming
+pipelines still depend on token arrival, source completion, or heartbeat rows;
+coalesce timeouts are not general background timers.
 
 ---
 
@@ -300,6 +303,7 @@ This contract is versioned with the software.
 
 | Version | Date | Changes |
 |---------|------|---------|
+| RC-6 (§15 addition) | June 2026 | §15 Multi-source execution and token scheduling guarantees. §7.1 amended — "single-threaded in RC-3" scoped to RC-3 history; current concurrency posture (single worker, overlapping token lifecycles, sequential cross-source ingest) stated explicitly. |
 | RC-5.2 (§11–§14 additions) | May 2026 | §11 Authentication and identity guarantees; §12 Secret-reference handling; §13 Multi-user session; §14 Composer authoring. §7.2 amended — "ELSPETH is not multi-user" disclaimer no longer accurate; replaced with organisational-policy boundary statement. |
 | RC-3 | Feb 2026 | Declarative DAG wiring, graceful shutdown, DROP-mode handling, gate plugin removal, telemetry hardening, test suite v2 migration |
 | RC-2 | Feb 2026 | Initial contract, bug fixes, checkpoint compatibility |
@@ -470,6 +474,56 @@ This is the audit-primacy rule from §7 applied to the session subsystem: a muta
 - A failed validation does not partially apply
 - A failed save reports the failure and preserves the prior committed state
 - Recovery from a failed save is operator-driven, not silent
+
+---
+
+## 15. MULTI-SOURCE EXECUTION AND TOKEN SCHEDULING (RC-6)
+
+### 15.1 Multiple Sources Per Run
+
+**Promise:** A run may declare one or more named sources, and every row is durably attributed to the source it entered from.
+
+- Each declared source is a distinct node in the execution graph
+- Every row records its source node (`source_node_id`), its position within its own source (`source_row_index`, restarting at 0 per source), and its global admission position across all sources (`ingest_sequence`)
+- Both identities are enforced at the schema level: `(run_id, source_node_id, source_row_index)` and `(run_id, ingest_sequence)` are unique
+- Per-source identity is source-authored, never fabricated: a source that fails to supply a row index is a fatal error, not a defaulted value
+
+### 15.2 Sequential Cross-Source Ingest
+
+**Promise:** Sources are iterated one at a time, in configuration declaration order.
+
+- Declaration order is the determinism anchor: the same configuration ingests rows in the same global order on every run
+- A later source's rows are not admitted until the previous source is exhausted
+- This is a deliberate design property, not a limitation pending removal; concurrent source iteration would require a new architecture decision (ADR-025, ADR-026)
+
+### 15.3 Per-Source Schema Contracts
+
+**Promise:** Each source's rows validate under that source's own schema contract.
+
+- Contracts do not bleed between sources: two sources with different schemas each validate independently
+- The contract each source ran under is persisted per source in the `run_sources` audit table, with its hash
+
+### 15.4 Deterministic Work Claiming
+
+**Promise:** The token scheduler claims ready work in a fully deterministic order.
+
+- Claim order is `ingest_sequence`, then `step_index`, then `created_at`, then `work_item_id` — the final key is a stable tiebreaker, so no two work items ever tie
+- The same run state always yields the same claim order, regardless of how work was enqueued
+
+### 15.5 Durable Token Work Queue and Crash Recovery
+
+**Promise:** Every scheduled token continuation is recorded durably before it is processed, and crash recovery neither loses nor duplicates work.
+
+- Work items are identified deterministically (a hash of run, token, node, and attempt), so a crash mid-enqueue is recoverable without duplicate rows
+- Leases are compare-and-swap guarded: two workers cannot silently write conflicting outcomes — the loser of a race fails loudly
+- An expired lease is recovered under a fresh attempt identity, preserving the prior attempt's audit records; work whose transform side is already durable (awaiting only a sink write) is recovered in place without re-executing the transform
+- Scheduler state transitions are journaled in the `scheduler_events` audit table, so lease claims, expiries, and recoveries are reconstructable facts, not inferences
+
+### 15.6 What §15 Does Not Promise
+
+- **No compute parallelism.** Token lifecycles overlap (a token can be durably parked while later tokens advance), but compute is one token at a time in a single worker process. §7.1's performance non-guarantee stands.
+- **No multi-worker operation.** Running more than one worker against the same run is mechanically refused. Multi-worker capability is contingent on a future deployment-shape decision (ADR-026) and is not part of this contract.
+- **No cross-source joining at ingest.** Queue fan-in nodes coordinate scheduling only; they do not merge row data or join source schemas.
 
 ---
 

@@ -16,6 +16,9 @@ This avoids the anti-pattern of testing mocks instead of behavior.
 
 from __future__ import annotations
 
+import hashlib
+from contextlib import nullcontext
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import Mock, patch
 
@@ -23,9 +26,10 @@ import pytest
 
 # For node registration
 from elspeth.contracts import NodeType, RouteDestination, RowResult, SourceRow, TokenInfo, TransformProtocol, TransformResult
-from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
+from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.enums import (
+    BatchStatus,
     NodeStateStatus,
     RoutingKind,
     TerminalOutcome,
@@ -40,7 +44,7 @@ from elspeth.contracts.errors import (
     OrchestrationInvariantError,
     SourceGuaranteedFieldsViolation,
 )
-from elspeth.contracts.results import GateResult
+from elspeth.contracts.results import FailureInfo, GateResult
 from elspeth.contracts.routing import RoutingAction
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
@@ -49,13 +53,18 @@ from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.engine.clock import MockClock
+from elspeth.engine.coalesce_executor import CoalesceOutcome
 from elspeth.engine.dag_navigator import WorkItem
 from elspeth.engine.executors import GateOutcome
 from elspeth.engine.processor import (
     MAX_WORK_QUEUE_ITERATIONS,
+    SCHEDULER_MAINTENANCE_INTERVAL,
+    BarrierJournalRestoreContext,
     DAGTraversalContext,
     RowProcessor,
     _FlushContext,
+    _LiveBarrierHold,
 )
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
@@ -63,13 +72,14 @@ from elspeth.plugins.infrastructure.clients.llm import LLMClientError
 from elspeth.plugins.transforms.batch_replicate import BatchReplicateConfig
 from elspeth.testing import make_contract, make_pipeline_row, make_row, make_source_row, make_token_info
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder_with_run
+from tests.fixtures.landscape import leader_coordination_token, make_recorder_with_run
 
 # =============================================================================
 # Helpers
 # =============================================================================
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+_DEFAULT_SCHEDULER = object()
 
 
 def _make_contract() -> SchemaContract:
@@ -81,6 +91,140 @@ def _make_source_row(data: dict[str, Any] | None = None) -> SourceRow:
     """Create a valid SourceRow with contract."""
     contract = _make_contract()
     return make_source_row(data or {"value": 42}, contract=contract)
+
+
+def test_aggregation_restore_plan_freezes_sequence_fields() -> None:
+    from elspeth.contracts.barrier_scalars import AggregationNodeScalars
+    from elspeth.engine.processor import _AggregationRestorePlan
+
+    plan = _AggregationRestorePlan(
+        node_id=NodeID("agg"),
+        items=[],
+        member_order=["left", "right"],
+        batch_id="batch-1",
+        accepted_count_total=2,
+        completed_flush_count=0,
+        scalars=AggregationNodeScalars(count_fire_offset=None, condition_fire_offset=None),
+    )
+
+    assert plan.items == ()
+    assert plan.member_order == ("left", "right")
+
+
+def _persist_token_for_scheduler(
+    factory: RecorderFactory,
+    token: TokenInfo,
+    *,
+    run_id: str = "test-run",
+    source_node_id: str = "source-0",
+    row_index: int | None = None,
+    source_row_index: int | None = None,
+    ingest_sequence: int = 0,
+) -> None:
+    """Persist a fabricated unit-test token before scheduler-backed processing."""
+    try:
+        factory.data_flow.resolve_row_ingest_sequence(token.row_id)
+    except AuditIntegrityError:
+        factory.data_flow.create_row(
+            run_id=run_id,
+            source_node_id=source_node_id,
+            row_index=ingest_sequence if row_index is None else row_index,
+            source_row_index=ingest_sequence if source_row_index is None else source_row_index,
+            ingest_sequence=ingest_sequence,
+            row_id=token.row_id,
+            data=token.row_data.to_dict(),
+        )
+    if factory.query.get_token(token.token_id) is None:
+        factory.data_flow.create_token(
+            token.row_id,
+            token_id=token.token_id,
+            branch_name=token.branch_name,
+            fork_group_id=token.fork_group_id or (f"test-fork:{token.row_id}" if token.branch_name is not None else None),
+            join_group_id=token.join_group_id,
+        )
+
+
+def _persist_blocked_scheduler_work(
+    factory: RecorderFactory,
+    processor: RowProcessor,
+    token: TokenInfo,
+    *,
+    node_id: NodeID,
+    barrier_key: str,
+    ingest_sequence: int = 0,
+    adopted: bool = True,
+    coalesce_name: str | None = None,
+) -> None:
+    """Persist BLOCKED scheduler work matching a fabricated buffered token.
+
+    Uses the production journal verbs (enqueue+claim, then mark_blocked) so
+    the BLOCKED row carries ``barrier_blocked_at`` exactly as a live barrier
+    hold would (F1: the journal is the only barrier-buffer truth).
+
+    ``adopted=True`` (the default) stamps ``barrier_adopted_epoch`` — the
+    post-adoption journal image (ADR-030 §E.2). Tests that fabricate executor
+    memory directly need the adopted image so the journal-first intake does
+    not try to re-adopt (and re-feed) the row; pass ``adopted=False`` to
+    fabricate an intake-pending deposit instead.
+    """
+    _persist_token_for_scheduler(factory, token, ingest_sequence=ingest_sequence)
+    now = processor._clock.now_utc()
+    item = processor._scheduler.enqueue_ready_claimed(
+        run_id=processor.run_id,
+        token_id=token.token_id,
+        row_id=token.row_id,
+        node_id=str(node_id),
+        step_index=processor.resolve_node_step(node_id),
+        ingest_sequence=factory.data_flow.resolve_row_ingest_sequence(token.row_id),
+        row_payload_json=processor._scheduler.serialize_row_payload(token.row_data),
+        available_at=now,
+        lease_owner="test-harness",
+        lease_seconds=60,
+        now=now,
+        branch_name=token.branch_name,
+        fork_group_id=token.fork_group_id,
+        join_group_id=token.join_group_id,
+        expand_group_id=token.expand_group_id,
+        coalesce_name=coalesce_name,
+    )
+    processor._scheduler.mark_blocked(
+        work_item_id=item.work_item_id,
+        queue_key=None,
+        barrier_key=barrier_key,
+        now=now,
+        expected_lease_owner="test-harness",
+    )
+    if adopted:
+        _stamp_blocked_rows_adopted(processor._scheduler, work_item_id=item.work_item_id)
+
+
+def _stamp_blocked_rows_adopted(
+    scheduler: Any,
+    *,
+    run_id: str | None = None,
+    work_item_id: str | None = None,
+    epoch: int = 1,
+) -> None:
+    """Stamp ``barrier_adopted_epoch`` on fabricated BLOCKED rows.
+
+    ADR-030 §E.2 (slice 3): tests that fabricate the post-adoption journal
+    image directly (BLOCKED rows + batch_members + BUFFERED outcomes, or
+    coalesce holds + node_states) must carry the adoption marker — the
+    journal restore restores ONLY adopted rows (intake-pending rows have no
+    audit writes to restore and are left for the journal-first intake).
+    """
+    from sqlalchemy import update as _sa_update
+
+    from elspeth.core.landscape.schema import token_work_items_table as _twi
+
+    stmt = _sa_update(_twi).values(barrier_adopted_epoch=epoch)
+    if work_item_id is not None:
+        stmt = stmt.where(_twi.c.work_item_id == work_item_id)
+    if run_id is not None:
+        stmt = stmt.where(_twi.c.run_id == run_id)
+    stmt = stmt.where(_twi.c.status == "blocked")
+    with scheduler._engine.begin() as conn:
+        conn.execute(stmt)
 
 
 def _assert_outcome_pair(
@@ -131,9 +275,13 @@ def _make_processor(
     node_to_next: dict[NodeID, NodeID | None] | None = None,
     first_transform_node_id: NodeID | None = None,
     node_to_plugin: dict[NodeID, Any] | None = None,
-    restored_aggregation_state: dict[NodeID, AggregationCheckpointState] | None = None,
+    barrier_restore: BarrierJournalRestoreContext | None = None,
     telemetry_manager: Any = None,
     sink_names: frozenset[str] | None = None,
+    scheduler: Any = _DEFAULT_SCHEDULER,
+    scheduler_lease_owner: str | None = None,
+    clock: Any = None,
+    stamp_blocked_rows_adopted: bool = True,
 ) -> RowProcessor:
     """Create a RowProcessor with sensible defaults."""
     coalesce_nodes = dict(coalesce_node_ids or {})
@@ -157,19 +305,65 @@ def _make_processor(
     for coalesce_node in coalesce_nodes.values():
         traversal_next.setdefault(coalesce_node, None)
 
+    node_ids_to_register: set[NodeID] = set(traversal_steps)
+    node_ids_to_register.update(traversal_node_to_plugin)
+    node_ids_to_register.update(traversal_next)
+    node_ids_to_register.update(node_id for node_id in traversal_next.values() if node_id is not None)
+    node_ids_to_register.update(coalesce_nodes.values())
+    node_ids_to_register.update((aggregation_settings or {}).keys())
+
+    for node_id in sorted(node_ids_to_register, key=str):
+        if node_id == source_node:
+            continue
+        if factory.data_flow.get_node(str(node_id), run_id) is not None:
+            continue
+        plugin = traversal_node_to_plugin.get(node_id)
+        if node_id in coalesce_nodes.values():
+            node_type = NodeType.COALESCE
+            plugin_name = "coalesce"
+        elif node_id in (aggregation_settings or {}):
+            node_type = NodeType.AGGREGATION
+            plugin_name = "aggregation"
+        elif isinstance(plugin, GateSettings):
+            node_type = NodeType.GATE
+            plugin_name = "gate"
+        else:
+            node_type = NodeType.TRANSFORM
+            plugin_name = getattr(plugin, "name", "transform")
+        factory.data_flow.register_node(
+            run_id=run_id,
+            plugin_name=str(plugin_name),
+            node_type=node_type,
+            plugin_version="1.0",
+            config={},
+            node_id=str(node_id),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
     traversal = DAGTraversalContext(
         node_step_map=traversal_steps,
         node_to_plugin=traversal_node_to_plugin,
-        first_transform_node_id=first_transform_node_id,
         node_to_next=traversal_next,
         coalesce_node_map=coalesce_nodes,
     )
+
+    if barrier_restore is not None and stamp_blocked_rows_adopted:
+        # ADR-030 §E.2: restore-shaped tests fabricate the post-adoption
+        # journal image (BLOCKED rows + the audit writes adoption owns), so
+        # stamp the adoption marker — the journal restore restores ONLY
+        # adopted rows. Tests exercising intake-pending restores (rows the
+        # dead leader deposited but never adopted) pass
+        # ``stamp_blocked_rows_adopted=False`` and stamp selectively.
+        _stamp_blocked_rows_adopted(factory.scheduler, run_id=run_id)
 
     return RowProcessor(
         execution=factory.execution,
         data_flow=factory.data_flow,
         span_factory=SpanFactory(),  # No tracer — no-op spans
         run_id=run_id,
+        # Slice 3 (ADR-030 §E.2): the journal-first barrier intake's adoption
+        # verbs are leader-fenced; bind the run's own epoch-1 seat token.
+        coordination_token=leader_coordination_token(factory, run_id),
         source_node_id=NodeID(source_node_id),
         source_on_success=source_on_success,
         source_plugin=source_plugin,
@@ -182,9 +376,12 @@ def _make_processor(
         branch_to_coalesce=branch_to_coalesce,
         branch_to_sink={BranchName(k): SinkName(v) for k, v in (branch_to_sink or {}).items()},
         coalesce_on_success_map=coalesce_on_success_map,
-        restored_aggregation_state=restored_aggregation_state,
+        barrier_restore=barrier_restore,
         telemetry_manager=telemetry_manager,
         sink_names=sink_names,
+        scheduler=factory.scheduler if scheduler is _DEFAULT_SCHEDULER else scheduler,
+        scheduler_lease_owner=scheduler_lease_owner,
+        clock=clock,
     )
 
 
@@ -228,6 +425,92 @@ def _make_mock_transform(
 class TestConstructorErrorEdgeMap:
     """Tests for error edge map construction in __init__."""
 
+    def test_scheduler_repository_is_required(self) -> None:
+        """RowProcessor must not expose the legacy in-memory drain path."""
+        _, factory = _make_factory()
+
+        with pytest.raises(TypeError, match="scheduler"):
+            _make_processor(factory, scheduler=None)
+
+    def test_default_scheduler_lease_owner_is_instance_unique(self) -> None:
+        """Implicit scheduler lease owners must distinguish processors for the same run."""
+        _, factory = _make_factory()
+
+        first = _make_processor(factory, scheduler=factory.scheduler)
+        second = _make_processor(factory, scheduler=factory.scheduler)
+
+        assert first._scheduler_lease_owner.startswith("row-processor:test-run:")
+        assert second._scheduler_lease_owner.startswith("row-processor:test-run:")
+        assert first._scheduler_lease_owner != second._scheduler_lease_owner
+
+    def test_explicit_scheduler_lease_owner_is_honored(self) -> None:
+        """Tests and controlled workers can still provide a stable lease-owner identity."""
+        _, factory = _make_factory()
+
+        processor = _make_processor(factory, scheduler=factory.scheduler, scheduler_lease_owner="worker-a")
+
+        assert processor._scheduler_lease_owner == "worker-a"
+
+    def test_fresh_row_drains_throttle_empty_scheduler_maintenance(self) -> None:
+        """Fresh source-row drains should not run empty recovery sweeps per row."""
+        _, factory = _make_factory()
+        processor = _make_processor(factory, scheduler=factory.scheduler)
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with (
+            # Slice 3 re-pin (token-bound fixture): a coordination-token-bound
+            # processor ingests rows via the fenced composed verb (ADR-030
+            # §C.4 row 9), not the unfenced enqueue_ready_claimed arm.
+            patch.object(
+                factory.scheduler, "ingest_row_with_initial_claim", wraps=factory.scheduler.ingest_row_with_initial_claim
+            ) as fenced_ingest,
+            patch.object(factory.scheduler, "claim_ready", wraps=factory.scheduler.claim_ready) as claim_ready,
+            patch.object(factory.scheduler, "recover_expired_leases", wraps=factory.scheduler.recover_expired_leases) as recover_expired,
+        ):
+            for idx in range(SCHEDULER_MAINTENANCE_INTERVAL - 1):
+                processor.process_row(
+                    row_index=idx,
+                    source_row=_make_source_row({"value": idx}),
+                    transforms=[],
+                    ctx=ctx,
+                    source_row_index=idx,
+                    ingest_sequence=idx,
+                )
+
+            assert recover_expired.call_count == 0
+
+            processor.process_row(
+                row_index=SCHEDULER_MAINTENANCE_INTERVAL - 1,
+                source_row=_make_source_row({"value": SCHEDULER_MAINTENANCE_INTERVAL - 1}),
+                transforms=[],
+                ctx=ctx,
+                source_row_index=SCHEDULER_MAINTENANCE_INTERVAL - 1,
+                ingest_sequence=SCHEDULER_MAINTENANCE_INTERVAL - 1,
+            )
+
+        assert recover_expired.call_count == 1
+        assert fenced_ingest.call_count == SCHEDULER_MAINTENANCE_INTERVAL
+        assert claim_ready.call_count == 0
+
+    def test_lease_recovered_work_offsets_transform_attempt_identity(self) -> None:
+        """Recovered scheduler attempts must not replay node state attempt 0."""
+        _, factory = _make_factory()
+        processor = _make_processor(factory)
+        transform = _make_mock_transform()
+        token = make_token_info(row_id="row-1", token_id="token-1", data={"value": 1})
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        executor = Mock()
+        executor.execute_transform.return_value = (
+            TransformResult.success(make_pipeline_row({"value": 1}), success_reason={"action": "test"}),
+            token,
+            None,
+        )
+        processor._transform_executor = executor
+
+        processor._execute_transform_with_retry(transform, token, ctx, attempt_offset=1)
+
+        assert executor.execute_transform.call_args.kwargs["attempt"] == 1
+
     def test_extracts_error_edges_from_edge_map(self) -> None:
         """Error edges (labels like __error_0__) are extracted into error_edge_ids."""
         _, factory = _make_factory()
@@ -260,16 +543,85 @@ class TestConstructorErrorEdgeMap:
         processor = _make_processor(factory, edge_map=edge_map)
         assert processor._error_edge_ids == {}
 
-    def test_restores_aggregation_state(self) -> None:
-        """Restored aggregation state is passed to AggregationExecutor."""
-        _, factory = _make_factory()
-        # We can't easily verify internal state restoration without exposing
-        # internals, but we can verify the constructor doesn't crash with
-        # restoration data
+    def test_resume_restores_aggregation_buffers_from_blocked_rows(self) -> None:
+        """F1 restore inversion: resume rebuilds aggregation buffers FROM journal BLOCKED rows.
+
+        Seeds the journal (2 BLOCKED rows under barrier_key "agg-1", stamped
+        via the production claim->mark_blocked path) and the audit trail
+        (batch + members, BUFFERED token_outcomes, node_states at attempt 0),
+        then builds a resuming processor and asserts the buffers, batch id,
+        counters, trigger latch and attempt offsets all derive correctly —
+        with NO new journal rows created (the BLOCKED rows are reused as-is).
+        """
+        from sqlalchemy import func, select
+
+        from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="agg-transform",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            node_id=str(agg_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        now = datetime.now(UTC)
+        batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        tokens: list[TokenInfo] = []
+        for ordinal, token_id in enumerate(["t1", "t2"]):
+            payload = make_row({"value": ordinal})
+            token = TokenInfo(row_id=f"row-{ordinal}", token_id=token_id, row_data=payload)
+            _persist_token_for_scheduler(factory, token, ingest_sequence=ordinal)
+            tokens.append(token)
+            # Audit: membership + BUFFERED outcome + a node_state at attempt 0.
+            factory.execution.add_batch_member(batch_id=batch.batch_id, token_id=token_id, ordinal=ordinal)
+            factory.data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token_id, run_id="test-run"),
+                outcome=None,
+                path=TerminalPath.BUFFERED,
+                batch_id=batch.batch_id,
+            )
+            factory.execution.begin_node_state(
+                token_id=token_id,
+                node_id=str(agg_node),
+                run_id="test-run",
+                step_index=1,
+                input_data=payload.to_dict(),
+                attempt=0,
+            )
+            # Journal: production-shaped BLOCKED row (mark_blocked stamps
+            # barrier_blocked_at; the old ensure_blocked path did not).
+            factory.scheduler.enqueue_ready(
+                run_id="test-run",
+                token_id=token_id,
+                row_id=token.row_id,
+                node_id=str(agg_node),
+                step_index=1,
+                ingest_sequence=ordinal,
+                row_payload_json=factory.scheduler.serialize_row_payload(payload),
+                available_at=now,
+            )
+            claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+            assert claimed is not None and claimed.token_id == token_id
+            factory.scheduler.mark_blocked(
+                work_item_id=claimed.work_item_id,
+                queue_key=None,
+                barrier_key=str(agg_node),
+                now=now,
+                expected_lease_owner="seeder",
+            )
+
+        with db.connection() as conn:
+            rows_before = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
+
         processor = _make_processor(
             factory,
             aggregation_settings={
-                NodeID("agg-1"): AggregationSettings(
+                agg_node: AggregationSettings(
                     name="test-agg",
                     plugin="test-plugin",
                     input="agg_in",
@@ -277,14 +629,367 @@ class TestConstructorErrorEdgeMap:
                     trigger={"count": 3},
                 ),
             },
-            restored_aggregation_state={
-                NodeID("agg-1"): AggregationCheckpointState(
-                    version="5.0",
-                    nodes={},
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=BarrierScalars(
+                    aggregation={str(agg_node): AggregationNodeScalars(count_fire_offset=1.5, condition_fire_offset=None)},
+                    coalesce={},
+                ),
+                batch_id_remap={},
+            ),
+        )
+
+        node = processor._aggregation_executor._nodes[agg_node]
+        assert [t.token_id for t in node.tokens] == ["t1", "t2"]
+        assert node.batch_id == batch.batch_id
+        assert node.buffers == [{"value": 0}, {"value": 1}]
+        assert node.accepted_count_total == 2
+        assert node.completed_flush_count == 0
+        assert all(t.resume_attempt_offset == 1 for t in node.tokens)  # max_attempt(0)+1
+        assert all(t.resume_checkpoint_id == "ckpt-resume-1" for t in node.tokens)
+        # Checkpoint scalars (trigger latch) round-trip through the restore.
+        assert node.trigger.get_count_fire_offset() == pytest.approx(1.5)
+        # NO new journal rows: the BLOCKED rows are reused as-is.
+        with db.connection() as conn:
+            rows_after = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
+        assert rows_after == rows_before
+
+    def test_resume_restore_raises_on_orphan_barrier_key(self) -> None:
+        """A BLOCKED row whose barrier_key matches no coalesce or aggregation refuses resume."""
+        _, factory = _make_factory()
+        payload = make_row({"value": 7})
+        token = TokenInfo(row_id="row-ghost", token_id="tok-ghost", row_data=payload)
+        _persist_token_for_scheduler(factory, token, ingest_sequence=0)
+        ghost_now = datetime.now(UTC)
+        ghost_item = factory.scheduler.enqueue_ready_claimed(
+            run_id="test-run",
+            token_id="tok-ghost",
+            row_id="row-ghost",
+            node_id=None,
+            step_index=0,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            available_at=ghost_now,
+            lease_owner="test-harness",
+            lease_seconds=60,
+            now=ghost_now,
+        )
+        factory.scheduler.mark_blocked(
+            work_item_id=ghost_item.work_item_id,
+            queue_key=None,
+            barrier_key="ghost-barrier",
+            now=ghost_now,
+            expected_lease_owner="test-harness",
+        )
+
+        with pytest.raises(AuditIntegrityError, match="orphan barrier_key 'ghost-barrier'"):
+            _make_processor(
+                factory,
+                barrier_restore=BarrierJournalRestoreContext(
+                    resume_checkpoint_id="ckpt-resume-1",
+                    barrier_scalars=None,
+                    batch_id_remap={},
+                ),
+            )
+
+    def test_resume_restore_ignores_adr028_queue_hold_rows(self) -> None:
+        """An ADR-028 queue-hold (BLOCKED, queue_key set, barrier_key NULL) is not a barrier member.
+
+        The queue resume path is untouched by F1: the row must be neither
+        restored into a barrier buffer nor counted anywhere, and must stay
+        BLOCKED on its queue_key.
+        """
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        now = datetime.now(UTC)
+        payload = make_row({"value": 9})
+        token = TokenInfo(row_id="row-q", token_id="tok-q", row_data=payload)
+        _persist_token_for_scheduler(factory, token, ingest_sequence=0)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id="tok-q",
+            row_id="row-q",
+            node_id=None,
+            step_index=0,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            available_at=now,
+        )
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+        assert claimed is not None
+        factory.scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key="queue-1",
+            barrier_key=None,
+            now=now,
+            expected_lease_owner="seeder",
+        )
+
+        processor = _make_processor(
+            factory,
+            aggregation_settings={
+                agg_node: AggregationSettings(
+                    name="test-agg",
+                    plugin="test-plugin",
+                    input="agg_in",
+                    on_error="discard",
+                    trigger={"count": 3},
                 ),
             },
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=None,
+                batch_id_remap={},
+            ),
         )
-        assert processor is not None
+
+        node = processor._aggregation_executor._nodes[agg_node]
+        assert node.tokens == []
+        assert node.batch_id is None
+        assert node.accepted_count_total == 0
+        assert node.completed_flush_count == 0
+        with db.connection() as conn:
+            status, queue_key, barrier_key = conn.execute(
+                select(
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.queue_key,
+                    token_work_items_table.c.barrier_key,
+                ).where(token_work_items_table.c.token_id == "tok-q")
+            ).one()
+        assert (status, queue_key, barrier_key) == ("blocked", "queue-1", None)
+
+    # -- shared seeding for the batch_id-derivation arms ---------------------
+
+    @staticmethod
+    def _agg_settings(agg_node: NodeID) -> dict[NodeID, AggregationSettings]:
+        return {
+            agg_node: AggregationSettings(
+                name="test-agg",
+                plugin="test-plugin",
+                input="agg_in",
+                on_error="discard",
+                trigger={"count": 3},
+            ),
+        }
+
+    @staticmethod
+    def _restore_ctx(batch_id_remap: dict[str, str] | None = None) -> BarrierJournalRestoreContext:
+        return BarrierJournalRestoreContext(
+            resume_checkpoint_id="ckpt-resume-1",
+            barrier_scalars=None,
+            batch_id_remap=batch_id_remap or {},
+        )
+
+    @staticmethod
+    def _register_aggregation_node(factory: RecorderFactory, agg_node: NodeID) -> None:
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="agg-transform",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            node_id=str(agg_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+    @staticmethod
+    def _seed_blocked_agg_row(factory: RecorderFactory, *, token_id: str, ordinal: int, agg_node: NodeID) -> TokenInfo:
+        """Token + production-shaped BLOCKED journal row under the agg barrier.
+
+        Goes through enqueue -> claim -> mark_blocked so barrier_blocked_at is
+        stamped exactly as the live buffering path stamps it.
+        """
+        payload = make_row({"value": ordinal})
+        token = TokenInfo(row_id=f"row-{ordinal}", token_id=token_id, row_data=payload)
+        _persist_token_for_scheduler(factory, token, ingest_sequence=ordinal)
+        now = datetime.now(UTC)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token_id,
+            row_id=token.row_id,
+            node_id=str(agg_node),
+            step_index=1,
+            ingest_sequence=ordinal,
+            row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            available_at=now,
+        )
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+        assert claimed is not None and claimed.token_id == token_id
+        factory.scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key=None,
+            barrier_key=str(agg_node),
+            now=now,
+            expected_lease_owner="seeder",
+        )
+        return token
+
+    def _seed_buffered_member(
+        self,
+        factory: RecorderFactory,
+        *,
+        token_id: str,
+        ordinal: int,
+        agg_node: NodeID,
+        batch_id: str,
+    ) -> TokenInfo:
+        """BLOCKED journal row + batch membership + BUFFERED outcome carrying batch_id."""
+        token = self._seed_blocked_agg_row(factory, token_id=token_id, ordinal=ordinal, agg_node=agg_node)
+        factory.execution.add_batch_member(batch_id=batch_id, token_id=token_id, ordinal=ordinal)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token_id, run_id="test-run"),
+            outcome=None,
+            path=TerminalPath.BUFFERED,
+            batch_id=batch_id,
+        )
+        return token
+
+    def test_resume_restore_reads_batch_id_through_incomplete_batch_remap(self) -> None:
+        """A flush-interrupting crash: BUFFERED outcomes carry the DEAD batch id.
+
+        handle_incomplete_batches retries the failed batch (members copied) and
+        returns the old->retry mapping; the restore must read each group's
+        batch_id THROUGH that remap, land on the retry batch, and count
+        accepted tokens DISTINCT-ly (the retry copies would double-count).
+        """
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        old_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        for ordinal, token_id in enumerate(["t1", "t2"]):
+            self._seed_buffered_member(factory, token_id=token_id, ordinal=ordinal, agg_node=agg_node, batch_id=old_batch.batch_id)
+        # Crash shape: flush died -> batch FAILED; resume's
+        # handle_incomplete_batches creates the retry batch (members COPIED).
+        factory.execution.update_batch_status(old_batch.batch_id, BatchStatus.FAILED)
+        retry_batch = factory.execution.retry_batch(old_batch.batch_id)
+        assert retry_batch.batch_id != old_batch.batch_id
+
+        processor = _make_processor(
+            factory,
+            aggregation_settings=self._agg_settings(agg_node),
+            barrier_restore=self._restore_ctx(batch_id_remap={old_batch.batch_id: retry_batch.batch_id}),
+        )
+
+        node = processor._aggregation_executor._nodes[agg_node]
+        # Headline: the BUFFERED outcomes still say old_batch; the restored
+        # in-progress batch is the RETRY batch via the remap.
+        assert node.batch_id == retry_batch.batch_id
+        assert [t.token_id for t in node.tokens] == ["t1", "t2"]
+        # DISTINCT discipline: members exist in BOTH the dead original and the
+        # retry copy; a raw count would say 4.
+        assert node.accepted_count_total == 2
+        assert node.completed_flush_count == 0
+
+    def test_resume_restore_preserves_counters_when_all_flushes_failed(self) -> None:
+        """A node whose flushes all FAILED is still counter-only restored.
+
+        Crash right after a failed flush consumed the batch: accepted rows > 0
+        but zero COMPLETED batches, empty buffer, no BLOCKED rows, no scalars
+        entry. The accepted counter must survive the resume (it drives
+        AggregationBatchContext pagination metadata), not silently reset to 0.
+        """
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        failed_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        for ordinal, token_id in enumerate(["t1", "t2"]):
+            payload = make_row({"value": ordinal})
+            token = TokenInfo(row_id=f"row-{ordinal}", token_id=token_id, row_data=payload)
+            _persist_token_for_scheduler(factory, token, ingest_sequence=ordinal)
+            factory.execution.add_batch_member(batch_id=failed_batch.batch_id, token_id=token_id, ordinal=ordinal)
+        factory.execution.update_batch_status(failed_batch.batch_id, BatchStatus.FAILED)
+
+        processor = _make_processor(
+            factory,
+            aggregation_settings=self._agg_settings(agg_node),
+            barrier_restore=self._restore_ctx(),
+        )
+
+        node = processor._aggregation_executor._nodes[agg_node]
+        assert node.tokens == []
+        assert node.batch_id is None
+        assert node.accepted_count_total == 2  # pagination metadata survives
+        assert node.completed_flush_count == 0
+
+    def test_resume_restore_rejects_barrier_group_split_across_batches(self) -> None:
+        """Two BLOCKED tokens in one barrier group resolving DIFFERENT batch ids is corruption."""
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        batch_a = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        batch_b = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        self._seed_buffered_member(factory, token_id="t1", ordinal=0, agg_node=agg_node, batch_id=batch_a.batch_id)
+        self._seed_buffered_member(factory, token_id="t2", ordinal=1, agg_node=agg_node, batch_id=batch_b.batch_id)
+
+        with pytest.raises(AuditIntegrityError, match="split across batches"):
+            _make_processor(
+                factory,
+                aggregation_settings=self._agg_settings(agg_node),
+                barrier_restore=self._restore_ctx(),
+            )
+
+    def test_resume_restore_rejects_blocked_row_with_terminal_outcome(self) -> None:
+        """A BLOCKED row whose token already flushed (terminal outcome) is journal/audit divergence.
+
+        Flushed-before-crash shape: the flush recorded BUFFERED -> BATCH_CONSUMED
+        but died before terminalizing the journal row. Restoring it would
+        double-process the token, so the restore refuses.
+        """
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        self._seed_buffered_member(factory, token_id="t1", ordinal=0, agg_node=agg_node, batch_id=batch.batch_id)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id="t1", run_id="test-run"),
+            outcome=TerminalOutcome.TRANSIENT,
+            path=TerminalPath.BATCH_CONSUMED,
+            batch_id=batch.batch_id,
+        )
+
+        with pytest.raises(AuditIntegrityError, match="disagree about this token being buffered"):
+            _make_processor(
+                factory,
+                aggregation_settings=self._agg_settings(agg_node),
+                barrier_restore=self._restore_ctx(),
+            )
+
+    def test_resume_restore_rejects_remapped_batch_without_batches_row(self) -> None:
+        """A remap target with no batches row is audit corruption, not a default."""
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        self._register_aggregation_node(factory, agg_node)
+        old_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        self._seed_buffered_member(factory, token_id="t1", ordinal=0, agg_node=agg_node, batch_id=old_batch.batch_id)
+
+        with pytest.raises(AuditIntegrityError, match="has no batches row"):
+            _make_processor(
+                factory,
+                aggregation_settings=self._agg_settings(agg_node),
+                barrier_restore=self._restore_ctx(batch_id_remap={old_batch.batch_id: "batch-that-does-not-exist"}),
+            )
+
+    def test_resume_restore_rejects_batch_owned_by_foreign_aggregation_node(self) -> None:
+        """A group's resolved batch must belong to the barrier_key's own aggregation node."""
+        _db, factory = _make_factory()
+        agg_node = NodeID("agg-1")
+        other_node = NodeID("agg-2")
+        self._register_aggregation_node(factory, agg_node)
+        self._register_aggregation_node(factory, other_node)
+        own_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(agg_node))
+        foreign_batch = factory.execution.create_batch(run_id="test-run", aggregation_node_id=str(other_node))
+        self._seed_buffered_member(factory, token_id="t1", ordinal=0, agg_node=agg_node, batch_id=own_batch.batch_id)
+
+        with pytest.raises(AuditIntegrityError, match="belongs to aggregation node"):
+            _make_processor(
+                factory,
+                aggregation_settings=self._agg_settings(agg_node),
+                barrier_restore=self._restore_ctx(batch_id_remap={own_batch.batch_id: foreign_batch.batch_id}),
+            )
 
 
 class TestTraversalNextNodeInvariants:
@@ -313,7 +1018,6 @@ class TestTraversalNextNodeInvariants:
             factory,
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
 
@@ -323,6 +1027,8 @@ class TestTraversalNextNodeInvariants:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
 
@@ -367,7 +1073,6 @@ class TestAuditStepResolutionInvariants:
         traversal = DAGTraversalContext(
             node_step_map={},
             node_to_plugin={},
-            first_transform_node_id=None,
             node_to_next={source_node: None},
             coalesce_node_map={},
         )
@@ -379,6 +1084,7 @@ class TestAuditStepResolutionInvariants:
             source_node_id=source_node,
             source_on_success="default",
             traversal=traversal,
+            scheduler=factory.scheduler,
         )
 
         assert processor._resolve_audit_step_for_node(source_node) == 0
@@ -525,6 +1231,8 @@ class TestProcessRowNoTransforms:
             source_row=source_row,
             transforms=[],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         assert len(results) == 1
@@ -545,6 +1253,8 @@ class TestProcessRowNoTransforms:
             source_row=source_row,
             transforms=[],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Verify token was created (result has a valid token_id)
@@ -560,12 +1270,25 @@ class TestProcessRowNoTransforms:
         source_row = _make_source_row()
         ctx = make_context(landscape=factory.plugin_audit_writer())
 
-        processor.process_row(
-            row_index=0,
-            source_row=source_row,
-            transforms=[],
-            ctx=ctx,
-        )
+        with (
+            patch.object(
+                factory.execution, "record_completed_node_state", wraps=factory.execution.record_completed_node_state
+            ) as completed,
+            patch.object(factory.execution, "begin_node_state", wraps=factory.execution.begin_node_state) as begin,
+            patch.object(factory.execution, "complete_node_state", wraps=factory.execution.complete_node_state) as complete,
+        ):
+            processor.process_row(
+                row_index=0,
+                source_row=source_row,
+                transforms=[],
+                ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
+            )
+
+        assert completed.call_count == 1
+        assert begin.call_count == 0
+        assert complete.call_count == 0
 
         # Check that source node_state was recorded
         from sqlalchemy import select
@@ -621,6 +1344,8 @@ class TestProcessRowNoTransforms:
                 source_row=source_row,
                 transforms=[],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         from sqlalchemy import select
@@ -642,6 +1367,85 @@ class TestProcessRowNoTransforms:
         assert source_state.status == NodeStateStatus.FAILED
         assert len(outcomes) == 1
         _assert_outcome_pair(outcomes[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
+
+    def test_source_boundary_violation_on_secondary_source_uses_secondary_source_identity(self) -> None:
+        """Multi-source boundary failures must be attributed to the row's source root."""
+        db, factory = _make_factory()
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="secondary-source",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0",
+            config={},
+            node_id="source-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        processor = _make_processor(
+            factory,
+            source_plugin=self._source_plugin(declared_guaranteed_fields=frozenset({"customer_id"})),
+        )
+        source_row = _make_source_row({"value": 42})
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        def _raise_source_boundary(*args: Any, **kwargs: Any) -> None:
+            violation = SourceGuaranteedFieldsViolation(
+                plugin="secondary-source",
+                node_id="source-1",
+                run_id="test-run",
+                row_id="row_0",
+                token_id="token_0",
+                payload={
+                    "declared": ["customer_id"],
+                    "runtime_observed": [],
+                    "missing": ["customer_id"],
+                },
+                message="secondary source boundary failed",
+            )
+            _attach_contract_name_from_dispatcher(violation, "source_guaranteed_fields")
+            raise violation
+
+        with (
+            patch("elspeth.engine.processor.run_boundary_checks", side_effect=_raise_source_boundary),
+            patch("elspeth.engine.processor.best_effort", return_value=nullcontext()) as best_effort_context,
+            pytest.raises(SourceGuaranteedFieldsViolation, match="secondary source boundary failed"),
+        ):
+            processor.process_row(
+                row_index=0,
+                source_row=source_row,
+                transforms=[],
+                ctx=ctx,
+                source_node_id=NodeID("source-1"),
+                source_row_index=0,
+                ingest_sequence=0,
+            )
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import node_states_table, rows_table, token_outcomes_table, tokens_table
+
+        with db.connection() as conn:
+            failed_states = conn.execute(
+                select(node_states_table).where(
+                    node_states_table.c.run_id == "test-run",
+                    node_states_table.c.status == NodeStateStatus.FAILED,
+                )
+            ).fetchall()
+            outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == "test-run")).fetchall()
+            row_source_node_id = conn.execute(
+                select(rows_table.c.source_node_id)
+                .join(tokens_table, rows_table.c.row_id == tokens_table.c.row_id)
+                .where(tokens_table.c.run_id == "test-run")
+            ).scalar_one()
+
+        assert row_source_node_id == "source-1"
+        assert len(failed_states) == 1
+        [source_state] = failed_states
+        assert source_state.node_id == "source-1"
+        assert len(outcomes) == 1
+        expected_hash = hashlib.sha256(b"SourceGuaranteedFieldsViolation:source-1").hexdigest()[:16]
+        assert outcomes[0].error_hash == expected_hash
+        best_effort_context.assert_called_once()
+        assert best_effort_context.call_args.kwargs["source_node_id"] == NodeID("source-1")
 
     def test_source_boundary_landscape_record_error_raises_audit_integrity_error(self) -> None:
         """Narrow recorder failures outrank the original boundary violation."""
@@ -683,6 +1487,8 @@ class TestProcessRowNoTransforms:
                 source_row=source_row,
                 transforms=[],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         assert isinstance(exc_info.value.__cause__, LandscapeRecordError)
@@ -725,6 +1531,8 @@ class TestProcessRowNoTransforms:
                 source_row=source_row,
                 transforms=[],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
     def test_source_boundary_state_landscape_record_error_raises_audit_integrity_error(self) -> None:
@@ -767,6 +1575,8 @@ class TestProcessRowNoTransforms:
                 source_row=source_row,
                 transforms=[],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         assert isinstance(exc_info.value.__cause__, LandscapeRecordError)
@@ -809,6 +1619,8 @@ class TestProcessRowNoTransforms:
                 source_row=source_row,
                 transforms=[],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
     def test_source_boundary_token_completed_telemetry_failure_does_not_interrupt_audit_recording(self) -> None:
@@ -848,6 +1660,8 @@ class TestProcessRowNoTransforms:
                 source_row=source_row,
                 transforms=[],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         from sqlalchemy import select
@@ -892,6 +1706,8 @@ class TestProcessRowNoTransforms:
                 source_row=source_row,
                 transforms=[],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         from sqlalchemy import select
@@ -963,6 +1779,26 @@ class TestProcessRowNoTransforms:
         assert mock_record_token_outcome.call_count == 2
         recorded_refs = {call.kwargs["ref"].token_id for call in mock_record_token_outcome.call_args_list}
         assert recorded_refs == {"token-a", "token-b"}
+
+    def test_buffered_scheduler_barrier_key_requires_live_hold_stash(self) -> None:
+        """A BUFFERED claim result without a live barrier-hold stash is a processor bug.
+
+        Slice 3 re-pin (ADR-030 §E.2): the barrier_key for the drain's
+        mark_blocked no longer derives from the (now nonexistent) in-claim
+        BUFFERED outcome — the producer stashes the live hold; a missing
+        stash entry is refused loudly.
+        """
+        _db, factory = _make_factory()
+        processor = _make_processor(factory)
+
+        with pytest.raises(AuditIntegrityError, match="no live barrier hold stash"):
+            processor._barrier_key_for_live_hold("token-a")
+
+        processor._live_barrier_holds["token-a"] = _LiveBarrierHold(
+            token=make_token_info(row_id="row-a", token_id="token-a", data={"value": 1}),
+            barrier_key="aggregation_a",
+        )
+        assert processor._barrier_key_for_live_hold("token-a") == "aggregation_a"
 
     def test_handle_flush_error_telemetry_failure_does_not_interrupt_failed_outcomes(self) -> None:
         """Batch-flush failure terminalization must continue after telemetry errors."""
@@ -1240,7 +2076,6 @@ class TestProcessRowSingleTransform:
             factory,
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
         return db, factory, processor
@@ -1272,6 +2107,8 @@ class TestProcessRowSingleTransform:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         assert len(results) == 1
@@ -1303,6 +2140,8 @@ class TestProcessRowSingleTransform:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         assert len(results) == 1
@@ -1338,6 +2177,8 @@ class TestProcessRowSingleTransform:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         assert len(results) == 1
@@ -1361,6 +2202,8 @@ class TestProcessRowSingleTransform:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         assert len(results) == 1
@@ -1406,7 +2249,6 @@ class TestAggregationFailureMatrix:
             factory,
             node_step_map={source_node: 0, agg_node: 1, NodeID("downstream-2"): 2},
             node_to_next=traversal_next,
-            first_transform_node_id=agg_node,
             node_to_plugin={agg_node: transform},
             aggregation_settings={
                 agg_node: AggregationSettings(
@@ -1422,13 +2264,21 @@ class TestAggregationFailureMatrix:
         return db, factory, processor, transform, agg_node
 
     def test_flush_failure_passthrough_records_failed_outcomes(self) -> None:
-        """Passthrough flush failure records FAILED terminal outcomes for buffered tokens."""
+        """Passthrough flush failure records FAILED terminal outcomes for buffered tokens.
+
+        Slice 3 re-pin (ADR-030 §E.2): the arrival returns a real
+        (None, BUFFERED) RowResult and the count flush fires from the NEXT
+        drain iteration's journal-first intake; the BUFFERED audit record is
+        written by the fenced adoption verb (not record_token_outcome), so
+        only the flush-failure FAILED record goes through the repository
+        method.
+        """
         _db, factory, processor, transform, _agg_node = self._setup_batch_processor(output_mode="passthrough")
         source_row = _make_source_row({"value": 10})
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
@@ -1439,10 +2289,8 @@ class TestAggregationFailureMatrix:
             )
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
         ):
@@ -1451,13 +2299,17 @@ class TestAggregationFailureMatrix:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
-        assert len(results) == 1
-        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
-        # BUFFERED is always recorded before the flush check, then FAILED on flush error.
+        assert len(results) == 2
+        _assert_outcome_pair(results[0], None, TerminalPath.BUFFERED)
+        _assert_outcome_pair(results[1], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
+        # The intake adoption verb wrote the BUFFERED record durably inside
+        # its fenced transaction; the repository method sees only the flush
+        # failure's FAILED record.
         assert [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list] == [
-            (None, TerminalPath.BUFFERED),
             (TerminalOutcome.FAILURE, TerminalPath.UNROUTED),
         ]
 
@@ -1473,7 +2325,7 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
@@ -1484,10 +2336,8 @@ class TestAggregationFailureMatrix:
             )
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
         ):
@@ -1496,13 +2346,20 @@ class TestAggregationFailureMatrix:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
-        assert len(results) == 1
-        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
+        # Slice 3 re-pin (ADR-030 §E.2): the arrival returns a real BUFFERED
+        # RowResult; the count flush fires from the next iteration's intake.
+        assert len(results) == 2
+        _assert_outcome_pair(results[0], None, TerminalPath.BUFFERED)
+        _assert_outcome_pair(results[1], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         outcomes = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
-        # BUFFERED is always recorded before the flush check, then FAILED on flush error.
-        assert outcomes == [(None, TerminalPath.BUFFERED), (TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
+        # The intake adoption verb wrote the BUFFERED record durably inside
+        # its fenced transaction; only the flush failure's FAILED record goes
+        # through the repository method.
+        assert outcomes == [(TerminalOutcome.FAILURE, TerminalPath.UNROUTED)]
 
     def test_passthrough_success_with_rows_none_raises(self) -> None:
         """Passthrough flush requires rows list; rows=None is an invariant violation."""
@@ -1516,17 +2373,15 @@ class TestAggregationFailureMatrix:
         bad_result.is_multi_row = True
         bad_result.rows = None
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return bad_result, [captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(processor._data_flow, "record_token_outcome"),
             patch.object(processor, "_emit_transform_completed"),
@@ -1537,6 +2392,8 @@ class TestAggregationFailureMatrix:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
     def test_passthrough_success_with_output_count_mismatch_raises(self) -> None:
@@ -1551,7 +2408,7 @@ class TestAggregationFailureMatrix:
             success_reason={"action": "mismatch"},
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
@@ -1559,10 +2416,8 @@ class TestAggregationFailureMatrix:
             return mismatch_result, [captured["token"], other_token], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(processor._data_flow, "record_token_outcome"),
             patch.object(processor, "_emit_transform_completed"),
@@ -1573,6 +2428,8 @@ class TestAggregationFailureMatrix:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
     def test_timeout_flush_passthrough_with_downstream_returns_continuation_work(self) -> None:
@@ -1590,6 +2447,7 @@ class TestAggregationFailureMatrix:
             success_reason={"action": "passthrough"},
         )
         buffered_token = make_token_info(data={"value": 10})
+        _persist_blocked_scheduler_work(factory, processor, buffered_token, node_id=agg_node, barrier_key=str(agg_node))
 
         with patch.object(
             processor._aggregation_executor,
@@ -1617,6 +2475,7 @@ class TestAggregationFailureMatrix:
             success_reason={"action": "passthrough"},
         )
         buffered_token = make_token_info(data={"value": 10})
+        _persist_blocked_scheduler_work(factory, processor, buffered_token, node_id=agg_node, barrier_key=str(agg_node))
 
         with patch.object(
             processor._aggregation_executor,
@@ -1648,6 +2507,7 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
         valid_buffered_token = make_token_info(row_id="row-a", token_id="token-valid", data={"value": 1})
+        _persist_blocked_scheduler_work(factory, processor, valid_buffered_token, node_id=NodeID("agg-1"), barrier_key="agg-1")
 
         # The triggering token is the second buffered token. Index 1 in
         # quarantined_indices means the triggering token IS quarantined while
@@ -1660,17 +2520,15 @@ class TestAggregationFailureMatrix:
             },
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [valid_buffered_token, captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
@@ -1678,10 +2536,12 @@ class TestAggregationFailureMatrix:
             patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")),
         ):
             results = processor.process_row(
-                row_index=0,
+                row_index=1,
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=1,
+                ingest_sequence=1,
             )
 
         # The triggering token must be returned as QUARANTINED, matching the data_flow.
@@ -1721,17 +2581,15 @@ class TestAggregationFailureMatrix:
             success_reason={"action": "batch_processed"},
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
@@ -1743,17 +2601,21 @@ class TestAggregationFailureMatrix:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
-        # Triggering token should be CONSUMED_IN_BATCH (no quarantine).
-        triggering_results = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
-        assert len(triggering_results) == 1, (
-            f"Expected triggering token RowResult with CONSUMED_IN_BATCH outcome, got outcomes: {[r.outcome for r in results]}"
-        )
+        # Slice 3 re-pin (ADR-030 §E.2): the trigger arrival surfaces as a
+        # real (None, BUFFERED) RowResult and the intake-fired flush takes the
+        # out-of-claim shape (triggering_token=None) — no extra
+        # CONSUMED_IN_BATCH RowResult is emitted for the trigger member. Its
+        # consumption lives in the audit trail.
+        assert [(r.outcome, r.path) for r in results] == [(None, TerminalPath.BUFFERED)]
 
         # Recorder should have CONSUMED_IN_BATCH, not QUARANTINED.
         recorded_pairs = [(call.kwargs["outcome"], call.kwargs["path"]) for call in record_outcome.call_args_list]
         assert (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED) in recorded_pairs
+        assert (TerminalOutcome.FAILURE, TerminalPath.QUARANTINED_AT_SOURCE) not in recorded_pairs
 
     def test_transform_mode_count_flush_expands_from_non_quarantined_parent(self) -> None:
         """Count-triggered batch output children must not use a quarantined triggering token as parent."""
@@ -1762,6 +2624,7 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         captured: dict[str, TokenInfo] = {}
         valid_buffered_token = make_token_info(row_id="row-a", token_id="token-valid", data={"value": 1})
+        _persist_blocked_scheduler_work(factory, processor, valid_buffered_token, node_id=NodeID("agg-1"), barrier_key="agg-1")
 
         flush_result = TransformResult.success(
             make_row({"value": 999}, contract=_make_contract()),
@@ -1771,17 +2634,15 @@ class TestAggregationFailureMatrix:
             },
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [valid_buffered_token, captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome"),
             patch.object(processor, "_emit_transform_completed"),
@@ -1789,10 +2650,12 @@ class TestAggregationFailureMatrix:
             patch.object(processor._token_manager, "expand_token", return_value=([], "expand-group-1")) as expand_token,
         ):
             processor.process_row(
-                row_index=0,
+                row_index=1,
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=1,
+                ingest_sequence=1,
             )
 
         assert expand_token.call_args is not None
@@ -1804,6 +2667,10 @@ class TestAggregationFailureMatrix:
         ctx = make_context(landscape=factory.plugin_audit_writer())
         quarantined_token = make_token_info(row_id="row-a", token_id="token-quarantined", data={"value": 1})
         valid_token = make_token_info(row_id="row-b", token_id="token-valid", data={"value": 2})
+        _persist_blocked_scheduler_work(
+            factory, processor, quarantined_token, node_id=agg_node, barrier_key=str(agg_node), ingest_sequence=0
+        )
+        _persist_blocked_scheduler_work(factory, processor, valid_token, node_id=agg_node, barrier_key=str(agg_node), ingest_sequence=1)
 
         flush_result = TransformResult.success(
             make_row({"value": 999}, contract=_make_contract()),
@@ -1908,7 +2775,6 @@ class TestTransformModeOutcomeOrdering:
             factory,
             node_step_map={source_node: 0, agg_node: 1},
             node_to_next={source_node: agg_node, agg_node: None},
-            first_transform_node_id=agg_node,
             node_to_plugin={agg_node: transform},
             aggregation_settings={
                 agg_node: AggregationSettings(
@@ -1943,17 +2809,15 @@ class TestTransformModeOutcomeOrdering:
             success_reason={"action": "batch_processed"},
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
@@ -1965,6 +2829,8 @@ class TestTransformModeOutcomeOrdering:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         # Parent tokens must NOT have been recorded as terminal before the error.
@@ -1991,17 +2857,15 @@ class TestTransformModeOutcomeOrdering:
             success_reason={"action": "batch_processed"},
         )
 
-        def buffer_row_side_effect(node_id: NodeID, token: TokenInfo) -> None:
+        def accept_side_effect(node_id: NodeID, token: TokenInfo, *, accept_time: float | None = None) -> None:
             captured["token"] = token
 
         def execute_flush_side_effect(*, node_id, transform, ctx, trigger_type):
             return flush_result, [captured["token"]], "batch-1"
 
         with (
-            patch.object(processor._aggregation_executor, "buffer_row", side_effect=buffer_row_side_effect),
-            patch.object(processor._aggregation_executor, "get_batch_id", return_value="batch-1"),
-            patch.object(processor._aggregation_executor, "should_flush", return_value=True),
-            patch.object(processor._aggregation_executor, "get_trigger_type", return_value=TriggerType.COUNT),
+            patch.object(processor._aggregation_executor, "accept_adopted_row", side_effect=accept_side_effect),
+            patch.object(processor._aggregation_executor, "check_flush_status", return_value=(True, TriggerType.COUNT)),
             patch.object(processor._aggregation_executor, "execute_flush", side_effect=execute_flush_side_effect),
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_transform_completed"),
@@ -2018,6 +2882,8 @@ class TestTransformModeOutcomeOrdering:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         # Parent tokens must NOT have terminal outcomes recorded before expand_token.
@@ -2125,7 +2991,6 @@ class TestProcessRowGateBranching:
                 expander_node: terminal_node,
                 terminal_node: None,
             },
-            first_transform_node_id=gate_node,
             node_to_plugin={
                 gate_node: config_gate,
                 expander_node: expander,
@@ -2181,6 +3046,8 @@ class TestProcessRowGateBranching:
                 source_row=source_row,
                 transforms=[expander, terminal],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         completed = [r for r in results if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
@@ -2209,7 +3076,6 @@ class TestProcessRowGateBranching:
                 router_node: coalesce_node,
                 coalesce_node: None,
             },
-            first_transform_node_id=router_node,
             coalesce_node_ids={CoalesceName("merge"): coalesce_node},
             # Intentionally omit coalesce_on_success_map
         )
@@ -2250,7 +3116,6 @@ class TestProcessRowGateBranching:
                 jump_start_node: downstream_transform_node,
                 downstream_transform_node: None,
             },
-            first_transform_node_id=jump_start_node,
             node_to_plugin={
                 jump_start_node: branch_transform1,
                 downstream_transform_node: branch_transform2,
@@ -2278,8 +3143,8 @@ class TestProcessRowGateBranching:
             sink_names=frozenset({"source_sink", "branch_sink"}),
             node_step_map={NodeID("source-0"): 0},
             node_to_next={NodeID("source-0"): None},
-            first_transform_node_id=None,
         )
+        _persist_token_for_scheduler(factory, token)
 
         results = processor.process_token(
             token=token,
@@ -2305,6 +3170,7 @@ class TestProcessRowGateBranching:
 
         gate_node = NodeID("gate-1")
         transform_node = NodeID("transform-1")
+        source_node = NodeID("source-0")
 
         # Register nodes for FK constraints
         factory.data_flow.register_node(
@@ -2346,9 +3212,8 @@ class TestProcessRowGateBranching:
             source_on_success="sink_c",
             branch_to_sink={BranchName("sink_a"): "sink_a", BranchName("sink_b"): "sink_b"},
             sink_names=frozenset({"sink_a", "sink_b", "sink_c"}),
-            node_step_map={gate_node: 1, transform_node: 2},
-            node_to_next={gate_node: transform_node, transform_node: None},
-            first_transform_node_id=gate_node,
+            node_step_map={source_node: 0, gate_node: 1, transform_node: 2},
+            node_to_next={source_node: gate_node, gate_node: transform_node, transform_node: None},
             node_to_plugin={gate_node: gate_config, transform_node: transform},
         )
 
@@ -2367,6 +3232,8 @@ class TestProcessRowGateBranching:
                 row_data=token.row_data,
                 branch_name="sink_b",
             )
+            _persist_token_for_scheduler(factory, child_a)
+            _persist_token_for_scheduler(factory, child_b)
             fork_action = RoutingAction.fork_to_paths(["sink_a", "sink_b"])
             fork_result = GateResult(
                 row=token.row_data.to_dict(),
@@ -2390,6 +3257,8 @@ class TestProcessRowGateBranching:
             source_row=source_row,
             transforms=[],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Parent should be FORKED
@@ -2452,7 +3321,6 @@ class TestProcessRowMultiRowOutput:
             factory,
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
 
@@ -2469,6 +3337,8 @@ class TestProcessRowMultiRowOutput:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         # Parent should be EXPANDED, children should be COMPLETED
@@ -2499,7 +3369,6 @@ class TestProcessRowMultiRowOutput:
             factory,
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
 
@@ -2519,6 +3388,8 @@ class TestProcessRowMultiRowOutput:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
     def test_multi_row_with_inconsistent_contracts_raises(self) -> None:
@@ -2567,6 +3438,8 @@ class TestProcessExistingRow:
             source_row=source_row,
             transforms=[],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         existing_row_id = first_results[0].token.row_id
 
@@ -2602,6 +3475,7 @@ class TestProcessToken:
 
         # Create a token to process
         token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(factory, token)
 
         results = processor.process_token(
             token=token,
@@ -2627,6 +3501,7 @@ class TestProcessToken:
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(factory, token)
 
         results = processor.process_token(
             token=token,
@@ -2653,11 +3528,11 @@ class TestProcessToken:
             coalesce_on_success_map={CoalesceName("merge"): "coalesce_sink"},
             node_step_map={NodeID("coalesce::merge"): 1, NodeID("transform-1"): 2},
             node_to_next={NodeID("coalesce::merge"): NodeID("transform-1"), NodeID("transform-1"): None},
-            first_transform_node_id=NodeID("transform-1"),
             node_to_plugin={NodeID("transform-1"): transform},
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 42})
+        _persist_token_for_scheduler(factory, token)
 
         with patch.object(
             processor,
@@ -2696,13 +3571,19 @@ class TestDrainWorkQueueIterationGuard:
         processor = _make_processor(factory)
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 1})
+        _persist_token_for_scheduler(factory, token)
+        produced = 0
 
         # Mock _process_single_token to always produce more work
         def infinite_loop_producer(token, ctx, current_node_id, **kwargs):
-            new_token = make_token_info(data={"value": 1})
+            nonlocal produced
+            produced += 1
+            new_token = make_token_info(row_id=token.row_id, token_id=f"loop-token-{produced}", data={"value": 1})
+            _persist_token_for_scheduler(factory, new_token)
             return (None, [WorkItem(token=new_token, current_node_id=NodeID("source-0"))])
 
         with (
+            patch("elspeth.engine.processor.MAX_WORK_QUEUE_ITERATIONS", 3),
             patch.object(processor, "_process_single_token", side_effect=infinite_loop_producer),
             pytest.raises(RuntimeError, match=r"exceeded.*iterations"),
         ):
@@ -2717,8 +3598,9 @@ class TestDrainWorkQueueIterationGuard:
         processor = _make_processor(factory)
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 1})
-        max_supported_copies = BatchReplicateConfig.model_json_schema()["properties"]["max_copies"]["maximum"]
-        remaining_children = max_supported_copies
+        _persist_token_for_scheduler(factory, token)
+        supported_copies = 3
+        remaining_children = supported_copies
 
         def supported_fanout_producer(token, ctx, current_node_id, **kwargs):
             nonlocal remaining_children
@@ -2726,21 +3608,2084 @@ class TestDrainWorkQueueIterationGuard:
                 return (None, [])
 
             remaining_children -= 1
-            child = make_token_info(data={"remaining": remaining_children})
+            child = make_token_info(
+                row_id=token.row_id, token_id=f"fanout-token-{remaining_children}", data={"remaining": remaining_children}
+            )
+            _persist_token_for_scheduler(factory, child)
             return (None, [WorkItem(token=child, current_node_id=NodeID("source-0"))])
 
-        with patch.object(processor, "_process_single_token", side_effect=supported_fanout_producer) as mock_process_single_token:
+        with (
+            patch("elspeth.engine.processor.MAX_WORK_QUEUE_ITERATIONS", supported_copies + 2),
+            patch.object(processor, "_process_single_token", side_effect=supported_fanout_producer) as mock_process_single_token,
+        ):
             results = processor._drain_work_queue(
                 WorkItem(token=token, current_node_id=NodeID("source-0")),
                 ctx=ctx,
             )
 
         assert results == []
-        assert mock_process_single_token.call_count == max_supported_copies + 1
+        assert mock_process_single_token.call_count == supported_copies + 1
 
     def test_max_iterations_constant_is_reasonable(self) -> None:
         """MAX_WORK_QUEUE_ITERATIONS should be at least 1000."""
         assert MAX_WORK_QUEUE_ITERATIONS >= 1000
+        max_supported_copies = BatchReplicateConfig.model_json_schema()["properties"]["max_copies"]["maximum"]
+        assert max_supported_copies < MAX_WORK_QUEUE_ITERATIONS
+
+
+class TestDurableSchedulerResumeDrain:
+    """Tests for draining scheduler work created before this processor existed."""
+
+    def test_drains_persisted_ready_work_without_source_replay(self) -> None:
+        """A fresh processor rehydrates READY scheduler work from durable row payloads."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-ready")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        success_result = TransformResult.success(
+            make_row({"value": 42, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            assert token.token_id == "token-ready"
+            assert token.row_data.to_dict() == {"value": 42}
+            return (success_result, token, None)
+
+        with patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+        assert results[0].token.token_id == "token-ready"
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        assert statuses == ["pending_sink"]
+
+    def test_sink_bound_scheduler_work_terminalizes_only_after_sink_callback(self) -> None:
+        """Sink-bound work remains durable until sink outcome recording completes."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-ready")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        success_result = TransformResult.success(
+            make_row({"value": 42, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            return (success_result, token, None)
+
+        with patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        processor.mark_sink_bound_scheduler_terminal("token-ready")
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, row_payload_json = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.row_payload_json).where(
+                    token_work_items_table.c.token_id == "token-ready"
+                )
+            ).one()
+        assert status == "terminal"
+        assert "resumed" not in row_payload_json
+        assert "purged" in row_payload_json
+
+    def test_single_sink_bound_scheduler_terminalization_requires_matching_pending_sink(self) -> None:
+        """Single-token callback path must not silently ignore missing scheduler rows."""
+        _db, factory = _make_factory()
+        processor = _make_processor(factory, scheduler=factory.scheduler)
+
+        with pytest.raises(AuditIntegrityError, match="terminalized 0 rows"):
+            processor.mark_sink_bound_scheduler_terminal("missing-token")
+
+    def test_pending_sink_resume_does_not_rerun_transform(self) -> None:
+        """A crash after transform success resumes at sink handoff, not at the transform."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-pending")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        first_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        final_token = TokenInfo(
+            row_id=row.row_id,
+            token_id=token.token_id,
+            row_data=make_row({"value": 42, "resumed": True}),
+        )
+        sink_bound_result = RowResult(
+            token=final_token,
+            final_data=final_token.row_data,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+
+        with patch.object(first_processor, "_process_single_token", return_value=(sink_bound_result, [])):
+            first_processor.drain_scheduled_work(ctx)
+
+        resumed_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+        with patch.object(resumed_processor._transform_executor, "execute_transform", side_effect=AssertionError("transform replayed")):
+            results = resumed_processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        assert results[0].token.token_id == "token-pending"
+        assert results[0].token.row_data.to_dict() == {"value": 42, "resumed": True}
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, lease_owner = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                    token_work_items_table.c.token_id == "token-pending"
+                )
+            ).one()
+        assert status == "leased"
+        assert lease_owner == "resume-worker"
+
+    def test_pending_sink_resume_repairs_already_outcomed_row_without_reemitting_sink(self) -> None:
+        """A terminal token outcome is the resume witness; do not emit the sink externally again."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-outcomed-pending")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        crashed_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="crashed-worker",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        final_token = TokenInfo(
+            row_id=row.row_id,
+            token_id=token.token_id,
+            row_data=make_row({"value": 42, "resumed": True}),
+        )
+        sink_bound_result = RowResult(
+            token=final_token,
+            final_data=final_token.row_data,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+        with patch.object(crashed_processor, "_process_single_token", return_value=(sink_bound_result, [])):
+            crashed_processor.drain_scheduled_work(ctx)
+        factory.data_flow.record_token_outcome(
+            ref=TokenRef(token_id=token.token_id, run_id="test-run"),
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+
+        resumed_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+        with patch.object(resumed_processor._transform_executor, "execute_transform", side_effect=AssertionError("transform replayed")):
+            results = resumed_processor.drain_scheduled_work(ctx)
+
+        assert results == []
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import scheduler_events_table, token_work_items_table
+
+        with db.connection() as conn:
+            status, lease_owner = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                    token_work_items_table.c.token_id == "token-outcomed-pending"
+                )
+            ).one()
+            terminal_event_owner = conn.execute(
+                select(scheduler_events_table.c.caller_owner)
+                .where(scheduler_events_table.c.token_id == "token-outcomed-pending")
+                .where(scheduler_events_table.c.event_type == "mark_pending_sink_terminal")
+            ).scalar_one()
+        assert status == "terminal"
+        assert lease_owner is None
+        assert terminal_event_owner == "resume-worker"
+
+    def test_resume_drains_all_pending_sink_rows_in_single_call(self) -> None:
+        """Multiple pre-existing PENDING_SINK rows must all drain in a single resume call.
+
+        Regression for elspeth-5c5e88b071 (G3): the ``created_pending_sink_this_drain``
+        gate previously short-circuited the ``claim_pending_sink`` fallback after
+        the first pending-sink emission. When a prior crashed worker left N
+        sink-bound rows durable, only one was recovered per ``drain_scheduled_work``
+        call, leaving the rest stranded and tripping
+        ``OrchestrationInvariantError`` at run completion.
+        """
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        pending_token_ids: list[str] = []
+        for idx in range(3):
+            source_payload = make_row({"value": idx})
+            row = factory.data_flow.create_row(
+                run_id="test-run",
+                source_node_id="source-0",
+                row_index=idx,
+                source_row_index=idx,
+                ingest_sequence=idx,
+                data=source_payload.to_dict(),
+            )
+            token_id = f"token-pending-{idx}"
+            pending_token_ids.append(token_id)
+            token = factory.data_flow.create_token(row.row_id, token_id=token_id)
+            factory.scheduler.enqueue_ready(
+                run_id="test-run",
+                token_id=token.token_id,
+                row_id=row.row_id,
+                node_id=str(transform_node),
+                step_index=1,
+                ingest_sequence=idx,
+                row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+                available_at=datetime.now(UTC),
+            )
+
+        # Stage 1: simulate the crashed worker that drove the transform to
+        # success on every token. Each token ends in PENDING_SINK because
+        # sink durability never completed.
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        crashed_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="crashed-worker",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        def crashed_executor(*, transform, token, ctx, attempt=0):
+            return (
+                TransformResult.success(
+                    make_row({**token.row_data.to_dict(), "resumed": True}),
+                    success_reason={"action": "crashed_worker_transform"},
+                ),
+                token,
+                None,
+            )
+
+        with patch.object(crashed_processor._transform_executor, "execute_transform", side_effect=crashed_executor):
+            crashed_processor.drain_scheduled_work(ctx)
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        assert sorted(statuses) == ["pending_sink"] * 3, (
+            f"Expected three PENDING_SINK rows after the crashed worker drained transform work; got {sorted(statuses)}."
+        )
+
+        # Stage 2: fresh resume worker. The bug: only one PENDING_SINK row
+        # emits a RowResult; the other two stay PENDING_SINK because the gate
+        # blocks the recovery branch after the first claim.
+        resume_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+        with patch.object(
+            resume_processor._transform_executor,
+            "execute_transform",
+            side_effect=AssertionError("transform replayed during pending-sink recovery"),
+        ):
+            results = resume_processor.drain_scheduled_work(ctx)
+
+        recovered_token_ids = sorted(result.token.token_id for result in results)
+        assert recovered_token_ids == sorted(pending_token_ids), (
+            f"All pre-existing PENDING_SINK rows must be re-emitted in a single drain call; got {recovered_token_ids}."
+        )
+
+        with db.connection() as conn:
+            statuses_after = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        # Every row is now LEASED by the resume worker awaiting the sink
+        # callback; none remain in PENDING_SINK status.
+        assert sorted(statuses_after) == ["leased"] * 3
+
+    def test_drain_emits_pending_sink_recovery_without_duplicating_fresh_work(self) -> None:
+        """Mixed pre-existing PENDING_SINK + new READY work must not double-emit.
+
+        Discriminating regression for elspeth-5c5e88b071 (G3): the naive fix —
+        deleting the gate and putting ``claim_pending_sink`` inside the main
+        loop — would re-claim PENDING_SINK rows that the current drain just
+        produced via ``mark_pending_sink`` and emit a duplicate RowResult via
+        ``_row_result_from_pending_sink`` for work already represented by the
+        original sink-bound RowResult. Pre-existing pending-sinks must be
+        drained up front; newly-marked pending-sinks must only be terminalized
+        by the sink callback, never re-claimed inside the same drain.
+        """
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        # Two pre-existing pending-sink rows from a prior crashed worker.
+        pre_existing_token_ids: list[str] = []
+        for idx in range(2):
+            source_payload = make_row({"value": idx})
+            row = factory.data_flow.create_row(
+                run_id="test-run",
+                source_node_id="source-0",
+                row_index=idx,
+                source_row_index=idx,
+                ingest_sequence=idx,
+                data=source_payload.to_dict(),
+            )
+            token_id = f"token-pre-{idx}"
+            pre_existing_token_ids.append(token_id)
+            token = factory.data_flow.create_token(row.row_id, token_id=token_id)
+            factory.scheduler.enqueue_ready(
+                run_id="test-run",
+                token_id=token.token_id,
+                row_id=row.row_id,
+                node_id=str(transform_node),
+                step_index=1,
+                ingest_sequence=idx,
+                row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+                available_at=datetime.now(UTC),
+            )
+
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        # Stage 1: crashed worker pushes the pre-existing rows to PENDING_SINK.
+        crashed_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="crashed-worker",
+        )
+
+        def crashed_executor(*, transform, token, ctx, attempt=0):
+            return (
+                TransformResult.success(
+                    make_row({**token.row_data.to_dict(), "resumed": True}),
+                    success_reason={"action": "crashed_worker_transform"},
+                ),
+                token,
+                None,
+            )
+
+        with patch.object(crashed_processor._transform_executor, "execute_transform", side_effect=crashed_executor):
+            crashed_processor.drain_scheduled_work(ctx)
+
+        # Stage 2: enqueue a brand new READY token that the resume worker
+        # will process to completion (ending in PENDING_SINK durably and
+        # emitting one sink-bound RowResult).
+        fresh_payload = make_row({"value": 99})
+        fresh_row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=99,
+            source_row_index=99,
+            ingest_sequence=99,
+            data=fresh_payload.to_dict(),
+        )
+        fresh_token_id = "token-fresh"
+        fresh_token = factory.data_flow.create_token(fresh_row.row_id, token_id=fresh_token_id)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=fresh_token.token_id,
+            row_id=fresh_row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=99,
+            row_payload_json=factory.scheduler.serialize_row_payload(fresh_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        # Stage 3: resume worker drains everything in one call. Pre-existing
+        # rows recover via _row_result_from_pending_sink; the fresh row
+        # processes through the transform and emits the sink-bound RowResult
+        # directly. Neither path may emit the same token twice.
+        resume_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+
+        def resume_executor(*, transform, token, ctx, attempt=0):
+            # Pre-existing tokens must NOT re-enter the transform (their
+            # transform work is durable from the crashed worker).
+            assert token.token_id == fresh_token_id, f"transform replayed for {token.token_id!r} during recovery drain"
+            return (
+                TransformResult.success(
+                    make_row({**token.row_data.to_dict(), "fresh_processed": True}),
+                    success_reason={"action": "resume_worker_transform"},
+                ),
+                token,
+                None,
+            )
+
+        with patch.object(resume_processor._transform_executor, "execute_transform", side_effect=resume_executor):
+            results = resume_processor.drain_scheduled_work(ctx)
+
+        emitted_token_ids = [result.token.token_id for result in results]
+        assert len(emitted_token_ids) == len(set(emitted_token_ids)), (
+            f"Duplicate RowResults emitted for the same token_id: {emitted_token_ids}. "
+            "claim_pending_sink must not re-claim rows produced by mark_pending_sink "
+            "within the same drain call."
+        )
+        assert sorted(emitted_token_ids) == sorted([*pre_existing_token_ids, fresh_token_id])
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses_after = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        # All three rows now sit in non-terminal states awaiting the sink
+        # callback. The pre-existing two are LEASED (claim_pending_sink
+        # transition); the fresh one is PENDING_SINK (mark_pending_sink
+        # transition without a subsequent claim).
+        assert sorted(statuses_after) == ["leased", "leased", "pending_sink"]
+
+    def test_drain_scheduler_transitions_use_injected_clock(self) -> None:
+        """Durable scheduler state transitions must be deterministic under MockClock."""
+        db, factory = _make_factory()
+        clock = MockClock(start=1_700_000_000.0)
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-clock")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=clock.now_utc(),
+        )
+
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            clock=clock,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        success_result = TransformResult.success(
+            make_row({"value": 42, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            clock.advance(5.0)
+            return (success_result, token, None)
+
+        with patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            processor.drain_scheduled_work(ctx)
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, updated_at = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.updated_at).where(
+                    token_work_items_table.c.token_id == "token-clock"
+                )
+            ).one()
+        assert status == "pending_sink"
+        assert updated_at.replace(tzinfo=UTC) == clock.now_utc()
+
+    def test_recovers_expired_lease_then_drains_without_source_replay(self) -> None:
+        """Expired LEASED scheduler work is recovered and advanced by a fresh processor."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 43})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-expired")
+        past = datetime.now(UTC) - timedelta(hours=1)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=past,
+        )
+        claimed = factory.scheduler.claim_ready(
+            run_id="test-run",
+            lease_owner="dead-worker",
+            lease_seconds=1,
+            now=past,
+        )
+        assert claimed is not None
+
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        success_result = TransformResult.success(
+            make_row({"value": 43, "resumed": True}),
+            success_reason={"action": "expired_lease_recovered"},
+        )
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            assert token.token_id == "token-expired"
+            assert token.row_data.to_dict() == {"value": 43}
+            assert attempt == 1
+            return (success_result, token, None)
+
+        with patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        assert results[0].token.token_id == "token-expired"
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == "test-run")).scalars().all()
+            )
+        assert statuses == ["pending_sink"]
+
+    def test_drain_raises_when_resultless_work_has_no_scheduler_release_key(self) -> None:
+        """Durable work cannot be BLOCKED unless resume has a release key for it."""
+        _db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 99})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-stranded")
+        work_item = factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with (
+            patch.object(processor, "_process_single_token", return_value=(None, [])),
+            pytest.raises(
+                OrchestrationInvariantError,
+                match=(
+                    rf"Work item '{work_item.work_item_id}'.*token='token-stranded'.*"
+                    rf"node={str(transform_node)!r}.*no queue or barrier key"
+                ),
+            ),
+        ):
+            processor.drain_scheduled_work(ctx)
+
+    def test_resume_restores_branch_lineage_for_direct_sink_work(self) -> None:
+        """Direct branch sink routing must survive durable scheduler resume."""
+        _db, factory = _make_factory()
+        source_payload = make_row({"value": 44})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = TokenInfo(
+            row_id=row.row_id,
+            token_id="token-direct-branch",
+            row_data=source_payload,
+            branch_name="direct",
+            fork_group_id="fork-1",
+            join_group_id="join-1",
+            expand_group_id="expand-1",
+        )
+        factory.data_flow.create_token(row.row_id, token_id=token.token_id)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=None,
+            step_index=99,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+            on_success_sink="source_sink",
+            branch_name=token.branch_name,
+            fork_group_id=token.fork_group_id,
+            join_group_id=token.join_group_id,
+            expand_group_id=token.expand_group_id,
+        )
+
+        processor = _make_processor(
+            factory,
+            source_on_success="source_sink",
+            branch_to_sink={BranchName("direct"): "branch_sink"},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        assert results[0].sink_name == "branch_sink"
+        assert results[0].token.branch_name == "direct"
+        assert results[0].token.fork_group_id == "fork-1"
+        assert results[0].token.join_group_id == "join-1"
+        assert results[0].token.expand_group_id == "expand-1"
+
+    def test_durable_scheduler_failure_result_marks_work_failed(self) -> None:
+        """Durable failure outcomes remain distinguishable from successful terminal work."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-failed")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        failed_result = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with patch.object(processor, "_process_single_token", return_value=(failed_result, [])):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert results == [failed_result]
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, run_id, work_item_id = conn.execute(
+                select(
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.run_id,
+                    token_work_items_table.c.work_item_id,
+                ).where(token_work_items_table.c.token_id == "token-failed")
+            ).one()
+        assert status == "failed"
+        assert run_id == "test-run"
+        assert work_item_id
+
+    def test_durable_scheduler_on_error_routed_result_marks_pending_sink(self) -> None:
+        """ON_ERROR_ROUTED failures are sink-bound until error-sink durability."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-on-error-routed")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default", on_error="errors")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        routed_result = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
+            sink_name="errors",
+            error=FailureInfo(exception_type="TransformError", message="bad row"),
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with patch.object(processor, "_process_single_token", return_value=(routed_result, [])):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        assert results[0].outcome == TerminalOutcome.FAILURE
+        assert results[0].path == TerminalPath.ON_ERROR_ROUTED
+        assert results[0].sink_name == "errors"
+        assert results[0].scheduler_pending_sink is True
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            row_state = conn.execute(
+                select(
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.pending_sink_name,
+                    token_work_items_table.c.pending_outcome,
+                    token_work_items_table.c.pending_path,
+                    token_work_items_table.c.row_payload_json,
+                ).where(token_work_items_table.c.token_id == "token-on-error-routed")
+            ).one()
+        assert row_state.status == "pending_sink"
+        assert row_state.pending_sink_name == "errors"
+        assert row_state.pending_outcome == TerminalOutcome.FAILURE.value
+        assert row_state.pending_path == TerminalPath.ON_ERROR_ROUTED.value
+        assert factory.scheduler.deserialize_row_payload(row_state.row_payload_json).to_dict() == source_payload.to_dict()
+
+    def test_durable_scheduler_tuple_failure_for_claimed_token_marks_work_failed(self) -> None:
+        """Tuple results must classify the claimed token, not fall through to terminal."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-failed-tuple")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        failed_result = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+        )
+        sibling_success = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id="sibling-token", row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with patch.object(processor, "_process_single_token", return_value=((sibling_success, failed_result), [])):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert results == [sibling_success, failed_result]
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status = conn.execute(
+                select(token_work_items_table.c.status).where(token_work_items_table.c.token_id == "token-failed-tuple")
+            ).scalar_one()
+        assert status == "failed"
+
+    def test_durable_scheduler_tuple_failure_for_sibling_keeps_claimed_work_terminal(self) -> None:
+        """Sibling failures returned with a claimed token must not poison the claimed work item."""
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-claimed-success")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        claimed_success = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id=token.token_id, row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.SUCCESS,
+            path=TerminalPath.DEFAULT_FLOW,
+            sink_name="default",
+        )
+        sibling_failure = RowResult(
+            token=TokenInfo(row_id=row.row_id, token_id="sibling-token", row_data=source_payload),
+            final_data=source_payload,
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.UNROUTED,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with patch.object(processor, "_process_single_token", return_value=((sibling_failure, claimed_success), [])):
+            results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 2
+        assert results[0] == sibling_failure
+        assert results[1].token.token_id == claimed_success.token.token_id
+        assert results[1].outcome == claimed_success.outcome
+        assert results[1].path == claimed_success.path
+        assert results[1].sink_name == claimed_success.sink_name
+        assert results[1].scheduler_pending_sink is True
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status = conn.execute(
+                select(token_work_items_table.c.status).where(token_work_items_table.c.token_id == "token-claimed-success")
+            ).scalar_one()
+        assert status == "pending_sink"
+
+    def test_scheduler_failure_write_preserves_processing_exception_context(self) -> None:
+        """If marking scheduler work failed also fails, diagnostics keep both causes."""
+        _db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 46})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-crash")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        with (
+            patch.object(processor, "_process_single_token", side_effect=ValueError("transform exploded")),
+            patch.object(factory.scheduler, "mark_failed", side_effect=AuditIntegrityError("scheduler write rejected")),
+            pytest.raises(
+                AuditIntegrityError,
+                match=r"original processing exception ValueError: transform exploded.*scheduler failure write.*scheduler write rejected",
+            ) as exc_info,
+        ):
+            processor.drain_scheduled_work(ctx)
+
+        assert isinstance(exc_info.value.__cause__, AuditIntegrityError)
+
+    def test_resume_restores_coalesce_cursor_for_held_branch_work(self) -> None:
+        """Coalesce-held branch work must rehydrate both token lineage and work-item cursor."""
+        db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id=str(coalesce_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        token = TokenInfo(
+            row_id=row.row_id,
+            token_id="token-held-branch",
+            row_data=source_payload,
+            branch_name="path_a",
+            fork_group_id="fork-2",
+        )
+        factory.data_flow.create_token(row.row_id, token_id=token.token_id)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(coalesce_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+            branch_name=token.branch_name,
+            fork_group_id=token.fork_group_id,
+            coalesce_node_id=str(coalesce_node),
+            coalesce_name="merge",
+        )
+        coalesce = Mock()
+        coalesce.accept.return_value = Mock(held=True, merged_token=None)
+        processor = _make_processor(
+            factory,
+            coalesce_executor=coalesce,
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            node_step_map={coalesce_node: 1},
+            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
+            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        results = processor.drain_scheduled_work(ctx)
+
+        assert results == []
+        coalesce.accept.assert_called_once()
+        accepted = coalesce.accept.call_args.kwargs["token"]
+        assert accepted.token_id == "token-held-branch"
+        assert accepted.branch_name == "path_a"
+        assert coalesce.accept.call_args.kwargs["coalesce_name"] == CoalesceName("merge")
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, barrier_key = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.barrier_key).where(
+                    token_work_items_table.c.token_id == "token-held-branch"
+                )
+            ).one()
+        assert (status, barrier_key) == ("blocked", "merge")
+
+    def _make_real_coalesce_executor(self, factory: RecorderFactory, coalesce_node: NodeID) -> Any:
+        """Build a production CoalesceExecutor over the factory's real repositories."""
+        from elspeth.core.config import CoalesceSettings
+        from elspeth.engine.coalesce_executor import CoalesceExecutor
+        from elspeth.engine.tokens import TokenManager
+
+        def step_resolver(_node_id: NodeID) -> int:
+            return 1
+
+        executor = CoalesceExecutor(
+            execution=factory.execution,
+            span_factory=SpanFactory(),
+            token_manager=TokenManager(factory.data_flow, step_resolver=step_resolver),
+            run_id="test-run",
+            step_resolver=step_resolver,
+            data_flow=factory.data_flow,
+        )
+        executor.register_coalesce(
+            CoalesceSettings(name="merge", branches=["path_a", "path_b"], policy="require_all", merge="union"),
+            coalesce_node,
+        )
+        return executor
+
+    def _seed_held_coalesce_branch(self, factory: RecorderFactory, coalesce_node: NodeID) -> str:
+        """Register the coalesce node and enqueue a path_a branch token at it.
+
+        Returns the row_id of the forked source row.
+        """
+        source_payload = make_row({"value": 45})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id=str(coalesce_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        factory.data_flow.create_token(row.row_id, token_id="token-held-a", branch_name="path_a", fork_group_id="fork-1")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id="token-held-a",
+            row_id=row.row_id,
+            node_id=str(coalesce_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+            branch_name="path_a",
+            fork_group_id="fork-1",
+            coalesce_node_id=str(coalesce_node),
+            coalesce_name="merge",
+        )
+        return str(row.row_id)
+
+    def test_resume_restores_coalesce_pending_from_blocked_rows(self) -> None:
+        """F1 restore inversion: resume rebuilds coalesce pendings FROM journal BLOCKED rows.
+
+        Arrange drives the PRODUCTION hold path (drain -> accept holds ->
+        mark_blocked stamps barrier_blocked_at; accept writes the OPEN
+        node_state hold at attempt 0). Act builds a fresh processor +
+        executor with barrier_restore. The pending entry must carry the
+        journal token, the audit-derived hold state_id, and the
+        max_attempt+1 offset — with no new journal rows.
+        """
+        from sqlalchemy import func, select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        row_id = self._seed_held_coalesce_branch(factory, coalesce_node)
+        arrange_executor = self._make_real_coalesce_executor(factory, coalesce_node)
+        processor_kwargs: dict[str, Any] = {
+            "coalesce_node_ids": {CoalesceName("merge"): coalesce_node},
+            "node_step_map": {NodeID("source-0"): 0, coalesce_node: 1},
+            "node_to_next": {NodeID("source-0"): coalesce_node, coalesce_node: None},
+            "coalesce_on_success_map": {CoalesceName("merge"): "merged_sink"},
+        }
+        processor1 = _make_processor(factory, coalesce_executor=arrange_executor, **processor_kwargs)
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        results = processor1.drain_scheduled_work(ctx)
+        assert results == []
+        assert ("merge", row_id) in arrange_executor._pending
+
+        # The hold node_state written by accept() — the state_id the restore must rediscover.
+        held_states = [
+            state
+            for state in factory.query.get_node_states_for_token("token-held-a")
+            if str(state.node_id) == str(coalesce_node) and state.status is NodeStateStatus.OPEN
+        ]
+        assert len(held_states) == 1
+        hold_state_id = held_states[0].state_id
+        assert held_states[0].attempt == 0
+
+        with db.connection() as conn:
+            rows_before = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
+            status, barrier_key = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.barrier_key).where(
+                    token_work_items_table.c.token_id == "token-held-a"
+                )
+            ).one()
+        assert (status, barrier_key) == ("blocked", "merge")
+
+        # ---- resume: fresh executor + processor rebuild FROM the journal ----
+        resumed_executor = self._make_real_coalesce_executor(factory, coalesce_node)
+        _make_processor(
+            factory,
+            coalesce_executor=resumed_executor,
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=None,
+                batch_id_remap={},
+            ),
+            **processor_kwargs,
+        )
+
+        pending = resumed_executor._pending[("merge", row_id)]
+        assert set(pending.branches) == {"path_a"}
+        entry = pending.branches["path_a"]
+        assert entry.token.token_id == "token-held-a"
+        assert entry.token.branch_name == "path_a"
+        assert entry.token.fork_group_id == "fork-1"
+        assert entry.state_id == hold_state_id  # state_id resolved from the OPEN node_state hold
+        assert entry.token.resume_attempt_offset == 1  # max_attempt(0)+1
+        assert entry.token.resume_checkpoint_id == "ckpt-resume-1"
+        assert pending.lost_branches == {}
+        # NO new journal rows: the BLOCKED row is reused as-is.
+        with db.connection() as conn:
+            rows_after = conn.execute(select(func.count()).select_from(token_work_items_table)).scalar_one()
+        assert rows_after == rows_before
+
+    def test_resume_restore_recovers_adopted_coalesce_row_without_hold_state(self) -> None:
+        """Adopted BLOCKED coalesce row with no OPEN node_state hold is a crash-window state.
+
+        Under ADR-030 §E.2 journal-first ordering the adoption CAS commits in
+        one transaction and accept() (which writes the PENDING hold) runs in a
+        separate transaction.  A leader crash between them leaves an adopted row
+        with no OPEN state_id — a reachable, legitimate crash state, not
+        corruption.
+
+        The restore reconcile (§E.3/§E.4 crash-window recovery) must:
+        - detect the holdless adopted row,
+        - determine the key is NOT completed (normal adoption crash, not a late
+          arrival), and
+        - reset barrier_adopted_epoch to NULL so the row becomes intake-pending
+          again and the first drain iteration's journal-first intake processes it
+          via the normal adopt + accept + trigger path.
+
+        The processor MUST be created successfully (no AuditIntegrityError).
+        After creation, the row must be intake-pending (barrier_adopted_epoch IS
+        NULL) so the next drain iteration's journal-first intake picks it up.
+
+        Re-pin of test_resume_restore_rejects_blocked_coalesce_row_without_hold_state:
+        that pin pre-dated §E.2 and claimed "hold written BEFORE journal row blocks",
+        which is inverted under journal-first ordering — the adoption CAS commits
+        first, accept() runs after. A refusal on this crash state permanently
+        wedges every subsequent resume.
+        """
+        db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        self._seed_held_coalesce_branch(factory, coalesce_node)
+        now = datetime.now(UTC)
+        # Block the row through the production claim path WITHOUT the
+        # accept()-written hold node_state (simulates a crash between adoption
+        # CAS commit and accept() in _intake_adopt_coalesce_row).
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+        assert claimed is not None
+        factory.scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key=None,
+            barrier_key="merge",
+            now=now,
+            expected_lease_owner="seeder",
+        )
+
+        resumed_executor = self._make_real_coalesce_executor(factory, coalesce_node)
+        # Under §E.2 crash-window recovery the processor MUST be created without
+        # error; the holdless adopted row is reset to intake-pending.
+        _make_processor(
+            factory,
+            coalesce_executor=resumed_executor,
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
+            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
+            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=None,
+                batch_id_remap={},
+            ),
+        )
+        # After crash-window recovery: barrier_adopted_epoch must be NULL
+        # (reset by the restore reconcile) so the next intake re-adopts the row.
+        from sqlalchemy import select as _select
+
+        from elspeth.core.landscape.schema import token_work_items_table as _twi
+
+        with db.connection() as conn:
+            row = conn.execute(_select(_twi.c.barrier_adopted_epoch).where(_twi.c.work_item_id == claimed.work_item_id)).one()
+        assert row.barrier_adopted_epoch is None, (
+            "crash-window recovery must reset barrier_adopted_epoch to NULL so the intake re-processes the row"
+        )
+
+    def test_aggregation_buffering_leaves_scheduler_work_blocked(self) -> None:
+        """Buffered aggregation tokens remain active until a flush consumes them."""
+        db, factory = _make_factory()
+        source_node = NodeID("source-0")
+        agg_node = NodeID("agg-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="agg-transform",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            node_id=str(agg_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        transform = _make_mock_transform(node_id=str(agg_node), name="agg-transform", is_batch_aware=True)
+        processor = _make_processor(
+            factory,
+            node_step_map={source_node: 0, agg_node: 1},
+            node_to_next={source_node: agg_node, agg_node: None},
+            node_to_plugin={agg_node: transform},
+            aggregation_settings={
+                agg_node: AggregationSettings(
+                    name="batch_agg",
+                    plugin="agg-transform",
+                    input="default",
+                    on_error="discard",
+                    trigger={"count": 2},
+                ),
+            },
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        results = processor.process_row(
+            row_index=0,
+            source_row=_make_source_row({"value": 1}),
+            transforms=[transform],
+            ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+
+        assert len(results) == 1
+        _assert_outcome_pair(results[0], None, TerminalPath.BUFFERED)
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, barrier_key = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.barrier_key).where(
+                    token_work_items_table.c.token_id == results[0].token.token_id
+                )
+            ).one()
+        assert (status, barrier_key) == ("blocked", str(agg_node))
+
+    def test_aggregation_flush_refuses_to_orphan_unconsumed_blocked_work(self) -> None:
+        """Flush completion REFUSES when a BLOCKED row under the barrier is not in the buffer.
+
+        F1/D6 strict exhaustiveness: an aggregation flush is ONE atomic
+        ``complete_barrier`` transition over the WHOLE barrier key (one node =
+        one in-progress batch), so a durable BLOCKED row the live buffer does
+        not account for is journal/buffer divergence — the completion must
+        refuse loudly instead of silently leaving (or sweeping) the orphan.
+        """
+        db, factory = _make_factory()
+        source_node = NodeID("source-0")
+        agg_node = NodeID("agg-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="agg-transform",
+            node_type=NodeType.AGGREGATION,
+            plugin_version="1.0",
+            config={},
+            node_id=str(agg_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        transform = _make_mock_transform(
+            node_id=str(agg_node),
+            name="agg-transform",
+            is_batch_aware=True,
+            on_success="agg_sink",
+            result=TransformResult.success(make_row({"total": 3}), success_reason={"action": "aggregate"}),
+        )
+        processor = _make_processor(
+            factory,
+            node_step_map={source_node: 0, agg_node: 1},
+            node_to_next={source_node: agg_node, agg_node: None},
+            node_to_plugin={agg_node: transform},
+            aggregation_settings={
+                agg_node: AggregationSettings(
+                    name="batch_agg",
+                    plugin="agg-transform",
+                    input="default",
+                    on_error="discard",
+                    trigger={"count": 2},
+                ),
+            },
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        first_results = processor.process_row(
+            row_index=0,
+            source_row=_make_source_row({"value": 1}),
+            transforms=[transform],
+            ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        first_token_id = first_results[0].token.token_id
+
+        stray_payload = make_row({"value": 99})
+        stray_row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=99,
+            source_row_index=99,
+            ingest_sequence=99,
+            data=stray_payload.to_dict(),
+        )
+        stray_token = factory.data_flow.create_token(stray_row.row_id, token_id="stray-buffered-token")
+        stray_work = factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=stray_token.token_id,
+            row_id=stray_row.row_id,
+            node_id=str(agg_node),
+            step_index=1,
+            ingest_sequence=99,
+            row_payload_json=factory.scheduler.serialize_row_payload(stray_payload),
+            available_at=datetime.now(UTC),
+            barrier_key=str(agg_node),
+        )
+        stray_claim = factory.scheduler.claim_ready(
+            run_id="test-run",
+            lease_owner="test-worker",
+            lease_seconds=30,
+            now=datetime.now(UTC),
+        )
+        assert stray_claim is not None
+        assert stray_claim.work_item_id == stray_work.work_item_id
+        factory.scheduler.mark_blocked(
+            work_item_id=stray_work.work_item_id,
+            queue_key=None,
+            barrier_key=str(agg_node),
+            now=datetime.now(UTC),
+            expected_lease_owner="test-worker",
+        )
+
+        # Slice 3 re-pin (ADR-030 §E.2/§E.3): the refusal moved EARLIER — the
+        # journal-first intake refuses to ADOPT a row this leader cannot
+        # attribute (no live stash entry, no resume provenance) before any
+        # durable mutation, instead of the flush-time orphan refusal.
+        with pytest.raises(AuditIntegrityError, match="no live stash entry and no resume checkpoint provenance"):
+            processor.process_row(
+                row_index=1,
+                source_row=_make_source_row({"value": 2}),
+                transforms=[transform],
+                ctx=ctx,
+                source_row_index=1,
+                ingest_sequence=1,
+            )
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        # The refused completion mutated nothing: buffered and stray rows stay BLOCKED.
+        with db.connection() as conn:
+            statuses = dict(
+                conn.execute(
+                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                        token_work_items_table.c.token_id.in_(
+                            [
+                                first_token_id,
+                                stray_token.token_id,
+                            ]
+                        )
+                    )
+                ).all()
+            )
+        assert statuses == {
+            first_token_id: "blocked",
+            stray_token.token_id: "blocked",
+        }
+
+    def test_passthrough_aggregation_sink_flush_marks_all_outputs_pending_sink(self) -> None:
+        """Every sink-bound passthrough flush token needs a durable sink handoff."""
+        db, factory = _make_factory()
+        source_node = NodeID("source-0")
+        agg_node = NodeID("agg-1")
+        contract = _make_contract()
+        transform = _make_mock_transform(
+            node_id=str(agg_node),
+            name="agg-transform",
+            is_batch_aware=True,
+            on_success="agg_sink",
+            result=TransformResult.success_multi(
+                (
+                    make_row({"value": 11}, contract=contract),
+                    make_row({"value": 22}, contract=contract),
+                ),
+                success_reason={"action": "passthrough"},
+            ),
+        )
+        transform.passes_through_input = True
+        processor = _make_processor(
+            factory,
+            node_step_map={source_node: 0, agg_node: 1},
+            node_to_next={source_node: agg_node, agg_node: None},
+            node_to_plugin={agg_node: transform},
+            aggregation_settings={
+                agg_node: AggregationSettings(
+                    name="batch_agg",
+                    plugin="agg-transform",
+                    input="default",
+                    on_error="discard",
+                    trigger={"count": 2},
+                    output_mode="passthrough",
+                ),
+            },
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        first_results = processor.process_row(
+            row_index=0,
+            source_row=_make_source_row({"value": 1}),
+            transforms=[transform],
+            ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+        assert len(first_results) == 1
+        _assert_outcome_pair(first_results[0], None, TerminalPath.BUFFERED)
+
+        second_results = processor.process_row(
+            row_index=1,
+            source_row=_make_source_row({"value": 2}),
+            transforms=[transform],
+            ctx=ctx,
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+
+        # F1 Task 4.3 (rows_buffered unification): the triggering token's
+        # buffer-accept surfaces as a synthetic (None, BUFFERED) result
+        # alongside the two terminal flush outputs, so every accepted batch
+        # member contributes exactly one BUFFERED result to the live counter.
+        assert len(second_results) == 3
+        buffered_results = [result for result in second_results if result.path is TerminalPath.BUFFERED]
+        assert len(buffered_results) == 1
+        assert buffered_results[0].outcome is None
+        flush_results = [result for result in second_results if result.path is not TerminalPath.BUFFERED]
+        assert len(flush_results) == 2
+        flushed_token_ids = tuple(result.token.token_id for result in flush_results)
+        # The triggering token both buffers (synthetic) and flushes (terminal).
+        assert buffered_results[0].token.token_id in flushed_token_ids
+        assert first_results[0].token.token_id in flushed_token_ids
+        assert len(frozenset(flushed_token_ids)) == 2
+        assert all(result.sink_name == "agg_sink" for result in flush_results)
+        assert all(result.scheduler_pending_sink for result in flush_results)
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            rows = conn.execute(
+                select(
+                    token_work_items_table.c.token_id,
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.pending_sink_name,
+                    token_work_items_table.c.pending_outcome,
+                    token_work_items_table.c.pending_path,
+                ).where(token_work_items_table.c.token_id.in_(flushed_token_ids))
+            ).all()
+        assert {(row.token_id, row.status, row.pending_sink_name, row.pending_outcome, row.pending_path) for row in rows} == {
+            (token_id, "pending_sink", "agg_sink", TerminalOutcome.SUCCESS.value, TerminalPath.DEFAULT_FLOW.value)
+            for token_id in flushed_token_ids
+        }
+
+        resumed_processor = _make_processor(
+            factory,
+            node_step_map={source_node: 0, agg_node: 1},
+            node_to_next={source_node: agg_node, agg_node: None},
+            node_to_plugin={agg_node: transform},
+            aggregation_settings={
+                agg_node: AggregationSettings(
+                    name="batch_agg",
+                    plugin="agg-transform",
+                    input="default",
+                    on_error="discard",
+                    trigger={"count": 2},
+                    output_mode="passthrough",
+                ),
+            },
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+        with patch.object(
+            resumed_processor._transform_executor,
+            "execute_transform",
+            side_effect=AssertionError("transform replayed during aggregation pending-sink recovery"),
+        ):
+            recovered_results = resumed_processor.drain_scheduled_work(ctx)
+
+        recovered_token_ids = tuple(result.token.token_id for result in recovered_results)
+        assert len(recovered_token_ids) == len(frozenset(recovered_token_ids))
+        assert sorted(recovered_token_ids) == sorted(flushed_token_ids)
+        assert all(result.sink_name == "agg_sink" for result in recovered_results)
+        assert all(result.scheduler_pending_sink for result in recovered_results)
+
+        with db.connection() as conn:
+            resumed_rows = conn.execute(
+                select(
+                    token_work_items_table.c.token_id,
+                    token_work_items_table.c.status,
+                    token_work_items_table.c.lease_owner,
+                ).where(token_work_items_table.c.token_id.in_(flushed_token_ids))
+            ).all()
+        assert {(row.token_id, row.status, row.lease_owner) for row in resumed_rows} == {
+            (token_id, "leased", "resume-worker") for token_id in flushed_token_ids
+        }
+
+    def test_drain_scheduled_work_no_longer_refuses_on_peer_lease(self) -> None:
+        """Slice 4 demotion: peer unexpired leases are diagnostic, not refusals.
+
+        ADR-030 §G slice 4 demotes ``peer_active_leases`` from a hard refusal
+        to a debug-level diagnostic. The correctness gate is now the
+        ``active_worker_fence_clause`` membership fence compiled into the claim
+        verbs — a non-member's claim CAS fails the EXISTS fence. A concurrent
+        peer holding an unexpired lease is a NORMAL multi-worker state, not a
+        precondition violation (filigree elspeth-66be4216cd, G3).
+
+        This test was previously ``test_drain_refuses_when_peer_worker_holds_active_lease``
+        and asserted an ``AuditIntegrityError`` raise. It now asserts the
+        OPPOSITE: ``drain_scheduled_work`` must NOT raise. Worker B's drain
+        enters the claim loop, finds the row still LEASED under peer-worker-A
+        (``claim_ready`` returns None — no READY rows), and exits cleanly with
+        an empty result list.
+        """
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 1})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-peer-held")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        # Peer worker A claims the row under its own lease_owner. Lease window
+        # is wide enough that ``peer_active_leases`` sees it as unexpired.
+        peer_claim_now = datetime.now(UTC)
+        peer_claim = factory.scheduler.claim_ready(
+            run_id="test-run",
+            lease_owner="peer-worker-A",
+            lease_seconds=600,
+            now=peer_claim_now,
+        )
+        assert peer_claim is not None
+        assert peer_claim.lease_owner == "peer-worker-A"
+
+        # Worker B's drain now logs the peer diagnostic but does NOT raise.
+        worker_b_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="peer-worker-B",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        # No raise: peer lease is diagnostic, not a refusal.
+        results = worker_b_processor.drain_scheduled_work(ctx)
+        # claim_ready found no READY rows (row is LEASED under peer-worker-A).
+        assert results == []
+
+        # Peer's row is still owned by peer-worker-A — B's drain was a no-op.
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, lease_owner = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                    token_work_items_table.c.token_id == "token-peer-held"
+                )
+            ).one()
+        assert status == "leased"
+        assert lease_owner == "peer-worker-A"
+
+    def test_drain_proceeds_when_peer_lease_expired(self) -> None:
+        """An expired peer lease is recoverable, not a precondition violation.
+
+        Single-active-resume blocks unexpired peer leases. An expired peer lease
+        is the normal crashed-prior-worker recovery path: the surviving worker
+        sweeps it via ``recover_expired_leases`` and proceeds. This test pins
+        that the precondition does NOT over-reject — only unexpired peers are
+        treated as live.
+        """
+        clock = MockClock(start=1_700_000_000.0)
+        _db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 1})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-stale-peer")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=clock.now_utc(),
+        )
+
+        # Crashed peer A held a short lease that has since expired.
+        factory.scheduler.claim_ready(
+            run_id="test-run",
+            lease_owner="crashed-peer",
+            lease_seconds=30,
+            now=clock.now_utc(),
+        )
+        clock.advance(60.0)
+
+        success_result = TransformResult.success(
+            make_row({"value": 1, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+        worker_b_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="recovery-worker",
+            clock=clock,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            return (success_result, token, None)
+
+        with patch.object(worker_b_processor._transform_executor, "execute_transform", side_effect=executor_side_effect):
+            results = worker_b_processor.drain_scheduled_work(ctx)
+
+        # Expired peer lease was recovered; row drained under recovery-worker.
+        assert len(results) == 1
+        assert results[0].token.token_id == "token-stale-peer"
+
+    def test_drain_ignores_callers_own_active_lease(self) -> None:
+        """A caller's own unexpired lease must not trigger the peer precondition.
+
+        ``peer_active_leases`` filters ``lease_owner != caller_owner``. A worker
+        re-entering its own drain (e.g. after a transform that left its own row
+        LEASED in an earlier iteration) must not self-block.
+        """
+        _db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 1})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-self-held")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+
+        # The caller's lease_owner pre-claims the row before the drain entry.
+        factory.scheduler.claim_ready(
+            run_id="test-run",
+            lease_owner="own-worker",
+            lease_seconds=600,
+            now=datetime.now(UTC),
+        )
+
+        worker_processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: _make_mock_transform(node_id=str(transform_node), on_success="default")},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="own-worker",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        # peer_active_leases must return () because the only LEASED row is
+        # owned by the caller; drain must not raise. It will reach the
+        # claim_ready loop, find no READY work (the row is LEASED by self),
+        # and exit cleanly with an empty result list.
+        results = worker_processor.drain_scheduled_work(ctx)
+        assert results == []
 
 
 # =============================================================================
@@ -2772,7 +5717,6 @@ class TestInnerTraversalCycleGuard:
                 s2: s1,  # cycle back
             },
             node_step_map={NodeID("source-0"): 0, s1: 1, s2: 2},
-            first_transform_node_id=None,
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 1})
@@ -3224,13 +6168,25 @@ class TestMaybeCoalesceToken:
         assert result is None
 
     def test_coalesce_failure_with_outcomes_recorded_does_not_duplicate_recording(self) -> None:
-        """When executor already recorded FAILED outcome, processor must not record again."""
+        """When executor already recorded FAILED outcome, the intake must not record again.
+
+        Slice 3 re-pin (ADR-030 §E.2): the accept-time failure surfaces from
+        the journal-first intake (the arrival blocked first, then the
+        adoption-time executor accept produced the failure), not in-claim.
+        """
         _, factory = _make_factory()
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-1",
+            row_data=make_row({}),
+            branch_name="path_a",
+        )
         coalesce = Mock()
-        coalesce.accept.return_value = Mock(
+        coalesce.accept.return_value = CoalesceOutcome(
             held=False,
             merged_token=None,
-            failure_reason="late_arrival_after_merge",
+            failure_reason="merge_failed:path_b_lost",
+            consumed_tokens=(token,),
             outcomes_recorded=True,
         )
         processor = _make_processor(
@@ -3239,37 +6195,53 @@ class TestMaybeCoalesceToken:
             coalesce_node_ids={CoalesceName("merge"): NodeID("coalesce::merge")},
             node_step_map={NodeID("coalesce::merge"): 2},
         )
-        token = TokenInfo(
-            row_id="row-1",
-            token_id="token-1",
-            row_data=make_row({}),
-            branch_name="path_a",
-        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
 
         with (
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
             patch.object(processor, "_emit_token_completed") as emit_token_completed,
         ):
-            handled, result = processor._maybe_coalesce_token(
-                token,
-                current_node_id=NodeID("coalesce::merge"),
-                coalesce_node_id=NodeID("coalesce::merge"),
-                coalesce_name=CoalesceName("merge"),
-                child_items=[],
-            )
+            results, child_items = processor._run_barrier_intake_pass(ctx)
 
-        assert handled is True
-        assert result is not None
-        _assert_outcome_pair(result, TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
+        assert child_items == []
+        assert len(results) == 1
+        _assert_outcome_pair(results[0], TerminalOutcome.FAILURE, TerminalPath.UNROUTED)
         record_outcome.assert_not_called()
         emit_token_completed.assert_called_once()
+        # Backdated accept timing (§H 476): the intake passed an explicit
+        # monotonic arrival anchor derived from barrier_blocked_at.
+        assert coalesce.accept.call_args.kwargs["arrival_time"] is not None
 
-    def test_coalesce_merged_at_terminal_returns_coalesced_result(self) -> None:
-        """All branches arrived at terminal coalesce → COALESCED result."""
-        _, factory = _make_factory()
-        merged_token = make_token_info(data={"merged": True})
+    def test_coalesce_merged_at_terminal_emits_pending_sink_handoff(self) -> None:
+        """All branches arrived at terminal coalesce → durable COALESCED handoff.
+
+        Slice 3 re-pin (ADR-030 §E.2/§E.3): the merge fires from the
+        journal-first intake; for a TERMINAL coalesce the COALESCED output is
+        emitted as a fresh PENDING_SINK row atomically with the consumed
+        branches (F1/D6) — the old in-claim memory-only ride between the
+        consumption and the claim disposition is gone.
+        """
+        db, factory = _make_factory()
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data={},
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1")
+        token = TokenInfo(
+            row_id=row.row_id,
+            token_id="token-1",
+            row_data=make_row({}),
+            branch_name="path_a",
+        )
         coalesce = Mock()
-        coalesce.accept.return_value = Mock(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -3277,32 +6249,61 @@ class TestMaybeCoalesceToken:
             node_step_map={NodeID("coalesce::merge"): 3},
             coalesce_on_success_map={CoalesceName("merge"): "output"},
         )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
+
+        results, child_items = processor._run_barrier_intake_pass(ctx)
+
+        # Terminal coalesce: the COALESCED sink-bound result is emitted as a
+        # fresh PENDING_SINK row in the SAME atomic completion (no READY hop)
+        # — the merged output is journal-durable before the sink write.
+        assert child_items == []
+        assert len(results) == 1
+        _assert_outcome_pair(results[0], TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
+        assert results[0].sink_name == "output"
+        assert results[0].scheduler_pending_sink is True
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            rows = dict(
+                conn.execute(
+                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                        token_work_items_table.c.run_id == "test-run"
+                    )
+                ).all()
+            )
+        assert rows["merged-1"] == "pending_sink"
+        assert rows["token-1"] == "terminal"
+
+    def test_coalesce_merged_at_terminal_missing_sink_mapping_raises(self) -> None:
+        """Terminal coalesce merge without sink mapping is an internal bug.
+
+        Slice 3 re-pin (ADR-030 §E.2): the terminal fire resolves the sink to
+        build the durable PENDING_SINK emission, so the invariant raises from
+        the intake pass.
+        """
+        _, factory = _make_factory()
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data={},
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1")
         token = TokenInfo(
-            row_id="row-1",
+            row_id=row.row_id,
             token_id="token-1",
             row_data=make_row({}),
             branch_name="path_a",
         )
-
-        handled, result = processor._maybe_coalesce_token(
-            token,
-            current_node_id=NodeID("coalesce::merge"),
-            coalesce_node_id=NodeID("coalesce::merge"),
-            coalesce_name=CoalesceName("merge"),
-            child_items=[],
-        )
-
-        assert handled is True
-        assert result is not None
-        _assert_outcome_pair(result, TerminalOutcome.SUCCESS, TerminalPath.COALESCED)
-        assert result.sink_name == "output"
-
-    def test_coalesce_merged_at_terminal_missing_sink_mapping_raises(self) -> None:
-        """Terminal coalesce merge without sink mapping is an internal bug."""
-        _, factory = _make_factory()
-        merged_token = make_token_info(data={"merged": True})
         coalesce = Mock()
-        coalesce.accept.return_value = Mock(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -3310,28 +6311,48 @@ class TestMaybeCoalesceToken:
             node_step_map={NodeID("coalesce::merge"): 3},
             # Intentionally omit coalesce_on_success_map
         )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
+
+        with pytest.raises(OrchestrationInvariantError, match="Coalesce 'merge' not in on_success map"):
+            processor._run_barrier_intake_pass(ctx)
+
+    def test_coalesce_merged_at_non_terminal_queues_work(self) -> None:
+        """Merged at non-terminal step → child work item added, no result.
+
+        F1/D6: the merged child's READY continuation is journal-durable the
+        moment the coalesce fires (inserted by the atomic barrier completion),
+        so the merged token and its row must exist in the audit DB.
+        """
+        db, factory = _make_factory()
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data={},
+        )
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id="coalesce::merge",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1")
         token = TokenInfo(
-            row_id="row-1",
+            row_id=row.row_id,
             token_id="token-1",
             row_data=make_row({}),
             branch_name="path_a",
         )
-
-        with pytest.raises(OrchestrationInvariantError, match="Coalesce 'merge' not in on_success map"):
-            processor._maybe_coalesce_token(
-                token,
-                current_node_id=NodeID("coalesce::merge"),
-                coalesce_node_id=NodeID("coalesce::merge"),
-                coalesce_name=CoalesceName("merge"),
-                child_items=[],
-            )
-
-    def test_coalesce_merged_at_non_terminal_queues_work(self) -> None:
-        """Merged at non-terminal step → child work item added, no result."""
-        _, factory = _make_factory()
-        merged_token = make_token_info(data={"merged": True})
         coalesce = Mock()
-        coalesce.accept.return_value = Mock(held=False, merged_token=merged_token)
+        coalesce.accept.return_value = CoalesceOutcome(held=False, merged_token=merged_token, consumed_tokens=(token,))
         processor = _make_processor(
             factory,
             coalesce_executor=coalesce,
@@ -3339,29 +6360,36 @@ class TestMaybeCoalesceToken:
             node_step_map={NodeID("coalesce::merge"): 2},
             node_to_next={NodeID("coalesce::merge"): NodeID("transform-5")},
         )
-        token = TokenInfo(
-            row_id="row-1",
-            token_id="token-1",
-            row_data=make_row({}),
-            branch_name="path_a",
-        )
-        child_items: list[WorkItem] = []
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        # Slice 3 re-pin (ADR-030 §E.2): the merge fires from the
+        # journal-first intake, not from an in-claim accept.
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
 
-        handled, result = processor._maybe_coalesce_token(
-            token,
-            current_node_id=NodeID("coalesce::merge"),
-            coalesce_node_id=NodeID("coalesce::merge"),
-            coalesce_name=CoalesceName("merge"),
-            child_items=child_items,
-        )
+        results, child_items = processor._run_barrier_intake_pass(ctx)
 
-        assert handled is True
-        assert result is None
+        assert results == []
         assert len(child_items) == 1
         assert child_items[0].current_node_id == NodeID("coalesce::merge")
+        # The merged child's continuation is already journal-durable (F1/D6).
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, node_id = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.node_id).where(
+                    token_work_items_table.c.token_id == "merged-1"
+                )
+            ).one()
+        assert (status, node_id) == ("ready", "coalesce::merge")
 
     def test_invalid_coalesce_outcome_state_raises_invariant(self) -> None:
-        """CoalesceOutcome must be held, merged, or failed; empty state is invalid."""
+        """CoalesceOutcome must be held, merged, or failed; empty state is invalid.
+
+        Slice 3 re-pin (ADR-030 §E.2): the executor accept runs at intake, so
+        the invalid-state invariant fires from the intake pass.
+        """
         _db, factory = _make_factory()
         coalesce = Mock()
         coalesce.accept.return_value = Mock(
@@ -3369,6 +6397,7 @@ class TestMaybeCoalesceToken:
             merged_token=None,
             failure_reason=None,
             outcomes_recorded=False,
+            late_arrival=False,
         )
         processor = _make_processor(
             factory,
@@ -3382,15 +6411,131 @@ class TestMaybeCoalesceToken:
             row_data=make_row({}),
             branch_name="path_a",
         )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        _persist_blocked_scheduler_work(factory, processor, token, node_id=NodeID("coalesce::merge"), barrier_key="merge", adopted=False)
+        processor._live_barrier_holds[token.token_id] = _LiveBarrierHold(token=token, barrier_key="merge")
 
         with pytest.raises(OrchestrationInvariantError, match="invalid state"):
-            processor._maybe_coalesce_token(
-                token,
-                current_node_id=NodeID("coalesce::merge"),
-                coalesce_node_id=NodeID("coalesce::merge"),
-                coalesce_name=CoalesceName("merge"),
-                child_items=[],
+            processor._run_barrier_intake_pass(ctx)
+
+
+# =============================================================================
+# complete_coalesce_merge (out-of-claim timeout/EOF coalesce fire, F1/D6)
+# =============================================================================
+
+
+class TestCompleteCoalesceMerge:
+    """Real-journal proof of the orchestrator-facing atomic coalesce merge verb."""
+
+    def test_complete_coalesce_merge_consumes_siblings_and_drives_merged_child(self) -> None:
+        """ONE atomic transition: held branches -> TERMINAL, merged child READY+claimed.
+
+        Out-of-claim fires (timeout/EOF) have no LEASED triggering token: every
+        held branch is BLOCKED, and the merged child must be journal-durable
+        before the consumed branches are terminalized. The drain's initial
+        enqueue then reconciles idempotently against the READY row inserted by
+        the barrier completion (strict field equality) and claims it.
+        """
+        db, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id=str(coalesce_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        payload = make_row({"value": 7})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=payload.to_dict(),
+        )
+        # One held branch, BLOCKED at the coalesce barrier through the
+        # production verbs (enqueue -> claim -> mark_blocked).
+        factory.data_flow.create_token(row.row_id, token_id="token-held-a", branch_name="path_a", fork_group_id="fork-1")
+        now = datetime.now(UTC)
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id="token-held-a",
+            row_id=row.row_id,
+            node_id=str(coalesce_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(payload),
+            available_at=now,
+            branch_name="path_a",
+            fork_group_id="fork-1",
+            coalesce_node_id=str(coalesce_node),
+            coalesce_name="merge",
+        )
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="seeder", lease_seconds=60, now=now)
+        assert claimed is not None and claimed.token_id == "token-held-a"
+        factory.scheduler.mark_blocked(
+            work_item_id=claimed.work_item_id,
+            queue_key=None,
+            barrier_key="merge",
+            now=now,
+            expected_lease_owner="seeder",
+        )
+        held_token = TokenInfo(
+            row_id=row.row_id,
+            token_id="token-held-a",
+            row_data=payload,
+            branch_name="path_a",
+            fork_group_id="fork-1",
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"value": 7})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1", join_group_id="join-1")
+
+        processor = _make_processor(
+            factory,
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            node_step_map={NodeID("source-0"): 0, coalesce_node: 1},
+            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: None},
+            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+            scheduler=factory.scheduler,
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        results = processor.complete_coalesce_merge(
+            coalesce_name=CoalesceName("merge"),
+            consumed_tokens=(held_token,),
+            merged_token=merged_token,
+            coalesce_node_id=coalesce_node,
+            ctx=ctx,
+        )
+
+        # The merged token was driven to its terminal coalesce sink handoff
+        # (same continuation semantics as the old process_token hop: the
+        # merged token resolves the coalesce on_success sink).
+        assert len(results) == 1
+        assert results[0].token.token_id == "merged-1"
+        assert (results[0].outcome, results[0].path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)
+        assert results[0].sink_name == "merged_sink"
+        assert results[0].scheduler_pending_sink is True
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            statuses = dict(
+                conn.execute(
+                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                        token_work_items_table.c.token_id.in_(["token-held-a", "merged-1"])
+                    )
+                ).all()
             )
+        assert statuses == {
+            "token-held-a": "terminal",
+            "merged-1": "pending_sink",
+        }
 
 
 # =============================================================================
@@ -3481,6 +6626,13 @@ class TestNotifyCoalesceOfLostBranch:
             coalesce_node_ids={CoalesceName("merge"): NodeID("coalesce::merge")},
             node_step_map={NodeID("coalesce::merge"): 3},
         )
+        _persist_blocked_scheduler_work(
+            factory,
+            processor,
+            sibling_token,
+            node_id=NodeID("coalesce::merge"),
+            barrier_key="merge",
+        )
         token = TokenInfo(
             row_id="row-1",
             token_id="token-1",
@@ -3567,9 +6719,32 @@ class TestNotifyCoalesceOfLostBranch:
             )
 
     def test_lost_branch_triggers_nonterminal_merge_queues_work(self) -> None:
-        """Branch loss triggers merge at non-terminal step → queues work."""
-        _, factory = _make_factory()
-        merged_token = make_token_info(data={"merged": True})
+        """Branch loss triggers merge at non-terminal step → queues work.
+
+        F1/D6: the merged child's READY continuation is journal-durable the
+        moment the merge fires, so the merged token and its row must exist
+        in the audit DB.
+        """
+        db, factory = _make_factory()
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data={},
+        )
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="coalesce:merge",
+            node_type=NodeType.COALESCE,
+            plugin_version="1.0",
+            config={},
+            node_id="coalesce::merge",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        merged_token = make_token_info(row_id=row.row_id, token_id="merged-1", data={"merged": True})
+        factory.data_flow.create_token(row.row_id, token_id="merged-1")
         coalesce = Mock()
         coalesce.notify_branch_lost.return_value = Mock(
             merged_token=merged_token,
@@ -3586,7 +6761,7 @@ class TestNotifyCoalesceOfLostBranch:
             node_to_next={NodeID("coalesce::merge"): NodeID("transform-4")},
         )
         token = TokenInfo(
-            row_id="row-1",
+            row_id=row.row_id,
             token_id="token-1",
             row_data=make_row({}),
             branch_name="path_a",
@@ -3601,6 +6776,18 @@ class TestNotifyCoalesceOfLostBranch:
         assert results == []
         assert len(child_items) == 1
         assert child_items[0].current_node_id == NodeID("coalesce::merge")
+        # The merged child's continuation is already journal-durable (F1/D6).
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with db.connection() as conn:
+            status, node_id = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.node_id).where(
+                    token_work_items_table.c.token_id == "merged-1"
+                )
+            ).one()
+        assert (status, node_id) == ("ready", "coalesce::merge")
 
 
 # =============================================================================
@@ -3628,7 +6815,6 @@ class TestUnknownTransformType:
             factory,
             node_step_map={source_node: 0, fake_node: 1},
             node_to_next={source_node: fake_node, fake_node: None},
-            first_transform_node_id=fake_node,
             node_to_plugin={fake_node: fake_plugin},
         )
 
@@ -3638,6 +6824,8 @@ class TestUnknownTransformType:
                 source_row=source_row,
                 transforms=[fake_plugin],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
 
@@ -3670,7 +6858,6 @@ class TestRoutingInvariantFailures:
             source_on_success="   ",
             node_step_map={NodeID("source-0"): 0},
             node_to_next={NodeID("source-0"): None},
-            first_transform_node_id=None,
         )
 
         with pytest.raises(OrchestrationInvariantError, match="No effective sink for token"):
@@ -3679,6 +6866,8 @@ class TestRoutingInvariantFailures:
                 source_row=source_row,
                 transforms=[],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
 
@@ -3734,22 +6923,49 @@ class TestAggregationFacades:
 
         assert count == 5
 
-    def test_get_aggregation_checkpoint_state_delegates(self) -> None:
-        """get_aggregation_checkpoint_state delegates to aggregation_executor."""
+    def test_get_barrier_scalars_composes_aggregation_executor(self) -> None:
+        """get_barrier_scalars composes the aggregation executor's latches (F1 Task 2.4).
+
+        Aggregation entries are re-keyed by str(node_id); with no coalesce
+        executor wired, the coalesce side is empty.
+        """
+        from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
+
         _, factory = _make_factory()
         processor = _make_processor(factory)
 
-        checkpoint: dict[str, Any] = {"agg-1": {"buffer": [], "trigger_state": {}}}
+        node_scalars = AggregationNodeScalars(count_fire_offset=0.5, condition_fire_offset=None)
         with patch.object(
             processor._aggregation_executor,
-            "get_checkpoint_state",
-            return_value=checkpoint,
+            "get_barrier_scalars",
+            return_value={NodeID("agg-1"): node_scalars},
         ):
-            result = processor.get_aggregation_checkpoint_state()
+            result = processor.get_barrier_scalars()
 
-        # Mock returns raw dict; runtime return type is AggregationCheckpointState.
-        # Comparing across types is intentional — verifying pass-through delegation.
-        assert result == checkpoint  # type: ignore[comparison-overlap]
+        assert isinstance(result, BarrierScalars)
+        assert dict(result.aggregation) == {"agg-1": node_scalars}
+        assert dict(result.coalesce) == {}  # no coalesce executor → empty
+
+    def test_get_barrier_scalars_composes_coalesce_executor(self) -> None:
+        """get_barrier_scalars folds in the coalesce executor's lost-branch scalars."""
+        from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
+
+        _, factory = _make_factory()
+        coalesce_executor = Mock()
+        pending_scalars = CoalescePendingScalars(lost_branches={"branch_b": "transform_failed"})
+        coalesce_executor.get_barrier_scalars.return_value = {("merge", "row-1"): pending_scalars}
+        processor = _make_processor(factory, coalesce_executor=coalesce_executor)
+
+        with patch.object(
+            processor._aggregation_executor,
+            "get_barrier_scalars",
+            return_value={},
+        ):
+            result = processor.get_barrier_scalars()
+
+        assert isinstance(result, BarrierScalars)
+        assert dict(result.aggregation) == {}
+        assert dict(result.coalesce) == {("merge", "row-1"): pending_scalars}
 
 
 # =============================================================================
@@ -3816,7 +7032,6 @@ class TestTerminalDeaggregationSinkRouting:
             source_on_success="source_sink",
             node_step_map={source_node: 0, transform_node: 1},
             node_to_next={source_node: transform_node, transform_node: None},
-            first_transform_node_id=transform_node,
             node_to_plugin={transform_node: transform},
         )
 
@@ -3833,6 +7048,8 @@ class TestTerminalDeaggregationSinkRouting:
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         # Parent should be EXPANDED (no sink_name)
@@ -3892,7 +7109,6 @@ class TestTerminalDeaggregationSinkRouting:
             source_on_success="source_sink",
             node_step_map={source_node: 0, expander_node: 1, terminal_node: 2},
             node_to_next={source_node: expander_node, expander_node: terminal_node, terminal_node: None},
-            first_transform_node_id=expander_node,
             node_to_plugin={expander_node: expander, terminal_node: terminal},
         )
 
@@ -3915,6 +7131,8 @@ class TestTerminalDeaggregationSinkRouting:
                 source_row=source_row,
                 transforms=[expander, terminal],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
         # Should have 1 EXPANDED + 2 COMPLETED (children processed through terminal)
@@ -3984,7 +7202,6 @@ class TestCoalesceTraversalInvariant:
                 coalesce_node: downstream_node,
                 downstream_node: None,
             },
-            first_transform_node_id=transform_node,
             node_to_plugin={downstream_node: transform},
             coalesce_node_ids={CoalesceName("merge"): coalesce_node},
             coalesce_on_success_map={CoalesceName("merge"): "output"},
@@ -4029,7 +7246,6 @@ class TestCoalesceTraversalInvariant:
             source_on_success="output",
             node_step_map={source_node: 0, coalesce_node: 1},
             node_to_next={source_node: coalesce_node, coalesce_node: None},
-            first_transform_node_id=coalesce_node,
             coalesce_node_ids={CoalesceName("merge"): coalesce_node},
             coalesce_on_success_map={CoalesceName("merge"): "output"},
         )
@@ -4041,17 +7257,20 @@ class TestCoalesceTraversalInvariant:
             branch_name="path_a",
         )
         # Should not raise — at coalesce node, not past it.
-        # Without coalesce_executor, coalesce handling is skipped (returns False, None)
-        # and the token completes normally. The invariant check only validates
-        # traversal ordering, not coalesce executor presence.
-        result, _ = processor._process_single_token(
+        # ADR-030 §B (slice 5): without coalesce_executor (follower mode),
+        # _maybe_coalesce_token returns (True, None) → mark_blocked hand-off.
+        # result is None and child_items is [] — the outer drain calls
+        # mark_blocked so the leader's next intake adopts the arrival.
+        result, child_items = processor._process_single_token(
             token=token,
             ctx=ctx,
             current_node_id=coalesce_node,
             coalesce_node_id=coalesce_node,
             coalesce_name=CoalesceName("merge"),
         )
-        assert result is not None
+        # Follower coalesce barrier: (None, []) → mark_blocked, not a completion.
+        assert result is None
+        assert child_items == []
 
 
 class TestTerminalWorkItemInvariant:
@@ -4140,7 +7359,6 @@ class TestGateSinkRoutingNotifiesCoalesce:
             source_on_success="default",
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config},
             coalesce_executor=coalesce,
             branch_to_coalesce={BranchName("path_a"): CoalesceName("merge")},
@@ -4235,11 +7453,17 @@ class TestGateSinkRoutingNotifiesCoalesce:
             source_on_success="default",
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config},
             coalesce_executor=coalesce,
             branch_to_coalesce={BranchName("path_a"): CoalesceName("merge")},
             coalesce_node_ids={CoalesceName("merge"): NodeID("coalesce::merge")},
+        )
+        _persist_blocked_scheduler_work(
+            factory,
+            processor,
+            sibling_token,
+            node_id=NodeID("coalesce::merge"),
+            barrier_key="merge",
         )
 
         token = TokenInfo(
@@ -4316,7 +7540,6 @@ class TestGateSinkRoutingNotifiesCoalesce:
             source_on_success="default",
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config},
             coalesce_executor=coalesce,
         )
@@ -4389,7 +7612,6 @@ class TestGateSinkRoutingNotifiesCoalesce:
             source_on_success="default",
             node_step_map={source_node: 0, gate_node: 1},
             node_to_next={source_node: gate_node, gate_node: None},
-            first_transform_node_id=gate_node,
             node_to_plugin={gate_node: gate_config},
             coalesce_executor=Mock(),
         )
@@ -4487,7 +7709,6 @@ class TestGateJumpPastCoalesceInvariant:
                 coalesce_node: past_coalesce_node,
                 past_coalesce_node: None,
             },
-            first_transform_node_id=gate_node,
             node_to_plugin={
                 gate_node: config_gate,
                 past_coalesce_node: past_coalesce_transform,
@@ -4588,7 +7809,6 @@ class TestGateJumpPastCoalesceInvariant:
                 transform_node: coalesce_node,
                 coalesce_node: None,
             },
-            first_transform_node_id=gate_node,
             node_to_plugin={
                 gate_node: config_gate,
                 transform_node: transform,
@@ -4652,9 +7872,13 @@ class TestGateJumpPastCoalesceInvariant:
         # Token should be held at the coalesce node without emitting a terminal result.
         assert result is None
         assert _child_items == []
-        coalesce_exec.accept.assert_called_once()
-        assert coalesce_exec.accept.call_args.kwargs["token"].token_id == "tok-1"
-        assert coalesce_exec.accept.call_args.kwargs["coalesce_name"] == CoalesceName("merge")
+        # Slice 3 re-pin (ADR-030 §E.2): acceptance is journal-first — the
+        # in-claim accept is gone. The hold is stashed for the next drain
+        # iteration's intake (which runs the executor accept post-adoption).
+        coalesce_exec.accept.assert_not_called()
+        hold = processor._live_barrier_holds["tok-1"]
+        assert hold.barrier_key == "merge"
+        assert hold.token.token_id == "tok-1"
 
 
 class TestFlushContextImmutability:
@@ -4813,3 +8037,263 @@ class TestHandleTransformErrorStatusRoutedOnError:
         # str() of the whole reason dict, not literal "unknown_error".
         assert "transform_failed_for_reasons" in result.error.message
         assert result.error.message != "unknown_error"
+
+
+# =============================================================================
+# F1 derivation-parity pins (Task 3.4 review follow-ups)
+# =============================================================================
+
+
+class TestReadyEmissionEnqueueParity:
+    """Pin: ``_ready_emission_from_work_item`` mirrors ``_enqueue_scheduler_work_item``.
+
+    The merged-coalesce READY emission (inserted atomically by
+    ``complete_barrier`` via ``_insert_ready_emission``) and the drain loop's
+    idempotent ``enqueue_ready`` for the SAME WorkItem must derive identical
+    field values: the enqueue reconciles against the emission-inserted row by
+    deterministic ``work_item_id`` + strict field equality, so any derivation
+    drift between the two processor builders fails in production at
+    reconciliation time. This pin makes that drift fail in CI instead.
+
+    The test lives processor-side because BOTH builders under comparison are
+    ``RowProcessor`` methods; the repository mapper
+    (``_ready_work_item_values``) is shared by construction and is used here
+    as the common projection onto the full journal-row column set.
+    """
+
+    @pytest.mark.parametrize(
+        "flavor",
+        [
+            # Maximal coalesce-cursor item: full fork/join/expand lineage +
+            # coalesce fields set (queue_key derives None — queue blocking and
+            # coalesce barriers are mutually exclusive by derivation).
+            "coalesce_cursor",
+            # Structural-queue item: full lineage, no coalesce fields, current
+            # node structural (in node_to_next, no plugin) so queue_key derives
+            # the node id.
+            "structural_queue",
+        ],
+    )
+    def test_ready_emission_mirrors_enqueue_work_item_fields(self, flavor: str, monkeypatch: pytest.MonkeyPatch) -> None:
+        _, factory = _make_factory()
+        coalesce_node = NodeID("coalesce::merge")
+        continue_node = NodeID("after-merge")
+        processor = _make_processor(
+            factory,
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+            node_step_map={NodeID("source-0"): 0, coalesce_node: 1, continue_node: 2},
+            node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: continue_node, continue_node: None},
+            coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+        )
+
+        # Lineage note: the audit trail enforces fork_group_id XOR
+        # join_group_id at token creation, so the two flavors split the
+        # lineage fields between them — together they pin every lineage
+        # column non-None at least once.
+        if flavor == "coalesce_cursor":
+            token = TokenInfo(
+                row_id="row-1",
+                token_id="token-merged-1",
+                row_data=make_pipeline_row({"value": 42}),
+                branch_name="path_a",
+                fork_group_id="fork-1",
+                expand_group_id="expand-1",
+            )
+            _persist_token_for_scheduler(factory, token)
+            item = WorkItem(
+                token=token,
+                current_node_id=continue_node,
+                coalesce_node_id=coalesce_node,
+                coalesce_name=CoalesceName("merge"),
+                on_success_sink="merged_sink",
+            )
+        else:
+            token = TokenInfo(
+                row_id="row-1",
+                token_id="token-merged-1",
+                row_data=make_pipeline_row({"value": 42}),
+                join_group_id="join-1",
+                expand_group_id="expand-1",
+            )
+            _persist_token_for_scheduler(factory, token)
+            item = WorkItem(
+                token=token,
+                current_node_id=continue_node,
+                on_success_sink="merged_sink",
+            )
+
+        emission = processor._ready_emission_from_work_item(item)
+
+        captured: dict[str, Any] = {}
+        real_enqueue = factory.scheduler.enqueue_ready
+
+        def _capturing_enqueue(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return real_enqueue(**kwargs)
+
+        monkeypatch.setattr(factory.scheduler, "enqueue_ready", _capturing_enqueue)
+        scheduled = processor._enqueue_scheduler_work_item(item, {})
+        assert captured, "enqueue_ready was not invoked"
+
+        # Project BOTH derivations through the production journal-row mapper
+        # (_ready_work_item_values — the single mapper used by enqueue_ready
+        # AND complete_barrier's _insert_ready_emission) with a pinned clock,
+        # then require strict equality across the FULL column set.
+        pinned_now = datetime(2026, 1, 1, tzinfo=UTC)
+        enqueue_kwargs = dict(captured)
+        enqueue_kwargs["available_at"] = pinned_now
+        enqueue_kwargs.setdefault("attempt", 1)
+        # worker_id is an enqueue_ready-only membership-fence kwarg; strip it
+        # before projecting through the journal-row mapper which does not accept it.
+        enqueue_kwargs.pop("worker_id", None)
+        values_from_enqueue = factory.scheduler._ready_work_item_values(**enqueue_kwargs)
+
+        # Mirror _insert_ready_emission's emission -> values mapping exactly.
+        values_from_emission = factory.scheduler._ready_work_item_values(
+            run_id=processor.run_id,
+            token_id=emission.token_id,
+            row_id=emission.row_id,
+            node_id=emission.node_id,
+            step_index=emission.step_index,
+            ingest_sequence=emission.ingest_sequence,
+            row_payload_json=emission.row_payload_json,
+            available_at=pinned_now,
+            attempt=emission.attempt,
+            queue_key=emission.queue_key,
+            barrier_key=emission.barrier_key,
+            on_success_sink=emission.on_success_sink,
+            branch_name=emission.branch_name,
+            fork_group_id=emission.fork_group_id,
+            join_group_id=emission.join_group_id,
+            expand_group_id=emission.expand_group_id,
+            coalesce_node_id=emission.coalesce_node_id,
+            coalesce_name=emission.coalesce_name,
+        )
+
+        assert values_from_emission == values_from_enqueue
+        # Pin the projected column count: adding a journal column to ONE of
+        # the two builders (or to the mapper) must force this pin to be
+        # revisited rather than silently desync the reconciliation contract.
+        assert len(values_from_emission) == 29
+
+        # Spot-check the per-flavor derived keys so a failure localizes.
+        if flavor == "coalesce_cursor":
+            assert values_from_emission["queue_key"] is None
+            assert values_from_emission["barrier_key"] == "merge"
+            assert values_from_emission["coalesce_node_id"] == str(coalesce_node)
+            assert values_from_emission["coalesce_name"] == "merge"
+            assert values_from_emission["branch_name"] == "path_a"
+            assert values_from_emission["fork_group_id"] == "fork-1"
+        else:
+            assert values_from_emission["queue_key"] == str(continue_node)
+            assert values_from_emission["barrier_key"] is None
+            assert values_from_emission["coalesce_node_id"] is None
+            assert values_from_emission["coalesce_name"] is None
+            assert values_from_emission["join_group_id"] == "join-1"
+        assert values_from_emission["expand_group_id"] == "expand-1"
+        assert values_from_emission["step_index"] == 2
+
+        # And the live reconciliation accepted the enqueue against the same
+        # deterministic work_item_id (no drift at the idempotent insert).
+        assert scheduled.work_item_id == values_from_emission["work_item_id"]
+
+
+class TestPendingSinkAttemptOffsetSinkStepScoping:
+    """Pin: PENDING_SINK re-drive attempt offsets are SINK-step scoped.
+
+    A re-driven PENDING_SINK token only ever writes ONE further node_state —
+    the sink write. Its attempt offset must therefore derive from
+    ``get_max_node_state_attempts(..., step_index=sink_step)``: attempts
+    recorded at PRODUCER steps (e.g. a transform retried twice before the
+    crash) must not inflate the sink-write attempt number.
+    """
+
+    def test_producer_attempts_do_not_inflate_pending_sink_redrive_offset(self) -> None:
+        from elspeth.contracts.scheduler import TokenWorkItem, TokenWorkStatus
+
+        _, factory = _make_factory()
+        producer_node = NodeID("transform-1")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, producer_node: 1},
+            node_to_next={NodeID("source-0"): producer_node, producer_node: None},
+            barrier_restore=BarrierJournalRestoreContext(
+                resume_checkpoint_id="ckpt-resume-1",
+                barrier_scalars=None,
+                batch_id_remap={},
+            ),
+        )
+        sink_step = processor.resolve_sink_step()
+        assert sink_step == 2
+
+        token = TokenInfo(
+            row_id="row-1",
+            token_id="token-redrive-1",
+            row_data=make_pipeline_row({"value": 42}),
+        )
+        _persist_token_for_scheduler(factory, token)
+
+        # Register a sink node so sink-step node_states satisfy the FK.
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="collect-sink",
+            node_type=NodeType.SINK,
+            plugin_version="1.0",
+            config={},
+            node_id="sink-1",
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        # Audited history: the PRODUCER step retried twice (attempts 0..2)...
+        for attempt in range(3):
+            factory.execution.begin_node_state(
+                token_id=token.token_id,
+                node_id=str(producer_node),
+                run_id="test-run",
+                step_index=1,
+                input_data={"value": 42},
+                attempt=attempt,
+            )
+        # ...while the SINK step only opened attempt 0 (the crashed write).
+        factory.execution.begin_node_state(
+            token_id=token.token_id,
+            node_id="sink-1",
+            run_id="test-run",
+            step_index=sink_step,
+            input_data={"value": 42},
+            attempt=0,
+        )
+
+        # Discriminator precondition: an UNSCOPED max over all steps WOULD
+        # see the producer's attempt 2 and over-bump the offset to 3.
+        unscoped = factory.execution.get_max_node_state_attempts("test-run", [token.token_id])
+        assert unscoped[token.token_id] == 2
+
+        now = datetime.now(UTC)
+        scheduled = TokenWorkItem(
+            work_item_id="wi-redrive-1",
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=token.row_id,
+            node_id=None,
+            step_index=sink_step,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(token.row_data),
+            status=TokenWorkStatus.PENDING_SINK,
+            attempt=1,
+            available_at=now,
+            created_at=now,
+            updated_at=now,
+            pending_sink_name="default",
+            pending_outcome=TerminalOutcome.SUCCESS.value,
+            pending_path=TerminalPath.DEFAULT_FLOW.value,
+        )
+
+        result = processor._row_result_from_pending_sink(scheduled)
+
+        # Sink-step scoped: max sink attempt 0 -> offset 1. NOT the
+        # producer-inflated 3.
+        assert result.token.resume_attempt_offset == 1
+        assert result.token.resume_checkpoint_id == "ckpt-resume-1"
+        assert result.scheduler_pending_sink is True
+        assert result.sink_name == "default"

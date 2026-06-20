@@ -63,8 +63,8 @@ def test_source_row_payloads_are_stored_during_run(tmp_path: Path, payload_store
             pass
 
         def load(self, ctx: Any) -> Any:
-            for row in self._data:
-                yield SourceRow.valid(row, contract=create_observed_contract(row))
+            for source_row_index, row in enumerate(self._data):
+                yield SourceRow.valid(row, contract=create_observed_contract(row), source_row_index=source_row_index)
 
         def close(self) -> None:
             pass
@@ -88,7 +88,7 @@ def test_source_row_payloads_are_stored_during_run(tmp_path: Path, payload_store
             from elspeth.contracts.diversion import SinkWriteResult
 
             self.received_rows.extend(rows)
-            artifact = ArtifactDescriptor.for_file(path="memory://test", size_bytes=len(rows), content_hash="test_hash")
+            artifact = ArtifactDescriptor.for_file(path="memory://test", size_bytes=len(rows), content_hash="a" * 64)
             return SinkWriteResult(artifact=artifact)
 
     test_source = _PayloadTestSource(source_data)
@@ -96,7 +96,7 @@ def test_source_row_payloads_are_stored_during_run(tmp_path: Path, payload_store
 
     # Build pipeline config
     config = PipelineConfig(
-        source=as_source(test_source),
+        sources={"primary": as_source(test_source)},
         transforms=[],
         sinks={"output": as_sink(test_sink)},
         config={},

@@ -892,6 +892,28 @@ class TestCSVSourceQuarantineYielding:
 
         assert results == []
 
+    def test_truncated_utf16_decode_error_uses_next_data_row_index(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Decode errors after emitted data rows must not reuse the first row index."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_bytes("id,name\n1,alice\n2,bob\n".encode("utf-16") + b"\x00")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "encoding": "utf-16",
+                "on_validation_failure": "quarantine",
+                "schema": DYNAMIC_SCHEMA,
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        assert [row.source_row_index for row in rows] == [0, 1, 2]
+        assert rows[2].is_quarantined is True
+        assert "CSV decode error" in rows[2].quarantine_error
+
 
 class TestCSVSourceFieldNormalization:
     """Integration tests for CSV source with field normalization."""

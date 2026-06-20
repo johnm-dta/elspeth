@@ -32,11 +32,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response as StarletteResponse
 
+from elspeth.contracts import RunStatus
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.secrets import (
     FingerprintKeyMissingError,
     SecretDecryptionError,
 )
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.plugins.transforms.llm.model_catalog import (
     prime_openrouter_catalog_from_live,
@@ -58,7 +61,7 @@ from elspeth.web.composer.progress import ComposerProgressRegistry
 from elspeth.web.composer.service import ComposerServiceImpl
 from elspeth.web.composer.tutorial_abandon_routes import create_tutorial_abandon_router
 from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
-from elspeth.web.config import _LOCAL_HOSTS, WebSettings
+from elspeth.web.config import WebSettings, _allow_insecure_test_keys
 from elspeth.web.dependencies import create_catalog_service
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.routes import create_execution_router
@@ -75,11 +78,11 @@ from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, StaleComposeStateError
+from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, RunRecord, StaleComposeStateError
 from elspeth.web.sessions.routes import create_session_router
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
-from elspeth.web.sessions.telemetry import build_sessions_telemetry
+from elspeth.web.sessions.telemetry import _SessionsTelemetry, build_sessions_telemetry
 from elspeth.web.shareable_reviews.routes import create_shareable_reviews_router
 from elspeth.web.shareable_reviews.service import ShareableReviewService
 from elspeth.web.shareable_reviews.signer import ShareTokenSigner
@@ -156,12 +159,43 @@ def _parse_worker_count(raw_value: str, *, signal_name: str) -> int:
         ) from exc
 
 
+def _finalize_orphaned_landscape_runs(landscape_url: str, cancelled_runs: list[RunRecord]) -> int:
+    """Mark Landscape rows interrupted for session runs cancelled as orphans."""
+    landscape_run_ids: list[str] = []
+    seen: set[str] = set()
+    for run in cancelled_runs:
+        if run.landscape_run_id is None or run.landscape_run_id in seen:
+            continue
+        seen.add(run.landscape_run_id)
+        landscape_run_ids.append(run.landscape_run_id)
+
+    if not landscape_run_ids:
+        return 0
+
+    finalized = 0
+    with LandscapeDB.from_url(landscape_url) as landscape_db:
+        lifecycle = RecorderFactory(landscape_db).run_lifecycle
+        for landscape_run_id in landscape_run_ids:
+            landscape_run = lifecycle.get_run(landscape_run_id)
+            if landscape_run is None:
+                raise AuditIntegrityError(
+                    f"Orphan cleanup cancelled a session run with landscape_run_id={landscape_run_id!r}, "
+                    "but no matching Landscape run row exists."
+                )
+            if landscape_run.status == RunStatus.RUNNING:
+                lifecycle.complete_run(landscape_run_id, RunStatus.INTERRUPTED)
+                finalized += 1
+    return finalized
+
+
 async def _periodic_orphan_cleanup(
     session_service: SessionServiceImpl,
     execution_service: ExecutionServiceImpl,
+    telemetry: _SessionsTelemetry,
     *,
     interval_seconds: int,
     max_age_seconds: int,
+    landscape_url: str | None = None,
 ) -> None:
     """Background task that periodically cancels orphaned runs.
 
@@ -182,13 +216,25 @@ async def _periodic_orphan_cleanup(
         await asyncio.sleep(interval_seconds)
         try:
             live_run_ids = execution_service.get_live_run_ids()
-            cancelled = await session_service.cancel_all_orphaned_runs(
-                max_age_seconds=max_age_seconds,
-                exclude_run_ids=live_run_ids,
-                reason="Orphaned by periodic cleanup — no active executor thread",
-            )
+            if landscape_url is None:
+                cancelled = await session_service.cancel_all_orphaned_runs(
+                    max_age_seconds=max_age_seconds,
+                    exclude_run_ids=live_run_ids,
+                    reason="Orphaned by periodic cleanup — no active executor thread",
+                )
+            else:
+                cancelled_runs = await session_service.cancel_all_orphaned_run_records(
+                    max_age_seconds=max_age_seconds,
+                    exclude_run_ids=live_run_ids,
+                    reason="Orphaned by periodic cleanup — no active executor thread",
+                )
+                _finalize_orphaned_landscape_runs(landscape_url, cancelled_runs)
+                cancelled = len(cancelled_runs)
             if cancelled:
-                slog.info("periodic_orphan_cleanup", cancelled=cancelled, excluded=len(live_run_ids))
+                telemetry.orphaned_runs_cancelled_total.add(
+                    cancelled,
+                    attributes={"source": "periodic", "excluded_live_runs": len(live_run_ids)},
+                )
         except (SQLAlchemyError, OSError) as cleanup_exc:
             # Narrow catch — only recoverable audit/IO failures are
             # absorbed so the loop retries on the next interval.
@@ -242,11 +288,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # No age filter — cancel ALL pending/running runs immediately.
     settings: WebSettings = app.state.settings
     session_service = app.state.session_service
-    cancelled = await session_service.cancel_all_orphaned_runs(
+    cancelled_runs = await session_service.cancel_all_orphaned_run_records(
         reason="Orphaned by server restart — no active process",
     )
+    _finalize_orphaned_landscape_runs(settings.get_landscape_url(), cancelled_runs)
+    cancelled = len(cancelled_runs)
     if cancelled:
-        slog.info("cancelled_orphaned_runs", count=cancelled)
+        app.state.sessions_telemetry.orphaned_runs_cancelled_total.add(
+            cancelled,
+            attributes={"source": "startup", "excluded_live_runs": 0},
+        )
 
     # Resolve OIDC authorization_endpoint from discovery or explicit config
     if settings.auth_provider in ("oidc", "entra"):
@@ -281,7 +332,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Sub-5: Construct ProgressBroadcaster and ExecutionServiceImpl
     # These require a running event loop, which is only available here.
     loop = asyncio.get_running_loop()
-    broadcaster = ProgressBroadcaster(loop)
+    broadcaster = ProgressBroadcaster(loop, telemetry=app.state.sessions_telemetry)
     app.state.broadcaster = broadcaster
 
     execution_service = ExecutionServiceImpl(
@@ -462,8 +513,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _periodic_orphan_cleanup(
             session_service,
             execution_service,
+            app.state.sessions_telemetry,
             interval_seconds=settings.orphan_run_check_interval_seconds,
             max_age_seconds=settings.orphan_run_max_age_seconds,
+            landscape_url=settings.get_landscape_url(),
         )
     )
 
@@ -497,8 +550,9 @@ def _settings_from_env() -> WebSettings:
     Collection-typed fields are JSON-decoded via ``_JSON_COLLECTION_FIELDS``.
     The JSON literal ``null`` is decoded to ``None`` for all fields — this is
     the env-var convention for "clear this optional setting."  Pydantic rejects
-    ``None`` for non-nullable fields, so there is no silent mistyping risk.
-    All other scalar values pass as raw strings; Pydantic coerces
+    ``None`` for non-nullable fields. Unknown setting names are rejected before
+    model construction so deployment typos fail startup with the original
+    environment variable name. All other scalar values pass as raw strings; Pydantic coerces
     str→int, str→float, str→Path automatically.
     """
     kwargs: dict[str, object] = {}
@@ -506,6 +560,8 @@ def _settings_from_env() -> WebSettings:
     for key, value in os.environ.items():
         if key.startswith(prefix):
             field_name = key[len(prefix) :].lower()
+            if field_name not in WebSettings.model_fields:
+                raise RuntimeError(f"Unknown ELSPETH_WEB__ setting: {key}")
             if field_name in _JSON_COLLECTION_FIELDS:
                 # These fields are tuple-typed on WebSettings; the env-var
                 # convention is a JSON-encoded array. A non-JSON value cannot
@@ -764,12 +820,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     app.state.oidc_authorization_endpoint = None  # Set by lifespan for OIDC/Entra
 
     # W16/S3: Secret key production guard -- hard crash
-    if (
-        settings.secret_key == "change-me-in-production"
-        and settings.host not in _LOCAL_HOSTS
-        and "pytest" not in sys.modules
-        and os.environ.get("ELSPETH_ENV") != "test"
-    ):
+    if settings.secret_key == "change-me-in-production" and not _allow_insecure_test_keys(settings.host):
         raise SystemExit(
             "FATAL: WebSettings.secret_key is set to the default value. "
             "Set a secure secret_key before starting the web server. "
@@ -932,7 +983,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     def _request_id(request: Request) -> str:
         """Read the correlation id set by RequestIdMiddleware.
 
-        ``RequestIdMiddleware.dispatch`` sets ``request.state.request_id``
+        ``RequestIdMiddleware`` sets ``request.state.request_id``
         before delegating to ``call_next``, so every request that reaches
         a route handler, dependency, or app-level exception handler has the
         id assigned. The exception handlers that call this helper

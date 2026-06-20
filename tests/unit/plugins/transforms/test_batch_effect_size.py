@@ -110,6 +110,31 @@ class TestBatchEffectSize:
         with pytest.raises(TypeError, match="must be numeric"):
             transform.process([_make_row({"variant": "A", "score": 1.0}), _make_row({"variant": "B", "score": "high"})], ctx)
 
+    def test_single_value_group_reports_none_stdev(self, ctx: PluginContext) -> None:
+        """n=1 stdev is undefined -- must emit None, never 0.0 (B4.5-a-effect_size-stdev)."""
+        from elspeth.plugins.transforms.batch_effect_size import BatchEffectSize
+
+        transform = BatchEffectSize({"schema": DYNAMIC_SCHEMA, "variant_field": "variant", "score_field": "score"})
+        rows = [
+            _make_row({"variant": "A", "score": 5.0}),
+            _make_row({"variant": "B", "score": 7.0}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row["baseline_count"] == 1
+        assert result.row["variant_count"] == 1
+        # stdev undefined at n=1 -- honest None, never 0.0
+        assert result.row["baseline_stdev"] is None
+        assert result.row["variant_stdev"] is None
+        # Both groups n=1 -> pooled dispersion denominator (n1+n2-2) is 0, so the
+        # pooled stdev is UNDEFINED, not zero. Emit None rather than a misleading
+        # real 0.0 (B4.5-b-effect_size-pooled). cohens_d stays None.
+        assert result.row["pooled_stdev"] is None
+        assert result.row["cohens_d"] is None
+
 
 class TestBatchEffectSizeConfig:
     @pytest.mark.parametrize(

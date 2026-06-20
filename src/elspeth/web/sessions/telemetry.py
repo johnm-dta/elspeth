@@ -191,6 +191,10 @@ class _SessionsTelemetry:
     # degradation: the Landscape run row remains primary, while WebSocket
     # progress delivery is an ephemeral client-notification channel.
     progress_broadcast_dropped_total: _Counter
+    # Orphan cleanup is operational lifecycle telemetry: the run row is the
+    # permanent record of the cancellation, while this counter exposes cleanup
+    # pressure by source without turning logs into a lifecycle channel.
+    orphaned_runs_cancelled_total: _Counter
     # ── Phase 8 (mode / session-switched / tutorial / B3 cohort / B5) ──
     # Counters added unconditionally to the container even when the
     # consuming emit-site is conditional on an earlier-phase surface
@@ -260,6 +264,7 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
             interpretation_rate_cap_exceeded_total=_FakeCounter(),
             interpretation_placeholder_unresolved_at_runtime_total=_FakeCounter(),
             progress_broadcast_dropped_total=_FakeCounter(),
+            orphaned_runs_cancelled_total=_FakeCounter(),
             # Phase 8 counters.
             mode_opted_out_total=_FakeCounter(),
             mode_opted_in_total=_FakeCounter(),
@@ -293,7 +298,13 @@ def build_sessions_telemetry(*, meter: _Meter | None = None) -> _SessionsTelemet
         progress_broadcast_dropped_total=meter.create_counter(
             "execution.progress.broadcast_dropped_total",
             description=(
-                "Execution progress WebSocket broadcasts dropped because the serving event loop had already closed. Attributes: reason."
+                "Execution progress WebSocket broadcasts dropped or drained under client backpressure. Attributes: reason, run_id when available."
+            ),
+        ),
+        orphaned_runs_cancelled_total=meter.create_counter(
+            "execution.orphaned_runs_cancelled_total",
+            description=(
+                "Runs cancelled by startup or periodic orphan cleanup. Attributes: source, excluded_live_runs for periodic cleanup."
             ),
         ),
         # ── Phase 8 wire names (real-meter branch) ──

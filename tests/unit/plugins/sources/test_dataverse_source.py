@@ -1841,3 +1841,65 @@ class TestDataverseSparseFieldMapping:
         r2b = src2._normalize_row_fields({"contactid": "1"}, is_first_row=False)
         assert r1b == {"contactid": "2", "client_name": "Alice"}
         assert r2b == {"contactid": "1"}
+
+
+class TestFieldResolutionUnion:
+    """B4.3: field resolution after heterogeneous rows must be the UNION."""
+
+    def test_field_resolution_is_union_across_heterogeneous_rows(self) -> None:
+        """B4.3: get_field_resolution() must be the UNION of all keys seen across rows.
+
+        When row1={contactid, name} is followed by row2={contactid, email}, the
+        resolution must contain {contactid, name, email} -- not just {contactid,
+        email} (the last row's keys). Before the fix the rebuild replaced the
+        resolution with list(row.keys()) on the NEW row only, discarding 'name'
+        from the Landscape field-resolution audit record (elspeth-594221617d).
+        """
+        pages = [
+            _make_page(
+                [{"contactid": "1", "fullname": "Alice"}],
+                next_link="https://myorg.crm.dynamics.com/api/data/v9.2/contacts?$skiptoken=1",
+            ),
+            _make_page([{"contactid": "2", "jobtitle": "Engineer"}]),
+        ]
+        source = _make_source_for_load(pages, _base_config())
+        ctx = _mock_source_context()
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 2
+        assert all(not r.is_quarantined for r in rows)
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _ = resolution
+        # Union: all keys from both rows must be present
+        assert "fullname" in mapping, "field 'fullname' from row 1 was lost after row 2 rebuilt the resolution"
+        assert "jobtitle" in mapping, "field 'jobtitle' from row 2 must be present"
+        assert "contactid" in mapping
+
+
+class TestFieldMappingCollisionPolarity:
+    """B3.1: field_mapping-created collisions are config faults (crash), not data
+    faults (quarantine). Mirrors the azure test suite's
+    test_json_field_mapping_collision_crashes_not_quarantines."""
+
+    def test_field_mapping_collision_crashes_not_quarantines(self) -> None:
+        """A field_mapping that collapses two fields into one final name is a CONFIG
+        fault and must crash the run, not be silently quarantined.
+
+        field_mapping={'contactid': 'id'} on a row that also carries a passthrough
+        field 'id' causes check_mapping_collisions to raise a plain ValueError.
+        Before the fix, the broad 'except ValueError' in load() masked it as a
+        per-row quarantine; after the fix only ExternalHeaderError (data faults) is
+        caught, so the plain ValueError propagates and crashes.
+        """
+        pages = [_make_page([{"contactid": "1", "id": "other"}])]
+        source = _make_source_for_load(
+            pages,
+            _base_config(field_mapping={"contactid": "id"}),
+        )
+        ctx = _mock_source_context()
+
+        with pytest.raises(ValueError, match="collision"):
+            list(source.load(ctx))

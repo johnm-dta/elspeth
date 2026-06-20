@@ -1,12 +1,20 @@
 import type { CompositionState, NodeSpec, OutputSpec, SourceSpec } from "@/types/index";
+import { sortedSourceEntries } from "@/utils/compositionState";
 
+// Kept BYTE-IDENTICAL to the backend cache-key constant ``CANONICAL_SEED_PROMPT``
+// in ``src/elspeth/web/preferences/tutorial_cache.py``. Turn 4 posts this string
+// to ``/api/tutorial/run``; the backend only engages the tutorial cache when
+// ``effective_prompt == CANONICAL_SEED_PROMPT``. If the two drift apart the cache
+// silently never hits and every tutorial run goes live. The Python test
+// ``test_canonical_seed_matches_frontend_constant`` fails CI if they diverge.
 export const CANONICAL_TUTORIAL_PROMPT =
   "Create a data source from these five Australian government pages: " +
   "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, " +
   "https://www.oaic.gov.au, and https://www.dta.gov.au. Use abuse contact " +
   "noreply@dta.gov.au and scraping reason 'DTA technical demonstration'. " +
-  "Read the HTML for each page, have an LLM identify the primary colours for " +
-  "each government agency. Remove the HTML and save the rest to a json file.";
+  "Read the HTML for each page, have an LLM return a single fact about each " +
+  "government agency based on the page HTML. Remove the HTML and save the " +
+  "rest to a json file.";
 
 export type TutorialStep =
   | "welcome"
@@ -203,19 +211,23 @@ export function tutorialReducer(
 export function summariseCompositionState(
   state: CompositionState,
 ): TutorialBuiltSummary {
+  const sources = sortedSourceEntries(state);
   return {
-    sourceLabel: summariseSource(state.source),
-    urls: collectUrls(state.source?.options ?? {}).slice(0, 10),
+    sourceLabel: summariseSources(sources),
+    urls: sources.flatMap(([, source]) => collectUrls(source.options)).slice(0, 10),
     transforms: state.nodes.map(summariseNode),
     sinkLabel: summariseOutputs(state.outputs),
   };
 }
 
-function summariseSource(source: SourceSpec | null): string {
-  if (source === null) {
+function summariseSources(sources: Array<[string, SourceSpec]>): string {
+  if (sources.length === 0) {
     return "No source was returned";
   }
-  return source.plugin;
+  if (sources.length === 1) {
+    return sources[0][1].plugin;
+  }
+  return sources.map(([name, source]) => `${name}: ${source.plugin}`).join(", ");
 }
 
 function summariseNode(node: NodeSpec): string {

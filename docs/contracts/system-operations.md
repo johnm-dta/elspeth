@@ -108,6 +108,27 @@ class SourceQuarantineReason(TypedDict):
 RoutingReason = ConfigGateReason | TransformErrorReason | SourceQuarantineReason
 ```
 
+### Multi-Source Fan-In Policy
+
+Direct multi-source fan-in to a sink is allowed without an explicit queue.
+Sinks are terminal write boundaries, not ordinary processing nodes. They do
+not transform, aggregate, gate, fork, or coalesce row contents; they persist a
+terminal result that already carries source attribution through `row_id` and
+`source_node_id`.
+
+`ingest_sequence` remains the ordering authority for direct sink fan-in. In
+the RC6 contract, sources are ingested sequentially in YAML declaration order,
+and the durable scheduler claims ready work by `ingest_sequence` before later
+step-order tiebreakers. A sink receiving rows from multiple sources therefore
+sees deterministic run order, but it is not a join primitive: it must not be
+used to correlate rows from different sources.
+
+Transforms, aggregations, and gates still require an explicit `queue` before
+multi-source fan-in. Those nodes execute logic over row data, so accepting
+multiple producers without a queue would hide the ordering/batching decision
+inside ordinary processing. Coalesce remains a same-`row_id` branch-merge
+primitive, not a cross-source join.
+
 ---
 
 ## Gates
@@ -427,7 +448,10 @@ CoalesceExecutor.accept(token, coalesce_name, step)
         │
         ├── Merge row data per strategy (union/nested/select)
         ├── Build merged SchemaContract
-        │   ├── union:  SchemaContract.merge() across branches
+        │   ├── union:  typed → precomputed build-time merge_union_fields() contract
+        │   │           (overlaid with winning-branch original_names);
+        │   │           all-OBSERVED → merge_union_contracts() across branches
+        │   │           (policy-aware: collision policy + require-all semantics)
         │   ├── nested: new contract with branch keys as object fields
         │   └── select: use selected branch's contract directly
         ├── TokenManager.coalesce_tokens(parents, merged_data)
@@ -476,7 +500,12 @@ check_timeouts(coalesce_name)
     └── best_effort → MERGE whatever arrived
 ```
 
-**Known Limitation (True Idle):** Timeout checks fire when the next token arrives at the coalesce point or when the source completes. During completely idle periods with no data flowing, timeouts cannot fire. For streaming sources, combine coalesce timeouts with source-level heartbeat rows.
+**Idle polling:** Coalesce timeout checks are not background timers. They fire
+when the next token arrives at the coalesce point, during source completion, and
+from the source-idle polling path when the pipeline also has time-sensitive
+aggregation triggers. Coalesce-only streaming pipelines without aggregation idle
+polling still need source-level heartbeat rows or explicit source completion to
+advance timeout checks during otherwise idle periods.
 
 ### Late Arrivals
 
@@ -546,12 +575,37 @@ Merged Token (T5)
 
 ### Coalesce Invariants
 
-1. **Correlation by row_id** — Tokens from the same source row (same `row_id`) are matched across branches. Different source rows never merge.
+1. **Correlation by row_id** — Tokens from the same source row (same `row_id`) are matched across branches. Different source rows never merge. `row_id` is globally unique within a run (PK on the `rows` table); it carries one source's identity via the `source_node_id` it points to. **Cross-source coalesce is not supported by `row_id` correlation** — two rows emitted by two different sources have different `row_id` values even if their `source_row_index` happens to coincide, so the coalesce barrier never matches them. To combine rows from multiple sources into a shared coalesce-able shape, fan in through a `queue` node first (ADR-025 §Decision 9); the `queue` itself does not produce shared `row_id`s — a downstream fork/aggregation/transform is what creates the joinable token set the coalesce then matches by `row_id`.
 2. **Branch uniqueness** — A branch can only contribute one token per row_id. Duplicate arrivals for the same branch raise an error.
 3. **Consumed tokens are terminal** — All tokens consumed in a merge reach `COALESCED` terminal state.
 4. **Merged token is new** — The merged token gets a fresh `token_id` with `join_group_id` linking back to consumed tokens.
 5. **Schema merge follows mode precedence** — When merging contracts: `FIXED > FLEXIBLE > OBSERVED`. The strictest mode wins.
-6. **End-of-source flush** — When the source exhausts, all pending coalesces are flushed per their policy. `best_effort` merges what arrived; `require_all` fails remaining.
+6. **End-of-source flush** — When *all* sources in the run have exhausted, all pending coalesces are flushed per their policy. `best_effort` merges what arrived; `require_all` fails remaining. End-of-source on a single source does not flush — multi-source runs wait for the last source to drain before applying the flush rule.
+
+### Multi-source coalesce
+
+Coalesce is a same-row token-merging primitive: it joins tokens that share
+a `row_id`. In a multi-source pipeline (ADR-025) every row carries a
+durable `source_node_id`, but `row_id` remains globally unique within the
+run — two sources never share a `row_id`. Three operational consequences:
+
+- **Coalesce does not merge across sources.** A `coalesce` node whose
+  upstream fork was rooted at a single source will only receive tokens
+  whose `row_id` came from that source. Authoring a coalesce that
+  expects to combine "the same logical record from source A and source
+  B" is not the supported pattern — that is a join, not a coalesce, and
+  it requires a transform that explicitly correlates by an
+  operator-declared join key.
+- **`source_node_id` is preserved through coalesce.** The merged token's
+  upstream `row_id` retains its original `source_node_id` attribution
+  via the `rows` table; an auditor running `elspeth explain` on the
+  merged token can trace it back to the single source that produced its
+  underlying row.
+- **End-of-source semantics are per-run, not per-source.** The
+  `best_effort` / `require_all` flush at end-of-source fires when the
+  last source in the run finishes ingesting, not when each individual
+  source finishes. A run with three sources will hold pending coalesce
+  state until all three are drained.
 
 ### Coalesce Audit Trail
 
@@ -597,7 +651,7 @@ transforms:
 | Trigger | Fires When | Combined Behavior |
 |---------|------------|-------------------|
 | `count` | N tokens accumulated | First trigger to fire wins |
-| `timeout_seconds` | Duration elapsed since batch start | Checked before each row |
+| `timeout_seconds` | Duration elapsed since batch start | Checked before each row and during source-idle polling |
 | `condition` | Row matches expression | Immediate flush |
 | End-of-source | Source exhausted | Always checked (implicit) |
 
@@ -640,22 +694,21 @@ AggregationExecutor.accept(token, node_id)
 
 ### Crash Recovery
 
-Aggregation buffers are persisted in checkpoints:
+Aggregation buffers are durable in the scheduler journal (ADR-029): every
+buffered token is a BLOCKED `token_work_items` row, written at buffer time.
 
-- `get_checkpoint_state()` serializes buffered rows and batch metadata
-- `restore_from_checkpoint()` restores buffers after crash
-- Trigger evaluators resume from correct count
+- `restore_from_journal()` rebuilds buffers from BLOCKED journal rows after
+  a crash; batch membership and counters derive from the audit trail
+- Trigger evaluators resume from the journal's `barrier_blocked_at`
+  timestamps plus the checkpoint's `barrier_scalars_json` trigger latches
 - In-progress batches survive crashes and can be resumed
 
 ### Timeout Behavior
 
-Timeout triggers are checked **before** each row is processed, not via background timers.
-
-**Known Limitation (True Idle):** If no rows arrive, buffered data will not flush until either:
-1. A new row arrives (triggering the timeout check)
-2. The source completes (triggering end-of-source flush)
-
-For streaming sources that may never end, combine timeout with count triggers, or implement periodic heartbeat rows at the source level.
+Timeout triggers are checked **before** each row is processed and while source
+iteration is waiting for the next row. Buffered aggregation data can therefore
+flush during true source-idle periods without requiring source-level heartbeat
+rows.
 
 ### Aggregation Invariants
 

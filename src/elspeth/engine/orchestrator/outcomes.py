@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
-from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariantError
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap, RowProcessorHandle
@@ -53,6 +53,7 @@ def _route_to_sink(
     outcome: TerminalOutcome | None,
     path: TerminalPath,
     error_hash: str | None = None,
+    scheduler_pending_sink: bool = False,
 ) -> None:
     """Validate sink exists in pending_tokens and append the token.
 
@@ -68,12 +69,52 @@ def _route_to_sink(
         path: Terminal provenance path to persist after sink durability
         error_hash: 16-char sha256 prefix capturing the originating error;
             required by PendingOutcome for failure/error paths.
+        scheduler_pending_sink: Whether this exact token has a durable
+            PENDING_SINK scheduler handoff to terminalize after sink durability.
     """
     if sink_name not in pending_tokens:
         raise OrchestrationInvariantError(
             f"Sink '{sink_name}' not in configured sinks. Available: {sorted(pending_tokens.keys())}. Token: {token}"
         )
-    pending_tokens[sink_name].append((token, PendingOutcome(outcome=outcome, path=path, error_hash=error_hash)))
+    pending_tokens[sink_name].append(
+        (
+            token,
+            PendingOutcome(
+                outcome=outcome,
+                path=path,
+                error_hash=error_hash,
+                scheduler_pending_sink=scheduler_pending_sink,
+            ),
+        )
+    )
+
+
+def _mark_barrier_tokens_terminal(
+    processor: RowProcessorHandle,
+    *,
+    barrier_key: str,
+    consumed_tokens: tuple[TokenInfo, ...],
+) -> None:
+    """Reconcile a FAILED coalesce outcome with durable scheduler terminalization.
+
+    Failure arms only (merge failed at timeout/EOF): consumption without an
+    emission, on the legacy partial-release wrapper. Successful merges go
+    through ``processor.complete_coalesce_merge`` — ONE atomic journal
+    transition that consumes the branches and emits the merged child (F1/D6).
+    """
+    token_ids = tuple(token.token_id for token in consumed_tokens)
+    if not token_ids:
+        raise AuditIntegrityError(f"Coalesce barrier {barrier_key!r} cannot terminalize scheduler work without live consumed token_ids.")
+    expected_count = len(frozenset(token_ids))
+    if expected_count != len(token_ids):
+        raise AuditIntegrityError(f"Coalesce barrier {barrier_key!r} consumed duplicate token_ids: {token_ids!r}")
+
+    terminalized_count = processor.mark_blocked_barrier_terminal(barrier_key, token_ids)
+    if expected_count and terminalized_count != expected_count:
+        raise AuditIntegrityError(
+            f"Coalesce barrier {barrier_key!r} live consumed {expected_count} token(s), "
+            f"but durable scheduler terminalized {terminalized_count}."
+        )
 
 
 def reconcile_sink_write_diversions(
@@ -272,6 +313,7 @@ def accumulate_row_outcomes(
                 result.token,
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.DEFAULT_FLOW,
+                scheduler_pending_sink=result.scheduler_pending_sink,
             )
         elif pair == (TerminalOutcome.SUCCESS, TerminalPath.GATE_ROUTED):
             counters.rows_succeeded += 1
@@ -284,6 +326,7 @@ def accumulate_row_outcomes(
                 result.token,
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.GATE_ROUTED,
+                scheduler_pending_sink=result.scheduler_pending_sink,
             )
         elif pair == (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
             if result.error is None:
@@ -300,6 +343,7 @@ def accumulate_row_outcomes(
                 outcome=TerminalOutcome.FAILURE,
                 path=TerminalPath.ON_ERROR_ROUTED,
                 error_hash=error_hash,
+                scheduler_pending_sink=result.scheduler_pending_sink,
             )
         elif pair == (TerminalOutcome.FAILURE, TerminalPath.UNROUTED):
             counters.rows_failed += 1
@@ -335,14 +379,25 @@ def accumulate_row_outcomes(
                 result.token,
                 outcome=TerminalOutcome.SUCCESS,
                 path=TerminalPath.COALESCED,
+                scheduler_pending_sink=result.scheduler_pending_sink,
             )
         elif pair == (TerminalOutcome.TRANSIENT, TerminalPath.EXPAND_PARENT):
             # Deaggregation parent token - children counted separately
             counters.rows_expanded += 1
         elif pair == (None, TerminalPath.BUFFERED):
-            # Non-terminal: token held in aggregation buffer (passthrough or transform mode).
-            # Terminal outcome deferred to flush time (count trigger, timeout, or end-of-source).
-            # Post-flush assertion in _post_source_iteration_work verifies no tokens remain buffered.
+            # Non-terminal: token accepted into an aggregation buffer
+            # (passthrough or transform mode). Terminal outcome deferred to
+            # flush time (count trigger, timeout, or end-of-source).
+            #
+            # F1 Task 4.3 (rows_buffered unification): this is the SINGLE live
+            # increment site for rows_buffered, and it fires once per accepted
+            # batch member — INCLUDING the count-trigger flush's triggering
+            # arrival, which since ADR-030 §E.2 (journal-first acceptance)
+            # returns a real (None, BUFFERED) RowResult like every other
+            # member (the flush fires from the next intake step, not from its
+            # claim). Live therefore equals the audit value (one BUFFERED
+            # token_outcome per accepted member; run_status.derive counts the
+            # same records on the resume path).
             counters.rows_buffered += 1
         else:
             raise OrchestrationInvariantError(
@@ -401,13 +456,16 @@ def _process_merged_coalesce_outcome(
             f"CoalesceOutcome for {coalesce_name!r} has a merged token but no coalesce node mapping. "
             f"Configured coalesce names: {configured_names}."
         ) from exc
+    # ONE atomic journal transition (F1/D6): the consumed branches'
+    # BLOCKED rows and the merged child's READY continuation transition
+    # together, then the merged token is driven downstream.
     continuation_results: list[RowResult] = list(
-        processor.process_token(
-            token=merged_token,
-            ctx=ctx,
-            current_node_id=coalesce_node_id,
-            coalesce_node_id=coalesce_node_id,
+        processor.complete_coalesce_merge(
             coalesce_name=coalesce_name,
+            consumed_tokens=tuple(outcome.consumed_tokens),
+            merged_token=merged_token,
+            coalesce_node_id=coalesce_node_id,
+            ctx=ctx,
         )
     )
     accumulate_row_outcomes(
@@ -459,6 +517,11 @@ def handle_coalesce_timeouts(
                     pending_tokens,
                 )
             else:
+                _mark_barrier_tokens_terminal(
+                    processor,
+                    barrier_key=str(coalesce_name),
+                    consumed_tokens=tuple(outcome.consumed_tokens),
+                )
                 counters.rows_coalesce_failed += 1
                 counters.rows_failed += len(outcome.consumed_tokens)
                 _emit_failed_coalesce_telemetry(ctx, outcome.consumed_tokens)
@@ -507,6 +570,17 @@ def flush_coalesce_pending(
                 pending_tokens,
             )
         else:
+            if outcome.consumed_tokens:
+                if outcome.coalesce_name is None:
+                    raise AuditIntegrityError(
+                        "Failed CoalesceOutcome from flush_pending() has consumed tokens but no coalesce_name; "
+                        "cannot reconcile durable scheduler barrier rows."
+                    )
+                _mark_barrier_tokens_terminal(
+                    processor,
+                    barrier_key=str(outcome.coalesce_name),
+                    consumed_tokens=tuple(outcome.consumed_tokens),
+                )
             counters.rows_coalesce_failed += 1
             counters.rows_failed += len(outcome.consumed_tokens)
             _emit_failed_coalesce_telemetry(ctx, outcome.consumed_tokens)

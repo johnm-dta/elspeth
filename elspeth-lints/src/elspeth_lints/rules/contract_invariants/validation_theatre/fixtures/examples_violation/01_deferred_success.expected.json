@@ -1,0 +1,12 @@
+[
+  {
+    "rule_id": "contract_invariants.validation_theatre",
+    "file_path": "bad.py",
+    "line": 6,
+    "column": 4,
+    "message": "validate_output_target returns success from a branch whose nearby comment says validation was skipped or deferred",
+    "fingerprint": "b175371d3ef9e6ae",
+    "severity": "error",
+    "suggestion": "Do not return success from a validation/check/verify function when the comment says the check was skipped or deferred. Return a distinct deferred/skipped result, fail closed, or move the success return after the validation actually runs."
+  }
+]

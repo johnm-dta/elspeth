@@ -104,7 +104,11 @@ function _project(internal: InternalState): Omit<
   // the URL). When the current request resolved successfully, lastSuccess
   // is already updated to the same payload, so the two agree.
   const latestResponse = internal.lastSuccess?.response ?? null;
-  const sessionIdForResponse = internal.lastSuccess?.sessionId ?? null;
+  const sessionIdForResponse =
+    internal.lastSuccess?.sessionId ??
+    (internal.request.kind === "pending" || internal.request.kind === "error"
+      ? internal.request.sessionId
+      : null);
   return {
     dialogOpen: internal.dialogOpen,
     request: internal.request,

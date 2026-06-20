@@ -104,6 +104,27 @@ describe("CommandPalette guided-mode commands", () => {
     ).toBeNull();
   });
 
+  it("labels command groups for assistive technology", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      sessions: [
+        {
+          id: "session-2",
+          title: "Earlier analysis",
+          created_at: "2026-06-16T00:00:00Z",
+          updated_at: "2026-06-16T00:00:00Z",
+          archived: false,
+        },
+      ],
+    });
+
+    render(<CommandPalette isOpen onClose={vi.fn()} />);
+
+    expect(screen.getByRole("group", { name: "Actions" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Navigation" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Sessions" })).toBeInTheDocument();
+  });
+
   it("does not offer navigation to the removed Spec tab", () => {
     render(<CommandPalette isOpen onClose={vi.fn()} />);
 

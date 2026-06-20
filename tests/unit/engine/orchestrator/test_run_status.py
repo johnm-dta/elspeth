@@ -56,6 +56,13 @@ class _FakeQuery:
     def count_distinct_source_rows_with_terminal_outcome(self, run_id: str) -> int:
         return len({o.token_id for o in self.outcomes if o.completed})
 
+    def count_failed_coalesce_barrier_rows(self, run_id: str) -> int:
+        # These tests exercise routed-destination tallies, not coalesce
+        # failures; the real verb counts DISTINCT (coalesce node, row) pairs
+        # over FAILED node_states, which a pure-outcome-list fake cannot
+        # reproduce. No scenario here involves a coalesce, so 0 is faithful.
+        return 0
+
 
 @dataclass(frozen=True, slots=True)
 class _FakeFactory:

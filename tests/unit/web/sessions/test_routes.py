@@ -377,7 +377,7 @@ class _ProgressRouteSessionService:
             id=uuid.uuid4(),
             session_id=session_id,
             version=version,
-            source=data.source,
+            source=None,
             nodes=data.nodes,
             edges=data.edges,
             outputs=data.outputs,
@@ -387,6 +387,7 @@ class _ProgressRouteSessionService:
             created_at=datetime.now(UTC),
             derived_from_state_id=self.current_state.id if self.current_state is not None else None,
             composer_meta=data.composer_meta,
+            sources=data.sources,
         )
         self.current_state = record
         return record
@@ -493,9 +494,18 @@ def _make_app(
     app.state.composer_progress_registry = ComposerProgressRegistry()
     app.state.scoped_secret_resolver = None
 
-    # Minimal mock for execution service — delete_session calls
-    # cleanup_session_lock() after archiving.
-    app.state.execution_service = MagicMock()
+    # Minimal mock for execution service — delete_session coordinates with
+    # the per-session execution lock and then cleans it up after archiving.
+    execution_service = MagicMock()
+    execution_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_execution_lock(session_id: str) -> asyncio.Lock:
+        if session_id not in execution_locks:
+            execution_locks[session_id] = asyncio.Lock()
+        return execution_locks[session_id]
+
+    execution_service.get_session_lock.side_effect = _get_execution_lock
+    app.state.execution_service = execution_service
 
     router = create_session_router()
     app.include_router(router)
@@ -570,8 +580,8 @@ def test_send_message_response_includes_pending_proposals_created_during_compose
             summary="Replace the pipeline.",
             rationale="Requested by the current composer turn.",
             affects=("graph", "yaml"),
-            arguments_json={"source": {"plugin": "csv", "options": {}}},
-            arguments_redacted_json={"source": {"plugin": "csv", "options": {}}},
+            arguments_json={"sources": {"primary": {"plugin": "csv", "options": {}}}},
+            arguments_redacted_json={"sources": {"primary": {"plugin": "csv", "options": {}}}},
             base_state_id=None,
             actor="composer-web:alice",
         )
@@ -644,11 +654,13 @@ def test_accept_proposal_executes_tool_and_commits_state(tmp_path, monkeypatch) 
             rationale="Requested by the current composer turn.",
             affects=("graph", "validation", "yaml"),
             arguments_json={
-                "source": {
-                    "plugin": "csv",
-                    "on_success": "source_out",
-                    "options": {"path": str(input_path), "schema": {"mode": "observed"}},
-                    "on_validation_failure": "quarantine",
+                "sources": {
+                    "primary": {
+                        "plugin": "csv",
+                        "on_success": "source_out",
+                        "options": {"path": str(input_path), "schema": {"mode": "observed"}},
+                        "on_validation_failure": "quarantine",
+                    }
                 },
                 "nodes": [
                     {
@@ -796,8 +808,8 @@ def test_accept_proposal_threads_originating_message_id_to_inline_blob(tmp_path,
 
     persisted = asyncio.run(service.get_current_state(session_id))
     assert persisted is not None
-    assert persisted.source is not None
-    source_authoring = persisted.source["options"][SOURCE_AUTHORING_KEY]
+    assert "source" in persisted.sources
+    source_authoring = persisted.sources["source"]["options"][SOURCE_AUTHORING_KEY]
     assert source_authoring == {
         "modality": CreationModality.LLM_GENERATED.value,
         "content_hash": row.content_hash,
@@ -1011,6 +1023,8 @@ def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
                     "run_id": run_id,
                     "source_node_id": "source",
                     "row_index": 0,
+                    "source_row_index": 0,
+                    "ingest_sequence": 0,
                     "source_data_hash": "hash-transform",
                     "created_at": now,
                 },
@@ -1019,6 +1033,8 @@ def _insert_discard_audit_records(settings: WebSettings, run_id: str) -> None:
                     "run_id": run_id,
                     "source_node_id": "source",
                     "row_index": 1,
+                    "source_row_index": 1,
+                    "ingest_sequence": 1,
                     "source_data_hash": "hash-sink",
                     "created_at": now,
                 },
@@ -1281,6 +1297,55 @@ class TestSessionCRUDRoutes:
         del_resp = client.delete(f"/api/sessions/{session_id}")
         assert del_resp.status_code == 409
         assert "active" in del_resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_delete_session_serializes_active_run_check_with_execution_lock(self, tmp_path) -> None:
+        """Delete must share execute()'s per-session lock across check+archive.
+
+        Holding the execution lock simulates a concurrent execute() already in
+        the active-run check/create-run critical section. The delete route must
+        wait before it even calls get_active_run(); otherwise a run can be
+        created between delete's check and archive.
+        """
+        app, service = _make_app(tmp_path)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            create_resp = await client.post("/api/sessions", json={"title": "Delete Race"})
+            assert create_resp.status_code == 201
+            session_id = create_resp.json()["id"]
+
+            execution_lock = app.state.execution_service.get_session_lock(session_id)
+            await execution_lock.acquire()
+
+            ownership_checked = asyncio.Event()
+            original_get_session = service.get_session
+            active_run_checked = asyncio.Event()
+            original_get_active_run = service.get_active_run
+
+            async def _get_session_spy(session_id_arg: uuid.UUID) -> Any:
+                result = await original_get_session(session_id_arg)
+                ownership_checked.set()
+                return result
+
+            async def _get_active_run_spy(session_id_arg: uuid.UUID) -> Any:
+                active_run_checked.set()
+                return await original_get_active_run(session_id_arg)
+
+            service.get_session = _get_session_spy  # type: ignore[method-assign]
+            service.get_active_run = _get_active_run_spy  # type: ignore[method-assign]
+
+            delete_task = asyncio.create_task(client.delete(f"/api/sessions/{session_id}"))
+            await asyncio.wait_for(ownership_checked.wait(), timeout=2.0)
+            await asyncio.sleep(0)
+
+            assert not active_run_checked.is_set()
+            assert not delete_task.done()
+
+            execution_lock.release()
+            del_resp = await delete_task
+
+        assert del_resp.status_code == 204
+        assert active_run_checked.is_set()
 
     @pytest.mark.asyncio
     async def test_delete_session_allowed_after_run_completes(self, tmp_path) -> None:
@@ -1715,6 +1780,13 @@ class TestIDORCoverageDrift:
             "list_blobs",
             "get_blob_metadata",
             "download_blob_content",
+            # 0.6.0: bounded inline-preview endpoint
+            # (``GET .../blobs/{blob_id}/preview``). Session-scoped like the
+            # rest of the blob family; routes through
+            # ``_verify_session_and_get_blob_service`` for IDOR safety. The
+            # cross-session 404 assertion lives in
+            # ``tests/unit/web/blobs/test_routes.py::TestIDORProtection``.
+            "preview_blob_content",
             "delete_blob",
         }
     )
@@ -2848,6 +2920,119 @@ class TestMessageRoutes:
 
         assert send_resp.status_code == 500
 
+    def test_guided_chat_source_commit_failure_does_not_leak_tool_result_repr(self, tmp_path) -> None:
+        """Step-1 chat source commit failures must not return ToolResult reprs."""
+        from elspeth.contracts.blobs import BlobRecord
+        from elspeth.contracts.enums import CreationModality
+        from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+        from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution
+        from elspeth.web.composer.tools import ToolResult
+
+        app, _ = _make_app(tmp_path)
+        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog.list_sources.return_value = [
+            PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+        ]
+        catalog.list_sinks.return_value = []
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="csv",
+            plugin_type="source",
+            description="CSV source",
+            json_schema={"title": "CSV", "type": "object", "properties": {}},
+            knob_schema={"fields": []},
+        )
+        app.state.catalog_service = catalog
+        app.state.blob_service = MagicMock()
+        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
+        app.state.blob_service.create_blob = AsyncMock(
+            return_value=BlobRecord(
+                id=uuid.uuid4(),
+                session_id=uuid.uuid4(),
+                filename="source.csv",
+                mime_type="text/csv",
+                size_bytes=18,
+                content_hash="0" * 64,
+                storage_path="sessions/raw-secret-source.csv",
+                created_at=datetime.now(UTC),
+                created_by="assistant",
+                source_description="test",
+                status="ready",
+                creation_modality=CreationModality.VERBATIM,
+                created_from_message_id=None,
+                creating_model_identifier=None,
+                creating_model_version=None,
+                creating_provider=None,
+                creating_composer_skill_hash=None,
+                creating_arguments_hash=None,
+            )
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Guided chat source failure"})
+        session_id = uuid.UUID(resp.json()["id"])
+        guided_resp = client.get(f"/api/sessions/{session_id}/guided")
+        assert guided_resp.status_code == 200
+        choose_source_resp = client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"]},
+        )
+        assert choose_source_resp.status_code == 200
+        assert choose_source_resp.json()["next_turn"]["type"] == "schema_form"
+
+        raw_row_secret = "raw-customer-ssn-123-45-6789"
+        tool_result_private_detail = "REDACTED tool result detail"
+        failing_tool_result = ToolResult(
+            success=False,
+            updated_state=_EMPTY_STATE,
+            validation=ValidationSummary(is_valid=False, errors=()),
+            affected_nodes=(),
+            data={"internal_detail": tool_result_private_detail},
+        )
+
+        with (
+            patch(
+                "elspeth.web.sessions.routes.composer.solve_step_chat_with_auto_drop",
+                new=AsyncMock(
+                    return_value=StepChatResult(
+                        assistant_message="I can use that source.",
+                        status=ComposerChatTurnStatus.SUCCESS,
+                        latency_ms=5,
+                        error_class=None,
+                    )
+                ),
+            ),
+            patch(
+                "elspeth.web.sessions.routes.composer.maybe_resolve_step_1_source_chat",
+                new=AsyncMock(
+                    return_value=Step1SourceChatResolution(
+                        assistant_message="I created the source.",
+                        plugin="csv",
+                        filename="source.csv",
+                        mime_type="text/csv",
+                        content="name,value\nalice,1\n",
+                        options={"path": "inline://source.csv"},
+                        observed_columns=("name", "value"),
+                        sample_rows=({"name": raw_row_secret, "value": "1"},),
+                    )
+                ),
+            ),
+            patch(
+                "elspeth.web.sessions.routes.composer.handle_step_1_source",
+                return_value=MagicMock(tool_result=failing_tool_result),
+            ),
+        ):
+            send_resp = client.post(
+                f"/api/sessions/{session_id}/guided/chat",
+                json={"message": "Use this source", "step_index": "step_1_source"},
+            )
+
+        assert send_resp.status_code == 400
+        detail = send_resp.json()["detail"]
+        assert detail == "Step 1 source commit failed"
+        assert "ToolResult(" not in detail
+        assert raw_row_secret not in detail
+        assert tool_result_private_detail not in detail
+
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:
         """Concurrent sends must not compose against an in-flight partial transcript."""
@@ -3475,7 +3660,7 @@ class TestRecomposeConvergencePartialState:
 
         # HTTP response: path key remains contract-visible, but the internal
         # storage value must be redacted.
-        response_source_opts = detail["partial_state"]["source"]["options"]
+        response_source_opts = detail["partial_state"]["sources"]["source"]["options"]
         assert response_source_opts["path"] == REDACTED_BLOB_SOURCE_PATH
         assert response_source_opts["blob_ref"] == "abc123"
 
@@ -3487,8 +3672,7 @@ class TestRecomposeConvergencePartialState:
         loop.close()
 
         assert db_record is not None
-        assert db_record.source is not None, "composition state must carry a source"
-        db_source_opts = db_record.source["options"]
+        db_source_opts = db_record.sources["source"]["options"]
         assert db_source_opts["path"] == "/internal/blobs/data.csv"
         assert db_source_opts["blob_ref"] == "abc123"
 
@@ -3900,7 +4084,7 @@ class TestRevertEndpoint:
         body = resp.json()
         assert body["version"] == 3
         # Should match v1's source, not v2's
-        assert body["source"] == {"type": "csv"}
+        assert body["sources"] == {"source": {"type": "csv"}}
         # Lineage: new version derives from v1
         assert body["derived_from_state_id"] == str(v1.id)
 
@@ -4078,7 +4262,7 @@ class TestYamlEndpoint:
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body["source_blob_id"] == blob_id
+        assert body["source_blob_ids"] == {"source": blob_id}
         assert blob_id not in body["yaml"]
 
     @pytest.mark.asyncio
@@ -4282,9 +4466,43 @@ class TestYamlEndpoint:
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
-        assert "runtime preflight failed for captured state" in resp.json()["detail"]
+        assert resp.json()["detail"] == "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
+        assert "runtime preflight failed for captured state" not in resp.text
         assert len(captured_states) == 1
-        assert captured_states[0].source is not None
+        assert captured_states[0].sources["source"] is not None
+
+    @pytest.mark.asyncio
+    async def test_get_state_yaml_does_not_echo_preflight_error_messages(self, tmp_path) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        session = await service.create_session("alice", "Pipeline", "local")
+        await service.save_composition_state(
+            session.id, CompositionStateData(metadata_={"name": "Snapshot", "description": ""}, is_valid=True), provenance="session_seed"
+        )
+        leaked_value = "REDACTED-preflight-error-canary"
+
+        async def fake_runtime_preflight(state, *, settings, secret_service, user_id):
+            del state, settings, secret_service, user_id
+            return ValidationResult(
+                is_valid=False,
+                checks=[],
+                errors=[
+                    ValidationError(
+                        component_id="scraper",
+                        component_type="transform",
+                        message=f"Invalid CIDR in allowed_hosts: {leaked_value!r}",
+                        suggestion=None,
+                        error_code=None,
+                    )
+                ],
+            )
+
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
+            resp = client.get(f"/api/sessions/{session.id}/state/yaml")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
+        assert leaked_value not in resp.text
 
     @pytest.mark.asyncio
     async def test_get_state_yaml_emits_yaml_export_telemetry_on_passed_preflight(self, tmp_path, monkeypatch) -> None:
@@ -4484,11 +4702,10 @@ class TestYamlEndpoint:
         )
 
         async def fake_runtime_preflight(state, *, settings, secret_service, user_id):
-            assert secret_service is app.state.scoped_secret_resolver
-            assert secret_service.resolved_value == resolved_secret
-            # The runtime preflight path may resolve the secret in memory; export
-            # must still serialize the original state snapshot with the secret_ref marker.
-            assert state.to_dict()["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
+            assert secret_service is None
+            # YAML export preflight must not receive the scoped resolver. It only
+            # serializes the original state snapshot with the secret_ref marker.
+            assert state.to_dict()["sources"]["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
         with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
@@ -4498,7 +4715,7 @@ class TestYamlEndpoint:
         exported_yaml = resp.json()["yaml"]
         assert resolved_secret not in exported_yaml
         parsed = yaml.safe_load(exported_yaml)
-        assert parsed["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
+        assert parsed["sources"]["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
 
 
 class TestRunAlreadyActiveError:
@@ -4565,6 +4782,38 @@ class TestNewStateHasNoLineage:
         assert resp.status_code == 200
         body = resp.json()
         assert body["derived_from_state_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_state_response_exposes_redacted_named_sources(self, tmp_path) -> None:
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+        session = await service.create_session("alice", "Multi-source", "local")
+        sources = {
+            "orders": {
+                "plugin": "csv",
+                "on_success": "orders_rows",
+                "on_validation_failure": "discard",
+                "options": {"blob_ref": "blob-1", "path": str(tmp_path / "internal" / "orders.csv")},
+            },
+            "refunds": {
+                "plugin": "csv",
+                "on_success": "refunds_rows",
+                "on_validation_failure": "discard",
+                "options": {"path": "refunds.csv"},
+            },
+        }
+        await service.save_composition_state(
+            session.id,
+            CompositionStateData(sources=sources, is_valid=True),
+            provenance="session_seed",
+        )
+
+        resp = client.get(f"/api/sessions/{session.id}/state")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["sources"]["orders"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+        assert body["sources"]["refunds"]["options"]["path"] == "refunds.csv"
 
 
 class TestComposerProgressRoutes:
@@ -4669,7 +4918,7 @@ class TestComposerProgressRoutes:
         await service.save_composition_state(
             service.session.id,
             CompositionStateData(
-                source=initial_state_d["source"],
+                sources=initial_state_d["sources"],
                 nodes=initial_state_d["nodes"],
                 edges=initial_state_d["edges"],
                 outputs=initial_state_d["outputs"],
@@ -7541,6 +7790,73 @@ def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(
     assert response.status_code == 500
 
     assert _read_persisted_provenance(service, session_id) == "preflight_persist"
+
+
+def test_send_message_post_compose_state_advance_persists_post_compose_provenance(tmp_path: Path) -> None:
+    """A successful send-message state advance is not a session seed.
+
+    The row is committed after the composer returns a newer state version, so
+    auditors must be able to distinguish it from initial session creation and
+    explicit state reselection.
+    """
+    advanced_state = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="post-compose"),
+        version=2,
+    )
+    mock_composer = _make_composer_mock(response_text="Updated.", state=advanced_state)
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    response = client.post(
+        f"/api/sessions/{session_id}/messages",
+        json={"content": "Build me a pipeline"},
+    )
+
+    assert response.status_code == 200
+    assert _read_persisted_provenance(service, session_id) == "post_compose"
+
+
+def test_recompose_post_compose_state_advance_persists_post_compose_provenance(tmp_path: Path) -> None:
+    """The recompose mirror path uses the same post-compose provenance."""
+    advanced_state = CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="post-compose"),
+        version=2,
+    )
+    mock_composer = _make_composer_mock(response_text="Updated.", state=advanced_state)
+
+    app, service = _make_app(tmp_path)
+    app.state.composer_service = mock_composer
+    client = TestClient(app)
+
+    session_id = client.post("/api/sessions", json={"title": "T"}).json()["id"]
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            service.add_message(
+                uuid.UUID(session_id),
+                "user",
+                "Build me a pipeline",
+                writer_principal="route_user_message",
+            )
+        )
+    finally:
+        loop.close()
+
+    response = client.post(f"/api/sessions/{session_id}/recompose")
+
+    assert response.status_code == 200
+    assert _read_persisted_provenance(service, session_id) == "post_compose"
 
 
 def test_composition_state_provenance_python_and_sql_enums_agree() -> None:

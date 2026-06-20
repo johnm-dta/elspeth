@@ -79,7 +79,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -94,7 +94,7 @@ class TestOrchestratorCheckpointing:
         assert result.status == "completed"
         assert result.rows_processed == 3
 
-        assert len(checkpoint_calls) == 3, f"Expected 3 checkpoint calls (one per row), got {len(checkpoint_calls)}"
+        assert len(checkpoint_calls) == 4, f"Expected 4 checkpoint calls (run-start baseline + one per row), got {len(checkpoint_calls)}"
 
     def test_maybe_checkpoint_respects_interval(self, landscape_db: LandscapeDB, payload_store) -> None:
         """_maybe_checkpoint only creates checkpoint every N rows."""
@@ -121,7 +121,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -136,7 +136,7 @@ class TestOrchestratorCheckpointing:
         assert result.status == "completed"
         assert result.rows_processed == 7
 
-        assert len(checkpoint_calls) == 2, f"Expected 2 checkpoint calls (at rows 3 and 6), got {len(checkpoint_calls)}"
+        assert len(checkpoint_calls) == 3, f"Expected 3 checkpoint calls (run-start baseline + rows 3 and 6), got {len(checkpoint_calls)}"
 
     def test_checkpoint_deleted_on_successful_completion(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Checkpoints are deleted when run completes successfully."""
@@ -154,7 +154,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -195,7 +195,7 @@ class TestOrchestratorCheckpointing:
         bad_sink = FailingSink(name="bad_sink", error_message="Bad sink failure")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"good": as_sink(good_sink), "bad": as_sink(bad_sink)},
             gates=[gate_config],
@@ -219,9 +219,11 @@ class TestOrchestratorCheckpointing:
 
         # Rows are processed sequentially: row 1 (odd→good) succeeds and creates
         # a checkpoint before row 2 (even→bad) crashes at FailingSink.
+        # F1/D4: +1 for the sequence-0 run-start baseline, preserved on failure
+        # alongside the per-row checkpoints.
         assert len(good_sink.results) >= 1, "At least one odd-valued row should reach good_sink before bad_sink crashes"
-        assert len(remaining_checkpoints) == len(good_sink.results), (
-            f"Expected {len(good_sink.results)} checkpoints for written rows, got {len(remaining_checkpoints)}"
+        assert len(remaining_checkpoints) == len(good_sink.results) + 1, (
+            f"Expected run-start baseline + {len(good_sink.results)} checkpoints for written rows, got {len(remaining_checkpoints)}"
         )
 
     def test_checkpoint_disabled_skips_checkpoint_creation(self, landscape_db: LandscapeDB, payload_store) -> None:
@@ -249,7 +251,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -279,7 +281,7 @@ class TestOrchestratorCheckpointing:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )

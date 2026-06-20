@@ -191,6 +191,28 @@ class TestTextSource:
         with pytest.raises(FileNotFoundError):
             list(source.load(ctx))
 
+    def test_truncated_utf16_decode_error_uses_next_source_row_index(self, tmp_path: Path, ctx: PluginContext) -> None:
+        from elspeth.plugins.sources.text_source import TextSource
+
+        text_file = tmp_path / "items.txt"
+        text_file.write_bytes("first\nsecond\n".encode("utf-16") + b"\x00")
+
+        source = TextSource(
+            {
+                "path": str(text_file),
+                "column": "value",
+                "encoding": "utf-16",
+                "schema": DYNAMIC_SCHEMA,
+                "on_validation_failure": QUARANTINE_SINK,
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        assert [row.source_row_index for row in rows] == [0, 1, 2]
+        assert rows[2].is_quarantined is True
+        assert rows[2].row["__line_number__"] == 3
+
     def test_invalid_schema_quarantines_rows(self, tmp_path: Path, ctx: PluginContext) -> None:
         from elspeth.plugins.sources.text_source import TextSource
 

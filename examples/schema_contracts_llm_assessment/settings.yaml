@@ -1,11 +1,12 @@
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: examples/schema_contracts_llm_assessment/input.csv
-    schema:
-      mode: observed
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: examples/schema_contracts_llm_assessment/input.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
 transforms:
 - name: llm_0
   plugin: llm

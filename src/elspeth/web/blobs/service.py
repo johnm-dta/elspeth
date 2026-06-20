@@ -171,13 +171,23 @@ def _composition_references_blob(
     if type(composition_state) is not dict:
         raise AuditIntegrityError(f"Tier 1: composition_states is {type(composition_state).__name__}, expected dict")
 
-    if "source" in composition_state:
-        source = composition_state["source"]
-        if source is not None and type(source) is not dict:
-            raise AuditIntegrityError(f"Tier 1: composition_states.source is {type(source).__name__}, expected dict")
-        source_options = source["options"] if source is not None and "options" in source else None
-        if _options_reference_blob(source_options, blob_id, storage_path, "source"):
-            return True
+    if "sources" in composition_state:
+        sources = composition_state["sources"]
+        # Per ADR-025 §1, the canonical pipeline dict emits `sources` as a
+        # non-null dict whenever any source is present. A null `sources` map
+        # in a persisted composition_state is internal corruption (Tier 1).
+        if sources is None:
+            raise AuditIntegrityError("Tier 1: composition_states.sources is null, expected dict")
+        if type(sources) is not dict:
+            raise AuditIntegrityError(f"Tier 1: composition_states.sources is {type(sources).__name__}, expected dict")
+        for source_name, source in sources.items():
+            if source is None:
+                raise AuditIntegrityError(f"Tier 1: composition_states.sources[{source_name!r}] is null, expected dict")
+            if type(source) is not dict:
+                raise AuditIntegrityError(f"Tier 1: composition_states.sources[{source_name!r}] is {type(source).__name__}, expected dict")
+            source_options = source["options"] if "options" in source else None
+            if _options_reference_blob(source_options, blob_id, storage_path, f"sources[{source_name!r}]"):
+                return True
 
     for collection_key in ("transforms", "gates", "aggregations", "coalesce"):
         if collection_key not in composition_state:
@@ -760,6 +770,40 @@ class BlobServiceImpl:
                     raise BlobIntegrityError(blob_id_str, expected=row.content_hash, actual=actual)
 
                 return data
+
+        return await self._run_sync(_sync)
+
+    async def read_blob_preview(self, blob_id: UUID, *, limit_bytes: int) -> tuple[bytes, bool]:
+        """Read a bounded prefix of a ready blob for inline UI preview.
+
+        This shares the full-content lifecycle/missing-file guards but does
+        not verify the full SHA-256 digest, because doing so would require
+        reading the whole blob and defeat the preview endpoint's resource cap.
+        """
+        if limit_bytes < 1:
+            raise ValueError("limit_bytes must be >= 1")
+
+        blob_id_str = str(blob_id)
+
+        def _sync() -> tuple[bytes, bool]:
+            with self._engine.connect() as conn:
+                row = conn.execute(select(blobs_table).where(blobs_table.c.id == blob_id_str)).first()
+                if row is None:
+                    raise BlobNotFoundError(blob_id_str)
+
+                if row.status != "ready":
+                    raise BlobStateError(
+                        blob_id_str,
+                        message=f"Cannot preview blob {blob_id_str} — status is '{row.status}', expected 'ready'",
+                    )
+
+                storage = Path(row.storage_path)
+                if not storage.exists():
+                    raise BlobContentMissingError(blob_id_str, storage_path=row.storage_path)
+
+                with storage.open("rb") as handle:
+                    data = handle.read(limit_bytes + 1)
+                return data[:limit_bytes], len(data) > limit_bytes
 
         return await self._run_sync(_sync)
 

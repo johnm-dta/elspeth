@@ -1,7 +1,9 @@
 # tests/unit/engine/test_tokens.py
 """Tests for TokenManager."""
 
-from typing import Any
+import inspect
+from typing import Any, get_type_hints
+from unittest.mock import patch
 
 import pytest
 
@@ -26,7 +28,7 @@ def _make_observed_contract(*field_names: str) -> SchemaContract:
 def _make_source_row(data: dict[str, Any]) -> SourceRow:
     """Create a SourceRow with an OBSERVED contract containing all data fields."""
     contract = _make_observed_contract(*data.keys())
-    return SourceRow.valid(data, contract=contract)
+    return SourceRow.valid(data, contract=contract, source_row_index=0)
 
 
 def _make_pipeline_row(data: dict[str, Any], contract: SchemaContract | None = None) -> PipelineRow:
@@ -61,12 +63,39 @@ class TestTokenManager:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 42}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         assert token_info.row_id is not None
         assert token_info.token_id is not None
         assert isinstance(token_info.row_data, PipelineRow)
         assert token_info.row_data.to_dict() == {"value": 42}
+
+    def test_create_initial_token_uses_atomic_row_token_creation(self) -> None:
+        from elspeth.engine.tokens import TokenManager
+
+        setup = make_recorder_with_run()
+        factory, run_id, source_node_id = setup.factory, setup.run_id, setup.source_node_id
+        manager = TokenManager(factory.data_flow, step_resolver=_make_step_resolver())
+
+        with (
+            patch.object(factory.data_flow, "create_row_with_token", wraps=factory.data_flow.create_row_with_token) as create_pair,
+            patch.object(factory.data_flow, "create_token", wraps=factory.data_flow.create_token) as create_token,
+        ):
+            token_info = manager.create_initial_token(
+                run_id=run_id,
+                source_node_id=source_node_id,
+                row_index=5,
+                source_row=_make_source_row({"value": 42}),
+                source_row_index=7,
+                ingest_sequence=11,
+            )
+
+        assert token_info.row_id is not None
+        assert token_info.token_id is not None
+        assert create_pair.call_count == 1
+        assert create_token.call_count == 0
 
     def test_fork_token(self) -> None:
         from elspeth.engine.tokens import TokenManager
@@ -80,6 +109,8 @@ class TestTokenManager:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 42}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _fork_group_id = manager.fork_token(
@@ -112,6 +143,8 @@ class TestTokenManagerCoalesce:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 42}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _fork_group_id = manager.fork_token(
@@ -170,12 +203,16 @@ class TestTokenManagerCoalesceValidation:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_b = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=1,
             source_row=_make_source_row({"value": 2}),
+            source_row_index=1,
+            ingest_sequence=1,
         )
 
         assert token_a.row_id != token_b.row_id
@@ -216,12 +253,16 @@ class TestCoalesceMismatchedRowIdsMutationKill:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_b = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=1,
             source_row=_make_source_row({"value": 2}),
+            source_row_index=1,
+            ingest_sequence=1,
         )
 
         with pytest.raises(OrchestrationInvariantError, match=token_a.row_id):
@@ -245,12 +286,16 @@ class TestCoalesceMismatchedRowIdsMutationKill:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token_b = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=1,
             source_row=_make_source_row({"value": 2}),
+            source_row_index=1,
+            ingest_sequence=1,
         )
 
         # Order so that parents[1].row_id < parents[0].row_id
@@ -288,6 +333,8 @@ class TestTokenManagerForkIsolation:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"payload": {"x": 1, "y": 2}, "items": [1, 2, 3]}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _fork_group_id = manager.fork_token(
@@ -320,6 +367,8 @@ class TestTokenManagerForkIsolation:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         custom_data = _make_pipeline_row({"nested": {"key": "original"}})
@@ -354,6 +403,8 @@ class TestTokenManagerExpandIsolation:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"original": "data"}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         expanded_rows = [
@@ -392,6 +443,8 @@ class TestTokenManagerExpandIsolation:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         shared_metadata = {"version": 1, "tags": ["a", "b"]}
@@ -428,6 +481,8 @@ class TestTokenManagerExpandIsolation:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         expanded_rows = [
@@ -465,6 +520,8 @@ class TestTokenManagerEdgeCases:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 42}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _fork_group_id = manager.fork_token(
@@ -489,6 +546,8 @@ class TestTokenManagerEdgeCases:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"x": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _fork_group_id = manager.fork_token(
@@ -516,6 +575,8 @@ class TestTokenManagerEdgeCases:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"x": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         forked_children, fork_group_id = manager.fork_token(
@@ -551,6 +612,8 @@ class TestTokenManagerEdgeCases:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"original": "data"}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         expanded_children, expand_group_id = manager.expand_token(
@@ -582,6 +645,8 @@ class TestTokenManagerEdgeCases:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 42}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _fork_group_id = manager.fork_token(
@@ -619,12 +684,16 @@ class TestTokenManagerEdgeCases:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"id": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token2 = manager.create_initial_token(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=1,
             source_row=_make_source_row({"id": 2}),
+            source_row_index=1,
+            ingest_sequence=1,
         )
 
         assert token1.row_id != token2.row_id
@@ -646,6 +715,8 @@ class TestTokenManagerStepInPipeline:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 42}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _fork_group_id = manager.fork_token(
@@ -674,6 +745,8 @@ class TestTokenManagerStepInPipeline:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"value": 42}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _fork_group_id = manager.fork_token(
@@ -711,6 +784,8 @@ class TestTokenManagerExpand:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"original": "data"}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         expanded_rows = [
@@ -757,6 +832,8 @@ class TestTokenManagerExpand:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         forked, _fork_group_id = manager.fork_token(
@@ -789,6 +866,8 @@ class TestTokenManagerExpand:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"x": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         children, _expand_group_id = manager.expand_token(
@@ -808,6 +887,18 @@ class TestTokenManagerExpand:
 class TestTokenManagerBoundaryPaths:
     """Coverage for error guards and quarantine/resume token paths."""
 
+    def test_source_identity_parameters_are_required_by_signature(self) -> None:
+        from elspeth.engine.tokens import TokenManager
+
+        for method_name in ("create_initial_token", "create_quarantine_token"):
+            signature = inspect.signature(getattr(TokenManager, method_name))
+            type_hints = get_type_hints(getattr(TokenManager, method_name))
+            for parameter_name in ("source_row_index", "ingest_sequence"):
+                parameter = signature.parameters[parameter_name]
+                assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+                assert parameter.default is inspect.Parameter.empty
+                assert type_hints[parameter_name] is int
+
     def test_create_initial_token_requires_contract(self) -> None:
         # Since elspeth-a27e71979f, SourceRow.__post_init__ rejects contract=None
         # at construction time, so the engine's guard is now unreachable via
@@ -824,6 +915,8 @@ class TestTokenManagerBoundaryPaths:
                 source_node_id=source_node_id,
                 row_index=0,
                 source_row=_make_source_row({"value": 42}),
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
     def test_create_quarantine_token_preserves_dict_payload(self) -> None:
@@ -837,7 +930,10 @@ class TestTokenManagerBoundaryPaths:
                 row={"raw": "invalid"},
                 error="bad data",
                 destination="quarantine",
+                source_row_index=0,
             ),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         assert token.row_data.to_dict() == {"raw": "invalid"}
@@ -856,7 +952,10 @@ class TestTokenManagerBoundaryPaths:
                 row=["not", "a", "dict"],
                 error="bad row type",
                 destination="quarantine",
+                source_row_index=0,
             ),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         assert token.row_data.to_dict() == {"_raw": ["not", "a", "dict"]}
@@ -870,6 +969,8 @@ class TestTokenManagerBoundaryPaths:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"id": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
         restored_row = _make_pipeline_row({"id": 1, "restored": True})
 
@@ -891,6 +992,8 @@ class TestTokenManagerBoundaryPaths:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"x": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
         unlocked_contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
 
@@ -934,6 +1037,8 @@ class TestExpandTokenDefaultOutcome:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"x": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Deliberately omit record_parent_outcome — rely on default=True
@@ -963,6 +1068,8 @@ class TestExpandTokenDefaultOutcome:
             source_node_id=source_node_id,
             row_index=0,
             source_row=_make_source_row({"x": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         _children, _expand_group_id = manager.expand_token(
@@ -1006,6 +1113,8 @@ class TestExpandTokenStrictZip:
             source_node_id=setup.source_node_id,
             row_index=0,
             source_row=_make_source_row({"x": 1}),
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Create fake Token objects the data_flow would return
@@ -1058,6 +1167,7 @@ class TestCreateQuarantineTokenFlag:
             {"bad_data": float("nan")},
             error="NaN value",
             destination="quarantine_sink",
+            source_row_index=0,
         )
 
         # This must NOT raise — quarantined=True enables repr_hash fallback
@@ -1066,6 +1176,8 @@ class TestCreateQuarantineTokenFlag:
             source_node_id=source_node_id,
             row_index=0,
             source_row=quarantine_row,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         assert token_info.row_id is not None

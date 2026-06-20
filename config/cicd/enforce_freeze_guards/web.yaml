@@ -33,3 +33,23 @@ per_file_rules:
     are passed through the context. Documented at the field in tool_batch.py.
   expires: null
   max_hits: 1
+- pattern: web/composer/state.py
+  rules:
+  - FG3
+  reason: CompositionState uses @dataclass(init=False) with a custom __init__ that
+    calls freeze_fields(self, "sources") directly — Python never generates a default
+    __init__ so __post_init__ is never invoked; the FG3 "no __post_init__" heuristic
+    cannot see the freeze performed in the custom __init__
+  expires: null
+  max_hits: 1
+- pattern: web/sessions/protocol.py
+  rules:
+  - FG3
+  reason: RunEventRecord.data is Mapping[str, Any] holding a run_events row payload
+    deserialised once from the audit DB (cast from the JSON object column) and consumed
+    read-only — it is serialised back out to JSON/SSE. deep_freeze would convert it to
+    MappingProxyType and risk breaking JSON serialisation of the event payload, so the
+    frozen=True field reference is the correct lifecycle statement and the contents are
+    not re-frozen; nothing mutates the mapping.
+  expires: null
+  max_hits: 1

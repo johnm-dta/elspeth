@@ -159,7 +159,7 @@ export interface ValidationEntryDTO {
 export interface CompositionState {
   id: string;
   version: number;
-  source: SourceSpec | null;
+  sources: Record<string, SourceSpec>;
   nodes: NodeSpec[];
   edges: EdgeSpec[];
   outputs: OutputSpec[];
@@ -513,6 +513,7 @@ export interface RunAccountingIntegrity {
 
 export interface RunAccounting {
   source: RunAccountingSource;
+  sources: Record<string, RunAccountingSource>;
   tokens: RunAccountingTokens;
   routing: RunAccountingRouting;
   integrity: RunAccountingIntegrity;
@@ -958,7 +959,7 @@ export interface AuditReadinessExplain {
 
 /**
  * Frontend-derived projection of an inline-blob source attached to the
- * current composition state. Computed from compositionState.source +
+ * current composition state. Computed from compositionState.sources +
  * blob metadata. Never persisted; recomputed on each composition mutation.
  */
 export interface InlineSourceSummary {

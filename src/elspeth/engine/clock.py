@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import time
+from datetime import UTC, datetime
 from typing import Protocol
 
 
@@ -36,6 +37,14 @@ class Clock(Protocol):
         """
         ...
 
+    def now_utc(self) -> datetime:
+        """Return the current UTC wall-clock time.
+
+        Scheduler lease and availability timestamps are persisted as UTC
+        datetimes. Tests can inject MockClock so those writes are deterministic.
+        """
+        ...
+
 
 class SystemClock:
     """Production clock using time.monotonic().
@@ -49,6 +58,10 @@ class SystemClock:
     def monotonic(self) -> float:
         """Return system monotonic time."""
         return time.monotonic()
+
+    def now_utc(self) -> datetime:
+        """Return current UTC wall-clock time."""
+        return datetime.now(UTC)
 
 
 class MockClock:
@@ -84,6 +97,10 @@ class MockClock:
     def monotonic(self) -> float:
         """Return current mock time."""
         return self._current
+
+    def now_utc(self) -> datetime:
+        """Return current mock time as a UTC datetime."""
+        return datetime.fromtimestamp(self._current, UTC)
 
     def advance(self, seconds: float) -> None:
         """Advance mock time by specified seconds.

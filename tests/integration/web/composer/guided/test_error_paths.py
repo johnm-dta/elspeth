@@ -226,7 +226,7 @@ class TestReenterGuided:
         existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
         state_d = state.to_dict()
         state_data = CompositionStateData(
-            source=state_d["source"],
+            sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],
@@ -392,7 +392,7 @@ class TestExitFromCompletedTerminal:
         new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
         state_d = state.to_dict()
         state_data = CompositionStateData(
-            source=state_d["source"],
+            sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],
@@ -464,7 +464,7 @@ class TestExitFromCompletedTerminal:
         # Composition-state survives the wizard-teardown: the yaml is
         # recoverable from these fields.
         composition_after = body["composition_state"]
-        assert composition_after["source"] == composition_before["source"]
+        assert composition_after["sources"] == composition_before["sources"]
         assert composition_after["nodes"] == composition_before["nodes"]
         assert composition_after["edges"] == composition_before["edges"]
         assert composition_after["outputs"] == composition_before["outputs"]

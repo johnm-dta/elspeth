@@ -226,19 +226,21 @@ def _build_runtime_graph(
         )
 
     config = ElspethSettings(
-        source=SourceSettings(
-            plugin="text",
-            on_success="t1",
-            options={
-                "path": str(text_path),
-                "column": column,
-                "schema_config": {
-                    "mode": "observed",
-                    "guaranteed_fields": declared_fields,
+        sources={
+            "primary": SourceSettings(
+                plugin="text",
+                on_success="t1",
+                options={
+                    "path": str(text_path),
+                    "column": column,
+                    "schema_config": {
+                        "mode": "observed",
+                        "guaranteed_fields": declared_fields,
+                    },
+                    "on_validation_failure": "discard",
                 },
-                "on_validation_failure": "discard",
-            },
-        ),
+            )
+        },
         transforms=transforms,
         sinks={
             "main": SinkSettings(
@@ -253,8 +255,8 @@ def _build_runtime_graph(
     )
     instances = instantiate_plugins_from_config(config)
     return ExecutionGraph.from_plugin_instances(
-        source=instances.source,
-        source_settings=instances.source_settings,
+        sources=instances.sources,
+        source_settings_map=instances.source_settings_map,
         transforms=instances.transforms,
         sinks=instances.sinks,
         aggregations=instances.aggregations,

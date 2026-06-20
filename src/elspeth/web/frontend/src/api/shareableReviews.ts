@@ -77,7 +77,7 @@ function isPipelineMetadata(value: unknown): value is PipelineMetadata {
 
 function isCompositionSnapshot(value: unknown): value is CompositionState {
   // Wire shape: CompositionState.to_dict() emits {version, metadata,
-  // source, nodes, edges, outputs} — the runtime-only `id` and
+  // sources, nodes, edges, outputs} — the runtime-only `id` and
   // `validation_*` fields on the front-end `CompositionState` interface
   // are absent on this wire payload (see SharedInspectResponse's type
   // docstring for the wire-vs-runtime caveat). We validate only the
@@ -85,7 +85,7 @@ function isCompositionSnapshot(value: unknown): value is CompositionState {
   if (!isRecord(value)) return false;
   if (typeof value.version !== "number") return false;
   if (!isPipelineMetadata(value.metadata)) return false;
-  if (value.source !== null && !isRecord(value.source)) return false;
+  if (!isRecord(value.sources)) return false;
   if (!Array.isArray(value.nodes)) return false;
   if (!Array.isArray(value.edges)) return false;
   if (!Array.isArray(value.outputs)) return false;

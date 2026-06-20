@@ -4,7 +4,11 @@ import { useComposer } from "@/hooks/useComposer";
 import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
-import type { ValidationEntryDTO } from "@/types/index";
+import type { CompositionState, ValidationEntryDTO } from "@/types/index";
+import {
+  sortedSourceEntries,
+  sourceComponentId,
+} from "@/utils/compositionState";
 
 interface SuggestionListProps {
   suggestions: ValidationEntryDTO[];
@@ -63,20 +67,45 @@ function SuggestionList({ suggestions }: SuggestionListProps): JSX.Element {
   );
 }
 
+function buildValidationComponentNames(
+  compositionState: CompositionState | null,
+): Record<string, string> {
+  if (!compositionState) {
+    return {};
+  }
+
+  const componentNames: Record<string, string> = {};
+  for (const [sourceName] of sortedSourceEntries(compositionState)) {
+    componentNames[sourceComponentId(sourceName)] = `source:${sourceName}`;
+  }
+  for (const node of compositionState.nodes) {
+    componentNames[node.id] = `${node.node_type}:${node.id}`;
+  }
+  for (const output of compositionState.outputs) {
+    componentNames[output.name] = `sink:${output.name}`;
+  }
+  return componentNames;
+}
+
 export function SideRailValidationBanner(): JSX.Element | null {
   const compositionState = useSessionStore((s) => s.compositionState);
   const validationResult = useExecutionStore((s) => s.validationResult);
   const error = useExecutionStore((s) => s.error);
   const suggestions = compositionState?.validation_suggestions ?? [];
+  const validationComponentNames =
+    buildValidationComponentNames(compositionState);
 
   if (!error && !validationResult && suggestions.length === 0) {
     return null;
   }
 
   function handleValidationComponentClick(componentId: string): void {
-    const isNode =
-      compositionState?.nodes.some((node) => node.id === componentId) ?? false;
-    if (isNode) {
+    if (
+      Object.prototype.hasOwnProperty.call(
+        validationComponentNames,
+        componentId,
+      )
+    ) {
       useSessionStore.getState().selectNode(componentId);
       window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
     }
@@ -96,6 +125,7 @@ export function SideRailValidationBanner(): JSX.Element | null {
         <ValidationResultBanner
           result={validationResult}
           nodes={compositionState?.nodes}
+          componentNames={validationComponentNames}
           onComponentClick={handleValidationComponentClick}
         />
       )}

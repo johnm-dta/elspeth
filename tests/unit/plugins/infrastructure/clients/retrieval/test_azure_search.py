@@ -58,6 +58,23 @@ class TestAzureSearchProviderConfig:
                 index="test",
             )
 
+    def test_managed_identity_rejects_non_azure_search_hostname(self) -> None:
+        with pytest.raises(ValueError, match=r"managed identity.*search\.windows\.net"):
+            AzureSearchProviderConfig(
+                endpoint="https://attacker.example.com",
+                index="test",
+                use_managed_identity=True,
+            )
+
+    def test_api_key_auth_preserves_existing_public_hostname_support(self) -> None:
+        config = AzureSearchProviderConfig(
+            endpoint="https://search-proxy.example.com",
+            index="test",
+            api_key="key",
+        )
+
+        assert config.endpoint == "https://search-proxy.example.com"
+
     def test_semantic_requires_config(self):
         with pytest.raises(ValueError, match="semantic_config"):
             AzureSearchProviderConfig(
@@ -675,6 +692,52 @@ class TestExecuteSearchHTTP:
             telemetry_emit=telemetry_emit,
         )
 
+    def _make_managed_identity_provider(self) -> AzureSearchProvider:
+        config = AzureSearchProviderConfig(
+            endpoint="https://test.search.windows.net",
+            index="test-index",
+            use_managed_identity=True,
+        )
+        execution = MagicMock()
+        telemetry_emit = MagicMock()
+        return AzureSearchProvider(
+            config=config,
+            execution=execution,
+            run_id="run-1",
+            telemetry_emit=telemetry_emit,
+        )
+
+    def test_constructor_wires_audited_http_client_context(self) -> None:
+        config = AzureSearchProviderConfig(
+            endpoint="https://test.search.windows.net",
+            index="test-index",
+            api_key="test-key",
+            request_timeout=12.5,
+        )
+        execution = MagicMock()
+        telemetry_emit = MagicMock()
+        limiter = MagicMock()
+
+        with patch("elspeth.plugins.infrastructure.clients.http.AuditedHTTPClient") as client_cls:
+            provider = AzureSearchProvider(
+                config=config,
+                execution=execution,
+                run_id="run-1",
+                telemetry_emit=telemetry_emit,
+                limiter=limiter,
+            )
+
+        client_cls.assert_called_once_with(
+            execution=execution,
+            state_id="__init__",
+            run_id="run-1",
+            telemetry_emit=telemetry_emit,
+            timeout=12.5,
+            limiter=limiter,
+            headers={"Content-Type": "application/json", "api-key": "test-key"},
+        )
+        assert provider._http_client is client_cls.return_value
+
     @pytest.mark.parametrize("status_code", [401, 403])
     def test_auth_error_response_raises_non_retryable(self, status_code: int) -> None:
         """HTTP 401/403 both map to RetrievalError(retryable=False)."""
@@ -734,6 +797,52 @@ class TestExecuteSearchHTTP:
 
         assert result == response_body
 
+    def test_execute_search_managed_identity_sends_bearer_token(self) -> None:
+        provider = self._make_managed_identity_provider()
+        response_body = {
+            "value": [
+                {"@search.score": 5.0, "content": "Result 1", "id": "doc1"},
+            ]
+        }
+        mock_token = MagicMock()
+        mock_token.token = "managed-identity-token-123"
+        mock_credential = MagicMock()
+        mock_credential.get_token.return_value = mock_token
+
+        with (
+            patch("azure.identity.DefaultAzureCredential", return_value=mock_credential),
+            respx.mock,
+        ):
+            route = respx.post(self.PINNED_SEARCH_URL).mock(return_value=httpx.Response(200, json=response_body))
+
+            result = provider._execute_search("test query", top_k=5, state_id="s1", token_id="t1")
+
+        assert result == response_body
+        mock_credential.get_token.assert_called_once_with("https://search.azure.com/.default")
+        assert route.calls.last is not None
+        request_headers = route.calls.last.request.headers
+        assert request_headers["Authorization"] == "Bearer managed-identity-token-123"
+        assert "api-key" not in request_headers
+
+    def test_execute_search_updates_audit_context_with_token(self) -> None:
+        provider = self._make_provider()
+        response_body = {
+            "value": [
+                {"@search.score": 5.0, "content": "Result 1", "id": "doc1"},
+            ]
+        }
+
+        with (
+            patch.object(provider._http_client, "update_call_context", wraps=provider._http_client.update_call_context) as update_context,
+            respx.mock,
+        ):
+            respx.post(self.PINNED_SEARCH_URL).respond(status_code=200, json=response_body)
+
+            result = provider._execute_search("test query", top_k=5, state_id="state-99", token_id="token-99")
+
+        assert result == response_body
+        update_context.assert_called_once_with("state-99", "token-99")
+
     def test_execute_search_uses_ssrf_pinned_post_connection(self) -> None:
         provider = self._make_provider()
         response_body = {
@@ -767,6 +876,26 @@ class TestExecuteSearchHTTP:
 
         assert not exc_info.value.retryable
         mock_request.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "transport_error",
+        [
+            httpx.TimeoutException("timed out"),
+            httpx.ConnectError("connection refused"),
+        ],
+    )
+    def test_transport_errors_raise_retryable_retrieval_error(self, transport_error: httpx.HTTPError) -> None:
+        """Connection and timeout failures from the HTTP transport are retryable."""
+        provider = self._make_provider()
+
+        with respx.mock:
+            respx.post(self.PINNED_SEARCH_URL).mock(side_effect=transport_error)
+
+            with pytest.raises(RetrievalError, match="Search request failed") as exc_info:
+                provider._execute_search("test query", top_k=5, state_id="s1", token_id=None)
+
+        assert exc_info.value.retryable
+        assert exc_info.value.__cause__ is transport_error
 
     def test_200_malformed_json_raises_non_retryable(self) -> None:
         """HTTP 200 with unparseable body maps to RetrievalError(retryable=False)."""

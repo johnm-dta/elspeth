@@ -34,6 +34,7 @@ from elspeth.web.composer.service import (
     AdvisorCheckpointVerdict,
     ComposerAvailability,
     ComposerServiceImpl,
+    _compose_preflight_repair_message,
 )
 from elspeth.web.composer.state import (
     CompositionState,
@@ -827,8 +828,8 @@ class TestComposerSingleToolCall:
             result = await service.compose("Use CSV as source", [], state)
 
         assert result.message == "I've set up a CSV source."
-        assert result.state.source is not None
-        assert result.state.source.plugin == "csv"
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].plugin == "csv"
         assert result.state.version == 2
 
     @pytest.mark.asyncio
@@ -995,8 +996,8 @@ class TestComposerSingleToolCall:
         assert "upsert_node" not in tool_names
         assert "set_output" not in tool_names
         assert len(result.llm_calls) == 3
-        assert result.state.source is not None
-        assert "blob_ref" in result.state.source.options
+        assert result.state.sources["source"] is not None
+        assert "blob_ref" in result.state.sources["source"].options
 
 
 class TestComposerMultiTurnToolCalls:
@@ -1044,7 +1045,7 @@ class TestComposerMultiTurnToolCalls:
             mock_llm.side_effect = [turn1, turn2, turn3]
             result = await service.compose("Build a pipeline", [], state)
 
-        assert result.state.source is not None
+        assert result.state.sources["source"] is not None
         assert result.state.metadata.name == "My Pipeline"
         assert result.state.version == 3  # two mutations
 
@@ -1510,10 +1511,12 @@ class TestComposerErrorHandling:
                     "id": "call_ok",
                     "name": "set_pipeline",
                     "arguments": {
-                        "source": {
-                            "plugin": "csv",
-                            "on_success": "t1",
-                            "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                        "sources": {
+                            "primary": {
+                                "plugin": "csv",
+                                "on_success": "t1",
+                                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                            }
                         },
                         "nodes": [
                             {
@@ -2131,7 +2134,7 @@ class TestComposerMultipleToolCallsPerTurn:
             mock_llm.side_effect = [multi_call, text]
             result = await service.compose("Setup", [], state)
 
-        assert result.state.source is not None
+        assert result.state.sources["source"] is not None
         assert result.state.metadata.name == "Dual Call Pipeline"
         assert result.state.version == 3  # two mutations
 
@@ -2405,8 +2408,8 @@ class TestComposeTimeout:
             "This is the cancel-safety regression: side effects committed but "
             "state was not published."
         )
-        assert exc_info.value.partial_state.source is not None
-        assert exc_info.value.partial_state.source.plugin == "csv"
+        assert exc_info.value.partial_state.sources["source"] is not None
+        assert exc_info.value.partial_state.sources["source"].plugin == "csv"
 
 
 class TestConvergenceProgressDispatch:
@@ -2620,8 +2623,8 @@ class TestPartialStatePreservation:
                 await service.compose("Build pipeline", [], state)
 
             assert exc_info.value.partial_state is not None
-            assert exc_info.value.partial_state.source is not None
-            assert exc_info.value.partial_state.source.plugin == "csv"
+            assert exc_info.value.partial_state.sources["source"] is not None
+            assert exc_info.value.partial_state.sources["source"].plugin == "csv"
             assert exc_info.value.partial_state.version == 2
 
     @pytest.mark.asyncio
@@ -4493,6 +4496,34 @@ class TestComposerRuntimePreflightCacheAndTimeout:
 
 
 class TestComposerRuntimePreflightFinalGate:
+    def test_literal_credential_preflight_repair_requires_secret_inventory_diagnosis(self) -> None:
+        """elspeth-697b7377a7: literal credential failures must drive
+        secret inventory diagnosis, not another copy of the validate complaint.
+        """
+        invalid_preflight = ValidationResultModel(
+            is_valid=False,
+            checks=[],
+            errors=[
+                ValidationError(
+                    component_id="summarize",
+                    component_type="transform",
+                    message="Credential field(s) api_key contain a literal value; expected a wired secret reference.",
+                    suggestion="Wire each credential field through the Secrets panel.",
+                    error_code="fabricated_secret",
+                )
+            ],
+            readiness=_not_authoring_ready("fabricated_secret"),
+        )
+
+        repair = _compose_preflight_repair_message(invalid_preflight, next_turn=1)
+
+        assert "list_secret_refs" in repair
+        assert "validate_secret_ref" in repair
+        assert "reason" in repair
+        assert "fingerprint_resolver_not_configured" in repair
+        assert "Do not answer by repeating the runtime preflight complaint" in repair
+        assert "Do not inline a literal credential" in repair
+
     @pytest.mark.asyncio
     async def test_changed_state_completion_is_replaced_when_runtime_preflight_fails(self) -> None:
         catalog = _mock_catalog()
@@ -5843,11 +5874,13 @@ class TestAttemptProofRepair:
         result = exec_tool(
             "set_pipeline",
             {
-                "source": {
-                    "plugin": "csv",
-                    "on_success": "rows",
-                    "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
-                    "on_validation_failure": "discard",
+                "sources": {
+                    "primary": {
+                        "plugin": "csv",
+                        "on_success": "rows",
+                        "options": {"path": "/data/in.csv", "schema": {"mode": "observed"}},
+                        "on_validation_failure": "discard",
+                    }
                 },
                 "nodes": [],
                 "edges": [],
@@ -6126,6 +6159,80 @@ class TestComposeLoopForcedRepair:
             },
         ]
 
+    def _from_json_fallback_pipeline_tool_calls(self, blob_id: str) -> list[dict[str, Any]]:
+        """Tool call for the p4_t2_edge fallback after unsupported from_json."""
+        return [
+            {
+                "id": "call_set_pipeline",
+                "name": "set_pipeline",
+                "arguments": {
+                    "source": {
+                        "plugin": "csv",
+                        "blob_id": blob_id,
+                        "on_success": "rows",
+                        "on_validation_failure": "discard",
+                        "options": {"schema": {"mode": "observed"}},
+                    },
+                    "nodes": [
+                        {
+                            "id": "gate_signup",
+                            "node_type": "gate",
+                            "input": "rows",
+                            "condition": "row['event_type'] == 'signup'",
+                            "routes": {"true": "signups", "false": "non_signup"},
+                        },
+                        {
+                            "id": "gate_upgrade",
+                            "node_type": "gate",
+                            "input": "non_signup",
+                            "condition": "row['event_type'] == 'upgrade'",
+                            "routes": {"true": "upgrades", "false": "other"},
+                        },
+                    ],
+                    "edges": [],
+                    "outputs": [
+                        {
+                            "sink_name": "signups",
+                            "plugin": "json",
+                            "options": {
+                                "path": "outputs/signups.jsonl",
+                                "format": "jsonl",
+                                "schema": {"mode": "observed"},
+                                "mode": "write",
+                                "collision_policy": "auto_increment",
+                            },
+                            "on_write_failure": "discard",
+                        },
+                        {
+                            "sink_name": "upgrades",
+                            "plugin": "json",
+                            "options": {
+                                "path": "outputs/upgrades.jsonl",
+                                "format": "jsonl",
+                                "schema": {"mode": "observed"},
+                                "mode": "write",
+                                "collision_policy": "auto_increment",
+                            },
+                            "on_write_failure": "discard",
+                        },
+                        {
+                            "sink_name": "other",
+                            "plugin": "json",
+                            "options": {
+                                "path": "outputs/other.jsonl",
+                                "format": "jsonl",
+                                "schema": {"mode": "observed"},
+                                "mode": "write",
+                                "collision_policy": "auto_increment",
+                            },
+                            "on_write_failure": "discard",
+                        },
+                    ],
+                    "metadata": {"name": "events-routing-fallback"},
+                },
+            }
+        ]
+
     @pytest.mark.asyncio
     async def test_empty_state_uploaded_blob_stall_forces_repair_turn(self) -> None:
         """A no-tool prose reply must not end the turn when ready uploaded blobs exist.
@@ -6161,9 +6268,9 @@ class TestComposeLoopForcedRepair:
 
         assert mock_llm.call_count == 3
         assert result.repair_turns_used == 1
-        assert result.state.source is not None
-        assert result.state.source.options["blob_ref"] == self.blob_id
-        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["blob_ref"] == self.blob_id
+        assert result.state.sources["source"].options["schema"] == {"mode": "observed"}
         assert result.state.outputs[0].name == "out"
         assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
 
@@ -6182,6 +6289,97 @@ class TestComposeLoopForcedRepair:
         assert "inspect_source" in repair_text
         assert "source.blob_id" in repair_text
         assert "Do not infer that a CSV is header-only" in repair_text
+
+    @pytest.mark.asyncio
+    async def test_unsupported_from_json_recovery_forces_supported_fallback_build(self, tmp_path: Path) -> None:
+        """Unsupported requested syntax must not strand the session in empty state.
+
+        Regression for elspeth-164d7078cb / hard-mode p4_t2_edge: the model
+        correctly rejected ``from_json(payload)`` for ``value_transform`` but
+        then kept returning prose instead of committing the supported fallback
+        the user accepted: keep ``payload`` as a string, gate on
+        ``event_type``, and emit the three JSONL sinks.
+        """
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        event_blob_id = str(uuid4())
+        body = (
+            b"event_id,user_id,event_type,timestamp,payload\n"
+            b'EV-1,U-101,signup,2026-09-01T10:00:00Z,{"plan":"free"}\n'
+            b"EV-2,U-102,login,2026-09-01T10:05:00Z,{}\n"
+            b'EV-3,U-101,upgrade,2026-09-02T11:00:00Z,{"to_plan":"pro"}\n'
+        )
+        storage_path = tmp_path / "blobs" / self.session_id / f"{event_blob_id}_events.csv"
+        storage_path.parent.mkdir(parents=True, exist_ok=True)
+        storage_path.write_bytes(body)
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=event_blob_id,
+                    session_id=self.session_id,
+                    filename="events.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(body),
+                    content_hash=_content_hash(body),
+                    storage_path=str(storage_path),
+                    created_at=datetime.now(UTC),
+                    created_by="user",
+                    source_description=None,
+                    status="ready",
+                )
+            )
+
+        passing_preflight = ValidationResult(is_valid=True, checks=[], errors=[])
+        turn1_refusal = _make_llm_response(
+            content=(
+                "The value_transform expression from_json(payload) is unsupported here. "
+                "I can keep payload as a string and route on event_type."
+            ),
+            tool_calls=None,
+        )
+        turn2_build = _make_llm_response(content=None, tool_calls=self._from_json_fallback_pipeline_tool_calls(event_blob_id))
+        turn3_done = _make_llm_response(content="Built the supported fallback.", tool_calls=None)
+
+        empty = _empty_state()
+        with (
+            patch.object(self.service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+            patch.object(self.service, "_runtime_preflight", return_value=passing_preflight),
+        ):
+            mock_llm.side_effect = [turn1_refusal, turn2_build, turn3_done]
+            result = await self.service.compose(
+                (
+                    "Build a CSV pipeline on the uploaded events.csv, parse payload with "
+                    "from_json(payload), gate on event_type, and write signups/upgrades/other."
+                ),
+                [],
+                empty,
+                session_id=self.session_id,
+                user_id="test-user",
+            )
+
+        assert mock_llm.call_count == 3
+        assert result.repair_turns_used == 1
+        assert result.state.sources["source"].options["blob_ref"] == event_blob_id
+        assert {node.id for node in result.state.nodes} == {"gate_signup", "gate_upgrade"}
+        assert {output.name for output in result.state.outputs} == {"signups", "upgrades", "other"}
+        assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
+
+        turn2_messages = mock_llm.call_args_list[1].args[0]
+        repair_msgs = [
+            m
+            for m in turn2_messages
+            if isinstance(m, dict)
+            and m.get("role") == "user"
+            and "[composer-system]" in str(m.get("content", ""))
+            and event_blob_id in str(m.get("content", ""))
+        ]
+        assert len(repair_msgs) == 1
+        repair_text = str(repair_msgs[0]["content"])
+        assert "unsupported requested primitive" in repair_text
+        assert "from_json" in repair_text
+        assert "supported fallback" in repair_text
+        assert "Do not reply with another conceptual plan" in repair_text
 
     def _futile_repair_tool_call(self, call_id: str, name_value: str) -> list[dict[str, Any]]:
         """Tool call that mutates state but does NOT clear the proof blocker.
@@ -6244,8 +6442,8 @@ class TestComposeLoopForcedRepair:
         # repair turn to clear the diagnostic.
         assert result.repair_turns_used == 1
         # Final state has observed schema (the repair landed) and is_valid.
-        assert result.state.source is not None
-        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["schema"] == {"mode": "observed"}
         assert result.runtime_preflight is not None and result.runtime_preflight.is_valid is True
         # The synthesised repair message reaches the LLM history before
         # turn 3 — inspect the messages of turn 3 (index 2).
@@ -6322,8 +6520,8 @@ class TestComposeLoopForcedRepair:
         assert result.repair_turns_used == _MAX_REPAIR_TURNS
         # Source still has the original fixed-mode blocking schema; the
         # futile mutations never touched the source.
-        assert result.state.source is not None
-        assert result.state.source.options["schema"]["mode"] == "fixed"
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["schema"]["mode"] == "fixed"
         # Metadata reflects the most recent (futile) repair attempt.
         assert result.state.metadata.name == "attempt-2"
         # Final message is the third claim-complete; finalisation
@@ -6380,8 +6578,8 @@ class TestComposeLoopForcedRepair:
         # original blocker config; runtime_preflight may still be valid
         # (it was patched to return is_valid=True), but the runtime gate
         # is not the proof gate. Verify the source state is unchanged.
-        assert result.state.source is not None
-        assert result.state.source.options["schema"]["mode"] == "fixed"
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["schema"]["mode"] == "fixed"
 
     @pytest.mark.asyncio
     async def test_repair_gate_fires_on_first_turn_of_resumed_session(self) -> None:
@@ -6477,8 +6675,8 @@ class TestComposeLoopForcedRepair:
         ]
         assert len(repair_msgs) == 1, f"expected one synthesised repair message in turn-2 history, found: {turn2_messages}"
         # Final state is repaired — the schema mode is now observed.
-        assert result.state.source is not None
-        assert result.state.source.options["schema"] == {"mode": "observed"}
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].options["schema"] == {"mode": "observed"}
 
     @pytest.mark.asyncio
     async def test_repair_gate_skipped_when_source_is_not_blob_backed(self) -> None:
@@ -6582,9 +6780,9 @@ class TestComposeLoopFreeformRecipeIntentRouting:
 
         assert mock_llm.call_count == 0
         assert result.state.validate().is_valid is True
-        assert result.state.source is not None
-        assert result.state.source.plugin == "csv"
-        assert result.state.source.options["blob_ref"]
+        assert result.state.sources["source"] is not None
+        assert result.state.sources["source"].plugin == "csv"
+        assert result.state.sources["source"].options["blob_ref"]
         assert {node.node_type for node in result.state.nodes} >= {"gate", "coalesce"}
         assert any(node.plugin == "truncate" for node in result.state.nodes)
         assert result.state.outputs[0].name == "merged_rows"

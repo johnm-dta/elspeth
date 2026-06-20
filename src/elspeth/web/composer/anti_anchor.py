@@ -1,11 +1,13 @@
-"""§7.7 anti-anchor hint: break LLM retry loops on byte-identical payloads.
+"""§7.7 anti-anchor hints: break LLM retry loops with no progress.
 
 When the composer LLM retries the same tool with the same canonical arguments
 three times in a row, it has stopped reading new evidence — a context-anchored
-loop. Empirically observed in the Tier 1 final cohort's residual RED session
-(`53bc3cf2-…`, see `docs/composer/evidence/composer-tier1.5-step-c-diagnosis-2026-05-06.md`):
-the model called `set_pipeline` three times with byte-identical arguments and
-identical errors, then surrendered to a text-only "I'm stuck" reply.
+loop. The original §7.7 repair targeted that byte-identical pattern. Later
+audit of the captured Tier 1 final cohort RED (`53bc3cf2-…`, see
+`notes/composer-tier1.5-step-c-diagnosis-2026-05-06.md`) proved the actual
+payloads were distinct: the model drifted across failed `set_pipeline` calls,
+then surrendered to a text-only "I'm stuck" reply. The tracker therefore covers
+both anchored identity and same-tool drift without progress.
 
 The fix is small: after N=3 consecutive identical failures, inject a
 `role="user"` message before the next LLM call telling the model to enumerate
@@ -32,6 +34,10 @@ Detection criteria (deliberately conservative):
 - Three-in-a-row means: the LAST 3 entries in the bounded failure deque are
   all the same `(tool_name, hash)` pair. Earlier non-matching entries do not
   poison the trigger; the deque length is bounded so stale entries age out.
+- Drift without convergence means: the LAST 3 entries are failures for the same
+  tool but at least two distinct argument hashes. The model is changing payloads
+  but not making progress, so it needs a different repair strategy rather than
+  more small variations.
 - Any tool *success* clears the deque immediately. The system has, by
   definition, just made progress.
 """
@@ -53,6 +59,16 @@ def should_inject_hint(failures: FailureDeque) -> bool:
         return False
     last = list(failures)[-_RETRY_THRESHOLD:]
     return all(entry == last[0] for entry in last)
+
+
+def should_inject_drift_hint(failures: FailureDeque) -> bool:
+    """Return True iff the same tool has failed with drifting payloads."""
+    if len(failures) < _RETRY_THRESHOLD:
+        return False
+    last = list(failures)[-_RETRY_THRESHOLD:]
+    tool_names = {tool_name for tool_name, _arguments_hash in last}
+    argument_hashes = {arguments_hash for _tool_name, arguments_hash in last}
+    return len(tool_names) == 1 and len(argument_hashes) > 1
 
 
 def build_anti_anchor_hint(failures: FailureDeque) -> str:
@@ -82,6 +98,23 @@ def build_anti_anchor_hint(failures: FailureDeque) -> str:
     )
 
 
+def build_drift_hint(failures: FailureDeque) -> str:
+    """Compose a hint for same-tool drift without convergence."""
+    if not should_inject_drift_hint(failures):
+        raise ValueError("build_drift_hint requires 3 same-tool failures with different arguments")
+    tool_name = failures[-1][0]
+    return (
+        f"[ELSPETH-SYSTEM-HINT] Your last {_RETRY_THRESHOLD} calls to `{tool_name}` "
+        "all failed while sending different arguments. This is drift without convergence: "
+        "small payload variations are not escaping the validator failure. "
+        "Before the next attempt, stop varying fields opportunistically and choose a new repair strategy: "
+        "(a) compare the last failed payloads against the validator-named fields, "
+        "(b) re-read the relevant schema or assistance result if the expected shape is unclear, "
+        "(c) rebuild the complete requested topology in one coherent payload, or "
+        "(d) surface a named gap if the requested shape is unsupported by the available tools."
+    )
+
+
 class AntiAnchorTracker:
     """Maintains the bounded failure deque across the compose loop.
 
@@ -103,17 +136,20 @@ class AntiAnchorTracker:
         self._failures.clear()
 
     def should_fire(self) -> bool:
-        return should_inject_hint(self._failures)
+        return should_inject_hint(self._failures) or should_inject_drift_hint(self._failures)
 
     def build_hint(self) -> str:
+        if should_inject_hint(self._failures):
+            return build_anti_anchor_hint(self._failures)
+        if should_inject_drift_hint(self._failures):
+            return build_drift_hint(self._failures)
         return build_anti_anchor_hint(self._failures)
 
     def consume_fire(self) -> None:
-        """Reset after the hint is injected to prevent immediate re-fire.
+        """Reset after a hint is injected to prevent immediate re-fire.
 
-        The hint addressed the model; we wait for it to act. If it produces
-        a 4th identical failure, that does NOT re-fire — only a fresh run of
-        N consecutive identical failures (which requires at least one success
-        OR one different-payload failure first) does.
+        The hint addressed the model; we wait for it to act. A 4th failure does
+        NOT immediately re-fire — only a fresh run of N failures after the
+        reset does.
         """
         self._failures.clear()

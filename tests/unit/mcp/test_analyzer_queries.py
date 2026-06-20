@@ -40,7 +40,6 @@ from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
 from elspeth.contracts.errors import AuditIntegrityError, ExecutionError, TransformErrorReason
 from elspeth.core.landscape.lineage import explain
-from elspeth.core.landscape.schema import nodes_table
 from elspeth.mcp.analyzer import LandscapeAnalyzer
 from elspeth.mcp.analyzers.diagnostics import get_failure_context
 from elspeth.mcp.analyzers.queries import (
@@ -48,6 +47,7 @@ from elspeth.mcp.analyzers.queries import (
     get_calls,
     get_operation_calls,
     list_operations,
+    list_rows,
     list_runs,
 )
 from elspeth.mcp.analyzers.reports import get_error_analysis, get_run_summary
@@ -60,6 +60,13 @@ from tests.fixtures.landscape import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _assert_value_fingerprint(fingerprint: dict[str, Any], *, value_type: str) -> None:
+    assert set(fingerprint) == {"value_hash", "value_type"}
+    assert fingerprint["value_type"] == value_type
+    assert isinstance(fingerprint["value_hash"], str)
+    assert len(fingerprint["value_hash"]) == 64
 
 
 def _build_linear_pipeline(
@@ -106,7 +113,7 @@ def _build_linear_pipeline(
 
     # Create row and token
     data = row_data or {"name": "Alice", "amount": 100}
-    row = factory.data_flow.create_row(run_id, source_node_id, row_index=0, data=data)
+    row = factory.data_flow.create_row(run_id, source_node_id, row_index=0, data=data, source_row_index=0, ingest_sequence=0)
     token = factory.data_flow.create_token(row.row_id)
 
     # Process through transform
@@ -283,7 +290,7 @@ class TestExplainTokenLineage:
 
         register_test_node(factory.data_flow, run_id, "xform", node_type=NodeType.TRANSFORM, plugin_name="mapper")
 
-        row = factory.data_flow.create_row(run_id, "src", row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row(run_id, "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
 
         ns = factory.execution.begin_node_state(token.token_id, "xform", run_id, step_index=1, input_data={"x": 1})
@@ -416,7 +423,7 @@ class TestGetFailureContext:
 
         register_test_node(factory.data_flow, "terr-run", "xform", node_type=NodeType.TRANSFORM, plugin_name="llm_classifier")
 
-        row = factory.data_flow.create_row("terr-run", "src", row_index=0, data={"text": "hello"})
+        row = factory.data_flow.create_row("terr-run", "src", row_index=0, data={"text": "hello"}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
 
         ns = factory.execution.begin_node_state(token.token_id, "xform", "terr-run", step_index=1, input_data={"text": "hello"})
@@ -479,7 +486,7 @@ class TestGetFailureContext:
 
         register_test_node(factory.data_flow, "retry-run", "xform", node_type=NodeType.TRANSFORM, plugin_name="flaky")
 
-        row = factory.data_flow.create_row("retry-run", "src", row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row("retry-run", "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
 
         # Attempt 0: failed (initial)
@@ -531,7 +538,7 @@ class TestGetFailureContext:
 
         register_test_node(factory.data_flow, "first-retry-run", "xform", node_type=NodeType.TRANSFORM, plugin_name="flaky")
 
-        row = factory.data_flow.create_row("first-retry-run", "src", row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row("first-retry-run", "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
 
         # Attempt 0: initial try
@@ -586,7 +593,7 @@ class TestGetFailureContext:
         # Run X: xform is "llm_classifier"
         register_test_node(factory.data_flow, "run-X", "xform", node_type=NodeType.TRANSFORM, plugin_name="llm_classifier")
 
-        row_x = factory.data_flow.create_row("run-X", "src", row_index=0, data={"x": 1})
+        row_x = factory.data_flow.create_row("run-X", "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token_x = factory.data_flow.create_token(row_x.row_id)
 
         ns_x = factory.execution.begin_node_state(token_x.token_id, "xform", "run-X", step_index=1, input_data={"x": 1})
@@ -609,7 +616,7 @@ class TestGetFailureContext:
         register_test_node(factory.data_flow, "run-Y", "src", node_type=NodeType.SOURCE, plugin_name="source")
         register_test_node(factory.data_flow, "run-Y", "xform", node_type=NodeType.TRANSFORM, plugin_name="field_mapper")
 
-        row_y = factory.data_flow.create_row("run-Y", "src", row_index=0, data={"y": 2})
+        row_y = factory.data_flow.create_row("run-Y", "src", row_index=0, data={"y": 2}, source_row_index=0, ingest_sequence=0)
         token_y = factory.data_flow.create_token(row_y.row_id)
 
         ns_y = factory.execution.begin_node_state(token_y.token_id, "xform", "run-Y", step_index=1, input_data={"y": 2})
@@ -651,7 +658,7 @@ class TestGetFailureContext:
 
         # Run P: xform is "slow_transform"
         register_test_node(factory.data_flow, "run-P", "xform", node_type=NodeType.TRANSFORM, plugin_name="slow_transform")
-        row_p = factory.data_flow.create_row("run-P", "src", row_index=0, data={"p": 1})
+        row_p = factory.data_flow.create_row("run-P", "src", row_index=0, data={"p": 1}, source_row_index=0, ingest_sequence=0)
         token_p = factory.data_flow.create_token(row_p.row_id)
         error_reason: TransformErrorReason = {"reason": "retry_timeout"}
         factory.data_flow.record_transform_error(
@@ -673,7 +680,7 @@ class TestGetFailureContext:
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-Q")
         register_test_node(factory.data_flow, "run-Q", "src", node_type=NodeType.SOURCE, plugin_name="source")
         register_test_node(factory.data_flow, "run-Q", "xform", node_type=NodeType.TRANSFORM, plugin_name="fast_transform")
-        row_q = factory.data_flow.create_row("run-Q", "src", row_index=0, data={"q": 2})
+        row_q = factory.data_flow.create_row("run-Q", "src", row_index=0, data={"q": 2}, source_row_index=0, ingest_sequence=0)
         token_q = factory.data_flow.create_token(row_q.row_id)
         error_reason_q: TransformErrorReason = {"reason": "invalid_input"}
         factory.data_flow.record_transform_error(
@@ -708,7 +715,7 @@ class TestGetFailureContext:
 
         # Create 5 rows, all failing
         for i in range(5):
-            row = factory.data_flow.create_row("limit-run", "src", row_index=i, data={"i": i})
+            row = factory.data_flow.create_row("limit-run", "src", row_index=i, data={"i": i}, source_row_index=i, ingest_sequence=i)
             token = factory.data_flow.create_token(row.row_id)
             ns = factory.execution.begin_node_state(token.token_id, "xform", "limit-run", step_index=1, input_data={"i": i})
             factory.execution.complete_node_state(
@@ -741,7 +748,7 @@ class TestGetFailureContext:
         register_test_node(factory.data_flow, "pattern-run", "xform-b", node_type=NodeType.TRANSFORM, plugin_name="classifier")
 
         # Fail in xform-a
-        row0 = factory.data_flow.create_row("pattern-run", "src", row_index=0, data={"i": 0})
+        row0 = factory.data_flow.create_row("pattern-run", "src", row_index=0, data={"i": 0}, source_row_index=0, ingest_sequence=0)
         token0 = factory.data_flow.create_token(row0.row_id)
         ns0 = factory.execution.begin_node_state(token0.token_id, "xform-a", "pattern-run", step_index=1, input_data={"i": 0})
         factory.execution.complete_node_state(
@@ -758,7 +765,7 @@ class TestGetFailureContext:
         )
 
         # Fail in xform-b
-        row1 = factory.data_flow.create_row("pattern-run", "src", row_index=1, data={"i": 1})
+        row1 = factory.data_flow.create_row("pattern-run", "src", row_index=1, data={"i": 1}, source_row_index=1, ingest_sequence=1)
         token1 = factory.data_flow.create_token(row1.row_id)
         ns1 = factory.execution.begin_node_state(token1.token_id, "xform-b", "pattern-run", step_index=2, input_data={"i": 1})
         factory.execution.complete_node_state(
@@ -852,7 +859,7 @@ class TestGetRunSummary:
         factory.data_flow.record_validation_error("err-run", "src", {"bad": "data"}, "missing field", "observed", "quarantine")
 
         # Record a transform error
-        row = factory.data_flow.create_row("err-run", "src", row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row("err-run", "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
         error_reason: TransformErrorReason = {"reason": "api_error"}
         factory.data_flow.record_transform_error(
@@ -877,6 +884,52 @@ class TestGetRunSummary:
         assert result["errors"]["transform"] == 1
         assert result["errors"]["total"] == 2
 
+    def test_list_rows_exposes_source_local_and_ingest_identity(self) -> None:
+        setup = make_recorder_with_run(run_id="multi-source-rows", source_node_id="orders")
+        db = setup.db
+        factory = setup.factory
+        register_test_node(factory.data_flow, "multi-source-rows", "refunds", node_type=NodeType.SOURCE, plugin_name="csv")
+
+        factory.data_flow.create_row(
+            "multi-source-rows",
+            "refunds",
+            row_index=0,
+            data={"kind": "refund"},
+            row_id="row-refunds",
+            source_row_index=0,
+            ingest_sequence=1,
+        )
+        factory.data_flow.create_row(
+            "multi-source-rows",
+            "orders",
+            row_index=0,
+            data={"kind": "order"},
+            row_id="row-orders",
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+
+        rows = list_rows(db, factory, "multi-source-rows")
+
+        assert [row["row_id"] for row in rows] == ["row-orders", "row-refunds"]
+        assert rows[0]["source_node_id"] == "orders"
+        assert rows[0]["row_index"] == 0
+        assert rows[0]["source_row_index"] == 0
+        assert rows[0]["ingest_sequence"] == 0
+        assert rows[1]["source_node_id"] == "refunds"
+        assert rows[1]["row_index"] == 0
+        assert rows[1]["source_row_index"] == 0
+        assert rows[1]["ingest_sequence"] == 1
+
+    def test_list_operations_accepts_runtime_preflight_filter(self) -> None:
+        setup = make_recorder_with_run(run_id="preflight-ops", source_node_id="source-0")
+        operation = setup.factory.execution.begin_operation("preflight-ops", "source-0", "runtime_preflight")
+
+        rows = list_operations(setup.db, setup.factory, "preflight-ops", operation_type="runtime_preflight")
+
+        assert [row["operation_id"] for row in rows] == [operation.operation_id]
+        assert rows[0]["operation_type"] == "runtime_preflight"
+
     def test_summary_outcome_distribution(self) -> None:
         """get_run_summary returns correct outcome distribution for mixed outcomes."""
         setup = make_recorder_with_run(run_id="dist-run", source_node_id="src")
@@ -886,7 +939,7 @@ class TestGetRunSummary:
         register_test_node(factory.data_flow, "dist-run", "sink", node_type=NodeType.SINK, plugin_name="csv_sink")
 
         # Row 0: completed
-        row0 = factory.data_flow.create_row("dist-run", "src", row_index=0, data={"i": 0})
+        row0 = factory.data_flow.create_row("dist-run", "src", row_index=0, data={"i": 0}, source_row_index=0, ingest_sequence=0)
         token0 = factory.data_flow.create_token(row0.row_id)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token0.token_id, run_id="dist-run"),
@@ -896,7 +949,7 @@ class TestGetRunSummary:
         )
 
         # Row 1: quarantined
-        row1 = factory.data_flow.create_row("dist-run", "src", row_index=1, data={"i": 1})
+        row1 = factory.data_flow.create_row("dist-run", "src", row_index=1, data={"i": 1}, source_row_index=1, ingest_sequence=1)
         token1 = factory.data_flow.create_token(row1.row_id)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token1.token_id, run_id="dist-run"),
@@ -906,7 +959,7 @@ class TestGetRunSummary:
         )
 
         # Row 2: completed
-        row2 = factory.data_flow.create_row("dist-run", "src", row_index=2, data={"i": 2})
+        row2 = factory.data_flow.create_row("dist-run", "src", row_index=2, data={"i": 2}, source_row_index=2, ingest_sequence=2)
         token2 = factory.data_flow.create_token(row2.row_id)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token2.token_id, run_id="dist-run"),
@@ -918,7 +971,7 @@ class TestGetRunSummary:
         # Row 3: routed_on_error (DIVERT path) — elspeth-5069612f3c new outcome.
         # MCP must surface ROUTED_ON_ERROR as its own outcome_distribution
         # bucket; it does not collapse into the legacy "routed" bucket.
-        row3 = factory.data_flow.create_row("dist-run", "src", row_index=3, data={"i": 3})
+        row3 = factory.data_flow.create_row("dist-run", "src", row_index=3, data={"i": 3}, source_row_index=3, ingest_sequence=3)
         token3 = factory.data_flow.create_token(row3.row_id)
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id=token3.token_id, run_id="dist-run"),
@@ -1000,14 +1053,24 @@ class TestListRuns:
 def _delete_node(db: Any, run_id: str, node_id: str) -> None:
     """Directly delete a node row to simulate Tier 1 audit corruption.
 
-    Disables FK enforcement temporarily — real corruption doesn't follow FK rules.
+    Disables FK enforcement temporarily — real corruption doesn't follow FK
+    rules. Operates at the raw driver level: ``PRAGMA foreign_keys`` is a
+    silent no-op inside a transaction, and under the write-intent begin
+    discipline every ``db.connection()`` transaction begins explicitly, so the
+    toggle must run in driver autocommit.
     """
-    from sqlalchemy import text
-
-    with db.connection() as conn:
-        conn.execute(text("PRAGMA foreign_keys = OFF"))
-        conn.execute(nodes_table.delete().where((nodes_table.c.node_id == node_id) & (nodes_table.c.run_id == run_id)))
-        conn.execute(text("PRAGMA foreign_keys = ON"))
+    raw = db.engine.raw_connection()
+    try:
+        driver = raw.driver_connection
+        assert driver is not None
+        driver.execute("PRAGMA foreign_keys = OFF")
+        try:
+            driver.execute("DELETE FROM nodes WHERE node_id = ? AND run_id = ?", (node_id, run_id))
+            driver.commit()
+        finally:
+            driver.execute("PRAGMA foreign_keys = ON")
+    finally:
+        raw.close()
 
 
 class TestFailureContextCorruptionGuards:
@@ -1035,7 +1098,7 @@ class TestFailureContextCorruptionGuards:
 
         register_test_node(factory.data_flow, "corrupt-te", "xform", node_type=NodeType.TRANSFORM, plugin_name="mapper")
 
-        row = factory.data_flow.create_row("corrupt-te", "src", row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row("corrupt-te", "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
         error_reason: TransformErrorReason = {"reason": "test_error"}
         factory.data_flow.record_transform_error(
@@ -1094,7 +1157,7 @@ class TestErrorAnalysisCorruptionGuard:
 
         register_test_node(factory.data_flow, "corrupt-ea", "xform", node_type=NodeType.TRANSFORM, plugin_name="mapper")
 
-        row = factory.data_flow.create_row("corrupt-ea", "src", row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row("corrupt-ea", "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
         error_reason: TransformErrorReason = {"reason": "test_error"}
         factory.data_flow.record_transform_error(
@@ -1124,7 +1187,7 @@ class TestErrorAnalysisCorruptionGuard:
 
         register_test_node(factory.data_flow, "clean-ea", "xform", node_type=NodeType.TRANSFORM, plugin_name="mapper")
 
-        row = factory.data_flow.create_row("clean-ea", "src", row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row("clean-ea", "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token = factory.data_flow.create_token(row.row_id)
         error_reason: TransformErrorReason = {"reason": "test_error"}
         factory.data_flow.record_transform_error(
@@ -1180,7 +1243,7 @@ class TestExplainTokenErrorHandling:
         register_test_node(factory.data_flow, "et-ambig", "sink-a", node_type=NodeType.SINK, plugin_name="sink_a")
         register_test_node(factory.data_flow, "et-ambig", "sink-b", node_type=NodeType.SINK, plugin_name="sink_b")
 
-        row = factory.data_flow.create_row("et-ambig", "src", row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row("et-ambig", "src", row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0)
         token_a = factory.data_flow.create_token(row.row_id)
         token_b = factory.data_flow.create_token(row.row_id)
         factory.data_flow.record_token_outcome(
@@ -1332,7 +1395,9 @@ class TestListCollisions:
         )
 
         # Create a row and token to satisfy FK constraints
-        row = factory.data_flow.create_row("plain-coalesce", setup.source_node_id, row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row(
+            "plain-coalesce", setup.source_node_id, row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0
+        )
         token = factory.data_flow.create_token(row.row_id)
 
         # Record a node state with collision data in context_after
@@ -1363,6 +1428,9 @@ class TestListCollisions:
         # Should find the collision even with plain 'coalesce' plugin_name
         assert len(results) == 1, f"Expected 1 collision record for plain 'coalesce' plugin_name, got {len(results)}"
         assert results[0]["token_id"] == token.token_id
+        result_json = json.dumps(results, sort_keys=True)
+        assert "active" not in result_json
+        assert "inactive" not in result_json
 
     def test_filters_out_overlap_only_fields(self) -> None:
         """list_collisions filters fields where all branches have identical values.
@@ -1387,7 +1455,9 @@ class TestListCollisions:
             plugin_name="coalesce:merge",
         )
 
-        row = factory.data_flow.create_row("overlap-only", setup.source_node_id, row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row(
+            "overlap-only", setup.source_node_id, row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0
+        )
         token = factory.data_flow.create_token(row.row_id)
 
         ns = factory.execution.begin_node_state(token.token_id, "coalesce-node", "overlap-only", step_index=1, input_data={"x": 1})
@@ -1444,7 +1514,9 @@ class TestListCollisions:
             plugin_name="coalesce:merge",
         )
 
-        row = factory.data_flow.create_row("first-wins", setup.source_node_id, row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row(
+            "first-wins", setup.source_node_id, row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0
+        )
         token = factory.data_flow.create_token(row.row_id)
 
         ns = factory.execution.begin_node_state(token.token_id, "coalesce-node", "first-wins", step_index=1, input_data={"x": 1})
@@ -1485,15 +1557,21 @@ class TestListCollisions:
         assert score_field["winner_branch"] == "branch1", (
             f"Expected winner_branch='branch1' (from union_field_origins), got '{score_field['winner_branch']}'"
         )
-        assert score_field["winner_value"] == 10, f"Expected winner_value=10 (branch1's value), got {score_field['winner_value']}"
+        winner_fingerprint = score_field["winner_value_fingerprint"]
+        assert winner_fingerprint is not None
+        _assert_value_fingerprint(winner_fingerprint, value_type="int")
+        competing = score_field["competing_value_fingerprints"]
+        assert [branch for branch, _fingerprint in competing] == ["branch1", "branch2"]
+        assert competing[0][1]["value_hash"] != competing[1][1]["value_hash"]
 
     def test_failed_merge_reports_no_winner(self) -> None:
         """list_collisions reports no winner when merge failed (union_collision_policy='fail').
 
         Regression: When status is 'failed' (NodeStateStatus.FAILED.value), the code
         compared against uppercase "FAILED" which never matched. This caused failed
-        merges to incorrectly populate winner_branch/winner_value from the pre-failure
-        union_field_origins, making it appear a winner was selected when no merge happened.
+        merges to incorrectly populate winner_branch/winner_value_fingerprint from
+        the pre-failure union_field_origins, making it appear a winner was selected
+        when no merge happened.
         """
         from sqlalchemy import text
 
@@ -1512,7 +1590,9 @@ class TestListCollisions:
             plugin_name="coalesce:strict_merge",
         )
 
-        row = factory.data_flow.create_row("failed-merge", setup.source_node_id, row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row(
+            "failed-merge", setup.source_node_id, row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0
+        )
         token = factory.data_flow.create_token(row.row_id)
 
         ns = factory.execution.begin_node_state(token.token_id, "coalesce-node", "failed-merge", step_index=1, input_data={"x": 1})
@@ -1560,7 +1640,9 @@ class TestListCollisions:
 
         # Winner should be None for failed merges — no winner was selected
         assert score_field["winner_branch"] is None, f"Expected winner_branch=None for failed merge, got '{score_field['winner_branch']}'"
-        assert score_field["winner_value"] is None, f"Expected winner_value=None for failed merge, got '{score_field['winner_value']}'"
+        assert score_field["winner_value_fingerprint"] is None, (
+            f"Expected winner_value_fingerprint=None for failed merge, got '{score_field['winner_value_fingerprint']}'"
+        )
 
     def test_returns_separate_records_for_each_node_state(self) -> None:
         """list_collisions returns one record per node_states row with real collisions.
@@ -1590,9 +1672,13 @@ class TestListCollisions:
         )
 
         # Create two rows and tokens — simulating two consumed branches
-        row1 = factory.data_flow.create_row("no-dedup-test", setup.source_node_id, row_index=0, data={"x": 1})
+        row1 = factory.data_flow.create_row(
+            "no-dedup-test", setup.source_node_id, row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0
+        )
         token1 = factory.data_flow.create_token(row1.row_id)
-        row2 = factory.data_flow.create_row("no-dedup-test", setup.source_node_id, row_index=1, data={"x": 2})
+        row2 = factory.data_flow.create_row(
+            "no-dedup-test", setup.source_node_id, row_index=1, data={"x": 2}, source_row_index=1, ingest_sequence=1
+        )
         token2 = factory.data_flow.create_token(row2.row_id)
 
         # Both tokens get node_states with identical context_after_json (same collision pattern)
@@ -1659,17 +1745,23 @@ class TestListCollisions:
         # Create 3 rows: first 2 are overlap-only (same values), third is a real collision
         rows_and_tokens = []
         for i in range(3):
-            row = factory.data_flow.create_row("limit-after-filter", setup.source_node_id, row_index=i, data={"x": i})
+            row = factory.data_flow.create_row(
+                "limit-after-filter", setup.source_node_id, row_index=i, data={"x": i}, source_row_index=i, ingest_sequence=i
+            )
             token = factory.data_flow.create_token(row.row_id)
             rows_and_tokens.append((row, token))
 
-        # Create node_states: first 2 with overlap-only data (more recent), third with real collision (older)
+        # Create node_states: first 2 with overlap-only data (more recent), third with real collision (older).
+        # begin_node_state opens its own write transaction — it must run BEFORE
+        # the db.connection() block (nesting a repo write inside an open
+        # connection on the in-memory StaticPool nests transactions under the
+        # write-intent begin discipline).
+        node_states = [
+            factory.execution.begin_node_state(token.token_id, "coalesce-node", "limit-after-filter", step_index=1, input_data={"x": i})
+            for i, (_row, token) in enumerate(rows_and_tokens)
+        ]
         with db.connection() as conn:
-            for i, (_row, token) in enumerate(rows_and_tokens):
-                ns = factory.execution.begin_node_state(
-                    token.token_id, "coalesce-node", "limit-after-filter", step_index=1, input_data={"x": i}
-                )
-
+            for i, ns in enumerate(node_states):
                 if i < 2:
                     # Overlap-only: same value on both branches (NOT a real collision)
                     context = json.dumps(
@@ -1742,7 +1834,9 @@ class TestListCollisions:
             plugin_name="coalesce:merge",
         )
 
-        row = factory.data_flow.create_row("canonical-test", setup.source_node_id, row_index=0, data={"x": 1})
+        row = factory.data_flow.create_row(
+            "canonical-test", setup.source_node_id, row_index=0, data={"x": 1}, source_row_index=0, ingest_sequence=0
+        )
         token = factory.data_flow.create_token(row.row_id)
 
         ns = factory.execution.begin_node_state(token.token_id, "coalesce-node", "canonical-test", step_index=1, input_data={"x": 1})
@@ -1816,7 +1910,9 @@ class TestListCollisions:
         fixed_timestamp = "2024-01-15 12:00:00"
 
         for i in range(5):
-            row = factory.data_flow.create_row("pagination-stability", setup.source_node_id, row_index=i, data={"x": i})
+            row = factory.data_flow.create_row(
+                "pagination-stability", setup.source_node_id, row_index=i, data={"x": i}, source_row_index=i, ingest_sequence=i
+            )
             token = factory.data_flow.create_token(row.row_id)
             token_ids.append(token.token_id)
             ns = factory.execution.begin_node_state(

@@ -17,12 +17,13 @@ def build_narrative(state: CompositionState, *, retention_days: int) -> str:
         "",
     ]
 
-    if state.source is None:
+    if not state.sources:
         lines.append(
             "- No source configured yet — the composition is incomplete. Once you add a source, this view will describe what it records."
         )
     else:
-        lines.append(_describe_source(state.source.plugin))
+        for source_name, source in state.sources.items():
+            lines.append(_describe_source(source.plugin, source_name=source_name))
 
     for node in state.nodes:
         if node.node_type == "transform":
@@ -46,14 +47,15 @@ def build_narrative(state: CompositionState, *, retention_days: int) -> str:
     return "\n".join(lines)
 
 
-def _describe_source(plugin: str) -> str:
+def _describe_source(plugin: str, *, source_name: str) -> str:
+    prefix = "- Source data" if source_name == "source" else f"- Source data ({source_name})"
     if plugin == "csv":
-        return "- Source data — each row from the CSV input. SHA-256 hash recorded for the source file and for each row."
+        return f"{prefix} — each row from the CSV input. SHA-256 hash recorded for the source file and for each row."
     if plugin == "json":
-        return "- Source data — each record from the JSON input. SHA-256 hash recorded for the source file and for each record."
+        return f"{prefix} — each record from the JSON input. SHA-256 hash recorded for the source file and for each record."
     if plugin == "dataverse":
-        return "- Source data — each record returned by the Dataverse query, with query parameters and result hashes recorded."
-    return f"- Source data — each row from the {plugin} source. Row-level hash recorded for every record."
+        return f"{prefix} — each record returned by the Dataverse query, with query parameters and result hashes recorded."
+    return f"{prefix} — each row from the {plugin} source. Row-level hash recorded for every record."
 
 
 def _describe_transform(node: NodeSpec) -> str:

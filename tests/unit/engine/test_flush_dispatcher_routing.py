@@ -175,7 +175,6 @@ def _make_processor() -> Any:
     traversal = DAGTraversalContext(
         node_step_map={NodeID("source-0"): 0, NodeID("agg-node"): 1},
         node_to_plugin={},
-        first_transform_node_id=None,
         node_to_next={NodeID("source-0"): None, NodeID("agg-node"): None},
         coalesce_node_map={},
     )
@@ -187,6 +186,7 @@ def _make_processor() -> Any:
         source_node_id=NodeID("source-0"),
         source_on_success="default",
         traversal=traversal,
+        scheduler=setup.factory.scheduler,
     )
 
 

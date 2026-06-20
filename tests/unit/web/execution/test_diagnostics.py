@@ -7,6 +7,8 @@ new audit surface or a payload/context export path.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import text
@@ -17,8 +19,131 @@ from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.execution.diagnostics import load_run_diagnostics_from_db
+from elspeth.web.execution.schemas import (
+    RunDiagnosticNodeState,
+    RunDiagnosticOperation,
+    RunDiagnosticSummary,
+    RunDiagnosticToken,
+)
 
 _OBSERVED_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
+_DIAGNOSTIC_TIME = datetime(2026, 1, 1, tzinfo=UTC)
+
+
+def _diagnostic_node_state(**overrides: object) -> RunDiagnosticNodeState:
+    payload: dict[str, object] = {
+        "state_id": "state-1",
+        "token_id": "token-1",
+        "node_id": "transform",
+        "step_index": 0,
+        "attempt": 0,
+        "status": "completed",
+        "duration_ms": 1.0,
+        "started_at": _DIAGNOSTIC_TIME,
+        "completed_at": _DIAGNOSTIC_TIME,
+    }
+    payload.update(overrides)
+    return RunDiagnosticNodeState(**payload)
+
+
+def _diagnostic_token(**overrides: object) -> RunDiagnosticToken:
+    payload: dict[str, object] = {
+        "token_id": "token-1",
+        "row_id": "row-1",
+        "row_index": 0,
+        "branch_name": None,
+        "fork_group_id": None,
+        "join_group_id": None,
+        "expand_group_id": None,
+        "step_in_pipeline": 0,
+        "created_at": _DIAGNOSTIC_TIME,
+        "terminal_outcome": "success",
+        "states": [],
+    }
+    payload.update(overrides)
+    return RunDiagnosticToken(**payload)
+
+
+def _diagnostic_operation(**overrides: object) -> RunDiagnosticOperation:
+    payload: dict[str, object] = {
+        "operation_id": "op-1",
+        "node_id": "source",
+        "operation_type": "source_load",
+        "status": "completed",
+        "duration_ms": 1.0,
+        "started_at": _DIAGNOSTIC_TIME,
+        "completed_at": _DIAGNOSTIC_TIME,
+        "error_message": None,
+    }
+    payload.update(overrides)
+    return RunDiagnosticOperation(**payload)
+
+
+def _diagnostic_summary(**overrides: object) -> RunDiagnosticSummary:
+    payload: dict[str, object] = {
+        "token_count": 1,
+        "preview_limit": 50,
+        "preview_truncated": False,
+        "state_counts": {"completed": 1},
+        "operation_counts": {"source_load": 1},
+        "latest_activity_at": _DIAGNOSTIC_TIME,
+    }
+    payload.update(overrides)
+    return RunDiagnosticSummary(**payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("status", "not_a_state"),
+        ("duration_ms", -1.0),
+        ("duration_ms", float("nan")),
+    ],
+)
+def test_diagnostic_node_state_rejects_impossible_contract_values(field: str, value: object) -> None:
+    with pytest.raises(ValidationError, match=field):
+        _diagnostic_node_state(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("row_index", -7),
+        ("step_in_pipeline", -2),
+        ("terminal_outcome", "not_an_outcome"),
+    ],
+)
+def test_diagnostic_token_rejects_impossible_contract_values(field: str, value: object) -> None:
+    with pytest.raises(ValidationError, match=field):
+        _diagnostic_token(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("operation_type", "not_an_operation"),
+        ("status", "not_a_status"),
+        ("duration_ms", -1.0),
+        ("duration_ms", float("nan")),
+    ],
+)
+def test_diagnostic_operation_rejects_impossible_contract_values(field: str, value: object) -> None:
+    with pytest.raises(ValidationError, match=field):
+        _diagnostic_operation(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("state_counts", {"not_a_state": 1}),
+        ("state_counts", {"completed": -1}),
+        ("operation_counts", {"not_an_operation": 1}),
+        ("operation_counts", {"source_load": -1}),
+    ],
+)
+def test_diagnostic_summary_rejects_impossible_contract_values(field: str, value: object) -> None:
+    with pytest.raises(ValidationError, match=field):
+        _diagnostic_summary(**{field: value})
 
 
 def _register_node(
@@ -46,8 +171,12 @@ def _seed_diagnostics_run(db: LandscapeDB, tmp_path, *, web_run_id: str = "web-r
     _register_node(factory, web_run_id, "extract", NodeType.TRANSFORM, "llm_extract")
     _register_node(factory, web_run_id, "json_out", NodeType.SINK, "json")
 
-    first_row = factory.data_flow.create_row(web_run_id, "source", 0, {"html": "<h1>A</h1>"}, row_id="row-0")
-    second_row = factory.data_flow.create_row(web_run_id, "source", 1, {"html": "<h1>B</h1>"}, row_id="row-1")
+    first_row = factory.data_flow.create_row(
+        web_run_id, "source", 0, {"html": "<h1>A</h1>"}, row_id="row-0", source_row_index=0, ingest_sequence=0
+    )
+    second_row = factory.data_flow.create_row(
+        web_run_id, "source", 1, {"html": "<h1>B</h1>"}, row_id="row-1", source_row_index=1, ingest_sequence=1
+    )
     first_token = factory.data_flow.create_token(first_row.row_id, token_id="token-0")
     second_token = factory.data_flow.create_token(second_row.row_id, token_id="token-1")
 

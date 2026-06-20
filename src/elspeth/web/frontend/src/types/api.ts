@@ -122,7 +122,7 @@ export interface RunAuditStoryResponse {
   run_id: string;
   session_id: string;
   llm_call_count: number;
-  output_file_hash: string;
+  source_data_hash: string;
   started_at: string;
   plugin_versions: Record<string, string>;
   seeded_from_cache: boolean;
@@ -175,12 +175,12 @@ export interface ShareableLinkResponse {
  * (`src/elspeth/web/shareable_reviews/models.py:97-179`).
  *
  * Wire-vs-runtime caveat for `composition_snapshot`: the backend
- * `CompositionState.to_dict()` (`src/elspeth/web/composer/state.py:1768`)
- * emits `{version, metadata, source, nodes, edges, outputs}` — the
+ * `CompositionState.to_dict()` emits `{version, metadata, sources, nodes,
+ * edges, outputs}` — the
  * runtime-only fields on the `CompositionState` interface (`id`,
  * `validation_errors`, `validation_warnings`, `validation_suggestions`)
  * are NOT present on this wire payload. The shared-inspect consumers
- * (notably `GraphMiniView`) read only `.source`, `.nodes`, `.outputs`,
+ * (notably `GraphMiniView`) read only `.sources`, `.nodes`, `.outputs`,
  * so the absent fields are inert here; treat any downstream consumer
  * that reads `id`/`validation_*` from this surface as a bug.
  */

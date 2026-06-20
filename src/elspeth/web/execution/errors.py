@@ -199,6 +199,38 @@ def _render_interpretation_site(site: InterpretationReviewSite) -> str:
     return f"{site.kind.value} review for {site.component_type} '{site.component_id}': {site.user_term}"
 
 
+class RunSessionIntegrityError(Exception):
+    """Tier 1 audit-integrity violation — a run row references a session id
+    that has no matching ``sessions`` row.
+
+    Raised by ``ExecutionService.verify_run_ownership`` when
+    ``get_run(run_id)`` succeeds but the subsequent
+    ``get_session(run.session_id)`` raises ``SessionNotFoundError``.  The run
+    exists, so the ``run_id`` was neither malformed nor absent (those are the
+    legitimate Tier-3 not-found cases that map to a 4004 close); a *dangling*
+    parent-session reference is referential corruption of our own sessions DB,
+    not hostile client input we should coerce into "Run not found".
+
+    NOT a subclass of ``ValueError``: the WebSocket / REST ownership paths
+    catch broad ``ValueError`` to convert Tier-3 malformed/not-found run ids
+    into IDOR-safe not-found closes.  ``SessionNotFoundError`` is itself a
+    ``ValueError`` subclass, so re-raising the corruption as a plain
+    ``Exception`` is what keeps it from being silently collapsed into that
+    benign path; the route surfaces it via an internal-error close (1011) and
+    operator-channel logging instead.  Mirrors ``BlobSourcePathMismatchError``.
+    """
+
+    def __init__(self, *, run_id: str, session_id: str) -> None:
+        self.run_id = run_id
+        self.session_id = session_id
+        super().__init__(
+            f"Run {run_id} references session {session_id}, which has no "
+            f"matching sessions row. This is referential corruption of the "
+            f"sessions DB (a run with a dangling parent-session FK), not user "
+            f"input to coerce into a not-found response."
+        )
+
+
 class BlobSourcePathMismatchError(Exception):
     """Tier 1 audit-integrity violation — composer-stored blob source path
     diverges from the referenced blob's canonical ``storage_path``.

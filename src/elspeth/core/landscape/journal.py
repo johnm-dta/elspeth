@@ -1,4 +1,32 @@
-"""Landscape JSONL change journal for emergency backups."""
+"""Landscape JSONL change journal for emergency backups.
+
+Multi-worker ordering doctrine (ADR-030 §C.4 row 13, design line 284 / 501)
+---------------------------------------------------------------------------
+At N=1 the journal is a reliable backup stream: a single writer means
+statement-time and WAL commit order are the same.
+
+At N>1 (leader + followers) each worker writes its own
+``db.journal.{worker_hex}.jsonl`` file (derived from the uuid4 hex tail of
+its ``worker_id``; see :meth:`LandscapeDB._derive_journal_path`).  Per-worker
+files fix the file-corruption half of the shared-file problem but NOT the
+ordering half.
+
+**The per-worker journal is FORENSIC-ONLY at N>1.**  Records carry
+per-statement timestamps (:class:`JournalRecord` key ``"timestamp"``, buffered
+to commit in :meth:`LandscapeJournal._after_commit`) which reflect
+*statement-time*, not cross-process WAL commit order.  Two workers writing to
+two files produce no shared total order.
+
+The **authoritative replay order** is ``run_coordination_events.seq``
+(``AUTOINCREMENT`` — design G line 409): every coordination write is fenced
+inside a ``BEGIN IMMEDIATE`` transaction and gets an incrementing sequence
+number that reflects true WAL commit order across all processes.
+
+Restore tooling **must gate** on single-worker provenance
+(``worker_count == 1`` from ``run_workers``) before treating journal records
+as an ordered replay log.  A true in-transaction ``journal_seq`` total order
+across multiple workers is deferred to a future release.
+"""
 
 from __future__ import annotations
 
@@ -55,6 +83,14 @@ class LandscapeJournal:
 
     Records SQL statements and parameters after a transaction commits.
     This is an emergency backup stream, not the canonical audit record.
+
+    At N=1 (single worker) the journal is a reliable ordered stream.
+    At N>1 each worker writes its own per-worker file
+    (``db.journal.{worker_hex}.jsonl``).  Per-worker files are FORENSIC-ONLY
+    because statement timestamps are not cross-process WAL commit order.
+    The authoritative replay order is ``run_coordination_events.seq``;
+    restore tooling must gate on single-worker provenance.
+    See the module docstring for the full multi-worker ordering doctrine.
     """
 
     def __init__(

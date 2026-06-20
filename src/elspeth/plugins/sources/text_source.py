@@ -73,7 +73,7 @@ class TextSource(BaseSource):
     name = "text"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:1fb33ad7cfb6e9f7"
+    source_file_hash: str | None = "sha256:6943b40c2d2d9cbe"
     config_model = TextSourceConfig
     _on_validation_failure: str
 
@@ -151,6 +151,7 @@ class TextSource(BaseSource):
                                 "__raw_bytes_hex__": raw_bytes.hex(),
                             },
                             error_msg=f"Text parse error at line {line_num}: invalid {self._encoding} encoding",
+                            source_row_index=line_num - 1,
                         )
                         if quarantined is not None:
                             yield quarantined
@@ -172,6 +173,7 @@ class TextSource(BaseSource):
                     yield from self._validate_and_yield(
                         {self._column: value},
                         ctx,
+                        source_row_index=line_num - 1,
                     )
         except UnicodeDecodeError as exc:
             error_line = line_num + 1 if line_num > 0 else 1
@@ -179,6 +181,7 @@ class TextSource(BaseSource):
                 ctx=ctx,
                 row={"file_path": str(self._path), "__line_number__": error_line},
                 error_msg=f"Text parse error at line {error_line}: invalid {self._encoding} encoding ({exc})",
+                source_row_index=error_line - 1,
             )
             if quarantined is not None:
                 yield quarantined
@@ -213,13 +216,13 @@ class TextSource(BaseSource):
                     "Use strip_whitespace=False when leading or trailing whitespace is meaningful data.",
                     "Set on_validation_failure to a quarantine sink unless deliberate discard is acceptable.",
                     "If you have been asked to generate text rows yourself (the invented_source path): emit one record per line with no blank padding between rows, and choose a `column` value that names what each line contains (e.g. `url`, `prompt`, `line_text`).",
-                    "When generating text rows yourself, the chosen `column` must be a valid Python identifier and must not be a Python keyword. Declare that column in `schema.fields` or `schema.guaranteed_fields` so downstream nodes can resolve it by name.",
-                    "When generating text rows yourself, do not insert a header line — `text` source treats every non-blank line as a data row.",
+                    "The chosen `column` must be a valid Python identifier and must not be a Python keyword. Declare that column in `schema.fields` or `schema.guaranteed_fields` so downstream nodes can resolve it by name.",
+                    "Do not insert a header line — `text` source treats every non-blank line as a data row.",
                 ),
             )
         return None
 
-    def _validate_and_yield(self, row: dict[str, Any], ctx: SourceContext) -> Iterator[SourceRow]:
+    def _validate_and_yield(self, row: dict[str, Any], ctx: SourceContext, *, source_row_index: int) -> Iterator[SourceRow]:
         """Validate a line row and quarantine schema failures."""
         try:
             validated = self._schema_class.model_validate(row)
@@ -247,10 +250,11 @@ class TextSource(BaseSource):
                             row=validated_row,
                             error=error_msg,
                             destination=self._on_validation_failure,
+                            source_row_index=source_row_index,
                         )
                     return
 
-            yield SourceRow.valid(validated_row, contract=contract)
+            yield SourceRow.valid(validated_row, contract=contract, source_row_index=source_row_index)
         except ValidationError as exc:
             ctx.record_validation_error(
                 row=row,
@@ -263,6 +267,7 @@ class TextSource(BaseSource):
                     row=row,
                     error=str(exc),
                     destination=self._on_validation_failure,
+                    source_row_index=source_row_index,
                 )
 
     def _record_parse_error(
@@ -270,6 +275,7 @@ class TextSource(BaseSource):
         ctx: SourceContext,
         row: Mapping[str, object],
         error_msg: str,
+        source_row_index: int,
     ) -> SourceRow | None:
         """Record a parse error and quarantine unless discard mode."""
         row_payload = dict(row)
@@ -285,6 +291,7 @@ class TextSource(BaseSource):
             row=row_payload,
             error=error_msg,
             destination=self._on_validation_failure,
+            source_row_index=source_row_index,
         )
 
     def close(self) -> None:

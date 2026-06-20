@@ -13,6 +13,7 @@ from typing import Any
 
 from elspeth.contracts import SourceRow, TokenInfo
 from elspeth.contracts.audit import TokenRef
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.contracts.types import NodeID, StepResolver
@@ -36,7 +37,9 @@ class TokenManager:
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
-            row_data={"value": 42},
+            source_row_index=0,
+            ingest_sequence=0,
+            source_row=source_row,
         )
 
         # After transform
@@ -72,6 +75,12 @@ class TokenManager:
         source_node_id: str,
         row_index: int,
         source_row: SourceRow,
+        *,
+        source_row_index: int,
+        ingest_sequence: int,
+        row_id: str | None = None,
+        token_id: str | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> TokenInfo:
         """Create a token for a source row.
 
@@ -80,6 +89,16 @@ class TokenManager:
             source_node_id: Source node that loaded the row
             row_index: Position in source (0-indexed)
             source_row: SourceRow from source (must have contract)
+            row_id: Optional pre-minted row identity (the processor's fenced
+                ingest path pre-mints ids so boundary checks can run BEFORE
+                any durable write)
+            token_id: Optional pre-minted token identity (see ``row_id``)
+            coordination_token: Leader fencing token (ADR-030 §C.4 row 9) —
+                threaded into ``create_row_with_token`` so this ingest-
+                adjacent ``rows`` write is epoch-fenced. The happy path of
+                ``RowProcessor.process_row`` does NOT come through here (it
+                composes the fenced ``ingest_row_with_initial_claim``); this
+                arm serves boundary-failure recording and direct callers.
 
         Returns:
             TokenInfo with row and token IDs, row_data as PipelineRow
@@ -100,16 +119,19 @@ class TokenManager:
         # Convert to PipelineRow
         pipeline_row = source_row.to_pipeline_row()
 
-        # Create row record - recorder stores dict representation
-        row = self._data_flow.create_row(
+        # Create row record and initial token atomically; the repository owns
+        # run/source identity and payload persistence for both audit rows.
+        row, token = self._data_flow.create_row_with_token(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             data=pipeline_row.to_dict(),
+            row_id=row_id,
+            token_id=token_id,
+            coordination_token=coordination_token,
         )
-
-        # Create initial token
-        token = self._data_flow.create_token(row_id=row.row_id)
 
         return TokenInfo(
             row_id=row.row_id,
@@ -124,7 +146,10 @@ class TokenManager:
         row_index: int,
         source_row: SourceRow,
         *,
+        source_row_index: int,
+        ingest_sequence: int,
         validation_error_id: str | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> TokenInfo:
         """Create a token for a quarantined row.
 
@@ -171,14 +196,21 @@ class TokenManager:
         # Create PipelineRow with minimal contract
         pipeline_row = PipelineRow(row_data, quarantine_contract)
 
-        # Create row record — quarantined=True enables safe hashing for
-        # Tier-3 external data that may contain non-canonical values (NaN, Infinity)
-        row = self._data_flow.create_row(
+        # Create the row record AND the initial token in ONE transaction —
+        # epoch-fenced when a coordination token is threaded (ADR-030 §C.4
+        # row 9: the quarantine arm is an ingest-adjacent durable rows write
+        # at sequence N; historically this was TWO separate transactions).
+        # quarantined=True enables safe hashing for Tier-3 external data that
+        # may contain non-canonical values (NaN, Infinity).
+        row, token = self._data_flow.create_row_with_token(
             run_id=run_id,
             source_node_id=source_node_id,
             row_index=row_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
             data=pipeline_row.to_dict(),
             quarantined=True,
+            coordination_token=coordination_token,
         )
 
         if validation_error_id is not None:
@@ -187,9 +219,6 @@ class TokenManager:
                 error_id=validation_error_id,
                 row_id=row.row_id,
             )
-
-        # Create initial token
-        token = self._data_flow.create_token(row_id=row.row_id)
 
         return TokenInfo(
             row_id=row.row_id,

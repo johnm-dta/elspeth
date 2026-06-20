@@ -16,7 +16,7 @@ import pytest
 
 from elspeth.contracts import Determinism, PipelineRow, RunStatus
 from elspeth.contracts.audit import TokenRef
-from elspeth.contracts.errors import GracefulShutdownError
+from elspeth.contracts.errors import GracefulShutdownError, IncompleteSourceResumeError
 from elspeth.contracts.results import SourceRow
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
@@ -34,6 +34,7 @@ from tests.fixtures.base_classes import (
     as_source,
     as_transform,
 )
+from tests.fixtures.landscape import insert_crashed_leader_seat
 from tests.fixtures.pipeline import build_linear_pipeline, build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource
 
@@ -91,6 +92,7 @@ class QuarantineSource(_TestSourceBase):
                 row={"value": i},
                 error=f"validation_error_{i}",
                 destination="quarantine",
+                source_row_index=i,
             )
 
 
@@ -154,6 +156,32 @@ class InterruptAfterNBufferedBatch(BaseTransform):
         return TransformResult.success(row, success_reason={"action": "buffer"})
 
 
+class FailFirstFlushBatch(InterruptAfterNBufferedBatch):
+    """Batch transform whose FIRST list-shaped (flush) call crashes.
+
+    Single-row calls buffer normally; the first end-of-source flush raises,
+    producing the production-written resumable state: source exhausted,
+    run FAILED, buffered tokens durable as BLOCKED journal rows (F1).
+    Subsequent flush calls succeed (the batch-sum path of the parent class).
+    """
+
+    name = "fail_first_flush_batch"
+    determinism = Determinism.DETERMINISTIC
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_calls = 0
+        self._failed_once = False
+
+    def process(self, row: PipelineRow | list[PipelineRow], ctx: Any) -> TransformResult:
+        if isinstance(row, list):
+            self.batch_calls += 1
+            if not self._failed_once:
+                self._failed_once = True
+                raise RuntimeError("injected EOF flush crash")
+        return super().process(row, ctx)
+
+
 class InterruptingAggregationSource(_TestSourceBase):
     """Source that raises the shutdown event after yielding N rows."""
 
@@ -168,8 +196,8 @@ class InterruptingAggregationSource(_TestSourceBase):
         self.on_success = "source_out"
 
     def load(self, ctx: Any) -> Iterator[SourceRow]:
-        for index, row in enumerate(self._rows, start=1):
-            if index >= self._interrupt_after:
+        for source_row_index, row in enumerate(self._rows):
+            if source_row_index + 1 >= self._interrupt_after:
                 self._event.set()
             fields = tuple(
                 FieldContract(
@@ -183,19 +211,28 @@ class InterruptingAggregationSource(_TestSourceBase):
             )
             contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
             self._schema_contract = contract
-            yield SourceRow.valid(row, contract=contract)
+            yield SourceRow.valid(row, contract=contract, source_row_index=source_row_index)
 
 
 def _build_interruptible_aggregation_config(
     shutdown_event: threading.Event,
+    *,
+    interrupt_after: int = 2,
+    transform: InterruptAfterNBufferedBatch | None = None,
 ) -> tuple[PipelineConfig, Any, CollectSink]:
-    """Build a count-triggered aggregation pipeline with an interrupting batch transform."""
+    """Build a count-triggered aggregation pipeline with an interrupting batch transform.
+
+    ``interrupt_after`` larger than the row count means the source exhausts
+    normally (the shutdown event never fires); ``transform`` substitutes the
+    buffering batch transform (e.g. ``FailFirstFlushBatch`` for crash paths).
+    """
     source = InterruptingAggregationSource(
         rows=[{"value": 10}, {"value": 20}, {"value": 30}, {"value": 40}],
-        interrupt_after=2,
+        interrupt_after=interrupt_after,
         shutdown_event=shutdown_event,
     )
-    transform = InterruptAfterNBufferedBatch()
+    if transform is None:
+        transform = InterruptAfterNBufferedBatch()
     output_sink = CollectSink("output")
     agg_settings = AggregationSettings(
         name="sum_agg",
@@ -208,8 +245,8 @@ def _build_interruptible_aggregation_config(
     )
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(source),
-        source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+        sources={"primary": as_source(source)},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
         transforms=[],
         sinks={"output": as_sink(output_sink)},
         aggregations={"sum_agg": (as_transform(transform), agg_settings)},
@@ -220,7 +257,7 @@ def _build_interruptible_aggregation_config(
     transform.node_id = agg_node_id
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(transform)],
         sinks={"output": as_sink(output_sink)},
         aggregation_settings={agg_node_id: agg_settings},
@@ -271,8 +308,8 @@ def _build_interruptible_coalesce_config(
     )
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(source),
-        source_settings=SourceSettings(plugin=source.name, on_success="fork_input", options={}),
+        sources={"primary": as_source(source)},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="fork_input", options={})},
         transforms=[],
         sinks={"output": as_sink(output_sink)},
         aggregations={"agg_branch_hold": (as_transform(batch_transform), agg_settings)},
@@ -284,7 +321,7 @@ def _build_interruptible_coalesce_config(
     batch_transform.node_id = agg_node_id
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(batch_transform)],
         sinks={"output": as_sink(output_sink)},
         aggregation_settings={agg_node_id: agg_settings},
@@ -292,7 +329,7 @@ def _build_interruptible_coalesce_config(
         coalesce_settings=[coalesce],
     )
     settings = ElspethSettings(
-        source={"plugin": source.name, "on_success": "fork_input", "options": {}},
+        sources={"primary": {"plugin": source.name, "on_success": "fork_input", "options": {}}},
         sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
         gates=[fork_gate],
         coalesce=[coalesce],
@@ -314,7 +351,7 @@ class TestShutdownBreaksLoop:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -339,7 +376,7 @@ class TestShutdownBreaksLoop:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -367,7 +404,7 @@ class TestShutdownBreaksLoop:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -413,7 +450,7 @@ class TestShutdownBreaksLoop:
         sink.close = track_sink_close  # type: ignore[method-assign]
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -439,7 +476,7 @@ class TestShutdownBreaksLoop:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -465,7 +502,7 @@ class TestShutdownBreaksLoop:
         quarantine_sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(CollectSink()), "quarantine": as_sink(quarantine_sink)},
         )
@@ -527,7 +564,7 @@ class TestInterruptAndResume:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -579,7 +616,7 @@ class TestInterruptAndResume:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -628,14 +665,37 @@ class TestInterruptAndResume:
 
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
         assert checkpoint is not None
-        assert checkpoint.aggregation_state_json is not None
+
+        # F1: the journal is the durable buffer truth — buffered aggregation
+        # tokens persist as BLOCKED token_work_items rows at the barrier.
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with landscape_db.connection() as conn:
+            blocked_barrier_rows = (
+                conn.execute(
+                    select(token_work_items_table.c.barrier_key).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == "blocked",
+                        token_work_items_table.c.barrier_key.is_not(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert blocked_barrier_rows, "Expected buffered aggregation tokens as BLOCKED journal rows"
 
         recovery = RecoveryManager(landscape_db, checkpoint_mgr)
         check = recovery.can_resume(run_id, graph)
         assert check.can_resume, f"Expected resumable buffered shutdown, got: {check.reason}"
 
-    def test_buffered_coalesce_shutdown_restores_pending_join_on_resume(self, landscape_db: LandscapeDB, payload_store) -> None:
-        """Shutdown checkpoint must persist pending coalesces without replaying buffered rows."""
+    def test_buffered_coalesce_shutdown_refuses_completion_without_source_exhaustion(
+        self,
+        landscape_db: LandscapeDB,
+        payload_store,
+    ) -> None:
+        """Shutdown checkpoint persists pending coalesces but cannot complete an interrupted source."""
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
@@ -668,31 +728,81 @@ class TestInterruptAndResume:
 
         checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
         assert checkpoint is not None
-        assert checkpoint.aggregation_state_json is not None
-        assert checkpoint.coalesce_state_json is not None
+        # F1: pending aggregation/coalesce state persists as BLOCKED journal
+        # rows, asserted on pre_resume_work below — the checkpoint carries only
+        # scalar barrier metadata.
+
+        # NOTE (multi-source-token-scheduler): the orchestrator now writes the
+        # schema contract to ``run_sources`` on the first valid row (ADR-025 §3
+        # Decision 5). Earlier revisions of this test fabricated the contract
+        # here because the previous engine path skipped the in-loop
+        # ``_record_schema_contract`` call when an observed source already had
+        # a contract at ``_load_source_with_events`` time — leaving resume
+        # broken. The fabrication is removed; the engine itself supplies the
+        # contract.
+
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with landscape_db.connection() as conn:
+            pre_resume_work = (
+                conn.execute(
+                    select(
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.branch_name,
+                        token_work_items_table.c.fork_group_id,
+                        token_work_items_table.c.barrier_key,
+                        token_work_items_table.c.coalesce_name,
+                    ).where(token_work_items_table.c.run_id == run_id)
+                )
+                .mappings()
+                .all()
+            )
+        blocked_work = [row for row in pre_resume_work if row["status"] == "blocked"]
+        assert blocked_work
+        coalesce_blocked_work = [row for row in blocked_work if row["barrier_key"] == "merge_paths"]
+        assert coalesce_blocked_work
+        assert {row["branch_name"] for row in coalesce_blocked_work} == {"direct_branch"}
+        assert {row["coalesce_name"] for row in coalesce_blocked_work} == {"merge_paths"}
+        assert all(row["fork_group_id"] is not None for row in coalesce_blocked_work)
 
         recovery = RecoveryManager(landscape_db, checkpoint_mgr)
         assert recovery.get_unprocessed_rows(run_id) == []
 
         resume_point = recovery.get_resume_point(run_id, graph)
         assert resume_point is not None
-        assert resume_point.coalesce_state is not None
 
-        result = orchestrator.resume(
-            resume_point=resume_point,
-            config=config,
-            graph=graph,
-            payload_store=payload_store,
-            settings=settings,
-        )
+        with pytest.raises(IncompleteSourceResumeError, match=r"source.*primary.*interrupted"):
+            orchestrator.resume(
+                resume_point=resume_point,
+                config=config,
+                graph=graph,
+                payload_store=payload_store,
+                settings=settings,
+            )
 
-        assert result.status == RunStatus.COMPLETED
-        assert len(output_sink.results) == 1
-        assert output_sink.results[0]["agg_branch"]["count"] == 1
-        assert output_sink.results[0]["direct_branch"]["value"] == 10
+        assert output_sink.results == []
+        with landscape_db.connection() as conn:
+            post_resume_work = (
+                conn.execute(
+                    select(token_work_items_table.c.status).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.barrier_key == "merge_paths",
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert post_resume_work
+        assert set(post_resume_work) == {"blocked"}
 
-    def test_buffered_only_resume_respects_pre_set_shutdown(self, landscape_db: LandscapeDB, payload_store) -> None:
-        """Buffered-only resume must checkpoint again instead of flushing when shutdown is already set."""
+    def test_buffered_only_resume_refuses_interrupted_source_before_pre_set_shutdown(
+        self,
+        landscape_db: LandscapeDB,
+        payload_store,
+    ) -> None:
+        """Buffered-only resume must not turn interrupted source work into completed output."""
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
@@ -728,11 +838,29 @@ class TestInterruptAndResume:
 
         first_resume_point = recovery.get_resume_point(run_id, graph)
         assert first_resume_point is not None
-        assert first_resume_point.coalesce_state is not None
+        # F1: pending coalesce state lives in BLOCKED journal rows, not on the
+        # resume point — assert the durable pending-coalesce evidence directly.
+        from sqlalchemy import select
+
+        from elspeth.core.landscape.schema import token_work_items_table
+
+        with landscape_db.connection() as conn:
+            blocked_coalesce_rows = (
+                conn.execute(
+                    select(token_work_items_table.c.coalesce_name).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == "blocked",
+                        token_work_items_table.c.coalesce_name.is_not(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert blocked_coalesce_rows, "Expected pending coalesce branches as BLOCKED journal rows"
 
         resume_shutdown = threading.Event()
         resume_shutdown.set()
-        with pytest.raises(GracefulShutdownError):
+        with pytest.raises(IncompleteSourceResumeError, match=r"source.*primary.*interrupted"):
             orchestrator.resume(
                 resume_point=first_resume_point,
                 config=config,
@@ -746,8 +874,24 @@ class TestInterruptAndResume:
 
         second_resume_point = recovery.get_resume_point(run_id, graph)
         assert second_resume_point is not None
-        assert second_resume_point.sequence_number > first_resume_point.sequence_number
-        assert second_resume_point.coalesce_state is not None
+        assert second_resume_point.sequence_number == first_resume_point.sequence_number
+        # F1: the pending coalesce branches must still be BLOCKED journal rows
+        # after the refused resume (nothing consumed them).
+        with landscape_db.connection() as conn:
+            post_refusal_blocked = (
+                conn.execute(
+                    select(token_work_items_table.c.coalesce_name).where(
+                        token_work_items_table.c.run_id == run_id,
+                        token_work_items_table.c.status == "blocked",
+                        token_work_items_table.c.coalesce_name.is_not(None),
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        # Sorted compare: the two SELECTs carry no ORDER BY, so raw list
+        # equality is a latent row-order flake.
+        assert sorted(post_refusal_blocked) == sorted(blocked_coalesce_rows)
         assert recovery.get_unprocessed_rows(run_id) == []
 
     def _setup_failed_run(
@@ -788,6 +932,7 @@ class TestInterruptAndResume:
             edges_table,
             nodes_table,
             rows_table,
+            run_sources_table,
             runs_table,
             tokens_table,
         )
@@ -802,7 +947,7 @@ class TestInterruptAndResume:
         _, _, _, graph = build_linear_pipeline(source_data, transforms=[as_transform(transform)])
 
         # Extract production-generated node IDs
-        source_nid = graph.get_source()
+        source_nid = graph.get_sources()[0]
         assert source_nid is not None
         transform_id_map = graph.get_transform_id_map()
         sink_id_map = graph.get_sink_id_map()
@@ -838,13 +983,14 @@ class TestInterruptAndResume:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             for node_id, plugin_name, node_type in [
                 (source_nid, "list_source", NodeType.SOURCE),
@@ -864,6 +1010,26 @@ class TestInterruptAndResume:
                         registered_at=now,
                     )
                 )
+
+            # Per ADR-025 §3 Decision 5, ``verify_contract_integrity`` reads
+            # from ``run_sources.schema_contract_json`` exclusively. The
+            # fabricated failed run must populate the per-source contract row
+            # so resume can verify Tier-1 integrity.
+            conn.execute(
+                insert(run_sources_table).values(
+                    run_id=run_id,
+                    source_node_id=source_nid,
+                    source_name="primary",
+                    plugin_name="list_source",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
 
             for edge_id, from_node, to_node in [
                 ("e1", source_nid, xform_nid),
@@ -890,6 +1056,8 @@ class TestInterruptAndResume:
                         run_id=run_id,
                         source_node_id=source_nid,
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -919,9 +1087,8 @@ class TestInterruptAndResume:
             checkpoint_mgr = CheckpointManager(db)
             checkpoint_mgr.create_checkpoint(
                 run_id=run_id,
-                token_id=f"t{processed_count - 1}",
-                node_id=xform_nid,
                 sequence_number=processed_count - 1,
+                barrier_scalars=None,
                 graph=graph,
             )
 
@@ -969,7 +1136,7 @@ class TestInterruptAndResume:
         null_source.on_success = "default"
 
         resume_config = PipelineConfig(
-            source=as_source(null_source),
+            sources={"primary": as_source(null_source)},
             transforms=[as_transform(resume_transform)],
             sinks={"default": as_sink(resume_sink)},
         )
@@ -1003,183 +1170,37 @@ class TestInterruptAndResume:
         assert len(resume_sink.results) >= 2
 
     def test_resume_shutdown_recheckpoints_buffered_aggregation_without_sink_writes(self, landscape_db: LandscapeDB, payload_store) -> None:
-        """Pre-set shutdown during resume must preserve buffered aggregation state without sink writes."""
-        import json as json_mod
-        from datetime import UTC, datetime
+        """Pre-set shutdown during resume must preserve buffered aggregation state without sink writes.
 
-        from sqlalchemy import insert
+        F1 rewrite: the buffered-aggregation run is produced by the PRODUCTION
+        engine — a virgin run whose end-of-source flush crashes AFTER the
+        source exhausted. The journal's BLOCKED barrier rows are the buffer
+        truth, and the sequence-0 run-start checkpoint makes the crashed run
+        resumable. The resume is then interrupted by a pre-set shutdown event:
+        it must honor the shutdown BEFORE any end-of-source flush work — no
+        sink writes, no flush attempt — and re-checkpoint progress so the
+        buffered state survives as the same BLOCKED journal rows + checkpoint
+        barrier scalars.
+        """
+        from sqlalchemy import select
 
-        from elspeth.contracts import Determinism
-        from elspeth.contracts.aggregation_checkpoint import (
-            AggregationCheckpointState,
-            AggregationNodeCheckpoint,
-            AggregationTokenCheckpoint,
-        )
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
-        from elspeth.contracts.contract_records import ContractAuditRecord
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
-        from elspeth.core.landscape.schema import (
-            batch_members_table,
-            batches_table,
-            edges_table,
-            nodes_table,
-            rows_table,
-            runs_table,
-            tokens_table,
-        )
-        from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
-        from elspeth.plugins.sources.null_source import NullSource
-        from tests.fixtures.base_classes import create_observed_contract
+        from elspeth.core.landscape.schema import runs_table, token_work_items_table
+        from elspeth.engine.orchestrator import Orchestrator
 
         checkpoint_mgr = CheckpointManager(landscape_db)
         checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
 
-        config, graph, _output_sink = _build_interruptible_aggregation_config(threading.Event())
-        run_id = "resume-buffered-checkpoint-progress"
-        now = datetime.now(UTC)
-        source_id = graph.get_source()
-        assert source_id is not None
-        agg_node_id = next(iter(config.aggregation_settings))
-        sink_id = graph.get_sink_id_map()["output"]
-        contract = create_observed_contract({"value": 1})
-        audit_record = ContractAuditRecord.from_contract(contract)
-        source_schema_json = json_mod.dumps(ListSource.output_schema.model_json_schema())
-        rows = [{"value": 10}, {"value": 20}, {"value": 30}, {"value": 40}]
-
-        with landscape_db.engine.begin() as conn:
-            conn.execute(
-                insert(runs_table).values(
-                    run_id=run_id,
-                    started_at=now,
-                    config_hash="test",
-                    settings_json="{}",
-                    canonical_version="sha256-rfc8785-v1",
-                    status=RunStatus.INTERRUPTED,
-                    source_schema_json=source_schema_json,
-                    schema_contract_json=audit_record.to_json(),
-                    schema_contract_hash=contract.version_hash(),
-                    runtime_val_manifest_json=_runtime_val_manifest_json(),
-                    openrouter_catalog_sha256="0" * 64,
-                    openrouter_catalog_source="bundled",
-                )
-            )
-
-            node_ids = [source_id, agg_node_id, sink_id]
-            for node_id in node_ids:
-                node_info = graph.get_node_info(node_id)
-                conn.execute(
-                    insert(nodes_table).values(
-                        node_id=node_id,
-                        run_id=run_id,
-                        plugin_name=node_info.plugin_name,
-                        node_type=node_info.node_type,
-                        plugin_version="1.0.0",
-                        determinism=Determinism.DETERMINISTIC,
-                        config_hash="test",
-                        config_json="{}",
-                        registered_at=now,
-                    )
-                )
-
-            for edge_index, edge in enumerate(graph.get_edges()):
-                conn.execute(
-                    insert(edges_table).values(
-                        edge_id=f"e{edge_index}",
-                        run_id=run_id,
-                        from_node_id=edge.from_node,
-                        to_node_id=edge.to_node,
-                        label=edge.label,
-                        default_mode=edge.mode,
-                        created_at=now,
-                    )
-                )
-
-            for index, row in enumerate(rows):
-                ref = payload_store.store(json_mod.dumps(row).encode())
-                conn.execute(
-                    insert(rows_table).values(
-                        row_id=f"r{index}",
-                        run_id=run_id,
-                        source_node_id=source_id,
-                        row_index=index,
-                        source_data_hash=f"h{index}",
-                        source_data_ref=ref,
-                        created_at=now,
-                    )
-                )
-                if index < 2:
-                    conn.execute(
-                        insert(tokens_table).values(
-                            token_id=f"t{index}",
-                            row_id=f"r{index}",
-                            run_id=run_id,
-                            created_at=now,
-                        )
-                    )
-            conn.execute(
-                insert(batches_table).values(
-                    batch_id="batch-001",
-                    run_id=run_id,
-                    aggregation_node_id=agg_node_id,
-                    attempt=0,
-                    status="draft",
-                    created_at=now,
-                )
-            )
-            for ordinal, token_id in enumerate(("t0", "t1")):
-                conn.execute(
-                    insert(batch_members_table).values(
-                        batch_id="batch-001",
-                        run_id=run_id,
-                        token_id=token_id,
-                        ordinal=ordinal,
-                    )
-                )
-
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id,
-            token_id="t1",
-            node_id=agg_node_id,
-            sequence_number=1,
-            graph=graph,
-            aggregation_state=AggregationCheckpointState(
-                version="5.0",
-                nodes={
-                    agg_node_id: AggregationNodeCheckpoint(
-                        tokens=(
-                            AggregationTokenCheckpoint(
-                                token_id="t0",
-                                row_id="r0",
-                                branch_name=None,
-                                fork_group_id=None,
-                                join_group_id=None,
-                                expand_group_id=None,
-                                row_data=rows[0],
-                                contract_version=contract.version_hash(),
-                                contract=contract.to_checkpoint_format(),
-                            ),
-                            AggregationTokenCheckpoint(
-                                token_id="t1",
-                                row_id="r1",
-                                branch_name=None,
-                                fork_group_id=None,
-                                join_group_id=None,
-                                expand_group_id=None,
-                                row_data=rows[1],
-                                contract_version=contract.version_hash(),
-                                contract=contract.to_checkpoint_format(),
-                            ),
-                        ),
-                        batch_id="batch-001",
-                        elapsed_age_seconds=0.0,
-                        count_fire_offset=None,
-                        condition_fire_offset=None,
-                        accepted_count_total=2,
-                        completed_flush_count=0,
-                    )
-                },
-            ),
+        # interrupt_after=99: the source exhausts normally (no shutdown during
+        # the run); the count=100 trigger never fires, so ALL rows are buffered
+        # at the aggregation barrier when the EOF flush crashes.
+        transform = FailFirstFlushBatch()
+        config, graph, output_sink = _build_interruptible_aggregation_config(
+            threading.Event(),
+            interrupt_after=99,
+            transform=transform,
         )
 
         orchestrator = Orchestrator(
@@ -1188,46 +1209,64 @@ class TestInterruptAndResume:
             checkpoint_config=checkpoint_config,
         )
 
+        with pytest.raises(RuntimeError, match="injected EOF flush crash"):
+            orchestrator.run(config, graph=graph, payload_store=payload_store)
+
+        with landscape_db.connection() as conn:
+            run_id = str(conn.execute(select(runs_table.c.run_id)).scalar_one())
+        assert output_sink.results == []
+        assert transform.batch_calls == 1
+
+        # F1: the journal is the buffer truth — the buffered rows persist as
+        # BLOCKED token_work_items rows at the aggregation barrier.
+        def blocked_barrier_tokens() -> list[str]:
+            with landscape_db.connection() as conn:
+                return sorted(
+                    conn.execute(
+                        select(token_work_items_table.c.token_id).where(
+                            token_work_items_table.c.run_id == run_id,
+                            token_work_items_table.c.status == "blocked",
+                            token_work_items_table.c.barrier_key.is_not(None),
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+
+        pre_resume_blocked = blocked_barrier_tokens()
+        assert len(pre_resume_blocked) == 4, "Expected all 4 buffered rows as BLOCKED journal rows"
+
         recovery = RecoveryManager(landscape_db, checkpoint_mgr)
         first_resume_point = recovery.get_resume_point(run_id, graph)
         assert first_resume_point is not None
-        assert first_resume_point.aggregation_state is not None
-        assert sum(len(node.tokens) for node in first_resume_point.aggregation_state.nodes.values()) == 2
 
         resume_shutdown = threading.Event()
         resume_shutdown.set()
-        resume_transform = InterruptAfterNBufferedBatch()
-        resume_transform.on_success = "output"
-        resume_transform.on_error = "discard"
-        resume_transform.node_id = next(iter(config.aggregation_settings))
-        resume_sink = CollectSink("output")
-        resume_source = NullSource({})
-        resume_source.on_success = "source_out"
-
-        resume_config = PipelineConfig(
-            source=as_source(resume_source),
-            transforms=[as_transform(resume_transform)],
-            sinks={"output": as_sink(resume_sink)},
-            aggregation_settings=dict(config.aggregation_settings),
-        )
-
-        with pytest.raises(GracefulShutdownError):
+        with pytest.raises(GracefulShutdownError) as resume_exc:
             orchestrator.resume(
                 resume_point=first_resume_point,
-                config=resume_config,
+                config=config,
                 graph=graph,
                 payload_store=payload_store,
                 shutdown_event=resume_shutdown,
             )
+        assert resume_exc.value.run_id == run_id
 
-        assert resume_sink.results == []
+        # The interrupted resume wrote nothing to the sink and never attempted
+        # the end-of-source flush (the in-run crash remains the only batch call).
+        assert output_sink.results == []
+        assert transform.batch_calls == 1
 
+        # The shutdown path re-checkpointed resume progress beyond the
+        # original resume point...
         second_resume_point = recovery.get_resume_point(run_id, graph)
         assert second_resume_point is not None
         assert second_resume_point.sequence_number > first_resume_point.sequence_number
-        assert second_resume_point.aggregation_state is not None
-        assert sum(len(node.tokens) for node in second_resume_point.aggregation_state.nodes.values()) == 2
-        assert len(recovery.get_unprocessed_rows(run_id)) == 2
+
+        # ...and the buffered state survived: identical BLOCKED journal rows
+        # plus unchanged checkpoint-borne barrier scalars.
+        assert blocked_barrier_tokens() == pre_resume_blocked
+        assert second_resume_point.barrier_scalars == first_resume_point.barrier_scalars
 
     def test_resume_without_shutdown_completes_normally(self, landscape_db: LandscapeDB, payload_store) -> None:
         """Resume without shutdown event completes all remaining rows."""
@@ -1271,7 +1310,7 @@ class TestInterruptAndResume:
         null_source.on_success = "default"
 
         resume_config = PipelineConfig(
-            source=as_source(null_source),
+            sources={"primary": as_source(null_source)},
             transforms=[as_transform(passthrough)],
             sinks={"default": as_sink(resume_sink)},
         )

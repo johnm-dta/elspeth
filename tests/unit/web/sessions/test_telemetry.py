@@ -26,6 +26,9 @@ EXPECTED_METRIC_NAMES = {
     # ``{{interpretation:<term>}}`` placeholder at runtime.
     "composer.interpretation_placeholder_unresolved_at_runtime_total",
     "execution.progress.broadcast_dropped_total",
+    # 0.6.0 multi-worker: runs cancelled by startup / periodic orphan
+    # cleanup (emitted from web/app.py orphan-cleanup sites).
+    "execution.orphaned_runs_cancelled_total",
     # ── Phase 8 wire names ──
     # Mode + per-session + tutorial + completion + B3 cohorts + B5.
     # NOTE: ``composer.tutorial.replayed_total`` is DELIBERATELY ABSENT
@@ -68,6 +71,8 @@ def test_telemetry_field_names_match_spec_exactly():
         # Phase 5b Task 5 follow-on (F-17 / F-21).
         "interpretation_placeholder_unresolved_at_runtime_total",
         "progress_broadcast_dropped_total",
+        # 0.6.0 multi-worker: orphan-run cleanup lifecycle counter.
+        "orphaned_runs_cancelled_total",
         # ── Phase 8 fields ──
         # Tutorial-replayed slot DELIBERATELY ABSENT (Phase 9 / Decision 2).
         # Probe-failed counter DELIBERATELY ABSENT (W8-r2 module-local).

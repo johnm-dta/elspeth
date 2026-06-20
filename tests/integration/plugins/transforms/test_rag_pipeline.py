@@ -337,8 +337,8 @@ class TestRAGExecutionGraphAssembly:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,
-            source_settings=source_settings,
+            sources={"primary": source},
+            source_settings_map={"primary": source_settings},
             transforms=wired_transforms,
             sinks={sink_name: sink},
             aggregations={},

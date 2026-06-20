@@ -86,8 +86,8 @@ class TestPhaseErrorDoesNotMaskOriginalException:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=cast(SourceProtocol, source),
-            source_settings=source_settings,
+            sources={"primary": cast(SourceProtocol, source)},
+            source_settings_map={"primary": source_settings},
             transforms=[],
             sinks=cast("dict[str, SinkProtocol]", {"default": sink}),
             aggregations={},
@@ -104,7 +104,7 @@ class TestPhaseErrorDoesNotMaskOriginalException:
         source, sink, graph = self._build_pipeline_with_failing_source()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )

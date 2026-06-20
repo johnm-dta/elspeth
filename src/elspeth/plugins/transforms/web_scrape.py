@@ -45,6 +45,7 @@ from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.transforms.web_scrape_errors import (
+    ClientError,
     ForbiddenError,
     InvalidURLError,
     NetworkError,
@@ -110,11 +111,20 @@ class WebScrapeHTTPConfig(BaseModel):
         gt=0,
         description="Request timeout in seconds",
     )
+    max_body_bytes: int = Field(
+        default=10 * 1024 * 1024,  # 10 MB
+        gt=0,
+        description=(
+            "Maximum response body size in bytes. Responses exceeding this limit "
+            "return an error result instead of being extracted and fingerprinted, "
+            "preventing OOM on hostile or misconfigured Tier-3 endpoints (B3.10)."
+        ),
+    )
     # SSRF allowlist. The two scalar keywords are a closed set (declared as a
     # Literal so Pydantic validates the arm natively); the list arm is one-or-more
     # CIDR strings, each well-formedness-checked by CidrStr's AfterValidator, with
     # the empty list rejected via min_length=1. Pydantic resolves which union arm a
-    # Tier-3 config value matches structurally — no isinstance discrimination needed.
+    # Tier-3 config value matches structurally -- no isinstance discrimination needed.
     allowed_hosts: Literal["public_only", "allow_private"] | Annotated[list[CidrStr], Field(min_length=1)] = Field(
         default="public_only",
         description="SSRF allowlist: 'public_only' (default), 'allow_private', or list of CIDR ranges",
@@ -425,7 +435,7 @@ class WebScrapeTransform(BaseTransform):
     name = "web_scrape"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:843660a9df8bc168"
+    source_file_hash: str | None = "sha256:2d54e2b6cc87abaf"
     config_model = WebScrapeConfig
     passes_through_input = True
 
@@ -472,10 +482,11 @@ class WebScrapeTransform(BaseTransform):
         self._text_separator = cfg.text_separator
         self._fingerprint_mode = cfg.fingerprint_mode
 
-        # HTTP config — validated by WebScrapeHTTPConfig sub-model
+        # HTTP config -- validated by WebScrapeHTTPConfig sub-model
         self._abuse_contact = cfg.http.abuse_contact
         self._scraping_reason = cfg.http.scraping_reason
         self._timeout = cfg.http.timeout
+        self._max_body_bytes = cfg.http.max_body_bytes
 
         # Compute allowed_ranges from allowed_hosts config
         allowed_hosts = cfg.http.allowed_hosts
@@ -547,9 +558,9 @@ class WebScrapeTransform(BaseTransform):
                     "http.abuse_contact and http.scraping_reason are mandatory and recorded in the audit trail — operator must declare them, not the model.",
                     "If the user-facing output should exclude raw scraped content, route the final path through field_mapper with select_only: true before the sink; a sink name or output name is not cleanup.",
                     "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete when raw scraped-content cleanup is required; insert or restore the final field_mapper before the sink.",
-                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Use azure_prompt_shield or the deployment's equivalent; continuing without it is allowed.",
-                    "For prompt-injection shielding when scraped content flows into an LLM, recommendation is not permission to add a node; do not substitute azure_content_safety; do not insert it automatically unless requested or policy-required.",
-                    "If no prompt shield is authorized, surface a pipeline_decision warning on the LLM node using user_term prompt_injection_shield_recommendation.",
+                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Use azure_prompt_shield or the deployment's equivalent.",
+                    "Recommendation is not permission to add a node; do not substitute azure_content_safety; do not insert it automatically unless requested or policy-required.",
+                    "If no prompt shield is authorized, make the direct public-content-to-LLM routing reviewable with a pipeline_decision requirement on the LLM node using user_term prompt_injection_shield_recommendation.",
                     "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
                 ),
             )
@@ -724,7 +735,51 @@ class WebScrapeTransform(BaseTransform):
                 }
             )
 
-        # Extract content — response.text is Tier 3 (external data), validate at boundary
+        # Content-type guard: reject non-text responses before extraction (B3.10).
+        # A Tier-3 endpoint returning image/*, application/octet-stream, etc. must
+        # not be decoded and fingerprinted as if it were page content -- that would
+        # produce mojibake fingerprints and corrupt change-detection. Only text/*
+        # and application/xhtml+xml are accepted; an absent Content-Type header is
+        # treated as unknown and rejected conservatively.
+        content_type_raw = response.headers.get("content-type", "")
+        content_type_lower = content_type_raw.split(";", 1)[0].strip().lower()
+        _TEXT_CONTENT_TYPES = ("text/", "application/xhtml+xml")
+        if not any(content_type_lower.startswith(prefix) for prefix in _TEXT_CONTENT_TYPES):
+            return TransformResult.error(
+                {
+                    "reason": "non_text_content_type",
+                    "error": f"non-text content-type {content_type_raw!r} returned by {safe_request.original_url}; expected text/*",
+                    "content_type": content_type_raw,
+                    "url": safe_request.original_url,
+                }
+            )
+
+        # Body-size guard: reject responses that exceed the configured limit (B3.10).
+        #
+        # LIMITATION: this is a POST-buffer guard. AuditedHTTPClient does a
+        # non-streaming GET, so by the time we get here the full body is already
+        # downloaded into response.content AND audit-captured (body_size +
+        # base64 payload). This guard therefore bounds only EXTRACTION and
+        # fingerprinting of a hostile body -- it does NOT bound download time,
+        # peak memory, or audit-payload size. A true pre-buffer cap requires a
+        # streaming byte-cap (early abort) in AuditedHTTPClient, which is a
+        # shared-client change with its own audit-semantics + test surface.
+        # Tracked: filigree elspeth-a6f246d02a (operator-deferred 2026-06-15).
+        body_size = len(response.content)
+        if body_size > self._max_body_bytes:
+            return TransformResult.error(
+                {
+                    "reason": "body_too_large",
+                    "error": (
+                        f"response body {body_size} bytes exceeds max_body_bytes {self._max_body_bytes} for {safe_request.original_url}"
+                    ),
+                    "body_size": body_size,
+                    "max_body_bytes": self._max_body_bytes,
+                    "url": safe_request.original_url,
+                }
+            )
+
+        # Extract content -- response.text is Tier 3 (external data), validate at boundary
         try:
             content = extract_content(
                 response.text,
@@ -851,8 +906,17 @@ class WebScrapeTransform(BaseTransform):
             elif 500 <= response.status_code < 600:
                 raise ServerError(f"HTTP {response.status_code}: {url}")
             elif 300 <= response.status_code < 400:
-                # Unresolved redirect (e.g. 3xx without Location header) — treat as error
+                # Unresolved redirect (e.g. 3xx without Location header) -- treat as error
                 raise InvalidURLError(f"Unresolved redirect HTTP {response.status_code}: {url} (missing or empty Location header)")
+            elif 400 <= response.status_code < 500:
+                # Catch-all for unenumerated 4xx codes (400, 402, 405, 406, 408,
+                # 410, 418, 451, ...). Without this arm the response would be
+                # returned and process() would fingerprint the error-page body as
+                # if it were real content -- corrupting change-detection (B3.9).
+                # 408 Request Timeout is retryable (transient server overload);
+                # all other unenumerated 4xx codes are non-retryable client errors.
+                retryable = response.status_code == 408
+                raise ClientError(f"HTTP {response.status_code}: {url}", retryable=retryable)
 
             return response, final_hostname_url, call
 

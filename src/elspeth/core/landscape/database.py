@@ -5,19 +5,88 @@ with appropriate settings for each.
 """
 
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, NewType, Self, cast
 from urllib.parse import quote
+from weakref import WeakKeyDictionary
 
 from sqlalchemy import Connection, create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.reflection import Inspector
 from sqlalchemy.engine.url import make_url
+from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.core.landscape.journal import LandscapeJournal
 from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+
+# Tier-1 branded Engine type.
+#
+# ``Tier1Engine`` is a NewType wrapper around :class:`sqlalchemy.engine.Engine`
+# that carries a static guarantee: the engine was created through
+# :class:`LandscapeDB` and passed the PRAGMA integrity probe
+# (:meth:`LandscapeDB._verify_sqlite_pragmas`).  The wrapper has zero runtime
+# overhead (``NewType`` is erased at runtime); it is a type-checker signal only.
+#
+# Only :meth:`LandscapeDB.engine` may mint a ``Tier1Engine`` via ``cast()``.
+# Call sites that accept ``Tier1Engine`` (e.g.
+# :class:`~elspeth.core.landscape.scheduler_repository.TokenSchedulerRepository`)
+# are guaranteed to receive a probe-verified engine — any call site that tries
+# to pass a bare :class:`Engine` will be caught by mypy.
+Tier1Engine = NewType("Tier1Engine", Engine)
+
+# Execution-option key that marks a connection's next transaction as carrying
+# WRITE INTENT.  On writable SQLite engines the engine-level ``begin`` event
+# (installed by :meth:`LandscapeDB._configure_sqlite`) inspects this option and
+# begins the transaction with ``BEGIN IMMEDIATE`` — taking the single WAL write
+# lock at BEGIN — instead of the default DEFERRED ``BEGIN``.  This closes the
+# cross-process read-then-write hazard where a transaction that starts as a
+# reader and later upgrades to a writer aborts with the non-retryable
+# ``SQLITE_BUSY_SNAPSHOT`` (ADR-030 §D5; option-c design F10).
+#
+# Only engine-side write verbs set this option (via
+# :func:`begin_write` / :meth:`LandscapeDB.write_connection`); read and
+# dashboard connections never carry it, so they never contend for the write
+# lock at BEGIN.
+WRITE_INTENT_OPTION = "elspeth_write_intent"
+
+# Canonical SQLite PRAGMA invariants for the Landscape audit DB.
+#
+# Tier-1 doctrine: the audit DB is the legal record. If SQLite doesn't accept
+# any of these PRAGMAs, the crash-safety / concurrency guarantees the audit
+# subsystem depends on are unmet and we MUST refuse to open the database.
+#
+# - journal_mode=WAL — file-backed DBs MUST run in WAL mode (better
+#   concurrency, fsync-on-checkpoint instead of fsync-per-write).  SQLite
+#   silently downgrades to 'memory' for ``:memory:`` databases (WAL has no
+#   meaning without an on-disk journal file); the probe accepts that.
+# - synchronous=NORMAL — paired with WAL, this is the canonical
+#   write-heavy crash-safe shape: durable across application crashes and
+#   sufficiently durable across OS crashes when fsync semantics are honoured
+#   by the filesystem.  FULL is slower without meaningful added durability
+#   under WAL.  See https://www.sqlite.org/pragma.html#pragma_synchronous
+# - foreign_keys=ON — referential integrity is mandatory for the audit
+#   schema (run_id / token_id / node_id FKs must enforce).
+# - busy_timeout=5000 ms — tolerate brief contention between recorders
+#   without surfacing SQLITE_BUSY to the caller.
+_SQLITE_PRAGMA_INVARIANTS_FILE: tuple[tuple[str, str], ...] = (
+    ("journal_mode", "wal"),
+    ("synchronous", "1"),
+    ("foreign_keys", "1"),
+    ("busy_timeout", "5000"),
+)
+_SQLITE_PRAGMA_INVARIANTS_MEMORY: tuple[tuple[str, str], ...] = (
+    # ``:memory:`` databases have no on-disk journal file; SQLite reports
+    # ``journal_mode=memory`` regardless of what we requested.  That is
+    # the only sanctioned deviation from the file-backed contract.
+    ("journal_mode", "memory"),
+    ("synchronous", "1"),
+    ("foreign_keys", "1"),
+    ("busy_timeout", "5000"),
+)
 
 
 class SchemaCompatibilityError(Exception):
@@ -27,6 +96,83 @@ class SchemaCompatibilityError(Exception):
 
 
 ADR019_MIGRATION_GUIDE = "docs/operator/migrations/adr-019.md"
+
+
+# StaticPool engines (``LandscapeDB.in_memory()``, tests only) share ONE DBAPI
+# connection across every thread (``check_same_thread=False`` + StaticPool).  When
+# a helper thread — e.g. the idle-timeout aggregation poller in
+# ``source_iteration.py`` — drives audit writes concurrently with the main source
+# thread (which may itself write audit rows via ``ctx.record_call`` during
+# ``next()``), both would drive that single shared connection at once and SQLite
+# raises "recursive use of cursors not allowed" / "cannot start a transaction
+# within a transaction".  File-backed production engines use the default
+# ``QueuePool`` (one connection PER thread) + WAL/BEGIN IMMEDIATE/busy_timeout, so
+# they are already safe and MUST NOT pay any app-level lock (it would regress the
+# epoch-21 multi-writer design).  We therefore serialize connection acquisition
+# with a per-engine reentrant lock that engages ONLY for StaticPool engines; every
+# other engine takes the no-op (lock-free) path.
+_SHARED_CONNECTION_LOCKS: "WeakKeyDictionary[Engine, threading.RLock]" = WeakKeyDictionary()
+_SHARED_CONNECTION_LOCKS_GUARD = threading.Lock()
+
+
+def _shared_connection_lock(engine: Engine) -> "threading.RLock | None":
+    """Return a serialization lock for engines whose pool shares one DBAPI
+    connection across threads (``StaticPool``); ``None`` for per-thread-connection
+    engines (the production ``QueuePool`` path), which need no app-level lock.
+
+    The lock is reentrant so a single thread that nests connection context
+    managers (e.g. ``connection()`` calling into ``write_connection()``) does not
+    self-deadlock, and per-engine so all callers sharing one StaticPool engine
+    contend on the same lock.
+    """
+    if not isinstance(engine.pool, StaticPool):
+        return None
+    with _SHARED_CONNECTION_LOCKS_GUARD:
+        lock = _SHARED_CONNECTION_LOCKS.get(engine)
+        if lock is None:
+            lock = threading.RLock()
+            _SHARED_CONNECTION_LOCKS[engine] = lock
+        return lock
+
+
+@contextmanager
+def _maybe_serialize_shared_connection(engine: Engine) -> Iterator[None]:
+    """Hold the StaticPool serialization lock for the duration of a transaction,
+    or do nothing on per-thread-connection (production) engines.
+    """
+    lock = _shared_connection_lock(engine)
+    if lock is None:
+        yield
+        return
+    with lock:
+        yield
+
+
+@contextmanager
+def begin_write(engine: Engine) -> Iterator[Connection]:
+    """Drop-in replacement for ``engine.begin()`` that carries write intent.
+
+    On writable Landscape SQLite engines the transaction begins with
+    ``BEGIN IMMEDIATE``, taking the WAL write lock at BEGIN so cross-process
+    read-then-write transactions cannot abort with the non-retryable
+    ``SQLITE_BUSY_SNAPSHOT`` (the lock is held from transaction start, so the
+    snapshot can never go stale under a concurrent writer).  Under contention
+    the BEGIN itself polls for up to ``busy_timeout`` (5000 ms) before raising
+    a retryable ``OperationalError`` ("database is locked").
+
+    Commit/rollback semantics are identical to ``engine.begin()``: commit on
+    successful block exit, rollback on exception.  On non-SQLite engines the
+    write-intent option is inert.
+
+    Exists as a module-level helper because some callers hold a bare
+    :class:`Engine` / :data:`Tier1Engine` rather than a :class:`LandscapeDB`
+    (e.g. ``TokenSchedulerRepository``); LandscapeDB holders should prefer
+    :meth:`LandscapeDB.write_connection`.
+    """
+    with _maybe_serialize_shared_connection(engine), engine.connect() as conn:
+        conn.execution_options(**{WRITE_INTENT_OPTION: True})
+        with conn.begin():
+            yield conn
 
 
 # Required columns that have been added since initial schema.
@@ -59,19 +205,17 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     ("node_states", "success_reason_json"),
     # Operation call linkage - enables source/sink call tracking
     ("calls", "operation_id"),
-    # Phase 5: Schema contract audit trail - captures contracts in effect for run
-    ("runs", "schema_contract_json"),
-    ("runs", "schema_contract_hash"),
     # Phase 5: Plugin contract audit trail - captures input/output contracts per node
     ("nodes", "input_contract_json"),
     ("nodes", "output_contract_json"),
     # Operation I/O hashes - survive payload purge for integrity verification
     ("operations", "input_data_hash"),
     ("operations", "output_data_hash"),
-    # Coalesce state for checkpoint recovery - serialized pending merge state
-    ("checkpoints", "coalesce_state_json"),
     # Checkpoint compatibility gate - runtime always stamps the checkpoint format version
     ("checkpoints", "format_version"),
+    # Epoch 20: F1 durability unification.
+    # barrier_scalars_json carries shrunken checkpoint barrier metadata (Task 1.2).
+    ("checkpoints", "barrier_scalars_json"),
     # Mechanical change detection — hash of plugin source file at registration
     ("nodes", "source_file_hash"),
     # ADR-010 §Decision 3 M3: runtime VAL manifest — set of
@@ -113,6 +257,99 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
     # Postgres staleness backstop, so a stale Postgres DB would slip past validation.
     ("runs", "openrouter_catalog_sha256"),
     ("runs", "openrouter_catalog_source"),
+    # Epoch 12: multi-source foundation.
+    ("run_sources", "run_id"),
+    ("run_sources", "source_node_id"),
+    ("run_sources", "source_name"),
+    ("run_sources", "lifecycle_state"),
+    ("rows", "source_row_index"),
+    ("rows", "ingest_sequence"),
+    ("token_work_items", "work_item_id"),
+    ("token_work_items", "run_id"),
+    ("token_work_items", "token_id"),
+    ("token_work_items", "row_id"),
+    ("token_work_items", "node_id"),
+    ("token_work_items", "step_index"),
+    ("token_work_items", "ingest_sequence"),
+    ("token_work_items", "status"),
+    ("token_work_items", "queue_key"),
+    ("token_work_items", "barrier_key"),
+    ("token_work_items", "available_at"),
+    ("token_work_items", "row_payload_json"),
+    ("token_work_items", "on_success_sink"),
+    ("token_work_items", "pending_sink_name"),
+    ("token_work_items", "pending_outcome"),
+    ("token_work_items", "pending_path"),
+    ("token_work_items", "pending_error_hash"),
+    ("token_work_items", "pending_error_message"),
+    ("token_work_items", "branch_name"),
+    ("token_work_items", "fork_group_id"),
+    ("token_work_items", "join_group_id"),
+    ("token_work_items", "expand_group_id"),
+    ("token_work_items", "coalesce_node_id"),
+    ("token_work_items", "coalesce_name"),
+    ("token_work_items", "attempt"),
+    ("token_work_items", "lease_owner"),
+    ("token_work_items", "lease_expires_at"),
+    ("token_work_items", "created_at"),
+    ("token_work_items", "updated_at"),
+    # Epoch 20: F1 durability unification.
+    # barrier_blocked_at records when a work item was blocked at a barrier (Task 1.3).
+    ("token_work_items", "barrier_blocked_at"),
+    ("scheduler_events", "event_id"),
+    ("scheduler_events", "run_id"),
+    ("scheduler_events", "token_id"),
+    ("scheduler_events", "work_item_id"),
+    ("scheduler_events", "node_id"),
+    ("scheduler_events", "event_type"),
+    ("scheduler_events", "from_status"),
+    ("scheduler_events", "to_status"),
+    ("scheduler_events", "from_lease_owner"),
+    ("scheduler_events", "to_lease_owner"),
+    ("scheduler_events", "from_lease_expires_at"),
+    ("scheduler_events", "to_lease_expires_at"),
+    ("scheduler_events", "from_attempt"),
+    ("scheduler_events", "to_attempt"),
+    ("scheduler_events", "recorded_at"),
+    ("scheduler_events", "caller_owner"),
+    ("scheduler_events", "context_json"),
+    # Epoch 21: multi-worker coordination substrate (ADR-030).
+    ("token_work_items", "barrier_adopted_epoch"),
+    ("run_coordination", "run_id"),
+    ("run_coordination", "leader_worker_id"),
+    ("run_coordination", "leader_epoch"),
+    ("run_coordination", "leader_heartbeat_expires_at"),
+    ("run_coordination", "updated_at"),
+    ("run_workers", "worker_id"),
+    ("run_workers", "run_id"),
+    ("run_workers", "role"),
+    ("run_workers", "status"),
+    ("run_workers", "registered_at"),
+    ("run_workers", "heartbeat_expires_at"),
+    ("run_workers", "departed_at"),
+    ("run_workers", "evicted_at"),
+    ("run_workers", "evicted_by_worker_id"),
+    ("run_workers", "pid"),
+    ("run_workers", "hostname"),
+    ("run_workers", "entry_point"),
+    ("run_coordination_events", "seq"),
+    ("run_coordination_events", "event_id"),
+    ("run_coordination_events", "run_id"),
+    ("run_coordination_events", "event_type"),
+    ("run_coordination_events", "worker_id"),
+    ("run_coordination_events", "leader_epoch"),
+    ("run_coordination_events", "recorded_at"),
+    ("run_coordination_events", "context_json"),
+    ("coalesce_branch_losses", "loss_id"),
+    ("coalesce_branch_losses", "run_id"),
+    ("coalesce_branch_losses", "coalesce_name"),
+    ("coalesce_branch_losses", "row_id"),
+    ("coalesce_branch_losses", "branch_name"),
+    ("coalesce_branch_losses", "token_id"),
+    ("coalesce_branch_losses", "reason"),
+    ("coalesce_branch_losses", "recorded_by"),
+    ("coalesce_branch_losses", "recorded_at"),
+    ("coalesce_branch_losses", "adopted_epoch"),
 )
 
 # Required foreign keys for audit integrity (Tier 1 trust).
@@ -122,6 +359,12 @@ _REQUIRED_COLUMNS: tuple[tuple[str, str], ...] = (
 _REQUIRED_FOREIGN_KEYS: tuple[tuple[str, str, str], ...] = (
     ("validation_errors", "row_id", "rows"),
     ("preflight_results", "run_id", "runs"),
+    ("scheduler_events", "run_id", "runs"),
+    # Epoch 21: multi-worker coordination substrate (ADR-030).
+    ("run_coordination", "run_id", "runs"),
+    ("run_workers", "run_id", "runs"),
+    ("run_coordination_events", "run_id", "runs"),
+    ("coalesce_branch_losses", "run_id", "runs"),
 )
 
 # Required composite foreign keys for run-scoped audit integrity.
@@ -136,11 +379,18 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("transform_errors", ("transform_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("artifacts", ("produced_by_state_id", "run_id"), "node_states", ("state_id", "run_id")),
     ("artifacts", ("sink_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("run_sources", ("source_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("batches", ("aggregation_node_id", "run_id"), "nodes", ("node_id", "run_id")),
     ("batches", ("aggregation_state_id", "run_id"), "node_states", ("state_id", "run_id")),
     ("batches", ("retry_of_batch_id", "run_id"), "batches", ("batch_id", "run_id")),
     ("batch_members", ("batch_id", "run_id"), "batches", ("batch_id", "run_id")),
     ("batch_members", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("token_work_items", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("token_work_items", ("row_id", "run_id"), "rows", ("row_id", "run_id")),
+    ("token_work_items", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("token_work_items", ("coalesce_node_id", "run_id"), "nodes", ("node_id", "run_id")),
+    ("scheduler_events", ("token_id", "run_id"), "tokens", ("token_id", "run_id")),
+    ("scheduler_events", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
 )
 
 # Required check constraints for audit integrity.
@@ -150,9 +400,22 @@ _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
     ("auth_events", "ck_auth_events_outcome"),
     ("auth_events", "ck_auth_events_provider"),
     ("run_attributions", "ck_run_attributions_auth_provider_type"),
+    ("run_sources", "ck_run_sources_lifecycle_state"),
+    ("token_work_items", "ck_token_work_items_lease_owner_required_when_leased"),
+    ("scheduler_events", "ck_scheduler_events_event_type"),
+    ("scheduler_events", "ck_scheduler_events_from_status"),
+    ("scheduler_events", "ck_scheduler_events_to_status"),
+    ("scheduler_events", "ck_scheduler_events_from_attempt_non_negative"),
+    ("scheduler_events", "ck_scheduler_events_to_attempt_non_negative"),
     ("calls", "calls_has_parent"),
     ("preflight_results", "ck_preflight_result_type"),
     ("runs", "ck_runs_openrouter_catalog_source"),
+    # Epoch 21: multi-worker coordination substrate (ADR-030).
+    ("run_coordination", "ck_run_coordination_seat_liveness_paired"),
+    ("run_workers", "ck_run_workers_role"),
+    ("run_workers", "ck_run_workers_status"),
+    ("run_workers", "ck_run_workers_evicted_at_paired"),
+    ("run_coordination_events", "ck_run_coordination_events_event_type"),
 )
 
 # Required indexes (including partial unique indexes) for audit integrity.
@@ -168,7 +431,19 @@ _REQUIRED_INDEXES: tuple[tuple[str, str], ...] = (
     ("checkpoints", "ix_checkpoints_run_sequence_unique"),
     ("preflight_results", "ix_preflight_results_run"),
     ("token_outcomes", "ix_token_outcomes_terminal_unique"),
+    ("token_work_items", "ix_token_work_items_ready"),
+    ("token_work_items", "ix_token_work_items_lease"),
+    ("token_work_items", "ix_token_work_items_recovery"),
+    ("token_work_items", "ix_token_work_items_pending_sink_token"),
+    ("token_work_items", "uq_token_work_items_terminal_identity"),
+    ("scheduler_events", "ix_scheduler_events_run_token_time"),
+    ("scheduler_events", "ix_scheduler_events_work_item"),
     ("validation_errors", "ix_validation_errors_run_row"),
+    # Epoch 21: multi-worker coordination substrate (ADR-030).
+    ("run_workers", "ix_run_workers_liveness"),
+    ("run_coordination_events", "uq_run_coordination_events_event_id"),
+    ("run_coordination_events", "ix_run_coordination_events_run"),
+    ("coalesce_branch_losses", "uq_coalesce_branch_losses_natural"),
 )
 
 _ADDITIVE_INDEX_NAMES: frozenset[str] = frozenset({"ix_tokens_run_id"})
@@ -282,6 +557,12 @@ class LandscapeDB:
                 LandscapeDB._configure_sqlite(self._engine)
         if self._journal is not None:
             self._journal.attach(self._engine)
+        # Tier-1: probe the SQLite PRAGMAs we just configured — if any
+        # didn't take effect, the audit DB does not meet the durability /
+        # concurrency contract and we MUST refuse to open it.  Skipped for
+        # non-SQLite backends (PostgreSQL has no equivalent surface here).
+        if self._engine is not None and self.connection_string.startswith("sqlite"):
+            LandscapeDB._verify_sqlite_pragmas(self._engine, self.connection_string)
 
     @staticmethod
     def _configure_sqlite(engine: Engine, *, read_only: bool = False) -> None:
@@ -289,12 +570,25 @@ class LandscapeDB:
 
         Registers a connection event hook that sets:
         - PRAGMA journal_mode=WAL (better concurrency, writable engines only)
+        - PRAGMA synchronous=NORMAL (canonical WAL crash-safety shape)
         - PRAGMA foreign_keys=ON (referential integrity)
         - PRAGMA busy_timeout=5000 (contention tolerance)
         - PRAGMA query_only=ON (read-only engines only)
 
+        For writable engines it additionally takes manual control of
+        transaction begin (pysqlite ``isolation_level = None`` plus an
+        engine-level ``begin`` listener) so that transactions carrying the
+        :data:`WRITE_INTENT_OPTION` execution option begin with
+        ``BEGIN IMMEDIATE`` and all others with a plain DEFERRED ``BEGIN``.
+        Read-only engines keep stock pysqlite autocommit-read behaviour and
+        never emit any BEGIN.
+
         For SQLCipher engines, these PRAGMAs execute AFTER the creator callback
         returns (where PRAGMA key is issued), preserving the required ordering.
+
+        The values set here MUST stay aligned with the invariants enforced by
+        :meth:`_verify_sqlite_pragmas`; the probe is the audit-integrity gate
+        that fails the database open if SQLite ever refuses to honour them.
 
         Args:
             engine: SQLAlchemy Engine to configure
@@ -308,11 +602,113 @@ class LandscapeDB:
             else:
                 # Enable WAL mode for better concurrency on writer-capable DBs.
                 cursor.execute("PRAGMA journal_mode=WAL")
+                # synchronous=NORMAL is the canonical pairing with WAL: durable
+                # across app crashes, sufficiently durable across OS crashes,
+                # without the per-write fsync overhead of FULL.
+                cursor.execute("PRAGMA synchronous=NORMAL")
             # Enable foreign key enforcement
             cursor.execute("PRAGMA foreign_keys=ON")
             # Set busy timeout to avoid immediate SQLITE_BUSY errors under contention
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.close()
+
+        if read_only:
+            # Read-only engines keep stock pysqlite behaviour: SELECTs run in
+            # autocommit and no BEGIN of any kind is ever emitted, so
+            # dashboards / inspectors provably never contend for the WAL
+            # write lock (option-c design F10 closure).
+            return
+
+        @event.listens_for(engine, "connect")
+        def _disable_pysqlite_implicit_begin(dbapi_connection: object, connection_record: object) -> None:
+            # pysqlite emits its own lazy BEGIN before the first DML and never
+            # before SELECT.  Take manual control of transaction start so the
+            # engine-level "begin" event below is the single place the begin
+            # mode (DEFERRED vs IMMEDIATE) is decided — the documented
+            # SQLAlchemy pysqlite recipe.  Without this, pysqlite would emit
+            # its own BEGIN after our BEGIN IMMEDIATE ("cannot start a
+            # transaction within a transaction").  The takeover is global per
+            # writable engine rather than toggled per-transaction: a pooled
+            # connection can never be checked in with surprising isolation
+            # state, so ``engine.begin()`` rollback always undoes audit
+            # writes.  sqlcipher3 mirrors the pysqlite ``isolation_level``
+            # attribute, and PRAGMA key runs in the creator callback BEFORE
+            # this event, so SQLCipher ordering is preserved.
+            dbapi_connection.isolation_level = None  # type: ignore[attr-defined]  # SQLAlchemy event passes DBAPI connection typed as object
+
+        @event.listens_for(engine, "begin")
+        def _emit_begin(conn: Connection) -> None:
+            # Belt: _configure_sqlite is only ever called for sqlite URLs, so
+            # this listener is dialect-keyed by construction; guard anyway.
+            if conn.dialect.name != "sqlite":
+                return
+            if conn.get_execution_options().get(WRITE_INTENT_OPTION, False):
+                # Write intent declared (begin_write()/write_connection()):
+                # take the WAL write lock at BEGIN so read-then-write
+                # transactions cannot hit SQLITE_BUSY_SNAPSHOT mid-flight.
+                conn.exec_driver_sql("BEGIN IMMEDIATE")
+            else:
+                # Plain transactions keep DEFERRED semantics.  Owned
+                # behaviour delta vs stock pysqlite: read transactions now
+                # emit an explicit (lock-free) BEGIN where the driver
+                # previously emitted nothing, making multi-SELECT blocks
+                # snapshot-consistent.
+                conn.exec_driver_sql("BEGIN")
+
+    @staticmethod
+    def _verify_sqlite_pragmas(engine: Engine, connection_string: str) -> None:
+        """Probe SQLite to confirm the configured PRAGMAs actually took effect.
+
+        Opens a connection (which triggers the ``connect`` event hook that
+        applies the PRAGMAs), then reads each PRAGMA back and asserts the
+        value matches the invariant.  Any mismatch raises
+        :class:`AuditIntegrityError` — Tier-1 doctrine: the audit DB cannot
+        proceed with weaker durability/concurrency guarantees than the audit
+        subsystem was designed against.
+
+        SQLite silently downgrades ``journal_mode`` to ``memory`` for
+        ``:memory:`` databases (WAL requires an on-disk journal file); the
+        probe selects the file-backed or memory-backed invariant set from
+        the connection string.
+
+        Args:
+            engine: SQLAlchemy Engine configured by :meth:`_configure_sqlite`.
+            connection_string: Original connection string, used to decide
+                whether ``journal_mode=memory`` is acceptable.
+
+        Raises:
+            AuditIntegrityError: If any PRAGMA reports a value other than
+                what :meth:`_configure_sqlite` requested.  The message names
+                the PRAGMA, the expected value, and the observed value so
+                operators can diagnose without needing to re-instrument.
+        """
+        # Resolve invariants once — :memory: is a single sanctioned deviation.
+        url = make_url(connection_string)
+        is_memory = url.database is None or url.database == ":memory:"
+        invariants = _SQLITE_PRAGMA_INVARIANTS_MEMORY if is_memory else _SQLITE_PRAGMA_INVARIANTS_FILE
+
+        with engine.connect() as conn:
+            observed: dict[str, str] = {}
+            for pragma, _expected in invariants:
+                # PRAGMA names are static (literal table above), not user
+                # input — f-string interpolation is safe here.
+                result = conn.exec_driver_sql(f"PRAGMA {pragma}").scalar_one_or_none()
+                observed[pragma] = "" if result is None else str(result).lower()
+
+        mismatches: list[str] = []
+        for pragma, expected in invariants:
+            actual = observed[pragma]
+            if actual != expected.lower():
+                mismatches.append(f"PRAGMA {pragma}: expected {expected!r}, observed {actual!r}")
+
+        if mismatches:
+            # Audit DB cannot proceed with degraded guarantees.  Tier-1:
+            # raise immediately, do not attempt remediation.  The message
+            # avoids the connection string (path may be sensitive) but
+            # names every offending PRAGMA so the operator can act.
+            raise AuditIntegrityError(
+                "Landscape SQLite PRAGMA invariants violated at engine startup; audit-integrity guarantees unmet. " + "; ".join(mismatches)
+            )
 
     @staticmethod
     def _create_sqlcipher_engine(url: str, passphrase: str) -> Engine:
@@ -442,11 +838,15 @@ class LandscapeDB:
             return int(conn.exec_driver_sql("PRAGMA user_version").scalar_one())
 
     def _set_sqlite_schema_epoch(self, epoch: int) -> None:
-        """Persist the SQLite schema epoch in PRAGMA user_version."""
+        """Persist the SQLite schema epoch in PRAGMA user_version.
+
+        ``PRAGMA user_version`` is a transactional write in SQLite; carry
+        write intent for uniformity with every other engine-side write.
+        """
         if not self.connection_string.startswith("sqlite"):
             return
 
-        with self.engine.begin() as conn:
+        with begin_write(self.engine) as conn:
             conn.exec_driver_sql(f"PRAGMA user_version = {int(epoch)}")
 
     def _sync_sqlite_schema_epoch(self) -> None:
@@ -666,11 +1066,23 @@ class LandscapeDB:
             )
 
     @property
-    def engine(self) -> Engine:
-        """Get the SQLAlchemy engine."""
+    def engine(self) -> "Tier1Engine":
+        """Return the SQLAlchemy engine, branded as Tier1Engine.
+
+        ``Tier1Engine`` is a :func:`typing.NewType` over
+        :class:`~sqlalchemy.engine.Engine` that carries the static guarantee
+        that the engine passed the PRAGMA integrity probe
+        (:meth:`_verify_sqlite_pragmas`).  The only place in the codebase that
+        may produce a ``Tier1Engine`` is this property — the ``cast()`` here
+        is the single gated mint point.
+
+        Raises:
+            RuntimeError: If the database is not initialized (i.e. after
+                :meth:`close` is called).
+        """
         if self._engine is None:
             raise RuntimeError("Database not initialized")
-        return self._engine
+        return cast("Tier1Engine", self._engine)
 
     def close(self) -> None:
         """Close database connection."""
@@ -723,8 +1135,14 @@ class LandscapeDB:
         Returns:
             LandscapeDB instance with in-memory SQLite
         """
-        engine = create_engine("sqlite:///:memory:", echo=False)
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+            echo=False,
+        )
         cls._configure_sqlite(engine)
+        cls._verify_sqlite_pragmas(engine, "sqlite:///:memory:")
         metadata.create_all(engine)
         instance = cls._from_parts("sqlite:///:memory:", engine)
         instance._sync_sqlite_schema_epoch()
@@ -771,6 +1189,7 @@ class LandscapeDB:
         dump_to_jsonl_fail_on_error: bool = False,
         dump_to_jsonl_include_payloads: bool = False,
         dump_to_jsonl_payload_base_path: str | None = None,
+        dump_to_jsonl_worker_suffix: str | None = None,
     ) -> Self:
         """Create database from connection URL.
 
@@ -786,10 +1205,18 @@ class LandscapeDB:
                 sidecar use ``immutable=1``; live WAL databases do not, so
                 committed WAL contents remain visible.
             dump_to_jsonl: Enable JSONL change journal for emergency backups
-            dump_to_jsonl_path: Optional override path for JSONL journal
+            dump_to_jsonl_path: Optional override path for JSONL journal.
+                When set alongside ``dump_to_jsonl_worker_suffix``, it is the
+                operator's responsibility to ensure distinct paths for each
+                worker (explicit-path-at-N-over-1 is unsupported).
             dump_to_jsonl_fail_on_error: Fail if journal write fails
             dump_to_jsonl_include_payloads: Inline payloads in journal records
             dump_to_jsonl_payload_base_path: Payload store base path for inlining
+            dump_to_jsonl_worker_suffix: Per-worker hex suffix (the uuid4 hex
+                tail of the ``worker_id``).  When set, the derived journal
+                path becomes ``db.journal.{suffix}.jsonl`` so followers on
+                the same host write distinct files (ADR-030 §C.4 row 13).
+                Ignored when ``dump_to_jsonl_path`` is supplied explicitly.
 
         Returns:
             LandscapeDB instance
@@ -802,16 +1229,21 @@ class LandscapeDB:
         if passphrase is not None:
             engine = cls._create_sqlcipher_engine(url, passphrase)
             cls._configure_sqlite(engine, read_only=read_only)
+            if not read_only:
+                # Tier-1 PRAGMA probe — see _verify_sqlite_pragmas docstring.
+                cls._verify_sqlite_pragmas(engine, url)
         else:
             engine_url = cls._sqlite_read_only_url(url) if read_only and url.startswith("sqlite") else url
             engine = create_engine(engine_url, echo=False)
             # SQLite-specific configuration
             if url.startswith("sqlite"):
                 cls._configure_sqlite(engine, read_only=read_only)
+                if not read_only:
+                    cls._verify_sqlite_pragmas(engine, url)
 
         journal: LandscapeJournal | None = None
         if dump_to_jsonl:
-            journal_path = dump_to_jsonl_path or cls._derive_journal_path(url)
+            journal_path = dump_to_jsonl_path or cls._derive_journal_path(url, dump_to_jsonl_worker_suffix)
             journal = LandscapeJournal(
                 journal_path,
                 fail_on_error=dump_to_jsonl_fail_on_error,
@@ -839,16 +1271,58 @@ class LandscapeDB:
             instance._sync_sqlite_schema_epoch()
         return instance
 
+    @property
+    def is_read_only(self) -> bool:
+        """Whether this handle was opened ``read_only=True`` (inspection only).
+
+        Read-only handles route :meth:`connection` through
+        :meth:`read_only_connection`, refuse :meth:`write_connection`, and
+        must never be handed to write repositories (e.g.
+        ``RecorderFactory`` skips ``TokenSchedulerRepository`` construction
+        for them).
+        """
+        return self._read_only
+
     @staticmethod
-    def _derive_journal_path(connection_string: str) -> str:
-        """Derive a default JSONL journal path from the connection string."""
+    def _derive_journal_path(connection_string: str, worker_suffix: str | None = None) -> str:
+        """Derive a default JSONL journal path from the connection string.
+
+        Args:
+            connection_string: SQLAlchemy connection string (must be SQLite).
+            worker_suffix: Optional per-worker hex suffix.  When ``None``
+                (the default N=1 leader case) the path is unchanged:
+                ``db.journal.jsonl``.  When set the path becomes
+                ``db.journal.{worker_suffix}.jsonl`` so that multiple workers
+                on one host write to distinct files (ADR-030 §C.4 row 13;
+                design line 284 / G line 455).
+
+                Derive from ``worker_id`` (``worker:{run_id}:{HEX}``) by
+                splitting on ``:`` and taking the last field.
+
+        Note — FORENSIC-ONLY at N>1:
+            Per-worker paths fix the file-corruption half of the N>1 journal
+            problem, not the ordering half.  Records carry per-statement
+            timestamps (``journal.py`` lines 39, 121) buffered to commit;
+            statement-time is **not** cross-process WAL commit order.  At
+            N>1 the per-worker journal is a forensic aid, **not** a
+            replayable log.  The authoritative replay order is
+            ``run_coordination_events.seq`` (AUTOINCREMENT — G line 409).
+            Restore tooling must gate on single-worker provenance; a true
+            in-transaction ``journal_seq`` total order is deferred to a
+            future release.
+        """
         url = make_url(connection_string)
         if not url.drivername.startswith("sqlite"):
             raise ValueError("dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases")
         database = url.database
         if database is None or database == ":memory:":
             raise ValueError("dump_to_jsonl requires a file-backed SQLite database")
-        return str(Path(database).with_suffix(".journal.jsonl"))
+        db_path = Path(database)
+        if worker_suffix is None:
+            # N=1 leader path: byte-for-byte unchanged.
+            return str(db_path.with_suffix(".journal.jsonl"))
+        # N>1 follower path: embed the hex suffix before the extension.
+        return str(db_path.parent / f"{db_path.stem}.journal.{worker_suffix}.jsonl")
 
     @contextmanager
     def connection(self) -> Iterator[Connection]:
@@ -868,7 +1342,29 @@ class LandscapeDB:
                 yield conn
             return
 
-        with self.engine.begin() as conn:
+        with _maybe_serialize_shared_connection(self.engine), self.engine.begin() as conn:
+            yield conn
+
+    @contextmanager
+    def write_connection(self) -> Iterator[Connection]:
+        """Transaction-scoped connection carrying WRITE INTENT.
+
+        Sibling of :meth:`connection` for write transactions.  On SQLite the
+        transaction begins with ``BEGIN IMMEDIATE``, taking the WAL write
+        lock at BEGIN so cross-process read-then-write shapes cannot abort
+        with the non-retryable ``SQLITE_BUSY_SNAPSHOT`` (ADR-030 §D5).
+        Commit/rollback semantics are identical to :meth:`connection`:
+        auto-commit on successful block exit, auto-rollback on exception.
+
+        Raises:
+            RuntimeError: If this handle was opened ``read_only=True`` —
+                write intent on a read-only audit handle is a programming
+                error, not a recoverable condition.
+        """
+        if self._read_only:
+            raise RuntimeError("write_connection() is not available on a read-only LandscapeDB handle")
+
+        with begin_write(self.engine) as conn:
             yield conn
 
     @contextmanager
@@ -876,14 +1372,17 @@ class LandscapeDB:
         """Get a database connection that rejects all write operations.
 
         Defense-in-depth for untrusted SQL execution (e.g., MCP query tool).
-        For SQLite, sets PRAGMA query_only = ON at the connection level and
-        resets it to OFF in the finally block so the pooled DBAPI connection
-        is returned in a writable state. For PostgreSQL, marks the current
+        For SQLite, sets PRAGMA query_only = ON at the connection level and,
+        on writable engines only, resets it to OFF in the finally block so the
+        pooled DBAPI connection is returned in a writable state. Read-only
+        engines (``from_url(read_only=True)``) keep query_only armed: it is
+        the only write barrier on SQLCipher read-only opens, which have no
+        mode=ro file-level backstop. For PostgreSQL, marks the current
         transaction READ ONLY. Unsupported backends fail closed instead of
         yielding a writable transaction.
         """
         dialect_name = self.engine.dialect.name
-        with self.engine.begin() as conn:
+        with _maybe_serialize_shared_connection(self.engine), self.engine.begin() as conn:
             if dialect_name == "sqlite":
                 conn.execute(text("PRAGMA query_only = ON"))
             elif dialect_name == "postgresql":
@@ -893,5 +1392,5 @@ class LandscapeDB:
             try:
                 yield conn
             finally:
-                if dialect_name == "sqlite":
+                if dialect_name == "sqlite" and not self._read_only:
                     conn.execute(text("PRAGMA query_only = OFF"))

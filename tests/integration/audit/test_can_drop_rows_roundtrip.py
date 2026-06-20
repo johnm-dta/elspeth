@@ -64,6 +64,8 @@ def _setup_landscape(*, run_id: str, row_id: str, token_id: str, node_id: str):
         row_index=0,
         data={"source": "v"},
         row_id=row_id,
+        source_row_index=0,
+        ingest_sequence=0,
     )
     setup.factory.data_flow.create_token(row_id=row.row_id, token_id=token_id)
     return setup
@@ -140,9 +142,11 @@ def _plugin(
 
 
 def _build_production_graph(config: PipelineConfig) -> ExecutionGraph:
+    primary_name = next(iter(config.sources))
+    primary = config.sources[primary_name]
     return ExecutionGraph.from_plugin_instances(
-        source=config.source,
-        source_settings=SourceSettings(plugin=config.source.name, on_success="source_out", options={}),
+        sources={primary_name: primary},
+        source_settings_map={primary_name: SourceSettings(plugin=primary.name, on_success="source_out", options={})},
         transforms=wire_transforms(
             [as_transform(transform) for transform in config.transforms],
             source_connection="source_out",
@@ -406,7 +410,7 @@ def test_legitimate_filter_records_queryable_dropped_by_filter_terminal_state() 
     sink = CollectSink("default")
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(transform)],
         sinks={"default": as_sink(sink)},
     )

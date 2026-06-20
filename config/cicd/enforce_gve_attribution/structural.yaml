@@ -16,5 +16,7 @@ per_file_rules:
   - pattern: "core/dag/builder.py"
     rules: ["GA1"]
     reason: >
-      Structural: pipeline cycle detection (2 sites) — no single node at fault.
-    max_hits: 2
+      Structural: pipeline cycle detection (2 sites), missing sources,
+      missing sinks, and sources/source-settings name mismatch (ADR-025
+      plural-source surface) — no single node at fault.
+    max_hits: 5

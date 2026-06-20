@@ -15,6 +15,7 @@ run's parent session.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -27,7 +28,7 @@ from pydantic import ValidationError
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
-from elspeth.web.auth.models import AuthenticationError, UserIdentity
+from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
 from elspeth.web.auth.protocol import AuthProvider
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
@@ -39,6 +40,7 @@ from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
     ExecuteRequestValidationError,
     PipelineValidationError,
+    RunSessionIntegrityError,
     SemanticContractViolationError,
     UnresolvedInterpretationPlaceholderError,
 )
@@ -73,6 +75,7 @@ from elspeth.web.execution.schemas import (
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
+    RunEventRecord,
     RunRecord,
     SessionServiceProtocol,
     TerminalSessionRunStatus,
@@ -285,6 +288,17 @@ def _build_terminal_run_event(current: RunStatusResponse, *, cancelled_run_recor
     )
 
 
+def _run_event_from_record(record: RunEventRecord) -> RunEvent:
+    return RunEvent.model_validate(
+        {
+            "run_id": str(record.run_id),
+            "timestamp": record.timestamp,
+            "event_type": record.event_type,
+            "data": record.data,
+        }
+    )
+
+
 def _counted(label: str, count: int) -> str:
     """Return a small English count phrase."""
     if count == 1:
@@ -292,7 +306,7 @@ def _counted(label: str, count: int) -> str:
     return f"{count} {label}s"
 
 
-def _summarize_counts(prefix: str, counts: dict[str, int]) -> str | None:
+def _summarize_counts(prefix: str, counts: Mapping[Any, int]) -> str | None:
     """Render snapshot counts without implying hidden progress."""
     if not counts:
         return None
@@ -841,6 +855,22 @@ def create_execution_router() -> APIRouter:
             return
         try:
             user = await auth_provider.authenticate(token)
+        except AuthProviderUnavailable as provider_exc:
+            # Provider availability failure is a distinct outcome from an
+            # invalid token (auth/models.py: AuthProviderUnavailable; the HTTP
+            # path maps it to 503, not 401). The client may hold a VALID token,
+            # so closing 4001 here would wrongly tell it to re-authenticate
+            # instead of backing off (see docstring above). Surface to the
+            # operator and close with the transient/server-side code 1011, the
+            # WebSocket analogue of HTTP 503 used elsewhere in this function.
+            slog.error(
+                "websocket_auth_provider_unavailable",
+                run_id=run_id,
+                phase="authenticate",
+                error=str(provider_exc),
+            )
+            await websocket.close(code=1011, reason="Authentication provider unavailable")
+            return
         except AuthenticationError:
             await websocket.close(code=4001, reason="Invalid authentication token")
             return
@@ -853,6 +883,23 @@ def create_execution_router() -> APIRouter:
             if not run_ownership:
                 await websocket.close(code=4004, reason="Run not found")
                 return
+        except RunSessionIntegrityError as integrity_exc:
+            # Tier-1 sessions-DB corruption: an existing run references a
+            # session row that does not exist. This is NOT a Tier-3 not-found
+            # case — surfacing it as 4004 would launder internal referential
+            # corruption into a benign client response. Landscape carries the
+            # run audit, not this sessions-DB invariant breach, so slog is the
+            # operator channel (CLAUDE.md logging policy: audit-system
+            # failure). Close 1011 (internal error), mirroring the seed-snapshot
+            # integrity handling below.
+            slog.error(
+                "websocket_run_ownership_session_integrity_error",
+                run_id=run_id,
+                session_id=integrity_exc.session_id,
+                error=str(integrity_exc),
+            )
+            await websocket.close(code=1011, reason="Run ownership check failed internal integrity validation")
+            return
         except ValueError:
             await websocket.close(code=4004, reason="Run not found")
             return
@@ -887,6 +934,12 @@ def create_execution_router() -> APIRouter:
                 await websocket.close(code=1011, reason="Run status failed internal accounting validation")
                 return
             current = current_snapshot.response
+            for persisted in await websocket.app.state.session_service.list_run_events(UUID(run_id)):
+                replay_event = _run_event_from_record(persisted)
+                await websocket.send_json(replay_event.model_dump(mode="json"))
+                if replay_event.event_type in ("completed", "cancelled", "failed"):
+                    await websocket.close(code=1000)
+                    return
             if current.status in RUN_STATUS_TERMINAL_VALUES:
                 event = _build_terminal_run_event(current, cancelled_run_record=current_snapshot.record)
                 await websocket.send_json(event.model_dump(mode="json"))

@@ -2,7 +2,7 @@
 // inlineSourceIntegration.test.tsx — Phase 5a Task 6
 //
 // End-to-end frontend integration: chat input dispatch → mocked LLM
-// `set_pipeline` tool-call response → `compositionState.source` with
+// `set_pipeline` tool-call response → `compositionState.sources` with
 // `blob_ref` → `getBlobMetadata` + `previewBlobContent` lookup → projection
 // into `useInlineSourceStore` → `<InlineSourceCreatedTurn>` rendered.
 //
@@ -11,7 +11,7 @@
 // boundary. The contract being pinned here is the FRONTEND wiring:
 //
 //   user types → useComposer.sendMessage → sessionStore.sendMessage
-//     → api.sendMessage (mocked) returns state with source.blob_ref
+//     → api.sendMessage (mocked) returns state with sources.source.blob_ref
 //     → sessionStore updates compositionState
 //     → ChatPanel's projection effect calls getBlobMetadata + preview
 //     → inlineSourceStore.setSummary populates the per-session summary
@@ -228,17 +228,19 @@ const LLM_INLINE_SOURCE_HASH =
   "c85e8a7843f8d4b014a8cde944256635cddbfa882f817d7f503d5623cfa1bc3f";
 
 /**
- * Build a CompositionState whose source is an `inline_blob` source with
- * a `blob_ref` option — the wire shape ChatPanel's `readBlobRef` helper
- * reads from `compositionState.source.options["blob_ref"]`.
+ * Build a CompositionState whose default named source is an `inline_blob`
+ * source with a `blob_ref` option — the wire shape ChatPanel's
+ * `readBlobRef` helper reads from `compositionState.sources`.
  */
 function makeCompositionStateWithInlineBlob(): CompositionState {
   return {
     id: "state-2",
     version: 2,
-    source: {
-      plugin: "inline_blob",
-      options: { blob_ref: BLOB_ID },
+    sources: {
+      source: {
+        plugin: "inline_blob",
+        options: { blob_ref: BLOB_ID },
+      },
     },
     nodes: [],
     edges: [],
@@ -264,7 +266,7 @@ function makeBlobMetadata(
     size_bytes: 32,
     content_hash: contentHash,
     created_at: "2026-05-18T00:00:00Z",
-    created_by: "user",
+    created_by: "assistant",
     source_description: "From chat",
     status: "ready",
     creation_modality: creationModality,
@@ -386,7 +388,7 @@ describe("Phase 5a Task 6 — chat input → set_pipeline → inline-source widg
       compositionState: {
         id: "state-1",
         version: 1,
-        source: null,
+        sources: {},
         nodes: [],
         edges: [],
         outputs: [],

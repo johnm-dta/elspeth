@@ -90,6 +90,21 @@ class TestDiscoverBlobContentRefs:
         assert refs[0].sha256 == VALID_HASH
         assert refs[0].encoding == "utf-8"
 
+    def test_discovers_plural_source_option_refs_with_source_name(self) -> None:
+        config = {
+            "sources": {
+                "orders": {"plugin": "csv", "options": {"system_prompt": _marker(BLOB1)}},
+                "refunds": {"plugin": "json", "options": {"template": _marker(BLOB2)}},
+            }
+        }
+
+        refs = _discover_blob_content_refs(config)
+
+        assert {ref.field_path for ref in refs} == {
+            "source:orders.options.system_prompt",
+            "source:refunds.options.template",
+        }
+
     def test_discovers_node_option_refs_across_node_collections(self) -> None:
         config = {
             "transforms": [
@@ -301,6 +316,42 @@ class TestSubstituteBlobContentRefs:
         assert audit == [
             ResolvedBlobContent(
                 field_path="source.options.system_prompt",
+                blob_id=UUID(BLOB1),
+                content_hash=ref.sha256,
+                byte_length=len(content),
+                mime_type="text/plain",
+                encoding="utf-8",
+            )
+        ]
+
+    def test_replaces_plural_source_marker_with_decoded_string_and_named_audit_path(self) -> None:
+        content = b"You are a helpful assistant."
+        ref = _ref_with_hash(content, "source:orders.options.system_prompt")
+        config = {
+            "sources": {
+                "orders": {
+                    "options": {
+                        "system_prompt": {
+                            "blob_ref": BLOB1,
+                            "mode": "inline_content",
+                            "sha256": ref.sha256,
+                        }
+                    }
+                }
+            }
+        }
+
+        substituted, audit = _substitute_blob_content_refs(
+            deepcopy(config),
+            {ref: content},
+            refs=[ref],
+            blob_metadata={ref.blob_id: ("text/plain", len(content))},
+        )
+
+        assert substituted["sources"]["orders"]["options"]["system_prompt"] == "You are a helpful assistant."
+        assert audit == [
+            ResolvedBlobContent(
+                field_path="source:orders.options.system_prompt",
                 blob_id=UUID(BLOB1),
                 content_hash=ref.sha256,
                 byte_length=len(content),

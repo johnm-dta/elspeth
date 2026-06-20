@@ -21,6 +21,8 @@ def _record_token(
         source_node_id=source_node_id,
         row_index=row_index,
         data={"row": row_index},
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     token = data_flow.create_token(row.row_id)
     data_flow.record_token_outcome(

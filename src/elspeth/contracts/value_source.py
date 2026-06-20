@@ -17,9 +17,9 @@ Two variants:
   value is also accepted (a Pydantic ``model_validator`` is expected to
   fill it from the sibling at config-construction time).
 
-Both variants are frozen, slot-bearing, scalar-only dataclasses — no
-mutable container fields, so no freeze guard is required (per CLAUDE.md
-"Scalar-Only Fields Need No Guard").
+Both variants are frozen and slot-bearing. ``CatalogValueSource`` normalizes
+its optional predicate field to immutable tuple pairs at construction time, so
+no mutable declaration containers cross the L0 boundary.
 
 This module is L0 (contracts layer): no upward imports from core, engine,
 or plugins. It is enforced as a leaf by the ``trust_tier.tier_model`` rule.
@@ -220,21 +220,25 @@ class CatalogValueSource:
             raise ValueError("CatalogValueSource.field_name must be non-empty")
         if not self.catalog_id:
             raise ValueError("CatalogValueSource.catalog_id must be non-empty")
+        normalized_applies_when: list[tuple[str, str]] = []
         for entry in self.applies_when:
-            # Length-only structural check (no isinstance — let Python's
-            # natural unpacking failures handle non-iterable entries).
-            # The type annotation already pins the expected shape; this
-            # guard only catches the common typo of passing a 1-tuple or
-            # 3-tuple by mistake.
-            if len(entry) != 2:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
                 raise ValueError(f"CatalogValueSource.applies_when entries must be (sibling_field, expected_value) tuples; got {entry!r}")
-            sibling_field, _expected = entry
+            sibling_field, expected_value = entry
+            if not isinstance(sibling_field, str):
+                raise TypeError("CatalogValueSource.applies_when sibling_field must be str")
+            if not isinstance(expected_value, str):
+                raise TypeError("CatalogValueSource.applies_when expected_value must be str")
             if not sibling_field:
                 raise ValueError("CatalogValueSource.applies_when sibling_field must be non-empty")
             if sibling_field == self.field_name:
                 raise ValueError(
                     f"CatalogValueSource.applies_when sibling_field {sibling_field!r} must differ from field_name {self.field_name!r}"
                 )
+            normalized_applies_when.append((sibling_field, expected_value))
+        normalized = tuple(normalized_applies_when)
+        if normalized != self.applies_when:
+            object.__setattr__(self, "applies_when", normalized)
 
 
 @dataclass(frozen=True, slots=True)

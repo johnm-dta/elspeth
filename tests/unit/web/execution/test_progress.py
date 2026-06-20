@@ -29,6 +29,7 @@ from elspeth.web.execution.schemas import (
     RunEvent,
     RunEventType,
 )
+from elspeth.web.sessions.telemetry import _FakeCounter, build_sessions_telemetry, observed_value
 
 _EventData = ProgressData | ErrorData | CompletedData | CancelledData | FailedData
 
@@ -586,6 +587,40 @@ class TestProgressBroadcasterCallbackBacklogBound:
         assert len(state.pending) == 0
         assert state.drain_scheduled is False
 
+    def test_terminal_drain_emits_telemetry_instead_of_logging(self) -> None:
+        mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        telemetry = build_sessions_telemetry()
+        broadcaster = ProgressBroadcaster(mock_loop, telemetry=telemetry)
+        queue = broadcaster.subscribe("run-1")
+        for _ in range(queue.maxsize):
+            queue.put_nowait(_make_event())
+
+        ProgressBroadcaster._safe_put(queue, _make_event(event_type="completed"), "run-1", telemetry=telemetry)
+
+        assert observed_value(telemetry.progress_broadcast_dropped_total) == queue.maxsize
+        counter = telemetry.progress_broadcast_dropped_total
+        assert isinstance(counter, _FakeCounter)
+        amount, attrs, _context = counter.calls[0]
+        assert amount == queue.maxsize
+        assert attrs == {"reason": "terminal_drain", "run_id": "run-1"}
+
+    def test_queue_full_drop_emits_telemetry_instead_of_logging(self) -> None:
+        mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
+        telemetry = build_sessions_telemetry()
+        broadcaster = ProgressBroadcaster(mock_loop, telemetry=telemetry)
+        queue = broadcaster.subscribe("run-1")
+        for _ in range(queue.maxsize):
+            queue.put_nowait(_make_event())
+
+        ProgressBroadcaster._safe_put(queue, _make_event(), "run-1", telemetry=telemetry)
+
+        assert observed_value(telemetry.progress_broadcast_dropped_total) == 1
+        counter = telemetry.progress_broadcast_dropped_total
+        assert isinstance(counter, _FakeCounter)
+        amount, attrs, _context = counter.calls[0]
+        assert amount == 1
+        assert attrs == {"reason": "queue_full", "run_id": "run-1"}
+
 
 class TestProgressBroadcasterCleanup:
     def test_cleanup_run_removes_all_subscribers(self) -> None:
@@ -645,7 +680,6 @@ class TestBroadcasterSingleTerminalGuard:
         loop = MagicMock(spec=asyncio.AbstractEventLoop)
         broadcaster = ProgressBroadcaster(loop)
         queue = broadcaster.subscribe("run-1")
-        queue._maxsize = 1
 
         completed = _make_event(run_id="run-1", event_type="completed")
         progress = _make_event(run_id="run-1", event_type="progress")

@@ -12,20 +12,21 @@
 #   - gate.input connects to an upstream on_success connection
 #   - No positional inference — every edge is explicitly declared
 
-source:
-  plugin: csv
-  on_success: validated
-  options:
-    path: examples/explicit_routing/input.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'customer: str'
-      - 'amount: int'
-      - 'currency: str'
-      - 'region: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: validated
+    options:
+      path: examples/explicit_routing/input.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'customer: str'
+        - 'amount: int'
+        - 'currency: str'
+        - 'region: str'
+      on_validation_failure: discard
 
 transforms:
 - name: enrich

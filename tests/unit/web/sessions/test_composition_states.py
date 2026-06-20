@@ -33,6 +33,7 @@ def test_provenance_check_accepts_known_values(engine):
         "plugin_crash_persist",
         "preflight_persist",
         "tutorial_normalization",
+        "post_compose",
         "session_seed",
         "session_fork",
         "interpretation_resolve",

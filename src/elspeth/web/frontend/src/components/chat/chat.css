@@ -93,7 +93,7 @@
   font-size: var(--font-size-sm);
 }
 
-/* Action buttons on message bubbles — hidden until hover, always visible on touch */
+/* Action buttons on message bubbles — subtly visible, then emphasized on hover/focus */
 .bubble-copy-btn,
 .bubble-edit-btn {
   /* Base sizing: previously only opacity was declared and intrinsic content
@@ -110,8 +110,8 @@
   color: var(--color-text-muted);
   border-radius: var(--radius-sm);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s ease;
+  opacity: 0.3;
+  transition: opacity var(--transition-fast);
 }
 .bubble:hover .bubble-copy-btn,
 .bubble:hover .bubble-edit-btn,

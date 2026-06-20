@@ -82,7 +82,7 @@ class LandscapeWriteRepository:
         source_node_id = self._node_id(run_id, 0)
 
         try:
-            with self._db.connection() as conn:
+            with self._db.write_connection() as conn:
                 conn.execute(
                     runs_table.insert().values(
                         run_id=run_id,
@@ -100,8 +100,6 @@ class LandscapeWriteRepository:
                         exported_at=None,
                         export_format=None,
                         export_sink=None,
-                        schema_contract_json=None,
-                        schema_contract_hash=None,
                         runtime_val_manifest_json=None,
                         llm_call_count=llm_call_count,
                         seeded_from_cache=seeded_from_cache,
@@ -141,6 +139,22 @@ class LandscapeWriteRepository:
                             output_contract_json=None,
                         )
                     )
+                # Cache-replay rows: exactly one source per replayed run, so
+                # ``source_row_index = row_index`` (position within the
+                # source) and ``ingest_sequence = row_index`` (monotone
+                # run-wide order). This is *recording reality*, not
+                # fabrication — the cache stores a deterministic single-
+                # source sequence; the three fields are genuinely equal.
+                #
+                # Load-bearing assumption: this path mints exactly ONE
+                # source node (``source_node_id = self._node_id(run_id, 0)``
+                # at the head of this method). A future contributor adding
+                # multi-source cache replay MUST re-derive
+                # ``source_row_index`` per source and ``ingest_sequence``
+                # globally — the equality above is single-source-specific
+                # and would otherwise produce per-source row-index
+                # collisions on the ``UniqueConstraint("run_id",
+                # "ingest_sequence")`` (filigree elspeth-56c3cda89b).
                 for row_index, _row in enumerate(rows):
                     conn.execute(
                         rows_table.insert().values(
@@ -148,6 +162,8 @@ class LandscapeWriteRepository:
                             run_id=run_id,
                             source_node_id=source_node_id,
                             row_index=row_index,
+                            source_row_index=row_index,
+                            ingest_sequence=row_index,
                             source_data_hash=source_data_hash,
                             source_data_ref=None,
                             created_at=started_at,

@@ -9,6 +9,7 @@ from scripts.check_contracts import (
     FieldMappingVisitor,
     HardcodeLiteralVisitor,
     HardcodeViolation,
+    ImportIndex,
     SettingsAccessVisitor,
     SettingsViolation,
     check_field_name_mappings,
@@ -107,6 +108,47 @@ class MyTuple(NamedTuple):
     assert len(definitions) == 1
     assert definitions[0][0] == "MyTuple"
     assert definitions[0][2] == "NamedTuple"
+
+
+def test_finds_qualified_type_definitions(tmp_path: Path) -> None:
+    """Finds valid qualified decorator and base-class forms."""
+    test_file = tmp_path / "test.py"
+    test_file.write_text("""
+import dataclasses
+import enum
+import typing
+
+@dataclasses.dataclass
+class QualifiedData:
+    name: str
+
+
+@dataclasses.dataclass(frozen=True)
+class QualifiedFrozen:
+    value: int
+
+
+class QualifiedEnum(enum.Enum):
+    A = "a"
+
+
+class QualifiedDict(typing.TypedDict):
+    name: str
+
+
+class QualifiedTuple(typing.NamedTuple):
+    x: int
+""")
+
+    definitions = find_type_definitions(test_file)
+
+    assert {(name, kind) for name, _, kind in definitions} == {
+        ("QualifiedData", "dataclass"),
+        ("QualifiedFrozen", "dataclass"),
+        ("QualifiedEnum", "Enum"),
+        ("QualifiedDict", "TypedDict"),
+        ("QualifiedTuple", "NamedTuple"),
+    }
 
 
 def test_ignores_pydantic_basemodel(tmp_path: Path) -> None:
@@ -231,6 +273,52 @@ def test_handles_unicode_errors(tmp_path: Path) -> None:
 
     definitions = find_type_definitions(test_file)
     assert definitions == []
+
+
+def test_import_index_does_not_match_substring_module_names(tmp_path: Path) -> None:
+    defining_file = tmp_path / "core" / "foo.py"
+    defining_file.parent.mkdir(parents=True)
+    defining_file.write_text("""
+from dataclasses import dataclass
+
+@dataclass
+class Foo:
+    value: str
+""")
+    using_file = tmp_path / "plugins" / "use.py"
+    using_file.parent.mkdir(parents=True)
+    using_file.write_text("""
+from elspeth.core.foobar import Foo
+
+value: Foo
+""")
+
+    index = ImportIndex.build(tmp_path)
+
+    assert index.find_cross_boundary_usages(tmp_path, "Foo", defining_file) == []
+
+
+def test_import_index_finds_qualified_import_alias_usage(tmp_path: Path) -> None:
+    defining_file = tmp_path / "core" / "foo.py"
+    defining_file.parent.mkdir(parents=True)
+    defining_file.write_text("""
+from dataclasses import dataclass
+
+@dataclass
+class Foo:
+    value: str
+""")
+    using_file = tmp_path / "plugins" / "use.py"
+    using_file.parent.mkdir(parents=True)
+    using_file.write_text("""
+import elspeth.core.foo as foo
+
+value: foo.Foo
+""")
+
+    index = ImportIndex.build(tmp_path)
+
+    assert index.find_cross_boundary_usages(tmp_path, "Foo", defining_file) == [using_file]
 
 
 # =============================================================================

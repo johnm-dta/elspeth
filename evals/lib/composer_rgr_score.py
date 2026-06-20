@@ -62,10 +62,11 @@ Convergence-bar GREEN criteria (added 2026-05-08 for the
 simple-pipeline-convergence program):
 
   must_have_node_chain_in_order
-      List of substrings that must appear in `state.nodes[*].plugin`
-      (or node_type) in the given relative order. Stronger than
+      List of plugin/type identifiers that must appear in the flattened workflow sequence:
+      source plugin(s), then `state.nodes[*].plugin` (or node_type), then
+      `state.outputs[*].plugin`, in the given relative order. Stronger than
       must_have_node_kinds_substring_any_of for chains like
-      [text, web_scrape, line_explode] where order matters.
+      [csv, web_scrape, line_explode, json] where order matters.
 
   must_include_observed_columns
       For CSV/text/JSON sources where the operator gave specific
@@ -80,6 +81,11 @@ simple-pipeline-convergence program):
       the field as int/float. Catches the numeric-gate-on-string-field
       hazard.
 
+  must_have_output_plugins
+      List of output sink plugin names required as a multiset. For example
+      ["csv", "csv"] requires at least two CSV sinks and catches JSON sinks
+      chosen for a CSV-in/CSV-out routing target.
+
   max_repair_turns
       Integer. If state has composer_meta.repair_turns_used, that
       value must be <= max_repair_turns. If the field is absent
@@ -91,6 +97,7 @@ simple-pipeline-convergence program):
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import Any
 
 
@@ -110,55 +117,151 @@ def _node_plugins(state: Any) -> list[str]:
     return plugins
 
 
-def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
-    """Return an AMBER reason if `chain` substrings don't appear in order in node plugins.
+def _normalise_plugin_token(value: Any) -> str:
+    return value.strip().lower() if isinstance(value, str) else ""
 
-    Each element in `chain` must be a (case-insensitive) substring of some
-    node plugin/type, and the matches must be strictly non-decreasing in index.
+
+def _workflow_plugins_for_chain(state: Any) -> list[str]:
+    """Extract source, node, and output plugin/type identifiers for chain checks."""
+    if not isinstance(state, dict):
+        return []
+
+    plugins: list[str] = []
+    source = state.get("source")
+    if isinstance(source, dict):
+        plugin = source.get("plugin")
+        if isinstance(plugin, str) and plugin:
+            plugins.append(plugin.lower())
+
+    sources = state.get("sources")
+    if isinstance(sources, dict):
+        for source_spec in sources.values():
+            if isinstance(source_spec, dict):
+                plugin = source_spec.get("plugin")
+                if isinstance(plugin, str) and plugin:
+                    plugins.append(plugin.lower())
+
+    plugins.extend(_node_plugins(state))
+
+    for output in state.get("outputs") or []:
+        if isinstance(output, dict):
+            plugin = output.get("plugin")
+            if isinstance(plugin, str) and plugin:
+                plugins.append(plugin.lower())
+    return plugins
+
+
+def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
+    """Return an AMBER reason if `chain` identifiers don't appear in workflow order.
+
+    Each element in `chain` must be a case-insensitive exact match for some
+    source plugin, node plugin/type, or output plugin identifier, and the
+    matches must be strictly non-decreasing in index.
     """
-    plugins = _node_plugins(state)
+    plugins = _workflow_plugins_for_chain(state)
     cursor = 0
     for needle in chain:
-        needle_l = needle.lower()
+        needle_l = _normalise_plugin_token(needle)
         match_idx: int | None = None
         for i in range(cursor, len(plugins)):
-            if needle_l in plugins[i]:
+            if needle_l == plugins[i]:
                 match_idx = i
                 break
         if match_idx is None:
-            return (
-                f"required node chain {chain} not satisfied in order; missing '{needle}' after position {cursor}; node plugins: {plugins}"
-            )
+            return f"required node chain {chain} not satisfied in order; missing '{needle}' after position {cursor}; workflow plugins: {plugins}"
         cursor = match_idx + 1
     return None
 
 
-def _source_schema(state: Any) -> dict[str, Any] | None:
-    """Return the source-options schema dict, or None if absent."""
+def _source_schemas(state: Any) -> list[dict[str, Any]]:
+    """Return every named source's options-schema dict.
+
+    Multi-source composer states (ADR-025) key sources under ``sources`` by
+    name; each value carries ``options.schema``. Sources without a schema dict
+    are skipped. Returns an empty list when no source declares a schema. (State
+    shape is LLM-produced and variable, so the type guards here are boundary
+    validation, not defensive suppression of our own bugs.)
+    """
+    if not isinstance(state, dict):
+        return []
+    sources = state.get("sources")
+    if not isinstance(sources, dict):
+        return []
+    schemas: list[dict[str, Any]] = []
+    for source in sources.values():
+        if not isinstance(source, dict):
+            continue
+        options = source.get("options")
+        if not isinstance(options, dict):
+            continue
+        schema = options.get("schema")
+        if isinstance(schema, dict):
+            schemas.append(schema)
+    return schemas
+
+
+def _sole_source(state: Any) -> Any:
+    """Return the single named source dict, or None unless there is exactly one.
+
+    The per-source option-key checks (hint-uptake scenarios) target "the
+    source" and only run against single-source scenarios; with multiple named
+    sources the target is ambiguous, so return None and let the check report.
+    """
     if not isinstance(state, dict):
         return None
-    source = state.get("source")
-    if not isinstance(source, dict):
+    sources = state.get("sources")
+    if not isinstance(sources, dict) or len(sources) != 1:
         return None
-    options = source.get("options")
-    if not isinstance(options, dict):
-        return None
-    schema = options.get("schema")
-    if not isinstance(schema, dict):
-        return None
-    return schema
+    return next(iter(sources.values()))
 
 
-def _check_observed_columns(state: Any, columns: list[str]) -> str | None:
-    """AMBER if source schema is fixed mode AND any expected column is missing.
+def _output_plugins(state: Any) -> list[str]:
+    """Return output sink plugin identifiers from list or mapping state shapes."""
+    if not isinstance(state, dict):
+        return []
+    outputs = state.get("outputs")
+    if isinstance(outputs, dict):
+        iterable = list(outputs.values())
+    elif isinstance(outputs, list):
+        iterable = outputs
+    else:
+        return []
+
+    plugins: list[str] = []
+    for output in iterable:
+        if not isinstance(output, dict):
+            continue
+        plugin = output.get("plugin") or output.get("type")
+        if isinstance(plugin, str) and plugin:
+            plugins.append(plugin.lower())
+    return plugins
+
+
+def _check_output_plugins(state: Any, expected: list[str]) -> str | None:
+    """None when output plugins satisfy the expected lower-case multiset."""
+    expected_plugins = [plugin.lower() for plugin in expected if isinstance(plugin, str) and plugin]
+    if not expected_plugins:
+        return None
+
+    observed = _output_plugins(state)
+    observed_counts = Counter(observed)
+    missing: list[str] = []
+    for plugin, required_count in Counter(expected_plugins).items():
+        observed_count = observed_counts[plugin]
+        if observed_count < required_count:
+            missing.append(f"{plugin} x{required_count} (found {observed_count})")
+    if not missing:
+        return None
+    return f"required output plugins not satisfied: need {missing}; found output plugins {observed}"
+
+
+def _schema_covers_columns(schema: dict[str, Any], columns: list[str]) -> str | None:
+    """None if this single schema covers the columns; else an AMBER reason.
 
     observed/flexible modes always pass — they accept extra columns by design.
     fixed mode must list every column in `fields` (case-insensitive name match
     on the bit before any ': type' suffix in the field grammar).
     """
-    schema = _source_schema(state)
-    if schema is None:
-        return f"source schema missing; cannot verify observed columns {columns}"
     mode = (schema.get("mode") or "").lower()
     if mode in {"observed", "flexible"}:
         return None
@@ -179,6 +282,22 @@ def _check_observed_columns(state: Any, columns: list[str]) -> str | None:
     return None
 
 
+def _check_observed_columns(state: Any, columns: list[str]) -> str | None:
+    """AMBER unless some named source's schema covers the expected columns.
+
+    With multiple named sources (ADR-025) the columns are satisfied if ANY
+    source covers them; a single-source scenario reduces to checking that one
+    source. AMBER reasons from the non-covering sources are surfaced (deduped).
+    """
+    schemas = _source_schemas(state)
+    if not schemas:
+        return f"source schema missing; cannot verify observed columns {columns}"
+    reasons = [_schema_covers_columns(schema, columns) for schema in schemas]
+    if any(reason is None for reason in reasons):
+        return None
+    return "; ".join(dict.fromkeys(r for r in reasons if r is not None))
+
+
 def _check_numeric_handling(state: Any, field: str) -> str | None:
     """AMBER if `field` is used by a numeric op without prior type_coerce or numeric-typed schema.
 
@@ -186,8 +305,7 @@ def _check_numeric_handling(state: Any, field: str) -> str | None:
       1. Source schema (fixed/flexible) declares `field` as int or float.
       2. A type_coerce node has a conversion targeting `field` -> int/float.
     """
-    schema = _source_schema(state)
-    if isinstance(schema, dict):
+    for schema in _source_schemas(state):
         fields = schema.get("fields") or []
         if isinstance(fields, list):
             for entry in fields:
@@ -574,18 +692,22 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
             amber_reasons.append(inefficient_reason)
 
     if isinstance(state, dict):
-        node_plugins = _node_plugins(state)
-        node_blob = " ".join(node_plugins)
+        workflow_plugins = _workflow_plugins_for_chain(state)
 
         kind_groups = green.get("must_have_node_kinds_substring_any_of") or []
         if kind_groups:
             ok = False
+            workflow_plugin_set = set(workflow_plugins)
             for group in kind_groups:
-                if all(needle.lower() in node_blob for needle in group):
+                required_tokens = [_normalise_plugin_token(needle) for needle in group]
+                required_tokens = [token for token in required_tokens if token]
+                if required_tokens and all(token in workflow_plugin_set for token in required_tokens):
                     ok = True
                     break
             if not ok:
-                amber_reasons.append(f"no expected node combo present (need one of {kind_groups}); found node plugins {node_plugins}")
+                amber_reasons.append(
+                    f"no expected workflow combo present (need one of {kind_groups}); found workflow plugins {workflow_plugins}"
+                )
 
         chain = green.get("must_have_node_chain_in_order")
         if isinstance(chain, list) and chain:
@@ -611,6 +733,12 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
         if out_count < min_outputs:
             amber_reasons.append(f"only {out_count} outputs (need >= {min_outputs})")
 
+        output_plugins = green.get("must_have_output_plugins")
+        if isinstance(output_plugins, list) and output_plugins:
+            output_plugin_reason = _check_output_plugins(state, output_plugins)
+            if output_plugin_reason is not None:
+                amber_reasons.append(output_plugin_reason)
+
         # Hint-uptake asserters (Phase 1 of composer-jit-hints).
         # These check that the LLM applied a discovery-time hint
         # without being told. Required/forbidden keys on the
@@ -619,7 +747,7 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
         source_keys_forb = green.get("must_not_have_options_keys_for_source") or []
         if source_keys_req or source_keys_forb:
             r = _check_options_keys(
-                state.get("source"),
+                _sole_source(state),
                 list(source_keys_req),
                 list(source_keys_forb),
                 container_label="source",

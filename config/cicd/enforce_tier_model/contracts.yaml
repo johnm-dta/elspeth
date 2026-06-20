@@ -34,14 +34,6 @@ per_file_rules:
     lineage fields are str
   expires: null
   max_hits: 3
-- pattern: contracts/aggregation_checkpoint.py
-  rules:
-  - R5
-  reason: Deep-freeze guards, from_dict validation, and Tier 1 __post_init__ type
-    guards (extended for accepted_count_total / completed_flush_count counters in
-    checkpoint v5.0)
-  expires: null
-  max_hits: 13
 - pattern: contracts/audit.py
   rules:
   - R5
@@ -53,14 +45,7 @@ per_file_rules:
   - R5
   reason: MappingProxyType deep-freeze guards on API call data
   expires: null
-  max_hits: 6
-- pattern: contracts/coalesce_checkpoint.py
-  rules:
-  - R5
-  reason: Deep-freeze guards, from_dict deserialization, and branch-key/lost-branch
-    validation
-  expires: null
-  max_hits: 17
+  max_hits: 9
 - pattern: contracts/config/runtime.py
   rules:
   - R5
@@ -114,7 +99,7 @@ per_file_rules:
     guard for ROUTED_ON_ERROR construction (elspeth-5069612f3c — single-hop audit
     attributability)
   expires: null
-  max_hits: 4
+  max_hits: 5
 - pattern: contracts/diversion.py
   rules:
   - R5
@@ -393,25 +378,6 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[56]/body[1]/body[2]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:4a226a1f7e10dcac50d97d69379922a76b8c355b964a11d78887f129bbef0d15'
-- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=b105d00f0725cd72
-  owner: john
-  reason: |-
-    PluginContext.record_call line 347 (`except (OSError, ConnectionError, TimeoutError) as tel_err`) wraps only the telemetry_emit call, which fires AFTER the call has already been recorded to the Landscape (the primary audit channel, returned at line 361). Per the primacy order, audit fires first sync/crash-on-failure and telemetry second async/best-effort, so suppressing transport-level network errors at the telemetry emit site is correct. The except is narrowly scoped to transport exceptions; the comment and code confirm Tier-1 and programming errors (e.g. KeyError) propagate naturally. The failure is recorded via logger.warning rather than silently dropped, and the legal record (Landscape) is already written, so there is no audit loss.
-  safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T04:43:53.603121+00:00'
-  judge_model: 'claude-opus-4-7[1m]'
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.93
-  judge_rationale: |-
-    PRESCRIBED FORM. The Landscape audit recording at lines 243-252/258-266 completes synchronously BEFORE the try block opens at line 295, so the audit channel is already committed when the except runs. The except at line 347 is narrowly typed to (OSError, ConnectionError, TimeoutError) — transport-level network failures only; FrameworkBugError raised at lines 220/227/240/257/276/279/287 and any KeyError/TypeError from the telemetry payload construction propagate naturally, matching the comment at lines 348-350. This is exactly the primacy order CLAUDE.md prescribes: audit first sync/crash-on-failure, telemetry second best-effort, logger.warning as last-resort surfacing when telemetry transport breaks. R6's concern (swallowing without re-raise) does not apply because the legal record is already written and only async transport noise is being absorbed.
-  judge_signature_version: 2
-  scope_fingerprint: 5c06ba3f4462266364daa009fadac2f588a6f0ff8facd060b371a90b6403e156
-  judge_transport: claude_agent_sdk
-  ast_path: 'body[17]/body[20]/body[10]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:b4b316df230c540bdd23cd3b00bbc7c2cd1b5155a18edaffbab1be5baeab3710'
 - key: contracts/composer_interpretation.py:R5:_validate_enum_member:fp=ffdde8578491891c
   owner: john
   reason: |-
@@ -431,41 +397,917 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[15]/body[0]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:8072f04508921266bced2a9ec1c85af8e2de1d713a3a66426ea11a4e1807f57d'
-- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=d48cac92b0418ba5
+- key: contracts/plugin_context.py:R6:PluginContext:record_call:fp=f4f040480f6caace
+  owner: john
+  reason: |-
+    PluginContext.record_call line 347 (`except (OSError, ConnectionError, TimeoutError) as tel_err`) wraps only the telemetry_emit call, which fires AFTER the call has already been recorded to the Landscape (the primary audit channel, returned at line 361). Per the primacy order, audit fires first sync/crash-on-failure and telemetry second async/best-effort, so suppressing transport-level network errors at the telemetry emit site is correct. The except is narrowly scoped to transport exceptions; the comment and code confirm Tier-1 and programming errors (e.g. KeyError) propagate naturally. The failure is recorded via logger.warning rather than silently dropped, and the legal record (Landscape) is already written, so there is no audit loss.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:51:57.759112+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The except wraps only the telemetry_emit call, which by policy fires second/async/best-effort AFTER the Landscape audit record has been written (recorded_call is returned at 408). The exception filter is narrowly scoped to transport-level errors (OSError/ConnectionError/TimeoutError); Tier-1 integrity errors and programming bugs like KeyError propagate naturally. The failure is observable via logger.warning, and the primary audit record is already persisted, so there is no audit loss. This matches the primacy-order policy exactly.
+  judge_signature_version: 2
+  scope_fingerprint: 5c06ba3f4462266364daa009fadac2f588a6f0ff8facd060b371a90b6403e156
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[21]/body[10]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:164d785ad004585c1e5f9c67661833b054b5daf1af9aa6ec59967ff0bc78008d'
+- key: contracts/plugin_context.py:R1:PluginContext:record_call:fp=40638bb5c17326c3
   owner: john
   reason: |-
     PRESCRIBED FORM — meaning-preserving optional read of an external (Tier-3) field on a typed-dict receiver. In PluginContext.record_call (contracts/plugin_context.py:315), `raw_usage = response_snapshot.get("usage")` reads the optional "usage" key from response_snapshot, which is the method's response_data parameter (typed `dict[str, Any] | None`, guarded by `response_snapshot is not None` at line 312). The receiver is therefore a typed dict — `.get` has a valid Mapping receiver, not an arbitrary object — but its CONTENTS are Tier-3: for an LLM call this dict is the external provider response, and "usage" is provider-OPTIONAL metadata that legitimately may be absent (not every response carries token usage). This is the sanctioned `.get()` use: a meaning-preserving optional read where absence is real. It passes the null-correctness test — there IS a case where None is correct (the provider returned no usage), so this is not papering over a missing key on data we own. No default is supplied, so absence maps to None, and TokenUsage.from_dict(raw_usage) is the boundary validator that accepts Any and returns unknown()/has_data=False for None or non-Mapping input (the comment documents this). No fabrication: an absent usage becomes token_usage=None, not a synthesized zero. R1 flags `.get()` generically and cannot tell a Tier-3 optional read from a Tier-1/Tier-2 defensive access. Per-line allowlist is the prescribed mechanism.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-08-31'
+  expires: '2026-09-15'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-02T23:36:40.806140+00:00'
+  judge_recorded_at: '2026-06-17T15:52:05.576564+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.8
+  judge_confidence: 0.82
   judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM — response_snapshot is the LLM provider's response_data (Tier-3 external content, not a first-party typed contract on the 'usage' key), and 'usage' is genuinely provider-optional metadata. The .get() is a meaning-preserving optional read: absence maps to None (not a fabricated zero), and TokenUsage.from_dict is the documented boundary validator that accepts Any. The decorator nudge does not apply: response_data is not the function's external-data entry-parameter in the @trust_boundary sense (it is internal telemetry plumbing within record_call), and the suppression is correctly scoped to one site.
+    RULE MISFIRES / PRESCRIBED FORM — response_data is the external LLM provider response (Tier-3 contents in a typed dict courier), and 'usage' is provider-optional metadata that legitimately may be absent. The .get() returns None on absence with no fabricated default; TokenUsage.from_dict is the boundary validator that accepts Any and yields has_data=False for None/non-Mapping. This is the sanctioned meaning-preserving optional read of an external optional field, not a defensive guard on first-party data. The decorator nudge does not apply: this is not at a function whose parameter is the external source in the @trust_boundary sense (record_call's response_data is a forwarded provider payload deep within a context method, not a tool-call boundary function).
   judge_signature_version: 2
   scope_fingerprint: 5c06ba3f4462266364daa009fadac2f588a6f0ff8facd060b371a90b6403e156
   judge_transport: openrouter
-  ast_path: 'body[17]/body[20]/body[10]/body[5]/body[1]/value'
-  judge_metadata_signature: 'hmac-sha256:v2:a3418d11187e07e3768c67f86edd1e629dd0f6850864b85962f959784de5d3ee'
-- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=8b344263cdaa642f
+  ast_path: 'body[17]/body[21]/body[10]/body[5]/body[1]/value'
+  judge_metadata_signature: 'hmac-sha256:v2:07394211b8b48bc07c80353fd4eeac69858673e708c94009b38368d2bd1e44e6'
+- key: contracts/plugin_context.py:R6:PluginContext:record_validation_error:fp=c48a9a71d7e1196a
   owner: john
   reason: |-
     PRESCRIBED FORM. The except at line 401 sits inside `record_validation_error`, whose contractual job is to record already-malformed Tier-3 source rows for audit; the `row` parameter is explicitly documented as possibly non-dict, non-serializable external data. The catch is narrow (`ValueError, TypeError` — exactly what `stable_hash` raises on NaN/Infinity/non-serializable content), not bare; it does not swallow but falls back to `repr_hash` so the quarantined row still gets a deterministic id and reaches the Landscape audit row recorded just below. A warning logs the exception type/message without leaking row content, consistent with the logging-policy. This is the Tier-3 'record what we got even when malformed' form, not silent suppression — losing the audit row instead would itself be the defect. Decorator nudge does not apply: R6 is outside the decorator's suppressible set ({R1, R5}).
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
-  expires: '2026-09-06'
+  expires: '2026-09-15'
   judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-08T04:10:39.120785+00:00'
+  judge_recorded_at: '2026-06-17T15:52:12.048459+00:00'
   judge_model: anthropic/claude-4.7-opus-20260416
   judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
   judge_confidence: 0.9
   judge_rationale: |-
-    PRESCRIBED FORM. The except sits inside record_validation_error, whose job is recording already-malformed Tier-3 external rows for audit. The catch is narrow (ValueError, TypeError from stable_hash on NaN/Infinity/non-serializable content), does not swallow control flow — it falls back to repr_hash so the quarantined row still receives a deterministic id and proceeds to the Landscape audit write below. Logging only the exception type (not str(e)) respects the row-content-stays-in-Landscape rule. Losing the audit row by re-raising here would itself be the defect; this is the Tier-3 'record what we got' boundary form, not silent suppression.
+    PRESCRIBED FORM. This is the Tier-3 record-what-we-got pattern at a genuine boundary: record_validation_error is called specifically to record already-malformed external rows for audit, and the row may be non-serializable (NaN/Infinity/non-dict primitives). The except is narrow (ValueError, TypeError — exactly what stable_hash raises on non-canonical input), does not silently swallow but falls back to repr_hash so the quarantined row still gets a deterministic id and reaches the Landscape record below, and the warning deliberately logs only the exception type to avoid leaking row content. Losing the audit row on a hash failure would itself be the defect. R6 is outside the @trust_boundary decorator's suppressible set ({R1, R5}), so the decorator nudge does not apply.
   judge_signature_version: 2
   scope_fingerprint: dca71e98bc547f9546650be3ad9dcd5e0e71fd418d6d3dbce1870b7bf8437ac8
   judge_transport: openrouter
-  ast_path: 'body[17]/body[21]/body[2]/orelse[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:e26d3ba6c24c13c163dc24409c05c41c927b25eb88a91b41c256a57993adfb18'
+  ast_path: 'body[17]/body[22]/body[2]/orelse[0]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:353bc6b5b7c77acff2935a52bce2e1f6ccdc87adfeaf931a59982fa19c130e76'
+- key: contracts/barrier_scalars.py:R5:_validate_envelope:fp=22e574a5735a990c
+  owner: john
+  reason: |-
+    Prescribed Tier-1 audit-data corruption check. `src/elspeth/contracts/barrier_scalars.py:40-44` explicitly classifies `from_dict()` reconstruction as Tier 1 checkpoint data: "Checkpoints are our data: crash on any structural corruption, no coercion." The flagged site in `_validate_envelope` enforces that invariant by crashing with `AuditIntegrityError`, not by recovering or defaulting: `src/elspeth/contracts/barrier_scalars.py:73-74` says `if not isinstance(data, dict):` then `raise AuditIntegrityError(f"Corrupted {type_name}: top-level value must be a dict, got {type(data).__name__}.")`. This is an offensive read-side integrity assertion for deserialized checkpoint envelope shape; future drift that changes this to return defaults, skip fields, coerce non-dicts, or treat corruption as row-level data quality would invalidate the suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:59:10.427233+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is the read-side integrity check on Tier-1 checkpoint data: `from_dict()` reconstruction of our own authored checkpoint envelope. Per policy, persisted data we authored remains Tier-1, and a broken seal (structural corruption) must crash — which is exactly what this `isinstance` does, raising `AuditIntegrityError` with no coercion or defaulting. The rationale correctly identifies the tier, the code shows an offensive raise (not a swallow), and the surrounding docstring confirms the envelope discipline. R5's concern (masking bugs) does not apply: the check surfaces corruption loudly rather than hiding it.
+  judge_signature_version: 2
+  scope_fingerprint: 57bb71dcbc131fec6a4251509cf656f62ef1440e11fe185088f21fa47683d92b
+  judge_transport: openrouter
+  ast_path: 'body[9]/body[1]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:4b459ca5f48ca3aeec6d6a6214fe6c45b947b4aab71cbe97a9b1f95112ae02fd'
+- key: contracts/barrier_scalars.py:R5:AggregationNodeScalars:from_dict:fp=11d76b88d0bfe9c2
+  owner: john
+  reason: |-
+    ACCEPT because `src/elspeth/contracts/barrier_scalars.py:128-149` is a Tier-1 checkpoint reification boundary, not a sink-side defensive fallback. The enclosing function is `AggregationNodeScalars.from_dict`, whose docstring says it will "Reconstruct from checkpoint dict (Tier 1 — crash on corruption)" and raises `AuditIntegrityError` for wrong offset types. The flagged `isinstance` check at `src/elspeth/contracts/barrier_scalars.py:149` is immediately followed by `raise AuditIntegrityError(...)` at lines 150-152, so corrupted checkpoint JSON is rejected at reification instead of being silently tolerated. The site-specific reason for the `bool` check is also encoded at lines 140-144: "`bool is an int subclass in Python and math.isfinite(True) passes, so it must be excluded explicitly`". If this code stopped checking `"count_fire_offset"` / `"condition_fire_offset"` at this boundary, stopped raising `AuditIntegrityError`, or began returning defaults, this suppression would no longer be valid.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:59:17.296014+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a checkpoint reification boundary: data read back from persisted checkpoint JSON, where per policy our-authored Tier-1 data with a broken seal must crash. The isinstance check is paired with an immediate `raise AuditIntegrityError`, making this the offensive `isinstance`→`raise` form policy prescribes, not a silent fallback. The bool-vs-int exclusion is non-obvious and correctly justified in-line (bool is an int subclass and math.isfinite(True) passes). The raised type is audit-integrity, matching the structural routing for Tier-1 corruption (bubble up, abort run).
+  judge_signature_version: 2
+  scope_fingerprint: 9ec98709b450505b1c570e093251713445089875c563ad087c7eabcd2d33498e
+  judge_transport: openrouter
+  ast_path: 'body[10]/body[5]/body[2]/body[2]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:20bb0630265d0efc64af036365fc31a729b23629f11414e9814527c916af5cb2'
+- key: contracts/barrier_scalars.py:R5:AggregationNodeScalars:from_dict:fp=a04dda2fad28b464
+  owner: john
+  reason: |-
+    This is a prescribed Tier-1 checkpoint reconstruction guard, not a suppressible data-quality fallback. `contracts/barrier_scalars.py:127-138` defines `AggregationNodeScalars.from_dict` as reconstruction from a checkpoint dict and says it raises `AuditIntegrityError` if an offset has the wrong type. The module-level trust note at `contracts/barrier_scalars.py:40-44` says `from_dict()` is "Tier 1 reconstruction" and that checkpoints are "our data: crash on any structural corruption, no coercion." The flagged site at `contracts/barrier_scalars.py:149-152` uses `if isinstance(value, bool) or not isinstance(value, (int, float)):` only to reject corrupted checkpoint JSON by raising `AuditIntegrityError`, not to continue defensively or coerce external data. The site is drift-sensitive: if this stops being checkpoint `from_dict()` reconstruction, stops raising `AuditIntegrityError`, or begins defaulting/coercing bad values, this suppression no longer applies.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:59:24.877184+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM: this is a checkpoint reconstruction boundary where persisted data is re-read from storage. Per policy, persisted data has interrupted custody — even our own checkpoints need seal-check at read, and the prescribed response for our-authored audit data is to crash on corruption with an audit-integrity-typed exception. The isinstance check here is offensive: it detects an invalid state (wrong type after envelope validation) and raises AuditIntegrityError with a maximally informative message, with no coercion or default substitution. The bool-exclusion comment correctly identifies the Python subtype hazard, and the exception type matches the structural routing (audit integrity bubbles to abort the run).
+  judge_signature_version: 2
+  scope_fingerprint: 9ec98709b450505b1c570e093251713445089875c563ad087c7eabcd2d33498e
+  judge_transport: openrouter
+  ast_path: 'body[10]/body[5]/body[2]/body[2]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:957a7f737743b5634d7bd418604731fb4f6c46fce571af19b8db057b5972d386'
+- key: contracts/barrier_scalars.py:R5:CoalescePendingScalars:from_dict:fp=73566af9d8e6b7f3
+  owner: john
+  reason: |-
+    `src/elspeth/contracts/barrier_scalars.py:197-226` is a Tier-1 checkpoint reconstruction path, not a Tier-3 ingestion boundary. The function docstring says `from_dict` reconstructs from a checkpoint dict and must raise `AuditIntegrityError` for corruption; the module trust note also says "`from_dict()` — Tier 1 reconstruction. Checkpoints are our data: crash on any structural corruption, no coercion." The flagged guard at line 210, `if not isinstance(lost_branches, dict):`, immediately crashes with `AuditIntegrityError` at lines 211-213 instead of coercing, defaulting, or continuing. The subsequent entry guards at lines 217-224 likewise crash if any key/value is not `str`. This is prescribed offensive Tier-1 corruption detection, so suppression is legitimate only while this site remains a checkpoint `from_dict` path that raises on corruption.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:59:32.772194+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a checkpoint `from_dict` reconstruction path — per policy, persisted checkpoints we authored remain Tier-1, and a broken seal (corruption) demands a crash. The visible code shows the isinstance check immediately raising `AuditIntegrityError` with a maximally informative message (type name included), which is exactly the offensive-programming pattern policy prescribes for detecting Tier-1 corruption at deserialization. The rationale correctly identifies the tier, the docstring confirms the contract, and the code does not coerce or default — it crashes loudly. R5's concern (masking contract violations) does not apply when the isinstance result is a raise, not a fallback.
+  judge_signature_version: 2
+  scope_fingerprint: 0cca90a822c29277e04bf7d702b4eab573ba1c9219afb6cc0c94cd7b96c1912d
+  judge_transport: openrouter
+  ast_path: 'body[11]/body[4]/body[3]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:30b5ac06a4c56483015959427bd407a7bd57b5633aba99c76197a55519076558'
+- key: contracts/barrier_scalars.py:R5:CoalescePendingScalars:from_dict:fp=9bccc959561c3fdc
+  owner: john
+  reason: |-
+    Prescribed Tier-1 reification, not defensive suppression. `src/elspeth/contracts/barrier_scalars.py:197-207` defines `CoalescePendingScalars.from_dict` as checkpoint reconstruction and documents it as "Tier 1 — crash on corruption"; the raised error contract includes any `lost_branches` entry that is not `str -> str`. The flagged `isinstance` at `src/elspeth/contracts/barrier_scalars.py:218` is immediately followed by `raise AuditIntegrityError(...)` at lines 219-221, so it does not coerce, default, or continue. It enforces the checkpoint invariant before returning `cls(lost_branches=lost_branches)` at line 226. Drift that changes this path away from checkpoint `from_dict`, removes the `AuditIntegrityError`, or starts accepting/coercing non-string keys would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:59:39.139943+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. This is checkpoint reconstruction (`from_dict`) reading our own Tier-1 audit-trail data — the docstring explicitly states 'Tier 1 — crash on corruption', and the flagged isinstance at line 218 is immediately followed by `raise AuditIntegrityError(...)` with a maximally informative message naming the bad type and value. This is the offensive-programming form prescribed by policy: detect invalid state, raise a typed exception that bubbles to abort the run, no coercion or default. The raised type is correctly an audit-integrity error so nothing peels it off, matching the routing for Tier-1 corruption.
+  judge_signature_version: 2
+  scope_fingerprint: 0cca90a822c29277e04bf7d702b4eab573ba1c9219afb6cc0c94cd7b96c1912d
+  judge_transport: openrouter
+  ast_path: 'body[11]/body[4]/body[4]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:5872af4872feef87e785017cc79b238f43f90fc98c539826b8a8081525c7f6ad'
+- key: contracts/barrier_scalars.py:R5:CoalescePendingScalars:from_dict:fp=33a5e2a94e19da56
+  owner: john
+  reason: |-
+    src/elspeth/contracts/barrier_scalars.py:197-226 is the checkpoint deserializer for `CoalescePendingScalars.from_dict`; its docstring at line 198 says it reconstructs from a "checkpoint dict (Tier 1 — crash on corruption)." The flagged site is an offensive Tier-1 corruption guard, not defensive fallback: line 222 checks `if not isinstance(lb_val, str):` and lines 223-225 immediately raise `AuditIntegrityError` with the corrupt key and value type. The enclosing comment at lines 214-216 makes the invariant drift-sensitive: every `lost_branches` entry must be `str -> str`, and non-string values are corruption that would otherwise re-serialize silently through future checkpoints. Suppression is legitimate only for this exact crash-on-corruption guard in this checkpoint DTO deserializer.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:59:45.563685+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a checkpoint deserializer reading data back from our own persisted store; per policy, persisted data has interrupted custody and the seal must be re-checked at read time. The isinstance check is offensive: it immediately raises AuditIntegrityError (a Tier-1 integrity exception that bubbles up and aborts the run) with the corrupt key and value type, making the crash maximally informative rather than swallowing the anomaly. The comment correctly identifies the drift risk (a nested dict would silently re-serialize), and the raise type matches the structural routing for Tier-1 corruption.
+  judge_signature_version: 2
+  scope_fingerprint: 0cca90a822c29277e04bf7d702b4eab573ba1c9219afb6cc0c94cd7b96c1912d
+  judge_transport: openrouter
+  ast_path: 'body[11]/body[4]/body[4]/body[1]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:de75ebf3c8cc511dd7a86c8e936bad5c6c604ae8dcfc31985e51c978126a40d2'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:__post_init__:fp=34e814c684aa39d3
+  owner: john
+  reason: |-
+    This is a prescribed write-side DTO invariant check, not defensive recovery from corrupt Tier-1 audit data. `BarrierScalars` is the checkpoint DTO for `checkpoints.barrier_scalars_json`; its docstring says it is "the value stored in ``checkpoints.barrier_scalars_json``" and its fields are `aggregation: Mapping[str, AggregationNodeScalars]` and `coalesce: Mapping[tuple[str, str], CoalescePendingScalars]` at `src/elspeth/contracts/barrier_scalars.py:235-252`. The flagged code is in `BarrierScalars.__post_init__`, where direct dataclass construction is rejected if it violates the key contract: `if not isinstance(key, str):` followed by `raise TypeError(...)` at `src/elspeth/contracts/barrier_scalars.py:262-264`. This matches the tier-model prescribed form for write-side DTOs: validate invariants at construction before invalid checkpoint state can be serialized. Future drift would invalidate this suppression if the check stopped raising immediately, began coercing keys, or moved onto a Tier-1 read path that should raise `AuditIntegrityError` for checkpoint corruption instead.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T15:59:55.223684+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. This is `__post_init__` on a frozen dataclass that serializes to a Tier-1 audit column (`checkpoints.barrier_scalars_json`). The annotation `Mapping[str, AggregationNodeScalars]` is not runtime-enforced, and direct construction bypasses `from_dict`'s validation, so the isinstance→raise at construction is the sole enforcement point preventing malformed keys from being serialized into the audit trail. The check raises TypeError immediately with informative context — offensive programming on the write side, exactly the prescribed pattern for protecting Tier-1 integrity before persistence.
+  judge_signature_version: 2
+  scope_fingerprint: b1d3da6a58cbfc7eb94044eef2c9dd2a21299c201638907a4f4def4737915a28
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[3]/body[4]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:772a1411e971c75f82d458e36c1fb9924b5edb290b40446b69af7ef9001e1147'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:__post_init__:fp=0e37aec9bbcc0531
+  owner: john
+  reason: |-
+    `src/elspeth/contracts/barrier_scalars.py:254-273` is a prescribed write-side DTO invariant guard in `BarrierScalars.__post_init__`, not a defensive read of Tier-1 audit data. The class documents that `coalesce` is keyed by `(coalesce_name, row_id)` tuples, and the flagged site enforces that construction invariant before freezing: `if not isinstance(raw_key, tuple) or len(raw_key) != 2 or not all(isinstance(s, str) for s in raw_key):`. The adjacent comment makes the suppression drift-sensitive: this guard exists because direct construction can bypass `from_dict`, so the constructor must reject invalid `coalesce` keys rather than allow malformed checkpoint scalar state to enter the contract object.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:00:02.389674+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The annotation `Mapping[tuple[str, str], ...]` is not runtime-enforced — Python does not check generic parameters at construction. The __post_init__ guard is the sole enforcement point of the documented key-shape invariant before `freeze_fields` locks the object, and it crashes loudly with an informative TypeError rather than coercing or swallowing. The rationale plainly states that direct construction bypasses `from_dict`, making this the offensive-programming pattern (detect invalid state, raise meaningful exception with `from exc`-equivalent chain via the type/value report). The R5 rule's concern (masking bugs) does not apply: nothing is masked — invalid keys raise.
+  judge_signature_version: 2
+  scope_fingerprint: b1d3da6a58cbfc7eb94044eef2c9dd2a21299c201638907a4f4def4737915a28
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[3]/body[6]/body[0]/test/values[0]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:333088bc7c7507e5323bc47a10c4903e81af1f365692e040d7916416fcd352c6'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=fbd8f687a96f0052
+  owner: john
+  reason: |-
+    Prescribed Tier-1 audit-data corruption guard, not a suppressible data-quality fallback. In `src/elspeth/contracts/barrier_scalars.py:294-309`, `BarrierScalars.from_dict` is explicitly reconstructing checkpoint-column state: `"""Reconstruct from checkpoint column value (Tier 1 — crash on corruption)."""`. The flagged site reads the required checkpoint field with `raw_agg = data["aggregation"]` and immediately rejects structural corruption with `if not isinstance(raw_agg, dict): raise AuditIntegrityError(...)`. That is the required Tier-1 let-it-crash/offensive-programming form: the code does not coerce, default, skip, or continue; it crashes with `AuditIntegrityError` when our persisted checkpoint shape has drifted or been corrupted.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:00:21.110688+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is `BarrierScalars.from_dict`, reconstructing our own checkpoint data re-read from the audit DB — a Tier-1 read under our authorship. Policy explicitly says our-authored checkpoint reads remain Tier-1 and a broken seal (structural corruption) must crash with a typed audit-integrity error. The `isinstance`→`raise AuditIntegrityError` is the offensive-programming form: no coercion, no default, no continue — it surfaces corruption with a typed exception that bubbles to abort the run. The rationale correctly identifies the tier and the code matches.
+  judge_signature_version: 2
+  scope_fingerprint: 23ac617b8ae47726fb80d45d78d7882c59a9ebc23a005211ccf2b232499b9764
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[6]/body[3]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:c65b5f80dd9539bd71dcef6d46be09edced3b3f745961fe9fdf61c9758185f05'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=58b7a5ffda3a7299
+  owner: john
+  reason: |-
+    `contracts/barrier_scalars.py:293-316` is a Tier-1 checkpoint read path, and the enclosing function explicitly documents that it reconstructs from a checkpoint column and must crash on corruption: `"""Reconstruct from checkpoint column value (Tier 1 — crash on corruption)."""`. The flagged check at `contracts/barrier_scalars.py:312` is not masking bad internal state or falling back; it immediately raises `AuditIntegrityError` with the corrupt aggregation key and actual type: `raise AuditIntegrityError(f"Corrupted BarrierScalars: aggregation[{node_id!r}] must be a dict, got {type(node_data).__name__}.")`. This is the prescribed Tier-1 offensive validation form for serialized audit/checkpoint data: detect structural corruption at the read boundary and crash with context before constructing `AggregationNodeScalars`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:00:28.023655+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a checkpoint-reread boundary: per policy, our-authored checkpoint data re-read from our DB stays Tier-1, and the seal-check on deserialized structure is the offensive validation form — detect structural corruption and raise AuditIntegrityError with context. The isinstance check at line 312 immediately raises a typed integrity error naming the corrupt key and actual type, which is exactly the prescribed crash-on-corruption pattern for Tier-1 audit data. The code is not coercing, defaulting, or swallowing; the raise type is one that bubbles to abort the run, matching audit-integrity routing.
+  judge_signature_version: 2
+  scope_fingerprint: 23ac617b8ae47726fb80d45d78d7882c59a9ebc23a005211ccf2b232499b9764
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[6]/body[5]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:ab34cc02e5d6e055ecfd4aaac8a8e9a2365ac753f8056713c68cf8d0c33f8705'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=6aee2d5b20defe50
+  owner: john
+  reason: |-
+    This is a prescribed Tier-1 crash-on-corruption guard, not a defensive fallback. The module declares `from_dict()` as checkpoint reconstruction: `src/elspeth/contracts/barrier_scalars.py:40-44` says "`from_dict()` — Tier 1 reconstruction. Checkpoints are our data: crash on any structural corruption, no coercion." The flagged site is inside `BarrierScalars.from_dict`, whose docstring says it reconstructs "from checkpoint column value (Tier 1 — crash on corruption)" at `src/elspeth/contracts/barrier_scalars.py:293-302`. At `src/elspeth/contracts/barrier_scalars.py:319-321`, the code reads the serialized checkpoint field and immediately raises `AuditIntegrityError` if it is not the exact persisted wire shape: `if not isinstance(raw_coalesce, list): raise AuditIntegrityError(...)`. That is the required Tier-1 offensive read-path behavior: detect checkpoint/audit corruption and crash with context, rather than coerce, default, or continue.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:00:35.565733+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is checkpoint reconstruction (Tier-1 read path) where the value has just crossed the serialization custodian boundary — per policy, the seal-check on our own data is the natural crash, and here it is an explicit isinstance→raise AuditIntegrityError on structural corruption. The raised type is an audit-integrity error designed to bubble (kill the run on corruption of our own evidence), which matches the structural routing policy prescribes. No coercion, no default, no swallow; the guard's sole behavior on shape mismatch is a maximally-informative crash with the observed type. The rationale names the disposition correctly and the visible code corroborates it.
+  judge_signature_version: 2
+  scope_fingerprint: 23ac617b8ae47726fb80d45d78d7882c59a9ebc23a005211ccf2b232499b9764
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[6]/body[7]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:5057ff3d51f0a33525074a76a00f11fb5f31b87aefd1c29a3df7787cba04b045'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=48b8a5ecad50025a
+  owner: john
+  reason: |-
+    This is a Tier-1 checkpoint/audit-data read path that deliberately crashes on corruption, not a defensive recovery path. In `contracts/barrier_scalars.py:294-303`, `BarrierScalars.from_dict` is documented as reconstructing a checkpoint column value and explicitly says `"(Tier 1 — crash on corruption)"`, with `AuditIntegrityError` raised for `"bad coalesce-key shape"` and related structural corruption. The flagged `isinstance()` at `contracts/barrier_scalars.py:324` enforces that invariant before unpacking a serialized `coalesce` entry: `if not isinstance(entry, (list, tuple)) or len(entry) != 2:`. On failure it raises `AuditIntegrityError` at `contracts/barrier_scalars.py:325-328`, so malformed internal checkpoint data is treated as corruption and crashes with context. Suppression is valid only for this exact Tier-1 offensive corruption guard around the `to_dict()` list-of-pairs format described at `contracts/barrier_scalars.py:280-290`; if this site stopped raising `AuditIntegrityError` or began accepting external/user data, the justification would no longer apply.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:00:43.083118+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a Tier-1 checkpoint deserialization path (BarrierScalars.from_dict) where data re-read from our own audit/checkpoint storage represents our own statement under unbroken custody — a broken seal is tampering/corruption, and policy prescribes crashing with maximally informative context. The isinstance check is the offensive seal-check on JSON-deserialized list/tuple shape (which Python's type system cannot statically enforce after json.loads), and on failure it raises AuditIntegrityError — a typed exception that bubbles to abort the run, matching how Tier-1 corruption should route. The visible code shows this exact pattern: isinstance → raise AuditIntegrityError with field context, never a silent default or coercion.
+  judge_signature_version: 2
+  scope_fingerprint: 23ac617b8ae47726fb80d45d78d7882c59a9ebc23a005211ccf2b232499b9764
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[6]/body[9]/body[0]/test/values[0]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:bbc587bc4d83d2c94d55e026d76fdb2b5724ca2b2ecbff4b7f3ed2eaaf78a4eb'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=078bc88d972c5b20
+  owner: john
+  reason: |-
+    Prescribed Tier-1 corruption guard, not defensive recovery. `src/elspeth/contracts/barrier_scalars.py:294-295` defines `BarrierScalars.from_dict` as reconstructing checkpoint data and explicitly marks it `"Tier 1 — crash on corruption"`. The flagged `isinstance()` at `src/elspeth/contracts/barrier_scalars.py:330` validates the serialized coalesce key shape immediately before reifying it into the internal tuple key at lines 339-341. On mismatch it raises `AuditIntegrityError` at lines 331-334, preserving the Tier-1 rule that corrupted checkpoint/audit data must crash with context rather than be tolerated or coerced: `if not isinstance(raw_key, (list, tuple)) or len(raw_key) != 2 or not all(isinstance(s, str) for s in raw_key):`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:00:51.887379+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.92
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a Tier-1 checkpoint deserialization boundary (BarrierScalars.from_dict reconstructing persisted audit-integrity data), and the isinstance check is the offensive seal-check on re-read: on shape mismatch it raises AuditIntegrityError with full context (type and value of raw_key) rather than coercing or defaulting. Per policy, persistence interrupts custody even for our own data, and the response to a broken seal on our-authored data is exactly this — crash loudly with a typed integrity error that bubbles to abort the run. The rationale plainly identifies the tier, the invariant, and the exception type, and the visible code corroborates all three.
+  judge_signature_version: 2
+  scope_fingerprint: 23ac617b8ae47726fb80d45d78d7882c59a9ebc23a005211ccf2b232499b9764
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[6]/body[9]/body[2]/test/values[0]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:74d0eb7f26ccd14f1d2b2abdc963e878efbfa7156a857f0320c2fe85ab59f3ab'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=33a3fa0923703db6
+  owner: john
+  reason: |-
+    Prescribed Tier-1 audit-data corruption guard, not a suppressible defensive-programming defect. `BarrierScalars.from_dict` is explicitly reconstructing persisted checkpoint state: `src/elspeth/contracts/barrier_scalars.py:295` says `Reconstruct from checkpoint column value (Tier 1 — crash on corruption).` The flagged `isinstance` at `src/elspeth/contracts/barrier_scalars.py:330` validates the JSON serialization boundary for `coalesce` keys (`"[str, str] array"`) and immediately crashes with `AuditIntegrityError` at lines 331-334 if persisted audit/checkpoint data has drifted or been corrupted. This is not masking bad data or continuing; it reifies the Tier-1 invariant that `to_dict` emits coalesce keys as two strings and rejects any checkpoint row that no longer matches that shape.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:00.035642+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a Tier-1 checkpoint deserialization boundary: BarrierScalars.from_dict reconstructs persisted state we authored, and per policy a broken seal on our own audit/checkpoint data must crash. The isinstance check on raw_key shape is paired immediately with `raise AuditIntegrityError(...)` carrying full diagnostic context — the prescribed offensive form (detect invalid state, raise informative typed exception that bubbles), not a defensive guard that swallows or coerces. The raised type is an audit-integrity error designed to bubble, matching the structural routing for Tier-1 corruption. R5's concern (isinstance masking bugs) does not apply: nothing is masked; the check exists solely to convert structural drift into a loud, typed crash.
+  judge_signature_version: 2
+  scope_fingerprint: 23ac617b8ae47726fb80d45d78d7882c59a9ebc23a005211ccf2b232499b9764
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[6]/body[9]/body[2]/test/values[2]/operand/args[0]/elt'
+  judge_metadata_signature: 'hmac-sha256:v2:5c1ab13436b63ba60eaf87d35dedc97acaebf4f74c1b8dc64e825e086f5c5dc2'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:from_dict:fp=35a4a7ed6ee85d39
+  owner: john
+  reason: |-
+    `src/elspeth/contracts/barrier_scalars.py:294-303` defines `BarrierScalars.from_dict` as reconstructing "from checkpoint column value (Tier 1 — crash on corruption)" and documents `AuditIntegrityError` for structural corruption. The flagged check at `src/elspeth/contracts/barrier_scalars.py:335` is inside the checkpoint deserialization validator for the `coalesce` list-of-pairs: `if not isinstance(raw_scalars, dict):`. It does not tolerate bad data or fall back; it immediately raises `AuditIntegrityError` at `src/elspeth/contracts/barrier_scalars.py:336-338` with the corrupted path and actual type. This is a prescribed Tier-1 offensive read-path invariant check for our checkpoint/audit data, not a defensive-programming defect.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:06.694020+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a checkpoint/audit deserializer (Tier-1 our-data read path) where chain of custody was interrupted by persistence — the seal check is required, and a broken seal must crash. The isinstance check immediately raises AuditIntegrityError with the corrupted path and actual type observed; it does not coerce, default, or swallow. This matches the offensive-programming prescription for Tier-1 reads where the persisted shape could have been tampered with, and the surrounding sibling checks follow the same pattern consistently.
+  judge_signature_version: 2
+  scope_fingerprint: 23ac617b8ae47726fb80d45d78d7882c59a9ebc23a005211ccf2b232499b9764
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[6]/body[9]/body[3]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:3a0f566453d363be023e47bf9ea17e629c09a07c8ea56d97f57e642fbec226d9'
+- key: contracts/plugin_semantics.py:R5:_require_enum_member:fp=560f1a93feeda850
+  owner: john
+  reason: |-
+    This is a write-side contract reification guard, not a Tier-1 read-path defensive fallback. In `src/elspeth/contracts/plugin_semantics.py:38-40`, `_require_enum_member` accepts an untrusted constructor argument typed as `object` and immediately rejects non-members before semantic DTOs can exist: `if not isinstance(value, enum_type):` followed by `raise TypeError(...)`. The call sites are dataclass `__post_init__` invariants for closed semantic vocabularies, e.g. `FieldSemanticFacts.__post_init__` requires `self.content_kind`, `self.text_framing`, and `self.value_type` to be the specific closed enums at `src/elspeth/contracts/plugin_semantics.py:133-136`, and `FieldSemanticRequirement.__post_init__` does the same for `self.unknown_policy` at line 182. This suppression depends on the current shape: a private helper used only to validate enum-valued fields during construction of plugin semantic contract DTOs, with failure as `TypeError`, not coercion, defaulting, logging, or continued execution.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:13.310652+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The function takes `value: object` — an explicitly untyped constructor input — and the isinstance check is the offensive enforcement point that converts a wrong type into an informative TypeError at the dataclass `__post_init__` boundary. There is no coercion, no default, no swallowing: malformed input crashes loudly with type name and repr, which is exactly the prescribed offensive pattern for validating closed enum vocabularies at DTO construction. The rationale correctly identifies the site as a write-side contract reification guard, and the visible code corroborates it (sibling `_require_*` helpers follow the same raise-on-violation shape).
+  judge_signature_version: 2
+  scope_fingerprint: 990a54162812737b0e13e7b13d929ef88953de4c8f8555ed1789a90dce929e9b
+  judge_transport: openrouter
+  ast_path: 'body[8]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:1bc31302f6914e4bca735a1d24a936baf8b9ea309016b28eaf58a39cca82b96e'
+- key: contracts/plugin_assistance.py:R5:_assert_safe_assistance_value:fp=af093bb07e573436
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a defensive read of Tier-1 audit data. In `src/elspeth/contracts/plugin_assistance.py:56-77`, `_assert_safe_assistance_value(value: object, path: str)` deliberately accepts `object` because the `PluginAssistance` constructors receive runtime Python values whose annotations are not enforced. The flagged line `57` is the first branch of a recursive boundary validator: `if isinstance(value, str):`, followed by unsafe-content scanning at line `58`, mapping key validation and forbidden raw-data key rejection at lines `60-72`, and sequence recursion at lines `74-76`. This is then called from DTO `__post_init__` methods at lines `87-90` and `139-144` before assistance content is frozen. The local contract text at lines `124-128` says assistance fields must not contain raw URLs, prompts, row data, credentials, provider errors, file paths, or exception strings, so this `isinstance` is part of enforcing that prescribed DTO/content boundary. Drift that changes `_assert_safe_assistance_value` away from constructor-time recursive validation of assistance DTO fields would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:20.649132+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. The function signature is `value: object`, so the parameter type is intentionally unenforced — this is a recursive structural dispatcher over heterogeneous runtime values entering DTO `__post_init__`. The isinstance ladder (str / Mapping / Sequence) is type-dispatch for tree walking, not a defensive re-check of a contracted shape: each branch routes to the appropriate validator that raises on policy violations (raw URLs, credentials, headers, row data, prompts). This is the offensive-programming boundary form — detect and raise meaningfully — at the DTO construction boundary, exactly what R5's remediation guidance prescribes.
+  judge_signature_version: 2
+  scope_fingerprint: b891bfc4a1107d8ff4ed787bd10222ddf125781ff890bafaa6fa931627ea56b6
+  judge_transport: openrouter
+  ast_path: 'body[11]/body[0]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:d517080de0dbfe5b93b81ea62c24afd914cfda4b2b3787eb6ea0bb86bf517e35'
+- key: contracts/plugin_assistance.py:R5:_assert_safe_assistance_value:fp=a039873be54b92ff
+  owner: john
+  reason: |-
+    `src/elspeth/contracts/plugin_assistance.py:56-76` is the construction-time boundary validator for plugin assistance payloads, not a Tier-1 audit read path. The function accepts `value: object` and recursively narrows the permitted assistance shape: `if isinstance(value, str):`, `if isinstance(value, Mapping):`, and `if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):`. This is paired with write-side invariant enforcement: unsafe keys such as raw headers, row data, and prompts raise before the DTO can be used (`raise ValueError(f"unsafe assistance content in {child_path}: raw headers are not allowed")`). If this site drifts away from `_assert_safe_assistance_value(value: object, path: str)` guarding plugin-authored assistance DTO construction, the suppression should be invalidated.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:27.325696+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The function signature `value: object` makes this a structural type-narrowing validator at a construction-time boundary — it must dispatch on runtime shape because the parameter type is deliberately untyped. The isinstance chain is the prescribed offensive form: it narrows to str/Mapping/Sequence and either recurses with raise-on-unsafe-content or falls through; it does not swallow errors or fabricate defaults. This is the validation that promotes plugin-authored assistance payloads into a safe DTO shape, exactly the boundary case where isinstance is required, not forbidden.
+  judge_signature_version: 2
+  scope_fingerprint: b891bfc4a1107d8ff4ed787bd10222ddf125781ff890bafaa6fa931627ea56b6
+  judge_transport: openrouter
+  ast_path: 'body[11]/body[1]/test'
+  judge_metadata_signature: 'hmac-sha256:v2:3940f39cec1ff51ee0e9f122668b29bc0322dc423d72808b58a36845e25aa56a'
+- key: contracts/plugin_assistance.py:R5:_assert_safe_assistance_value:fp=ae08f6eaafd1b352
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant validation, not defensive recovery from Tier-1 audit data. In `src/elspeth/contracts/plugin_assistance.py:56`, `_assert_safe_assistance_value(value: object, path: str)` accepts intentionally object-typed assistance payloads, then recursively rejects unsafe shapes before `PluginAssistanceExample.__post_init__` stores them. The flagged check at `src/elspeth/contracts/plugin_assistance.py:74` is the sequence branch: `if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):`; it exists so list/tuple assistance values are descended into at lines 75-76 and unsafe nested strings/keys are rejected. Drift would invalidate this if the function stopped being DTO construction-time validation for assistance content, stopped raising on unsafe content, or began reading persisted audit/runtime state.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:35.260637+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The function signature is `value: object` — there is no first-party typed contract guaranteeing the shape at this point; this is a DTO __post_init__ validator that recursively walks heterogeneous assistance payloads (str / Mapping / Sequence / other) and raises on unsafe shapes. The isinstance check distinguishes Sequence-of-items (descend and validate each) from bytes/bytearray (treat as opaque), which is the prescribed offensive shape-dispatch for an `object`-typed input being normalised/validated before storage. The rationale plainly identifies the construction-time validation purpose and the code matches it; this is not a defensive re-check of a contractually-typed value.
+  judge_signature_version: 2
+  scope_fingerprint: b891bfc4a1107d8ff4ed787bd10222ddf125781ff890bafaa6fa931627ea56b6
+  judge_transport: openrouter
+  ast_path: 'body[11]/body[2]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:6f45fdc4ea4fc89dfe3ab979bf1ed9b99c26e89da74c2eab8734c99fb7b4522e'
+- key: contracts/plugin_assistance.py:R5:_assert_safe_assistance_value:fp=a942f2276d98419b
+  owner: john
+  reason: |-
+    Prescribed write-side DTO boundary validation, not a Tier-1 audit-data read. In `src/elspeth/contracts/plugin_assistance.py:56-77`, `_assert_safe_assistance_value(value: object, path: str)` intentionally accepts an arbitrary nested assistance value and walks strings, mappings, and sequences before `PluginAssistance` fields are frozen. The finding line, `if isinstance(value, Sequence) and not isinstance(value, bytes | bytearray):`, is the recursive container boundary that lets the DTO inspect lists/tuples of assistance text while excluding byte payloads. This is tied to the module's stated secret discipline at `src/elspeth/contracts/plugin_assistance.py:16-20`: assistance fields must not contain raw URLs, headers, prompts, row data, credentials, provider errors, file paths, or exception strings. Future drift that removed the recursive validation role or moved this check onto already-authored Tier-1 audit data would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:43.368627+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The function `_assert_safe_assistance_value(value: object, ...)` is a write-side validator with parameter type `object` — by contract it accepts arbitrary nested input and must dispatch on runtime shape (str / Mapping / Sequence) to recursively enforce the secret-discipline invariant before the value is frozen into the PluginAssistance DTO. The `isinstance(value, Sequence)` check is the legitimate type-dispatch at this validation boundary, and the `not isinstance(value, bytes | bytearray)` exclusion is necessary because bytes are Sequences but must not be walked as containers. This is the prescribed offensive validation form, not a defensive guard masking a contract bug.
+  judge_signature_version: 2
+  scope_fingerprint: b891bfc4a1107d8ff4ed787bd10222ddf125781ff890bafaa6fa931627ea56b6
+  judge_transport: openrouter
+  ast_path: 'body[11]/body[2]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:bf762f967fa9a354ff97c84501715671df284d3dcf2671850f5ff38b47bd80a4'
+- key: contracts/node_state_context.py:R5:_require_non_negative_finite_number:fp=3c6affca8dd31ae3
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a defensive Tier-1 read fallback. The module declares this is audit-trail context metadata serialized into `context_after_json` and that `from_executor_stats()` is a "Tier 1 factory: crash on bad data" at `src/elspeth/contracts/node_state_context.py:3-12`. The flagged helper enforces that contract by rejecting invalid values immediately: line 44 says `if isinstance(value, bool) or not isinstance(value, int | float):`, then line 45 raises `TypeError(...)`; line 46 rejects NaN, infinity, and negatives before audit metadata can be represented. Drift would invalidate this suppression if the helper stopped raising, returned a fallback/default, or moved to validating external/user payloads instead of construction-time audit DTO invariants.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:51.330983+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. The function takes `value: object` (deliberately untyped) and is invoked from `__post_init__` of frozen Tier-1 audit DTOs to enforce construction-time invariants — exactly the offensive isinstance→raise pattern policy prescribes. The `isinstance(value, bool) or not isinstance(value, int | float)` shape check immediately raises TypeError with a maximally-informative message, then the value range is checked and raises ValueError; nothing is swallowed or defaulted. Since `value` is typed `object`, no first-party contract guarantees its shape at this helper, so the isinstance guard is the validation, not redundant defense. Code and rationale are consistent.
+  judge_signature_version: 2
+  scope_fingerprint: 19965fc45353b26e7198846053ff223a56b32dd416cbaaa5e7e5531aeb492113
+  judge_transport: openrouter
+  ast_path: 'body[8]/body[0]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:45f89435b8656e9accf46af3550894b31ec43ab7b5e9c116d4855a16b9b412fa'
+- key: contracts/node_state_context.py:R5:_require_non_negative_finite_number:fp=fd7debfd4d5f8148
+  owner: john
+  reason: |-
+    Prescribed-form write-side DTO invariant guard, not a defensive fallback. `src/elspeth/contracts/node_state_context.py:1-13` identifies this module as the typed audit-trail context for `context_after_json` and says `from_executor_stats()` is a "Tier 1 factory: crash on bad data." The flagged helper at `src/elspeth/contracts/node_state_context.py:43-47` enforces the numeric invariant by raising immediately: `if isinstance(value, bool) or not isinstance(value, int | float):` then `raise TypeError(...)`, followed by a finite/non-negative check that raises `ValueError`. Its callers are dataclass `__post_init__` methods such as `PoolConfigSnapshot.__post_init__` at `src/elspeth/contracts/node_state_context.py:65-68`, so this is construction-time validation before audit context enters the typed DTO, matching the prescribed write-side DTO pattern. Future drift would invalidate this suppression if the helper stopped raising, returned a recoverable result, was used to sanitize external Tier-3 input without boundary ownership, or moved out of DTO/audit-context construction.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:01:57.951181+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. The helper takes `value: object` and is invoked from dataclass `__post_init__` methods to enforce the numeric invariant before values enter the Tier-1 audit DTO. The isinstance check is the offensive guard — wrong type → immediate `TypeError` with maximally informative message, then a finite/non-negative `ValueError`. This is exactly the prescribed `isinstance`→`raise` pattern: detect invalid state, raise meaningful typed exception, do not coerce or default. The signature `value: object` makes the runtime check necessary since the type system cannot enforce it at this construction-time validation point.
+  judge_signature_version: 2
+  scope_fingerprint: 19965fc45353b26e7198846053ff223a56b32dd416cbaaa5e7e5531aeb492113
+  judge_transport: openrouter
+  ast_path: 'body[8]/body[0]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:29fc2f5fb713d5baa5e951bdecb13bb198e57a43beba9c404e3e76beaad3935d'
+- key: contracts/node_state_context.py:R5:_require_non_empty_str:fp=cef93a9f923360ee
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check for Tier-1 audit context, not defensive recovery. In `src/elspeth/contracts/node_state_context.py:1-13`, this module defines typed node-state context metadata serialized into `context_after_json` and explicitly says `from_executor_stats()` is a "Tier 1 factory: crash on bad data." The flagged helper at `src/elspeth/contracts/node_state_context.py:50-54` rejects invalid audit metadata by raising, not by coercing or defaulting: `if not isinstance(value, str):` then `raise TypeError(...)`, followed by `if not value:` then `raise ValueError(...)`. Its callers are dataclass `__post_init__` guards for audit context DTOs: `GateEvaluationContext.__post_init__` validates `condition`, `result`, and `route_label` at `src/elspeth/contracts/node_state_context.py:226-229`; `AggregationFlushContext.__post_init__` validates `trigger_type` and `batch_id` at `src/elspeth/contracts/node_state_context.py:262-264`. This matches the prescribed "write-side DTOs validate invariants at construction" pattern: bad Tier-1 audit context crashes before entering the audit trail.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:02:08.636310+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is offensive programming at a Tier-1 write-side DTO boundary: `_require_non_empty_str` is a `__post_init__` invariant check that converts a wrong type into a maximally-informative TypeError before bad audit context can enter the audit trail. The isinstance->raise pattern is exactly the prescribed form per Auditability Standard and the Decision Test ('can I detect an invalid state and throw a meaningful err? Assert it'). The function does not coerce, default, or swallow — it raises typed exceptions, and the structural `NodeStateContext` Protocol is not runtime-checkable, so this is the sole enforcement point for the string-shape invariant. R5's concern (isinstance masking bugs) does not apply when the isinstance leads directly to a raise that surfaces the bug.
+  judge_signature_version: 2
+  scope_fingerprint: 7bcbc5637d226c028d89ea952fac005ce6f2c1cd30174832bdd73e508c9c0302
+  judge_transport: openrouter
+  ast_path: 'body[9]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:c8199fcf5a9a2d48095c5ac26ebe5b82292fb815d4fc6a3b019158fd9f61534e'
+- key: contracts/value_source.py:R5:CatalogValueSource:__post_init__:fp=215e896c93860f5f
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a Tier-1 read-path suppression. In `src/elspeth/contracts/value_source.py:218-241`, frozen `CatalogValueSource.__post_init__` validates and canonicalizes the contract declaration before it can be used: it rejects malformed `applies_when` entries with `if not isinstance(entry, (list, tuple)) or len(entry) != 2:` at line 225, then enforces both tuple fields are strings at lines 228-231, rejects an empty sibling field and self-reference at lines 232-237, and finally freezes any accepted list/tuple pair into `tuple[tuple[str, str], ...]` at lines 238-241. The site-specific invariant is the class docstring at lines 209-211: "`applies_when` is a tuple of `(sibling_field, expected_value)` pairs"; this check enforces that declaration shape at construction and fails closed with `ValueError`/`TypeError`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:02:22.280332+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a frozen dataclass `__post_init__` validating the declared contract shape of `applies_when` at construction time. The type annotation `tuple[tuple[str, str], ...]` is not runtime-enforced by Python's dataclass machinery, so this `isinstance` check is the sole enforcement point for the declared shape — and it fails closed with `ValueError`, matching offensive-programming guidance. The construction site is the boundary that promotes operator-authored declarations into the typed L0 contract; guarding the shape here and raising is the prescribed form, not a defensive re-check of already-guaranteed Tier-2 data.
+  judge_signature_version: 2
+  scope_fingerprint: f5077562acab203cc2f14d140e606b8d0f5df04a192a9887dcb5129957b86ccc
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[4]/body[3]/body[0]/test/values[0]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:30f540aee8df4b63c4e54ff48a388b34f62bde6cad25675a1e2eab57dcbe8a50'
+- key: contracts/value_source.py:R5:CatalogValueSource:__post_init__:fp=8183f3ecb1eaca1e
+  owner: john
+  reason: |-
+    `contracts/value_source.py:218-241` is a write-side contract DTO invariant check in `CatalogValueSource.__post_init__`, not a Tier-1 audit-data read path. The flagged site validates the shape of `applies_when` before normalizing it into an immutable tuple: line 225 rejects entries that are not `(sibling_field, expected_value)` pairs, line 228 requires `sibling_field` to be `str`, line 230 requires `expected_value` to be `str`, and line 241 only writes back the normalized value after those checks. This matches the prescribed offensive construction-time pattern for DTOs: reject malformed contract metadata at construction with `TypeError`/`ValueError`, rather than letting a malformed contract propagate. This suppression is valid only while the flagged `if not isinstance(sibling_field, str):` remains inside `CatalogValueSource.__post_init__` enforcing `applies_when` entry invariants before `object.__setattr__(self, "applies_when", normalized)`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:02:29.224102+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. This is a frozen dataclass __post_init__ validating constructor input (applies_when), which is the contract boundary where externally-authored config tuples become a normalized immutable invariant. The isinstance check is paired with an immediate raise (TypeError), making it the offensive construction-time enforcement pattern: malformed contract metadata crashes loudly at the boundary rather than propagating. The annotation tuple[tuple[str, str], ...] is not runtime-enforced by Python, so this is the sole enforcement point for the sibling_field str invariant before it is written via object.__setattr__.
+  judge_signature_version: 2
+  scope_fingerprint: f5077562acab203cc2f14d140e606b8d0f5df04a192a9887dcb5129957b86ccc
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[4]/body[3]/body[2]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:ce95bcc064fb5004a2a1a5f85c792a7a8b5f4857e98f5360fa199115047570d1'
+- key: contracts/value_source.py:R5:CatalogValueSource:__post_init__:fp=772e14f2e3478037
+  owner: john
+  reason: |-
+    `CatalogValueSource.__post_init__` is a construction-time invariant gate for an L0 frozen contract DTO, not a downstream defensive read of already-trusted audit data. The enclosing class explicitly says it normalizes `applies_when` "to immutable tuple pairs at construction time" at `src/elspeth/contracts/value_source.py:20-22`, and the method rejects malformed declaration entries before storing the normalized value: `if not isinstance(expected_value, str):` at `src/elspeth/contracts/value_source.py:230`, followed by `raise TypeError("CatalogValueSource.applies_when expected_value must be str")` at line 231. This is the prescribed write-side DTO invariant pattern: if a plugin author constructs `CatalogValueSource(..., applies_when=...)` with a non-string expected value, the contract constructor crashes immediately instead of allowing a malformed declaration to cross the L0 boundary.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:02:36.273635+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is the offensive-programming pattern at a frozen-dataclass construction-time invariant gate: `applies_when` is typed as `tuple[tuple[str, str], ...]` but Python does not runtime-enforce generic parameter types, so the constructor must check the inner element types itself and raise TypeError to refuse a malformed declaration before it crosses into the L0 contract. The isinstance->raise on `expected_value` is the sole enforcement point that makes the type annotation real, and the rationale plainly identifies the construction-gate semantics consistent with the visible code (frozen dataclass, normalization in __post_init__, immediate raise on shape failure). No external-parameter Tier-3 boundary is involved, so the decorator nudge does not apply.
+  judge_signature_version: 2
+  scope_fingerprint: f5077562acab203cc2f14d140e606b8d0f5df04a192a9887dcb5129957b86ccc
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[4]/body[3]/body[3]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:e35e7beefac0a39b81015ee075aa7d0abefa80bc98861bab373f291a11c5b205'
+- key: contracts/coalesce_metadata.py:R6:collision_value_fingerprint:fp=27792a6493b4bd54
+  owner: john
+  reason: |-
+    This is a site-specific fallback fingerprinting path for colliding branch values, not a swallowed defensive check over Tier-1 audit data. In `src/elspeth/contracts/coalesce_metadata.py:34-40`, `collision_value_fingerprint(value: Any)` first tries the canonical audit-safe hash with `value_hash = stable_hash(value)`, and on exactly the canonicalization failures `except (TypeError, ValueError):` it still produces an audit-safe non-reversible fingerprint via `value_hash = repr_hash(value)`. The exception is not hiding corruption or returning success after skipped validation; it selects the documented fallback hash for non-canonical collided values while preserving the emitted shape `{"value_hash": value_hash, "value_type": type(value).__name__}`. This suppression is valid only while line 38 catches `TypeError, ValueError` around `stable_hash(value)` and line 39 immediately assigns `repr_hash(value)`.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:02:43.836017+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    PRESCRIBED FORM. The `value` arriving at `collision_value_fingerprint` is an arbitrary branch value from collided pipeline data — it can be any Python object including unhashable/non-canonicalizable ones, which is exactly why `stable_hash` may raise `TypeError`/`ValueError`. The except clause is narrowly typed to those two canonicalization failures and immediately produces an alternative audit-safe fingerprint via `repr_hash(value)`; the function still returns the documented shape, so nothing is swallowed or fabricated — the fallback path is a meaning-preserving boundary coercion to a stable string representation. This matches the policy's prescribed pattern of recording-what-we-got rather than silent recovery, and the exception types are specific (not bare `except`).
+  judge_signature_version: 2
+  scope_fingerprint: d366a2894ae3b51d8d88ccee6fc3427ec006512783bccd60bd549f11ef4f930b
+  judge_transport: openrouter
+  ast_path: 'body[10]/body[1]/handlers[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:f14def136a208eaf7c2ec9be149f747b92bc137becbba35fa47bd1ff6864dc90'
+- key: contracts/coalesce_metadata.py:R5:_require_non_negative_finite_number:fp=cf905f9251c5b969
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a defensive read of Tier-1 audit data. In `contracts/coalesce_metadata.py:57-63`, `_require_non_negative_finite_number` rejects invalid constructor values by crashing with `TypeError`/`ValueError`: `if isinstance(value, bool) or not isinstance(value, int | float):` followed by `raise TypeError(...)`, then rejects non-finite or negative numbers with `raise ValueError(...)`. The call sites are `ArrivalOrderEntry.__post_init__` for `arrival_offset_ms` at `contracts/coalesce_metadata.py:157-160` and `CoalesceMetadata.__post_init__` for `wait_duration_ms` / `timeout_seconds` at `contracts/coalesce_metadata.py:196-209`, so this is construction-time enforcement before coalesce audit metadata is serialized, not graceful handling of corrupted persisted audit state.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:02:50.820517+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The function's parameter is typed `object`, meaning the shape is explicitly unguaranteed at this site — this is a `__post_init__` constructor-time validator that enforces the dataclass invariant before the value is admitted into a typed contract. The isinstance check is the offensive `isinstance`→`raise` pattern: detect invalid input, raise a meaningfully-typed `TypeError`/`ValueError` with field name and value. The bool exclusion is meaningful (bool is a subclass of int but semantically wrong here), and rejection is via raise, not silent coercion. This is the boundary that promotes constructor input into the typed Tier-2 dataclass contract.
+  judge_signature_version: 2
+  scope_fingerprint: a474d103cb129306ab0131aae324ea289dcc88b7bcdfb16a6005a7593fb12ecc
+  judge_transport: openrouter
+  ast_path: 'body[13]/body[1]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:9b391e195ca5ccea817558686fe95e72c069ed4b3d1de1b3152588b07a243f50'
+- key: contracts/coalesce_metadata.py:R5:_require_non_negative_finite_number:fp=daf3dbe2f3cb5e76
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a Tier-1 read-path suppression. In `src/elspeth/contracts/coalesce_metadata.py:57-63`, `_require_non_negative_finite_number` validates constructor-time metadata fields before they can enter coalesce audit metadata, rejecting non-numeric, bool, negative, NaN, and infinity values: `if isinstance(value, bool) or not isinstance(value, int | float):` followed by `raise TypeError(...)` and `if not math.isfinite(value) or value < 0: raise ValueError(...)`. The call sites are dataclass `__post_init__` guards for `ArrivalOrderEntry.arrival_offset_ms` and `CoalesceMetadata.wait_duration_ms` / `timeout_seconds` at lines 157-160 and 196-209, so this is offensive invariant enforcement at construction, not defensive recovery from corrupted audit data.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:02:57.569466+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The function takes `value: object` and is invoked from dataclass `__post_init__` guards to validate constructor-time metadata before it enters coalesce audit structures. The `isinstance` check is the offensive invariant-enforcement pattern: detect wrong type → raise TypeError with a maximally-informative message. This is exactly the boundary at which untyped `object` input is promoted into a typed numeric invariant, and the bool-exclusion plus finite/non-negative checks are the prescribed shape-and-value guards. The code visibly raises rather than coercing or defaulting, matching the policy's offensive-programming prescription.
+  judge_signature_version: 2
+  scope_fingerprint: a474d103cb129306ab0131aae324ea289dcc88b7bcdfb16a6005a7593fb12ecc
+  judge_transport: openrouter
+  ast_path: 'body[13]/body[1]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:24aa8112b9347262f391afb424e9c48a06ae58576f1092b4cffb924cde20b7b0'
+- key: contracts/coalesce_metadata.py:R5:_require_string_sequence:fp=a163ceacb4b9b18b
+  owner: john
+  reason: |-
+    `contracts/coalesce_metadata.py:66-73` is a write-side DTO invariant guard for audit metadata, not a Tier-1 read-path suppression. The helper `_require_string_sequence(value: object, field_name: str, *, optional: bool = True)` rejects malformed construction input by crashing: `if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence): raise TypeError(...)`, then verifies every element with `if type(item) is not str: raise TypeError(...)`. It is invoked from `CoalesceMetadata.__post_init__` at `contracts/coalesce_metadata.py:203-204` for `expected_branches` and `branches_arrived`, so bad metadata cannot enter the audit record. This is prescribed write-side invariant enforcement: it reifies the contract and lets invalid construction crash instead of silently accepting or coercing malformed Tier-1 audit metadata.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:03:16.637381+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is an offensive `isinstance`→`raise` invariant guard in `__post_init__` of a Tier-1 audit-metadata DTO: malformed construction input crashes with a typed, informative `TypeError` rather than being silently accepted into the audit record. The function takes `value: object` (typed-untyped by design — its purpose is to validate the type), and the policy explicitly endorses offensive `isinstance`→`raise` as the prescribed form when detecting an invalid state and throwing a meaningful exception. The guard does not coerce or default; it raises. R5's concern (masking contract violations) does not apply when the isinstance result is used to raise, not to branch into a silent recovery.
+  judge_signature_version: 2
+  scope_fingerprint: 7f7de3cbe47bb23d470e888869b627b8d1f0d94936631529d3b083bcf9dac102
+  judge_transport: openrouter
+  ast_path: 'body[14]/body[1]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:c82df369a64d51495a83dffbe968d118b286536d14dd0255e46bfe77a9dc4d20'
+- key: contracts/coalesce_metadata.py:R5:_require_string_sequence:fp=ba151c3c262dfe5f
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a suppressible defensive read of trusted audit data. In `src/elspeth/contracts/coalesce_metadata.py:166-172`, `CoalesceMetadata` is a frozen typed metadata DTO for Landscape audit records, and `__post_init__` validates constructor inputs before they can be serialized into `context_after_json`. The flagged `isinstance` at `src/elspeth/contracts/coalesce_metadata.py:69` is inside `_require_string_sequence`, which raises immediately: `if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence):`. It is called from `__post_init__` for audit fields at `src/elspeth/contracts/coalesce_metadata.py:203-204`: `_require_string_sequence(self.expected_branches, "expected_branches")` and `_require_string_sequence(self.branches_arrived, "branches_arrived")`, and from the mapping validator at `src/elspeth/contracts/coalesce_metadata.py:96` for nested string sequences. This matches the prescribed offensive pattern: validate write-side DTO invariants at construction and crash with `TypeError`, rather than silently accepting malformed audit metadata. Drift would invalidate this suppression if `_require_string_sequence` stopped raising, moved to a Tier-1 audit read path, or became a fallback that masks corrupted stored metadata.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:03:23.160249+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. This is an offensive isinstance→raise at a DTO construction boundary: `_require_string_sequence` validates inputs to a frozen audit-metadata dataclass's `__post_init__`, raising TypeError on shape mismatch rather than silently accepting malformed data. The two-branch check (reject str/bytes/bytearray which are Sequences but not the intended type; require Sequence) is precisely the maximally-informative crash pattern policy encourages. The rationale plainly states the invariant and points to the call sites, and the visible code confirms it raises unconditionally with a descriptive message — no silent default, no swallow.
+  judge_signature_version: 2
+  scope_fingerprint: 7f7de3cbe47bb23d470e888869b627b8d1f0d94936631529d3b083bcf9dac102
+  judge_transport: openrouter
+  ast_path: 'body[14]/body[1]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:7ff2f01e819665d10fb5681cec416989e6edc047e68329533db43b5919fe685d'
+- key: contracts/coalesce_metadata.py:R5:_require_string_to_string_mapping:fp=20b212153e568ab7
+  owner: john
+  reason: |-
+    This is a prescribed write-side DTO invariant check, not a fail-open defensive read of Tier-1 audit data. In `src/elspeth/contracts/coalesce_metadata.py:196-212`, `CoalesceMetadata.__post_init__` validates the frozen audit metadata object before it can be serialized into `context_after_json`, including `_require_string_to_string_mapping(self.branches_lost, "branches_lost")` and `_require_string_to_string_mapping(self.union_field_origins, "union_field_origins")`. The flagged site, `src/elspeth/contracts/coalesce_metadata.py:79`, is the shape guard for that constructor invariant: `if not isinstance(value, Mapping):`. It immediately raises `TypeError` on violation at line 80, so bad metadata crashes at construction instead of being tolerated or silently repaired. Drift that moved this check to a read path, swallowed the exception, or used it to continue after corrupt audit data would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:03:29.857390+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. This is an offensive isinstance→raise guard inside a validation helper called from __post_init__ of a frozen audit-metadata dataclass. The pattern matches the policy's prescribed form: detect invalid state, raise TypeError with maximally informative context (field name, actual type, repr of value). The check sits on the construction path — bad shape crashes immediately rather than being coerced or silently passed forward. The surrounding helpers (_require_optional_str, _require_string_sequence, etc.) confirm a consistent offensive-validation idiom at the DTO boundary, and nothing in the excerpt suggests the exception is swallowed downstream.
+  judge_signature_version: 2
+  scope_fingerprint: f2b58c25ee94577e38bbce24eb847dd4b7c0129a1b277ba9ad82eb4a3c74fece
+  judge_transport: openrouter
+  ast_path: 'body[15]/body[1]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:38b12bc5fcdc3000df674838d0ce4dedf5dfb6a296f7bae110cc0f20f0b7be2e'
+- key: contracts/coalesce_metadata.py:R5:_require_string_to_string_sequence_mapping:fp=7b41d7e79485765c
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant guard, not a Tier-1 read-path suppression. In `src/elspeth/contracts/coalesce_metadata.py:168-172`, `CoalesceMetadata` is explicitly "Typed metadata for coalesce merge/failure audit records" whose `to_dict()` serializes into audit context; its `__post_init__` validates the shape before the metadata can enter that audit record. The flagged site is the helper for mapping-of-field-to-branch-sequence fields: `src/elspeth/contracts/coalesce_metadata.py:91` says `if not isinstance(value, Mapping):` and immediately raises `TypeError` at line 92. The helper is called from `__post_init__` for `union_field_collisions` at line 210 and `lost_branch_expected_fields` at line 213, so this is construction-time invariant enforcement with fail-fast behavior. If future code moved this check to a Landscape read path, converted it to a fallback/default, or used it to tolerate corrupt persisted audit data, this suppression would no longer apply.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:03:37.488868+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is the offensive isinstance->raise pattern at a DTO construction-time invariant guard: `__post_init__` validates the shape of metadata before it can enter the audit record (Tier-1 promotion boundary). The check immediately raises TypeError with a maximally informative message — no silent coercion, no default substitution, no swallowing. The rationale correctly identifies the site as construction-time enforcement for fields that feed `to_dict()` into audit context, matching the offensive-programming prescription.
+  judge_signature_version: 2
+  scope_fingerprint: 93c028098fa761b409f761db5ecca33bd847ba704a1d7bec499a5a6927eaa434
+  judge_transport: openrouter
+  ast_path: 'body[16]/body[1]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:a0864ffa6008d423971c1a1d77342ca962deb3224994d99fdf4e412734957394'
+- key: contracts/coalesce_metadata.py:R5:_require_arrival_order:fp=0c7e050827dbcd7a
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check. In `src/elspeth/contracts/coalesce_metadata.py:196-206`, `CoalesceMetadata.__post_init__` calls `_require_arrival_order(self.arrival_order)` before this metadata can be serialized into the Landscape audit trail. The flagged `isinstance` at `src/elspeth/contracts/coalesce_metadata.py:102` is not a lenient read-path fallback; it rejects invalid construction with `TypeError`: `if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence):`. The helper then enforces exact element identity at `src/elspeth/contracts/coalesce_metadata.py:104-106`: `if type(entry) is not ArrivalOrderEntry: raise TypeError(...)`. This is a crash-on-bad-DTO invariant guard for audit metadata construction, matching the prescribed offensive-programming pattern for write-side DTOs.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:03:44.751175+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. The flagged isinstance is the offensive-programming pattern: __post_init__ calls this helper to validate DTO construction and raise TypeError on wrong shape, rejecting str/bytes/bytearray (which are technically Sequences but semantically wrong) and non-Sequence inputs. The very next lines enforce exact element type with `type(entry) is not ArrivalOrderEntry: raise TypeError`. This is a crash-on-bad-construction invariant for audit metadata destined for the Landscape (Tier-1 write-side), exactly the prescribed maximally-informative-crash form rather than a defensive shape-coerce.
+  judge_signature_version: 2
+  scope_fingerprint: e27e7b721636293fef25730e8360a53a06e22ac490fa6993428842d698d58fb7
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[1]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:e9ac0d5e0d90cc73e956ed7c2939eb84e08da3ce5fda511ae5dc74c2a76c9053'
+- key: contracts/coalesce_metadata.py:R5:_require_arrival_order:fp=2b483a618dd81784
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a Tier-1 read-path suppression. `src/elspeth/contracts/coalesce_metadata.py:196-207` validates `CoalesceMetadata` construction before metadata is serialized into the audit trail, and line 206 calls `_require_arrival_order(self.arrival_order)`. The flagged site at `src/elspeth/contracts/coalesce_metadata.py:99-106` rejects malformed constructor input immediately: `if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence):` then raises `TypeError`, and it also requires every element to be exactly `ArrivalOrderEntry`. This is crash-on-bad-invariant write-side validation for audit metadata, not graceful recovery from corrupted Tier-1 stored data.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:03:52.114150+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. The flagged isinstance is the offensive write-side invariant check on CoalesceMetadata construction: it detects a wrong-typed argument and raises TypeError with a maximally informative message, exactly the offensive-programming pattern the policy prescribes. The check rejects str/bytes/bytearray (which are Sequence but semantically wrong) and non-Sequence inputs before the value can be serialized into the audit trail — this is the Tier-1 boundary enforcement on the write side, not a defensive .get/silent-recovery. Construction-time type assertions on audit-trail DTOs are the prescribed mechanism for ensuring Tier-1 data stays pristine.
+  judge_signature_version: 2
+  scope_fingerprint: e27e7b721636293fef25730e8360a53a06e22ac490fa6993428842d698d58fb7
+  judge_transport: openrouter
+  ast_path: 'body[17]/body[1]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:595b5933643c94f7ebd94808fc35d44eb685b3cdbcbf9a2807edac7e35e8c3c9'
+- key: contracts/coalesce_metadata.py:R5:_require_union_field_collision_values:fp=efe7a15962201c71
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a Tier-3 boundary suppression. In `src/elspeth/contracts/coalesce_metadata.py:196-212`, `CoalesceMetadata.__post_init__` calls `_require_union_field_collision_values(self.union_field_collision_values)` before this audit metadata DTO can be serialized. The flagged site is the DTO reification guard at `src/elspeth/contracts/coalesce_metadata.py:109-113`: `if not isinstance(value, Mapping): raise TypeError(...)`. That crashes on malformed constructor input instead of silently accepting bad audit metadata. The field is explicitly audit metadata for collision value fingerprints, not raw external data: `union_field_collision_values: Mapping[str, tuple[tuple[str, CollisionValueFingerprint], ...]] | None = None` at `src/elspeth/contracts/coalesce_metadata.py:259-264`, and `to_dict()` serializes only `[[branch, dict(fingerprint)] ...]` at `src/elspeth/contracts/coalesce_metadata.py:307-311`. Drift that moves this check out of `__post_init__`, changes it to a graceful fallback, or lets raw colliding values into `to_dict()` would invalidate this suppression.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:03:59.104464+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a `__post_init__`-invoked validator on a DTO whose `union_field_collision_values` field is typed as `Mapping[str, tuple[...]] | None` but Python does not runtime-enforce that annotation. The function's job is exactly to crash on malformed constructor input with a maximally informative TypeError before the audit-metadata DTO is serialized — the offensive `isinstance`→`raise` pattern the policy prescribes. The rationale identifies the enforcement point, names the invariant, and the surrounding code shows a consistent pattern of typed-shape enforcement at DTO reification, not silent recovery.
+  judge_signature_version: 2
+  scope_fingerprint: 63bedea6395e2e907e9bbe474160c99a0706e3b918cc54340a44d4e8371ef817
+  judge_transport: openrouter
+  ast_path: 'body[18]/body[1]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:cef1dbbd573e72fca3d3e1747b7845d386afa7d4fe57d889a8a6510a25705da6'
+- key: contracts/coalesce_metadata.py:R5:_require_union_field_collision_values:fp=c907392e7f6cd87b
+  owner: john
+  reason: |-
+    This is a prescribed write-side DTO invariant check, not a Tier-1 read-path suppression. In `src/elspeth/contracts/coalesce_metadata.py:196-212`, `CoalesceMetadata.__post_init__()` validates every audit metadata field before the DTO can be serialized into `context_after_json`; specifically, line 212 calls `_require_union_field_collision_values(self.union_field_collision_values)`. The flagged `isinstance()` at `src/elspeth/contracts/coalesce_metadata.py:117` is inside that validator and rejects malformed collision-value metadata before it enters the audit record: `if isinstance(entries, str | bytes | bytearray) or not isinstance(entries, Sequence):`. The surrounding docstring and field comments make the invariant drift-sensitive: `union_field_collision_values` must be a mapping from field name to ordered `(branch, {value_hash, value_type})` entries, and raw branch values must never be serialized. If this function stops being called from `CoalesceMetadata.__post_init__()`, or if `union_field_collision_values` stops being write-side audit metadata, this suppression is no longer valid.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:04:07.362599+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. This is an offensive __post_init__ validator on a DTO that will be serialized into the audit record (Tier-1). The isinstance() check at line 117 is the boundary enforcement that PROMOTES caller-supplied metadata into a trustworthy audit-shape before it can be persisted — exactly the offensive-programming pattern policy prescribes (detect invalid state, raise informative TypeError). The check distinguishes str/bytes/bytearray from generic Sequence (since strings satisfy Sequence but would be semantically wrong here), so the dual isinstance is meaning-bearing, not redundant. Rationale ties the suppression to a specific drift condition (caller invariant + write-side audit metadata), making it an interpretable audit record.
+  judge_signature_version: 2
+  scope_fingerprint: 63bedea6395e2e907e9bbe474160c99a0706e3b918cc54340a44d4e8371ef817
+  judge_transport: openrouter
+  ast_path: 'body[18]/body[2]/body[1]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:d664ef1ab54a6d7454f4f4f2b58c359a072d3e23dcf738772878ddd2906f016d'
+- key: contracts/coalesce_metadata.py:R5:_require_union_field_collision_values:fp=8f4f5a40d5989377
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not a suppressible defensive-programming defect. In `contracts/coalesce_metadata.py:196-212`, `CoalesceMetadata.__post_init__` validates audit metadata before it can enter `context_after_json`, including `_require_union_field_collision_values(self.union_field_collision_values)` at line 212. The flagged check at `contracts/coalesce_metadata.py:117` is part of that constructor-time reification: `if isinstance(entries, str | bytes | bytearray) or not isinstance(entries, Sequence):` immediately raises `TypeError` with the concrete bad value at line 118. This is fail-closed invariant enforcement for a frozen contracts DTO whose docstring states raw collision values are never serialized into audit metadata, not a Tier-1 read-path attempt to tolerate corrupt audit data.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:04:15.161277+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. This is an offensive isinstance→raise inside a frozen DTO's constructor-time invariant validator. The parameter is typed `object`, meaning the function explicitly accepts arbitrary input and is the enforcement point that promotes it into a trusted shape; the check immediately raises TypeError with the concrete bad value rather than coercing or swallowing. The pattern matches the policy's 'detect invalid state and throw a meaningful exception' guidance, and the surrounding code shows uniform fail-closed treatment (every branch raises, none defaults). The rule's concern (isinstance masking bugs) does not apply: nothing is masked — the wrong shape becomes a loud TypeError at the DTO boundary.
+  judge_signature_version: 2
+  scope_fingerprint: 63bedea6395e2e907e9bbe474160c99a0706e3b918cc54340a44d4e8371ef817
+  judge_transport: openrouter
+  ast_path: 'body[18]/body[2]/body[1]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:2767f9abed460c6e6c2bb74f36393bba22ed53b097e8c1571299feb1a2e58236'
+- key: contracts/coalesce_metadata.py:R5:_require_union_field_collision_values:fp=031c6c0dca7a8c5e
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check before audit metadata enters the Landscape record. In `src/elspeth/contracts/coalesce_metadata.py:196-212`, `CoalesceMetadata.__post_init__()` validates every metadata field and specifically calls `_require_union_field_collision_values(self.union_field_collision_values)` before freezing containers. The flagged line is inside that validator: `if isinstance(entry, str | bytes | bytearray) or not isinstance(entry, Sequence):`, followed by a hard `TypeError`, so malformed collision metadata crashes at construction rather than being silently accepted. This is site-specific to the audit-safe collision fingerprint field documented at `src/elspeth/contracts/coalesce_metadata.py:188-191` as `(branch, {value_hash, value_type})` entries where "Raw branch values are never serialized into audit metadata."
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:04:23.194709+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a __post_init__ DTO validator for CoalesceMetadata, the audit-record DTO entering Landscape (Tier-1). The isinstance→raise TypeError is the offensive enforcement of the dataclass's structural contract before the value is frozen and persisted: malformed entries crash loudly with maximally informative messages rather than being silently accepted into the audit trail. The rule fires on shape but the code is exactly the prescribed offensive form — detect invalid state, raise meaningful typed exception — and the surrounding validator uses the same pattern consistently. No decorator nudge applies: R5 is in the suppressible set but this is a write-side invariant check on a constructor argument, not a Tier-3 external-input boundary function.
+  judge_signature_version: 2
+  scope_fingerprint: 63bedea6395e2e907e9bbe474160c99a0706e3b918cc54340a44d4e8371ef817
+  judge_transport: openrouter
+  ast_path: 'body[18]/body[2]/body[2]/body[0]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:58e97f1aa93cdd8c814478241768e9b55f2f60e57ba4e9d51efd28d7a9c6df65'
+- key: contracts/coalesce_metadata.py:R5:_require_union_field_collision_values:fp=61f004163b938efd
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant validation, not a Tier-1 read-path suppression. In `contracts/coalesce_metadata.py:109-126`, `_require_union_field_collision_values()` rejects malformed constructor data before `CoalesceMetadata.__post_init__` freezes and serializes audit metadata. The flagged line is part of reifying the nested contract shape: `if isinstance(entry, str | bytes | bytearray) or not isinstance(entry, Sequence):` followed by a crash via `raise TypeError(...)`, then `len(entry) != 2`, destructuring, and fingerprint mapping validation. This is not defensive continuation over corrupted audit data; it is a fail-fast constructor guard for `union_field_collision_values` entries.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:04:30.409011+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a constructor-side validator for CoalesceMetadata that vets externally-supplied (caller-constructed) values before they freeze into audit metadata. The isinstance check at line 120 is the offensive shape-guard form: detect non-Sequence/str-bytes input and immediately raise TypeError with a maximally informative message. No silent recovery, no coercion, no default — it is the prescribed isinstance→raise pattern at the Tier-3→Tier-2 boundary where audit metadata is being reified.
+  judge_signature_version: 2
+  scope_fingerprint: 63bedea6395e2e907e9bbe474160c99a0706e3b918cc54340a44d4e8371ef817
+  judge_transport: openrouter
+  ast_path: 'body[18]/body[2]/body[2]/body[0]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:4155bd5e57927868a55941185df3de5c8367f59136ef7ecb36d7a6994a617837'
+- key: contracts/coalesce_metadata.py:R5:_require_union_field_collision_values:fp=b7b7fdf9bd884e99
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant check, not defensive recovery. In `src/elspeth/contracts/coalesce_metadata.py:196-212`, `CoalesceMetadata.__post_init__` validates audit metadata before it can be serialized, and line 212 calls `_require_union_field_collision_values(self.union_field_collision_values)`. The specific hit at `src/elspeth/contracts/coalesce_metadata.py:131` is inside that validator and crashes on malformed construction input: `if not isinstance(fingerprint, Mapping):` followed by `raise TypeError(...)`. This is consistent with the file's audit-contract purpose: `union_field_collision_values` is documented at `src/elspeth/contracts/coalesce_metadata.py:259-264` as fingerprinted collision metadata, and `with_union_result()` stores only `_fingerprint_collision_values(collision_values)` at lines 407-411. Suppression is valid only while this remains a construction-time invariant check that raises, not a read-path fallback or silent coercion.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:04:37.369759+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.9
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a __post_init__ validator on an audit-metadata dataclass (Tier-1 invariant enforcement at construction). The isinstance→raise TypeError is the offensive-programming pattern: detect an invalid state at the write-side boundary and raise a maximally informative error so corrupt audit metadata cannot be constructed. The rationale correctly identifies this as a construction-time invariant check, the code visibly raises rather than coerces or defaults, and the surrounding validators all follow the same offensive pattern. No fabrication, no silent recovery.
+  judge_signature_version: 2
+  scope_fingerprint: 63bedea6395e2e907e9bbe474160c99a0706e3b918cc54340a44d4e8371ef817
+  judge_transport: openrouter
+  ast_path: 'body[18]/body[2]/body[2]/body[4]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:cc94dd5198b72531f286fdc5b7406eb40b5ebf9fb23b29d84b9ff1a1507376d2'
+- key: contracts/composer_llm_audit.py:R5:_require_optional_finite_number:fp=0ff08c4939cf7914
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant guard, not a Tier-1 read-path recovery or sink-side defensive fallback. In `src/elspeth/contracts/composer_llm_audit.py:56-62`, `_require_optional_finite_number` accepts a constructor value typed as `object`, permits only `None` or finite numeric values, and raises before the audit DTO can be constructed: `if isinstance(value, bool) or not isinstance(value, (int, float)):` followed by `raise TypeError(...)` and `if not math.isfinite(float(value)):`. Its only local use in the enclosing `ComposerLLMCall.__post_init__` is `src/elspeth/contracts/composer_llm_audit.py:152-154`, where the write-side audit record validates `self.temperature` and then canonicalizes it with `object.__setattr__(self, "temperature", float(self.temperature))`. Drift would invalidate this suppression if the helper is reused to tolerate malformed stored audit data, to continue after audit corruption, or to validate Tier-2 pipeline row fields instead of rejecting constructor input before it enters the composer LLM audit record.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:04:44.721738+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.86
+  judge_rationale: |-
+    PRESCRIBED FORM. The isinstance check is an offensive validator at the DTO constructor boundary: it accepts `object`-typed input, rejects bool (which would otherwise pass `isinstance(value, int)` due to Python's bool<:int subtyping) and any non-numeric, raising TypeError before the audit record can be constructed. This is the prescribed offensive `isinstance`→`raise` pattern guarding entry into a Tier-1 audit DTO, not a defensive recovery — there is no `.get`, no default substitution, no swallowed exception. The bool-exclusion is a specific, load-bearing invariant the rationale identifies correctly, and the visible code matches the claim.
+  judge_signature_version: 2
+  scope_fingerprint: b1f2aff0aad07d63d99cedc029f914db39294e60dfebeeb41f7dd0311f0acd61
+  judge_transport: openrouter
+  ast_path: 'body[15]/body[1]/test/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:d5e61bf281fcf5ae0f585dd671a0fd2c6635e8bf251185cc000cf7537d3d95da'
+- key: contracts/composer_llm_audit.py:R5:_require_optional_finite_number:fp=0d15231a587f574a
+  owner: john
+  reason: |-
+    Prescribed write-side DTO invariant guard, not a Tier-1 read-side defensive fallback. In `contracts/composer_llm_audit.py:131-154`, `ComposerLLMCall.__post_init__` validates the audit record before it can be serialized/persisted, calling `_require_optional_finite_number(self.temperature, "temperature")` and then canonicalizing an accepted value with `object.__setattr__(self, "temperature", float(self.temperature))`. The flagged helper at `contracts/composer_llm_audit.py:56-62` is the crash-at-construction guard for that optional audit field: it permits only `None` or finite numeric temperature values, explicitly rejects `bool`, rejects non-`int`/`float`, and raises on NaN/Infinity. This matches the prescribed write-side DTO pattern: reject invalid audit data before it enters the audit trail.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:04:52.360616+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.88
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a write-side DTO construction-time invariant guard at the audit boundary: `_require_optional_finite_number` is called from `ComposerLLMCall.__post_init__` to reject invalid temperature values before the audit record can be persisted. The isinstance checks here are the prescribed offensive pattern — they detect invalid states (bool masquerading as int, non-numeric types) and raise informative TypeError/ValueError, which is exactly what audit-trail integrity (Tier-1 write boundary) requires. The bool exclusion is meaningful since `bool` is an `int` subclass in Python; rejecting it prevents True/False from silently being recorded as 1.0/0.0 temperatures. The rationale correctly identifies the pattern and the visible code confirms it.
+  judge_signature_version: 2
+  scope_fingerprint: b1f2aff0aad07d63d99cedc029f914db39294e60dfebeeb41f7dd0311f0acd61
+  judge_transport: openrouter
+  ast_path: 'body[15]/body[1]/test/values[1]/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:dff7db7ac2d0f53fe1351f4e5bdd8db8b00f2fa3b03ed91b51bb62f14521e596'
+- key: contracts/barrier_scalars.py:R5:BarrierScalars:__post_init__:fp=cc3cd299e9b0e2c1
+  owner: john
+  reason: |-
+    Offensive Tier-1 type validation in __post_init__: raises TypeError IMMEDIATELY on a wrong-typed key (no coerce/default/suppress). Adversarial review confirmed removing it causes SILENT MASKING - callers use .get(str(node_id)) which would return a default on a non-str key rather than surface the corruption. Prescribed offensive crash-on-anomaly, not defensive masking; judge over-strict.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: OVERRIDDEN_BY_OPERATOR
+  judge_model_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T17:35:34.498269+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    PRESCRIBED FORM. This is a Tier-1 contract dataclass (BarrierScalars) whose typed Mapping fields are declared by annotation only — Python does not enforce parameterised generics at runtime, so direct construction can bypass any from_dict validation. The __post_init__ performs offensive isinstance→raise TypeError checks at the construction boundary, making invalid states maximally informative rather than silently propagating wrong-typed keys into downstream .get(str(node_id)) lookups that would mask corruption. This matches the prescribed offensive-programming pattern (detect invalid state, raise meaningful typed exception), and the rationale plainly states the masking failure mode that justifies the guard.
+  judge_signature_version: 2
+  scope_fingerprint: b1d3da6a58cbfc7eb94044eef2c9dd2a21299c201638907a4f4def4737915a28
+  judge_transport: openrouter
+  ast_path: 'body[12]/body[3]/body[6]/body[0]/test/values[2]/operand/args[0]/elt'
+  judge_metadata_signature: 'hmac-sha256:v2:adf447a09a7dddd21c12f116ff604bdcdedbf304574520661e95fa3c3bf1ddec'
+- key: contracts/node_state_context.py:R5:PoolExecutionContext:__post_init__:fp=4db30e935e2b6e44
+  owner: john
+  reason: |-
+    Offensive Tier-1 type validation in PoolExecutionContext.__post_init__: crashes immediately with a detailed TypeError on wrong-typed construction; removing it defers failure to to_dict() with worse provenance. Prescribed offensive validation, not defensive masking; judge over-strict.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: OVERRIDDEN_BY_OPERATOR
+  judge_model_verdict: BLOCKED
+  judge_recorded_at: '2026-06-17T17:35:43.270526+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    GENUINE VIOLATION. This is a frozen dataclass with typed fields (PoolConfigSnapshot, PoolStatsSnapshot, tuple[QueryOrderEntry, ...]) constructed by first-party code — Tier-1/Tier-2 data under our own contract. Re-checking the types of typed dataclass fields in __post_init__ is exactly the defensive pattern R5 targets: if a caller constructs PoolExecutionContext with wrong-typed arguments, that's a bug in code we control and the type checker plus natural attribute access in to_dict() will surface it. The rationale's claim that to_dict() gives 'worse provenance' does not override policy — Plugin Ownership says wrong type from first-party code should crash naturally, not be guarded by isinstance walls. No external parameter is in play, so the @trust_boundary decorator does not apply.
+  judge_signature_version: 2
+  scope_fingerprint: bc0f3a901af5239e1b484bc2d9ada8ea83a8b05b3f39af7643f3f3b1af7c0321
+  judge_transport: openrouter
+  ast_path: 'body[13]/body[4]/body[3]/body[0]/test/operand'
+  judge_metadata_signature: 'hmac-sha256:v2:865c0fea7ead7f0656a0f2a08e365f02f9a88845795b1220f9aed6854b318423'

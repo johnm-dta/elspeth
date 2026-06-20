@@ -5,12 +5,6 @@
 # empty until a live finding needs a reviewed exemption.
 
 allow_hits:
-  # ResumeState: dict inside a tuple element — nested, not a direct field type issue
-  - key: "src/elspeth/engine/orchestrator/types.py:immutability.frozen_annotations:_module_:fp=src/elspeth/engine/orchestrator/types.py:ResumeState:unprocessed_rows"
-    owner: "@elspeth-maintainers"
-    reason: "ResumeState: dict inside a tuple element — nested, not a direct field type issue."
-    safety: "pre-existing exemption — content audit pending in Plan B"
-
   # MCP tool definition: Callable signature contains dict parameter
   - key: "src/elspeth/mcp/server.py:immutability.frozen_annotations:_module_:fp=src/elspeth/mcp/server.py:_ToolDef:handler"
     owner: "@elspeth-maintainers"

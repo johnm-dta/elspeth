@@ -77,6 +77,30 @@ def _inline_ref_state() -> CompositionState:
     )
 
 
+def _named_sources_state() -> CompositionState:
+    return CompositionState(
+        sources={
+            "orders": SourceSpec(
+                plugin="csv",
+                on_success="orders_rows",
+                options={"path": "/tmp/orders.csv", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            "refunds": SourceSpec(
+                plugin="json",
+                on_success="refund_rows",
+                options={"path": "/tmp/refunds.jsonl", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+        },
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
 class _Catalog:
     def list_sources(self) -> list[PluginSummary]:
         return [
@@ -276,10 +300,35 @@ class TestWireBlobInlineRef:
 
         assert source_result.success is True
         assert output_result.success is True
-        assert source_result.updated_state.source is not None
-        source_marker = source_result.updated_state.source.options["schema"]["description"]
+        assert "source" in source_result.updated_state.sources
+        source_marker = source_result.updated_state.sources["source"].options["schema"]["description"]
         assert source_marker["encoding"] == "latin-1"
         assert output_result.updated_state.outputs[0].options["header"]["mode"] == "inline_content"
+
+    def test_writes_named_source_paths_for_plural_source_yaml(self, blob_env: dict[str, Any]) -> None:
+        blob = _create_blob(blob_env, content="orders prompt")
+
+        result = execute_tool(
+            "wire_blob_inline_ref",
+            {
+                "field_path": "source:orders.options.schema.description",
+                "blob_id": blob.data["blob_id"],
+            },
+            _named_sources_state(),
+            _catalog(),
+            session_engine=blob_env["engine"],
+            session_id=blob_env["session_id"],
+        )
+
+        assert result.success is True
+        marker = result.updated_state.sources["orders"].options["schema"]["description"]
+        assert marker == {
+            "blob_ref": blob.data["blob_id"],
+            "mode": "inline_content",
+            "sha256": blob.data["content_hash"],
+        }
+        pipeline_dict = generate_pipeline_dict(result.updated_state)
+        assert pipeline_dict["sources"]["orders"]["options"]["schema"]["description"] == marker
 
     def test_rejects_pending_blob(self, blob_env: dict[str, Any]) -> None:
         blob = _create_blob(blob_env, content="pending")
@@ -372,8 +421,8 @@ class TestSetSourceFromBlobMode:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        marker = {key: result.updated_state.source.options[key] for key in ("blob_ref", "mode", "path")}
+        assert "source" in result.updated_state.sources
+        marker = {key: result.updated_state.sources["source"].options[key] for key in ("blob_ref", "mode", "path")}
         assert marker["mode"] == "bind_source"
         shape = is_widened_blob_ref(marker)
         assert shape is not None
@@ -394,8 +443,8 @@ class TestSetSourceFromBlobMode:
 
         pipeline = generate_pipeline_dict(result.updated_state)
 
-        assert "blob_ref" not in pipeline["source"]["options"]
-        assert "mode" not in pipeline["source"]["options"]
+        assert "blob_ref" not in pipeline["sources"]["source"]["options"]
+        assert "mode" not in pipeline["sources"]["source"]["options"]
 
 
 def test_tool_definitions_include_inline_blob_authoring_tools() -> None:

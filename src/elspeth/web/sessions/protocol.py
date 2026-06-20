@@ -12,7 +12,7 @@ CompositionStateData is the input DTO for saving new state versions.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, get_args, runtime_checkable
@@ -54,6 +54,7 @@ ProposalEventType = Literal[
 SessionRunStatus = Literal["pending", "running", "completed", "completed_with_failures", "failed", "empty", "cancelled"]
 TerminalSessionRunStatus = Literal["completed", "completed_with_failures", "failed", "empty", "cancelled"]
 OperatorCompletionSessionRunStatus = Literal["completed", "completed_with_failures", "empty"]
+SessionRunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 
 # Closed enum mirroring the ``ck_chat_messages_writer_principal`` CHECK
 # constraint in ``web/sessions/models.py``. The Python Literal and the SQL
@@ -91,6 +92,7 @@ CompositionStateProvenance = Literal[
     # written under the old behavior remain representable; re-activating it is
     # a governance action (see the NO SILENT EXTENSION block in ``models.py``).
     "tutorial_normalization",
+    "post_compose",
     "session_seed",
     "session_fork",
     "interpretation_resolve",
@@ -117,6 +119,7 @@ COMPOSITION_STATE_PROVENANCE_VALUES: frozenset[str] = frozenset(get_args(Composi
 SESSION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(SessionRunStatus))
 SESSION_TERMINAL_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(TerminalSessionRunStatus))
 OPERATOR_COMPLETION_RUN_STATUS_VALUES: frozenset[str] = frozenset(get_args(OperatorCompletionSessionRunStatus))
+SESSION_RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(SessionRunEventType))
 _RUN_COUNTER_FIELDS: tuple[str, ...] = (
     "rows_processed",
     "rows_succeeded",
@@ -169,6 +172,17 @@ if _legal_transitions_terminal != SESSION_TERMINAL_RUN_STATUS_VALUES:
         f"LEGAL_RUN_TRANSITIONS terminal entries {sorted(_legal_transitions_terminal)} "
         f"must match TerminalSessionRunStatus {sorted(SESSION_TERMINAL_RUN_STATUS_VALUES)}"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RunEventRecord:
+    """Represents a row from the run_events table."""
+
+    id: UUID
+    run_id: UUID
+    timestamp: datetime
+    event_type: SessionRunEventType
+    data: Mapping[str, Any]
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,7 +387,8 @@ class CompositionStateData:
     Contains mutable container fields -- requires freeze guard.
     """
 
-    source: Mapping[str, Any] | None = None
+    source: InitVar[Mapping[str, Any] | None] = None
+    sources: Mapping[str, Mapping[str, Any]] | None = None
     nodes: Sequence[Mapping[str, Any]] | None = None
     edges: Sequence[Mapping[str, Any]] | None = None
     outputs: Sequence[Mapping[str, Any]] | None = None
@@ -385,10 +400,14 @@ class CompositionStateData:
     # is honest for revert/fork paths and for non-compose write paths.
     composer_meta: Mapping[str, Any] | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, source: Mapping[str, Any] | None) -> None:
+        if source is not None:
+            if self.sources is not None:
+                raise AuditIntegrityError("CompositionStateData accepts either source or sources, not both")
+            object.__setattr__(self, "sources", {"source": source})
         non_none = []
-        if self.source is not None:
-            non_none.append("source")
+        if self.sources is not None:
+            non_none.append("sources")
         if self.nodes is not None:
             non_none.append("nodes")
         if self.edges is not None:
@@ -415,7 +434,6 @@ class CompositionStateRecord:
     id: UUID
     session_id: UUID
     version: int
-    source: Mapping[str, Any] | None
     nodes: Sequence[Mapping[str, Any]] | None
     edges: Sequence[Mapping[str, Any]] | None
     outputs: Sequence[Mapping[str, Any]] | None
@@ -428,11 +446,15 @@ class CompositionStateRecord:
     # from ``metadata_`` which carries user-facing PipelineMetadata. ``None``
     # is honest for revert/fork paths and for non-compose write paths.
     composer_meta: Mapping[str, Any] | None = None
+    sources: Mapping[str, Mapping[str, Any]] | None = None
+    source: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         non_none = []
         if self.source is not None:
             non_none.append("source")
+        if self.sources is not None:
+            non_none.append("sources")
         if self.nodes is not None:
             non_none.append("nodes")
         if self.edges is not None:
@@ -965,7 +987,7 @@ class SessionServiceProtocol(Protocol):
     ) -> CompositionStateRecord:
         """Save a new immutable composition state snapshot.
 
-        ``provenance`` MUST be one of the six values enumerated by the
+        ``provenance`` MUST be one of the values enumerated by the
         ``ck_composition_states_provenance`` CHECK constraint and the
         :data:`CompositionStateProvenance` Literal. It records WHY this row
         was written and is the load-bearing discriminator for the
@@ -1064,6 +1086,21 @@ class SessionServiceProtocol(Protocol):
         """
         ...
 
+    async def append_run_event(
+        self,
+        *,
+        run_id: UUID,
+        timestamp: datetime,
+        event_type: SessionRunEventType,
+        data: Mapping[str, Any],
+    ) -> RunEventRecord:
+        """Append a structured execution event for replay/audit."""
+        ...
+
+    async def list_run_events(self, run_id: UUID) -> list[RunEventRecord]:
+        """Return persisted execution events for a run in event order."""
+        ...
+
     async def record_blob_inline_resolutions(
         self,
         *,
@@ -1152,6 +1189,19 @@ class SessionServiceProtocol(Protocol):
                 These are skipped even if they exceed max_age_seconds.
             reason: Written to the error column so operators can distinguish
                 orphan-cleanup cancellations from user cancellations.
+        """
+        ...
+
+    async def cancel_all_orphaned_run_records(
+        self,
+        max_age_seconds: int | None = None,
+        exclude_run_ids: frozenset[str] = frozenset(),
+        reason: str | None = None,
+    ) -> list[RunRecord]:
+        """Force-cancel orphaned runs and return the cancelled records.
+
+        Used by app-level startup reconciliation to terminalize matching
+        Landscape audit rows via each record's ``landscape_run_id``.
         """
         ...
 

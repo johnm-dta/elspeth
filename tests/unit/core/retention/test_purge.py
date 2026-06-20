@@ -106,6 +106,8 @@ def _create_row(
             run_id=run_id,
             source_node_id=node_id,
             row_index=row_index,
+            source_row_index=row_index,
+            ingest_sequence=row_index,
             source_data_hash=f"hash-{row_id}",
             source_data_ref=source_data_ref,
             created_at=datetime.now(UTC),
@@ -436,6 +438,28 @@ class TestFindExpiredPayloadRefs:
                 source_data_ref="ref-old-failed",
             )
 
+            _create_run(conn, "run-old-completed-with-failures", status=RunStatus.COMPLETED_WITH_FAILURES, completed_at=old)
+            _create_node(conn, "run-old-completed-with-failures", "node-old-completed-with-failures")
+            _create_row(
+                conn,
+                "run-old-completed-with-failures",
+                "node-old-completed-with-failures",
+                "row-completed-with-failures",
+                row_index=0,
+                source_data_ref="ref-old-completed-with-failures",
+            )
+
+            _create_run(conn, "run-old-empty", status=RunStatus.EMPTY, completed_at=old)
+            _create_node(conn, "run-old-empty", "node-old-empty")
+            _create_operation(
+                conn,
+                operation_id="op-old-empty",
+                run_id="run-old-empty",
+                node_id="node-old-empty",
+                input_data_ref="ref-old-empty",
+                output_data_ref=None,
+            )
+
             _create_run(conn, "run-recent", status=RunStatus.COMPLETED, completed_at=recent)
             _create_node(conn, "run-recent", "node-recent")
             _create_row(
@@ -461,6 +485,8 @@ class TestFindExpiredPayloadRefs:
         expired = set(manager.find_expired_payload_refs(retention_days=30, as_of=now))
         assert "ref-old-shared" in expired
         assert "ref-old-failed" in expired
+        assert "ref-old-completed-with-failures" in expired
+        assert "ref-old-empty" in expired
         assert "ref-recent" not in expired
         assert "ref-running" not in expired
 

@@ -220,7 +220,7 @@ class TestDeepForkTopology:
     @settings(max_examples=50)
     def test_all_nodes_reachable(self, graph: ExecutionGraph) -> None:
         """Property: All nodes reachable from source in deep forks."""
-        source = graph.get_source()
+        source = graph.get_sources()[0]
         nx_graph = graph.get_nx_graph()
         reachable = {NodeID(n) for n in nx.descendants(nx_graph, source)} | {source}
         all_nodes = {info.node_id for info in graph.get_nodes()}
@@ -275,7 +275,7 @@ class TestSequentialForkTopology:
     @settings(max_examples=50)
     def test_all_nodes_reachable(self, graph: ExecutionGraph) -> None:
         """Property: All nodes reachable from source."""
-        source = graph.get_source()
+        source = graph.get_sources()[0]
         nx_graph = graph.get_nx_graph()
         reachable = {NodeID(n) for n in nx.descendants(nx_graph, source)} | {source}
         all_nodes = {info.node_id for info in graph.get_nodes()}
@@ -334,7 +334,7 @@ class TestParallelCoalesceTopology:
     @settings(max_examples=50)
     def test_all_nodes_reachable(self, graph: ExecutionGraph) -> None:
         """Property: All nodes reachable from source."""
-        source = graph.get_source()
+        source = graph.get_sources()[0]
         nx_graph = graph.get_nx_graph()
         reachable = {NodeID(n) for n in nx.descendants(nx_graph, source)} | {source}
         all_nodes = {info.node_id for info in graph.get_nodes()}
@@ -386,7 +386,7 @@ class TestBranchTransformTopology:
     @settings(max_examples=50)
     def test_all_nodes_reachable(self, graph: ExecutionGraph) -> None:
         """Property: All nodes reachable from source."""
-        source = graph.get_source()
+        source = graph.get_sources()[0]
         nx_graph = graph.get_nx_graph()
         reachable = {NodeID(n) for n in nx.descendants(nx_graph, source)} | {source}
         all_nodes = {info.node_id for info in graph.get_nodes()}

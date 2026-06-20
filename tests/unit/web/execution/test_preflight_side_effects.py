@@ -113,16 +113,17 @@ def _minimal_csv_pipeline_yaml(tmp_path: Path) -> str:
     input_path = blobs_dir / "probe_input.csv"
     input_path.write_text("name\nAda\n", encoding="utf-8")
     return f"""\
-source:
-  plugin: csv
-  on_success: primary
-  options:
-    path: {input_path!s}
-    on_validation_failure: discard
-    schema:
-      mode: observed
-sinks:
+sources:
   primary:
+    plugin: csv
+    on_success: output
+    options:
+      path: {input_path!s}
+      on_validation_failure: discard
+      schema:
+        mode: observed
+sinks:
+  output:
     plugin: csv
     on_write_failure: discard
     options:
@@ -162,14 +163,15 @@ def _external_plugin_probe_pipeline_yaml(tmp_path: Path) -> str:
     input_path = blobs_dir / "external_probe_input.csv"
     input_path.write_text("llm_probe_text,web_scrape_probe_url\ntest,http://example.com\n", encoding="utf-8")
     return f"""\
-source:
-  plugin: csv
-  on_success: llm_step
-  options:
-    path: {input_path!s}
-    on_validation_failure: discard
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: llm_step
+    options:
+      path: {input_path!s}
+      on_validation_failure: discard
+      schema:
+        mode: observed
 transforms:
   - name: llm_step
     plugin: llm
@@ -265,7 +267,7 @@ def test_preflight_mode_instantiates_external_plugins_without_network(
     _forbid_socket_calls(monkeypatch)
     bundle = instantiate_plugins_from_config(settings, preflight_mode=True)
 
-    assert bundle.source is not None
+    assert bundle.sources
     assert bundle.sinks
 
 
@@ -322,7 +324,7 @@ def test_runtime_mode_default_does_not_enable_preflight_context(
     """The normal execution path must remain real runtime mode by default.
 
     I5 strengthening: the previous version of this test only asserted
-    ``bundle.source is not None``, which would pass even if the
+    ``bundle.sources``, which would pass even if the
     ContextVar were permanently stuck at True. The monkeypatched
     constructor probe directly observes ``plugin_preflight_mode_enabled()``
     at instantiation time and asserts the False default — that is the
@@ -342,7 +344,7 @@ def test_runtime_mode_default_does_not_enable_preflight_context(
 
     bundle = instantiate_plugins_from_config(settings)
 
-    assert bundle.source is not None
+    assert bundle.sources
     assert observed == [False], (
         "Default runtime mode (no plugin_preflight_mode wrapper) MUST "
         "instantiate plugins with plugin_preflight_mode_enabled() == False. "

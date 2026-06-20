@@ -190,11 +190,20 @@ class Row:
     row_index: int
     source_data_hash: str
     created_at: datetime
-    source_data_ref: str | None = None
+    # Mandatory source-scoped identity (G22 fabrication ban): the rows table
+    # declares both NOT NULL and they anchor the (run_id, source_node_id,
+    # source_row_index) / (run_id, ingest_sequence) unique constraints. Typed
+    # `int` (not `int | None`) to match the require_int guard and NOT NULL column;
+    # ordered before the genuinely-optional source_data_ref.
+    source_row_index: int
+    ingest_sequence: int
+    source_data_ref: str | None = None  # None when payload stored inline
 
     def __post_init__(self) -> None:
         """Validate int fields - Tier 1 crash on invalid types."""
         require_int(self.row_index, "row_index", min_value=0)
+        require_int(self.source_row_index, "source_row_index", min_value=0)
+        require_int(self.ingest_sequence, "ingest_sequence", min_value=0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,31 +513,38 @@ class BatchOutput:
 class Checkpoint:
     """Checkpoint for crash recovery.
 
-    Captures run progress at row/transform boundaries.
+    Captures run progress at sink-durability boundaries. Post-F1 durability
+    unification, buffered tokens live in token_work_items (journal BLOCKED
+    rows); the checkpoint carries only scalar barrier metadata
+    (``barrier_scalars_json``). The real resume work-set is token_outcomes
+    completeness + journal BLOCKED rows + sequence_number; compatibility is
+    enforced by the full-topology hash (which embeds every node's config
+    hash), so the checkpoint carries no per-node anchor.
 
     Format Versions:
         Version 1: Pre-deterministic node IDs (legacy, incompatible)
         Version 2: Deterministic node IDs (2026-01-24+)
         Version 3: Phase 2 traversal refactor checkpoint break
-        Version 4: Pending coalesce state persisted in checkpoints (current)
+        Version 4: Pending coalesce state persisted in checkpoints
+        Version 5: F1 durability unification — buffered tokens live in
+            token_work_items; checkpoint carries only scalar barrier
+            metadata (current)
     """
 
     # Current checkpoint format version (ClassVar excludes from dataclass fields)
-    CURRENT_FORMAT_VERSION: ClassVar[int] = 4
+    CURRENT_FORMAT_VERSION: ClassVar[int] = 5
 
     checkpoint_id: str
     run_id: str
-    token_id: str
-    node_id: str
     sequence_number: int
     created_at: datetime  # Required - schema enforces NOT NULL (Tier 1 audit data)
-    # Topology validation fields - REQUIRED for checkpoint compatibility checking
-    # Schema enforces NOT NULL - these are audit-critical for resume validation
+    # Topology validation field - REQUIRED for checkpoint compatibility checking
+    # Schema enforces NOT NULL - audit-critical for resume validation
     upstream_topology_hash: str  # Hash of ALL nodes + edges in DAG (full topology)
-    checkpoint_node_config_hash: str  # Hash of checkpoint node config only
     # Optional fields (with defaults) MUST come after required fields in dataclass
-    aggregation_state_json: str | None = None
-    coalesce_state_json: str | None = None
+    # Serialized BarrierScalars (elspeth.contracts.barrier_scalars), or None
+    # when no barriers were in flight at checkpoint time.
+    barrier_scalars_json: str | None = None
     # Format version for compatibility checking
     format_version: int | None = None
 
@@ -542,8 +558,6 @@ class Checkpoint:
         require_int(self.format_version, "format_version", optional=True, min_value=0)
         if not self.upstream_topology_hash:
             raise ValueError("upstream_topology_hash is required and cannot be empty")
-        if not self.checkpoint_node_config_hash:
-            raise ValueError("checkpoint_node_config_hash is required and cannot be empty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -568,9 +582,18 @@ class RowLineage:
     # Resolved payload (from PayloadStore)
     source_data: Mapping[str, object] | None  # None if purged
     payload_available: bool
+    # Mandatory source-scoped identity (G22 fabrication ban): the rows table
+    # declares both NOT NULL and they anchor the (run_id, source_node_id,
+    # source_row_index) / (run_id, ingest_sequence) unique constraints, so they
+    # are never None on a DB read. Typed `int` (not `int | None`) so the type
+    # matches the require_int guard below and the NOT NULL column.
+    source_row_index: int
+    ingest_sequence: int
 
     def __post_init__(self) -> None:
         require_int(self.row_index, "row_index", min_value=0)
+        require_int(self.source_row_index, "source_row_index", min_value=0)
+        require_int(self.ingest_sequence, "ingest_sequence", min_value=0)
         freeze_fields(self, "source_data")
 
 

@@ -48,7 +48,10 @@ def cleanup_plugins(
 
     Each call is individually try/excepted so one plugin's failure does not
     prevent other plugins from cleaning up. All errors are collected and
-    raised together after all cleanup completes.
+    raised together after all cleanup completes — unless an exception is
+    already propagating (this function runs in ``finally`` blocks), in which
+    case the collected cleanup errors are logged and the in-flight exception
+    is preserved as the primary outcome.
 
     Extracted from _execute_run() and _process_resumed_rows() to eliminate
     duplication of the finally-block cleanup pattern.
@@ -60,8 +63,9 @@ def cleanup_plugins(
             on the source. Set to False for resume path where source wasn't opened.
 
     Raises:
-        RuntimeError: If any plugin cleanup hook fails. Chained from the
-            pending exception if one exists.
+        RuntimeError: If any plugin cleanup hook fails and no exception is
+            already propagating. When a pending exception exists, cleanup
+            failures are logged instead so they never mask it.
     """
     logger = slog
     pending_exc = sys.exc_info()[1]
@@ -103,11 +107,13 @@ def cleanup_plugins(
     for sink in config.sinks.values():
         run_hook("sink.on_complete", sink.name, partial(sink.on_complete, ctx))
     if include_source:
-        run_hook("source.on_complete", config.source.name, partial(config.source.on_complete, ctx))
+        for source in config.sources.values():
+            run_hook("source.on_complete", source.name, partial(source.on_complete, ctx))
 
     # Close source (if included) and all sinks
     if include_source:
-        run_hook("source.close", config.source.name, config.source.close)
+        for source in config.sources.values():
+            run_hook("source.close", source.name, source.close)
 
     # Close all transforms (release resources - file handles, connections, etc.)
     for transform in config.transforms:
@@ -120,5 +126,16 @@ def cleanup_plugins(
     if cleanup_errors:
         error_summary = "; ".join(cleanup_errors)
         if pending_exc is not None:
-            raise RuntimeError(f"Plugin cleanup failed: {error_summary}") from pending_exc
+            # An exception is already propagating through the caller's finally
+            # block. Raising here would REPLACE it — e.g. swap a
+            # _RunFailedWithPartialResultError (real partial counters, failed
+            # ceremony) for a cleanup RuntimeError handled by the generic
+            # ceremony. The per-hook failures are already logged above; record
+            # the aggregate and let the original exception continue.
+            logger.error(
+                "Plugin cleanup failed during exception propagation; original error preserved",
+                cleanup_errors=tuple(cleanup_errors),
+                pending_error_type=type(pending_exc).__name__,
+            )
+            return
         raise RuntimeError(f"Plugin cleanup failed: {error_summary}")

@@ -31,7 +31,6 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
-from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
 if TYPE_CHECKING:
     from tests.fixtures.multi_run import MultiRunFixture
@@ -53,22 +52,6 @@ def _make_secret_resolution(env_var: str, fingerprint_byte: str = "a") -> Secret
         timestamp=time.time(),
         resolution_latency_ms=1.0,
         fingerprint=fingerprint_byte * 64,
-    )
-
-
-def _make_schema_contract() -> SchemaContract:
-    return SchemaContract(
-        mode="OBSERVED",
-        fields=(
-            FieldContract(
-                normalized_name="val",
-                original_name="val",
-                python_type=str,
-                required=True,
-                source="inferred",
-            ),
-        ),
-        locked=True,
     )
 
 
@@ -133,20 +116,6 @@ class TestUpdateRunStatusWhereExactness:
         run_c = fix.factory.run_lifecycle.get_run("run-C")
         assert run_c is not None
         assert run_c.status == RunStatus.RUNNING
-
-
-class TestUpdateRunContractWhereExactness:
-    """update_run_contract must set contract only on the target run."""
-
-    def test_updates_only_target_run(self, multi_run_landscape: MultiRunFixture) -> None:
-        fix = multi_run_landscape
-        contract = _make_schema_contract()
-
-        fix.factory.run_lifecycle.update_run_contract("run-B", contract)
-
-        assert fix.factory.run_lifecycle.get_run_contract("run-B") is not None
-        assert fix.factory.run_lifecycle.get_run_contract("run-A") is None
-        assert fix.factory.run_lifecycle.get_run_contract("run-C") is None
 
 
 class TestGetSourceFieldResolutionWhereExactness:

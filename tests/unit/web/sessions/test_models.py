@@ -16,6 +16,7 @@ from elspeth.web.sessions.models import (
     run_events_table,
     runs_table,
     sessions_table,
+    user_secrets_table,
 )
 from elspeth.web.sessions.schema import initialize_session_schema
 
@@ -208,9 +209,75 @@ class TestSessionForeignKeys:
         constrained_columns = {column for foreign_key in foreign_keys for column in foreign_key["constrained_columns"]}
         assert "forked_from_session_id" not in constrained_columns
 
+    def test_forked_from_message_id_has_set_null_chat_message_fk(self, engine) -> None:
+        """Fork message provenance is cleared if the source chat message is deleted."""
+        inspector = inspect(engine)
+        foreign_keys = inspector.get_foreign_keys("sessions")
+
+        matching = [foreign_key for foreign_key in foreign_keys if tuple(foreign_key["constrained_columns"]) == ("forked_from_message_id",)]
+
+        assert len(matching) == 1
+        foreign_key = matching[0]
+        assert foreign_key["name"] == "fk_sessions_forked_from_message"
+        assert foreign_key["referred_table"] == "chat_messages"
+        assert tuple(foreign_key["referred_columns"]) == ("id",)
+        assert str(foreign_key["options"]["ondelete"]).lower() == "set null"
+
+    def test_orphan_forked_from_message_id_rejected_with_fk_enforcement(self, engine) -> None:
+        """Child sessions cannot point fork provenance at a nonexistent message."""
+        with engine.begin() as conn:
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+            with pytest.raises(IntegrityError):
+                conn.execute(
+                    insert(sessions_table).values(
+                        id=str(uuid.uuid4()),
+                        user_id="alice",
+                        title="Fork with missing message",
+                        forked_from_message_id=str(uuid.uuid4()),
+                        created_at=datetime.now(UTC),
+                        updated_at=datetime.now(UTC),
+                    )
+                )
+
 
 class TestCheckConstraints:
     """Verify CHECK constraints reject invalid values."""
+
+    def test_auth_provider_type_constraints_exist(self, engine) -> None:
+        inspector = inspect(engine)
+        session_checks = {check["name"] for check in inspector.get_check_constraints("sessions")}
+        user_secret_checks = {check["name"] for check in inspector.get_check_constraints("user_secrets")}
+
+        assert "ck_sessions_auth_provider_type" in session_checks
+        assert "ck_user_secrets_auth_provider_type" in user_secret_checks
+
+    def test_invalid_session_auth_provider_type_rejected(self, engine) -> None:
+        with engine.begin() as conn, pytest.raises(IntegrityError):
+            conn.execute(
+                insert(sessions_table).values(
+                    id=str(uuid.uuid4()),
+                    user_id="alice",
+                    auth_provider_type="saml",
+                    title="Test",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+    def test_invalid_user_secret_auth_provider_type_rejected(self, engine) -> None:
+        with engine.begin() as conn, pytest.raises(IntegrityError):
+            conn.execute(
+                insert(user_secrets_table).values(
+                    id=str(uuid.uuid4()),
+                    name="api-key",
+                    user_id="alice",
+                    auth_provider_type="saml",
+                    encrypted_value=b"ciphertext",
+                    salt=b"salt",
+                    created_at=datetime.now(UTC),
+                    updated_at=datetime.now(UTC),
+                )
+            )
 
     def test_invalid_chat_message_role_rejected(self, engine) -> None:
         session_id = str(uuid.uuid4())

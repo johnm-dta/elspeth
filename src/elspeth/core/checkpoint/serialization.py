@@ -303,7 +303,12 @@ def _restore_types(obj: Any) -> Any:
     """
     if isinstance(obj, dict):
         # Check for collision-safe envelope
-        if _ENVELOPE_TYPE_KEY in obj and _ENVELOPE_VALUE_KEY in obj and len(obj) == 2:
+        if _ENVELOPE_TYPE_KEY in obj and _ENVELOPE_VALUE_KEY in obj:
+            if len(obj) != 2:
+                raise AuditIntegrityError(
+                    f"Corrupted checkpoint: invalid envelope shape for type {obj[_ENVELOPE_TYPE_KEY]!r} — "
+                    f"reserved envelope keys must not be mixed with extra keys"
+                )
             envelope_type = obj[_ENVELOPE_TYPE_KEY]
             envelope_value = obj[_ENVELOPE_VALUE_KEY]
 

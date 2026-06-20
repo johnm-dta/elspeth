@@ -4,10 +4,322 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## [0.5.4] - Unreleased
+## [0.6.0] - 2026-06-19 (cross-process multi-worker run coordination)
+
+The single-worker-to-multi-worker transition. Multiple cooperating
+processes on one host may now operate against a single run backed by one
+WAL SQLite audit database: one leader (source ingest, barrier trigger
+evaluation, checkpoints, finalization, sink I/O) and any number of
+claim-only followers attached through the new `elspeth join` entry point.
+The deployment shape, its alternatives, and the operator requirements are
+recorded in ADR-030. Builds on the 0.5.4 maintenance fixes below.
+
+The audit database schema epoch advances to 21; per the delete-the-DB
+migration policy operators delete the prior database before first run on
+this version.
+
+### Added
+
+- **`elspeth join <run_id>`** — attach a follower to a RUNNING run. A
+  second worker joining is the supported feature; racing `resume()`
+  remains refused. Admission is one atomic transaction gated on run
+  status, pipeline-config-hash equality, and a live leader seat, after a
+  filesystem preflight that fails with an operator-actionable error when
+  the worker cannot write the database, its directory, or the WAL
+  sidecars.
+- **Run-level worker registry and heartbeat** — a dedicated heartbeat
+  thread beats the worker row and the leader seat in one transaction;
+  liveness drives takeover and reaping decisions.
+- **Dead-leader takeover** — a run left RUNNING under a dead leader is now
+  resumable via `elspeth resume` (previously a wedged, unrecoverable
+  state); a leader frozen holding the write lock surfaces an
+  operator-actionable error naming the process to terminate before
+  resuming.
+- **`examples/multi_worker` and `examples/multi_worker_showcase`** — two
+  runnable examples for the multi-worker feature. `multi_worker` is
+  self-verifying: it backgrounds a leader, attaches a follower via
+  `elspeth join`, and asserts that two or more workers each completed at
+  least one row using `scheduler_events` lease-owner attribution.
+  `multi_worker_showcase` demonstrates a wider multi-source / concurrent
+  spectacle without a correctness assertion. Both are registered in
+  `examples/README.md` and `examples/AGENTS.md`.
+- **`examples/concurrent_scheduler`** — a runnable proof that the scheduler
+  keeps multiple token lifecycles open at once: two three-row CSV sources
+  feed a count-6 `batch_stats` barrier that can only fire if all six tokens
+  are alive simultaneously (one-at-a-time draining would deadlock). It
+  ships with read-only SQL attribution queries confirming both sources fed
+  the single batch.
+
+### Changed
+
+- **Barrier buffers are journal-first** — aggregation and coalesce
+  acceptance is durable in the scheduler journal before it enters
+  executor memory, so barrier state spans workers and survives takeover
+  (ADR-029 amended).
+- **Leader writes are epoch-fenced** — finalization, run-status changes,
+  checkpoints, barrier completion, lease recovery, and source ingest each
+  verify leadership inside their transaction; a superseded leader's writes
+  are refused, not applied.
+- **Cross-process write discipline** — writable Landscape transactions
+  take the WAL write lock at `BEGIN IMMEDIATE`; dashboard and audit-story
+  read paths open read-only (ADR-030 §D5).
+- **Lease recovery is liveness-aware** — an expired item lease held by a
+  worker whose registry heartbeat is still live is revived, not reaped, so
+  a long in-flight model call is no longer mistaken for a dead worker.
+- **Web composer enforces implicit-required contracts for named typed
+  sources** — the predicate that decided whether a producer was a typed
+  source matched only the bare string `"source"`, so it returned `False`
+  for every *named* source (producer id `source:<name>`). The
+  implicit-required parity check therefore never fired for the headline
+  multi-source case: the pipeline validated green at compose time but
+  runtime Phase-2 type validation rejected it. The predicate now uses
+  `is_source_producer_id()`, closing the compose-green / runtime-red
+  divergence (elspeth-3332619032).
+
+See the rewritten `docs/runbooks/scheduler-lease-recovery.md` for N>1
+recovery procedures and operator guidance (worker count, lease sizing,
+shared group/clock requirements, per-worker forensic journals).
+
+### Fixed
+
+Plugin-boundary correctness — the plugins-subsystem remediation. Each of
+these defects let a plugin coerce, fabricate, or self-contradict at the
+trust boundary without an honest audit record; the fixes keep the boundary
+truthful (no silent Tier-3 coercion, no fabricated statistics, no
+fail-open scanning, no row that fails its own contract).
+
+- **`AzureBlobSource` CSV parses strictly** — the source built its
+  `csv.reader` without `strict=True`, so malformed quoting (data after a
+  closing quote) was silently merged into adjacent fields and, when the
+  field count still matched, passed through as a valid row with no
+  quarantine and no audit record. It now parses with `strict=True` like
+  `CSVSource`: the malformed row is recorded and quarantined, and
+  processing stops because the parser state is no longer trustworthy
+  (elspeth-ebe13515f4).
+- **`batch_stats` skips and reports `None` instead of crashing the run** —
+  a `None` value field raised `TypeError`, which the aggregation executor
+  records FAILED and re-raises, aborting the whole run; an all-`None` group
+  additionally hit a `mean = 0/0` `ZeroDivisionError`. `None` is now
+  skipped and reported in `skipped_missing` / `skipped_missing_indices`
+  (mirroring `skipped_non_finite`), and a group with no aggregatable values
+  returns an audited `validation_failed` error naming each skipped row
+  rather than a fabricated `count=0`/`sum=0`. Genuine wrong types still
+  raise at the boundary (elspeth-e62478e5db).
+- **`batch_outlier_annotator` no longer fabricates `robust_z_score=0.0`
+  when MAD=0** — any batch where more than half the values are identical
+  (common for score/count data) drove the median absolute deviation to
+  zero, which the annotator reported as a robust z-score of `0.0`,
+  silently disabling outlier detection exactly when it mattered. It now
+  applies the Iglewicz–Hoaglin mean-absolute-deviation modified z-score
+  when spread is still present, and emits an honest `None` (never `0.0`)
+  for a wholly identical batch (elspeth-a46c6e361f).
+- **Non-finite scanner uses `isinstance`, not exact-type checks** —
+  `_find_non_finite_value_path` gated container recursion on exact type, so
+  a `NaN`/`Infinity` nested inside a `Mapping` subclass (e.g. `OrderedDict`)
+  or a `tuple` subclass (e.g. a namedtuple) bypassed the source-boundary
+  non-finite gate entirely — a fail-open leak into audit hashing. The
+  float, mapping, sequence, and ndarray checks now use `isinstance`; `bool`
+  stays excluded and masked-array `NaN` is still treated as absent.
+- **`value_transform` retypes the output contract on a typed-field
+  overwrite** — overwriting an existing typed field with a
+  different-typed result (e.g. an `int` price recomputed as a `float`) left
+  the stale `FieldContract.python_type` in place, so the emitted row failed
+  its own `out.contract.validate(...)` — a self-contradictory audit record.
+  An overwrite whose runtime type differs from the declared type now
+  rebuilds that field's contract to the value's type, preserving
+  `original_name` / `required` / `source` / `nullable`; `object`/`any`
+  fields are left untouched.
+- **`AzureBlobSink` CSV no longer diverts valid rows in flexible/observed
+  mode** — the per-row staging probe trial-encoded each row against only
+  the first row's keys, while the real serializer computes field names
+  cumulatively across all rows. A later row carrying a valid extra field
+  (legitimate in flexible/observed mode) tripped `DictWriter`'s
+  `extrasaction='raise'` and was routed to the failure sink before the
+  serializer that would have accepted it ever ran — silent data loss. The
+  probe now uses the same schema-aware field set as the serializer, so a
+  valid late-appearing field is kept while a genuine fixed-mode
+  column-lock violation is still diverted per-row.
+- **`batch_experiment_compare` no longer fabricates inferential statistics
+  for a singleton arm** — `stdev` is undefined at n=1 and was reported as
+  an honest `None`, but the comparison then coerced that `None` to `0.0`
+  in the standard-error term, so an arm with a single value still produced
+  a real `standard_error`, `z_score`, and 95% confidence interval from a
+  zero-variance assumption. When either arm has undefined variance the
+  standard error, z-score, and interval are now all `None`.
+- **`batch_effect_size` emits `None` pooled dispersion for two singletons**
+  — when both groups had a single value the pooled-variance denominator
+  (`n₁+n₂−2`) is zero and the pooled standard deviation is undefined, but
+  it was reported as a real `0.0` (while the per-group stdevs and Cohen's
+  *d* were correctly `None`). The pooled standard deviation is now `None`
+  in that case, consistent with the other undefined dispersion statistics.
+- **`json_source` and `dataverse` narrow their header catch to
+  configuration faults** — both caught broad `ValueError` around header
+  normalization, so a configuration mistake (a `field_mapping` collision,
+  an unknown key) was silently quarantined as if it were a per-row data
+  error. The catch is now scoped to `ExternalHeaderError`, so a config
+  fault surfaces at the boundary instead of as a phantom quarantine.
+- **`CSVSink` and `AzureBlobSink` trial-encode each row before staging** —
+  a single unencodable character (e.g. an emoji written to a `cp1252`
+  sink) bypassed the per-row divert path and raised `UnicodeEncodeError`
+  at write time, aborting the whole batch with no per-row audit record.
+  Each row is now trial-encoded individually during staging, so the codec
+  fault is caught as a per-row diversion and the surrounding good rows are
+  still written.
+- **`database_sink` diverts `DataError` per row and serializes flexible
+  extra columns** — a `DataError` (e.g. integer overflow on a typed
+  column) is per-row attributable but was missing from the divert arms, so
+  it crashed the batch instead of diverting the offending row. Separately,
+  typed-field serialization now covers all fields, not only declared ones,
+  so a flexible-mode row carrying an extra typed column is serialized
+  correctly.
+- **RAG `count()` inside `search()` is guarded like `query()`** — the bare
+  `count()` call had no exception handling, so a transient backend error
+  (`ChromaError`, `ConnectionError`, `TimeoutError`, `OSError`) escaped as
+  a raw traceback that crashed the run with no quarantine and no audit
+  record. It now shares the `query()` except arms.
+- **Chroma readiness probe widens its catch and closes its client** — the
+  probe missed plain `ValueError` (raised by `chromadb` when the server is
+  unreachable) and `httpx` transport errors, which escaped as raw
+  tracebacks and aborted the commencement gate; it also leaked the
+  `HttpClient`. The except set is widened and the client is closed in a
+  `finally` block.
+- **Sequential multi-query transforms retry transient errors within a
+  bounded budget** — a transient 429/5xx/network error on a sequential
+  multi-query row propagated immediately and failed the row. Such errors
+  are now retried locally within a `max_capacity_retry_seconds` budget
+  (mirroring the Azure capacity-retry pattern), without re-running queries
+  that already succeeded for the same row; on budget exhaustion the row
+  diverts as `retry_timeout`, while non-retryable errors (context-length,
+  content-policy) still fail immediately.
+- **RAG query returns a `missing_field` error instead of a bare
+  `KeyError`** — a missing query field raised an uncaught `KeyError` with
+  no audit record; a presence check now returns a structured
+  `missing_field` error, consistent with the rest of the RAG boundary.
+- **`web_scrape` treats unenumerated 4xx responses as errors, not
+  content** — codes outside the handled set (400, 402, 405, 410, …) were
+  returned as successful responses and their error-page body was
+  fingerprinted and audited as real content, corrupting change detection.
+  They now raise a non-retryable client error; 408 Request Timeout raises
+  a retryable one.
+- **`web_scrape` guards content type and body size before extraction** —
+  there was no `Content-Type` check and no size cap, so a binary response
+  (image, PDF, `application/octet-stream`) was extracted and fingerprinted
+  as text. A content-type guard now rejects non-text responses and a
+  configurable cap rejects oversized bodies before extraction. (The size
+  cap is a post-buffer guard; the streaming pre-buffer cap follow-up is
+  noted below.)
+- **`batch_classifier_metrics` accepts an all-negative batch as data** —
+  when `positive_label` was configured but absent from the batch (a
+  legitimate outcome in rare-positive monitoring) the plugin returned
+  `validation_failed`. An all-negative batch now yields honest
+  zero-positive metrics; only a batch with no labels at all remains an
+  error.
+- **LLM `chat_completion` records the call before re-raising on a
+  malformed response** — the `response.usage` /
+  `response.choices[0].message` reads happened outside the guarded region,
+  so a malformed provider response left no Landscape record even though
+  tokens had been consumed. The reads are now guarded; on failure the call
+  is recorded as ERROR with the raw response captured before a
+  non-retryable client error is raised.
+- **Field-resolution rebuild is a union, not a replace** — in
+  `json_source`, `azure_blob_source`, and `dataverse`, a later sparse row
+  introducing a new key replaced the field-resolution set with only that
+  row's fields, discarding previously seen keys and corrupting the
+  field-resolution audit record. The rebuild now merges all observed keys
+  across all rows.
+- **`AzureBlobSource` rejects a headerless CSV with no columns or schema at
+  configuration time** — the `has_header=False` / no-columns path invented
+  numeric field names (`"0"`, `"1"`, …) that are not valid identifiers,
+  broke `field_mapping`, and skipped field resolution entirely, leaving the
+  audit record permanently absent. That configuration is now refused at
+  startup with an operator-actionable error.
+- **Statistical batch transforms emit `None` for every undefined statistic,
+  never a fabricated `0.0`** — extending the singleton-arm fixes above to
+  the rest of the family: `batch_distribution_profile` emits `None` stdev
+  at n=1; `batch_paired_preference` emits `None` for an all-tie preference
+  rate and for the standard error / interval when an arm has n≤1; and
+  `batch_outlier_annotator` emits `None` (not `0.0`) for the standard
+  z-score when the batch standard deviation is zero.
+- **Six batch transforms guard against non-finite group keys** — a `NaN`
+  float or `Decimal('NaN')` used as a group-by key silently fragments
+  groups (because `NaN != NaN`). The non-finite group-key guard already in
+  `batch_effect_size` is now ported to `batch_experiment_compare`,
+  `batch_distribution_profile`, `batch_paired_preference`, `batch_stats`,
+  `batch_top_k`, and `batch_drift_compare`, including the `Decimal` arm.
+- **`batch_paired_preference` errors on a duplicate variant within a
+  pair** — two rows sharing the same variant label silently used the first
+  and dropped the second (silent data loss). The plugin now detects and
+  errors on a duplicate variant before processing the pair.
+- **`batch_replicate` records the quarantine row index, not the row body** —
+  the invalid-copies quarantine entry embedded the full row content in its
+  audit metadata, leaking Tier-2/3 data into the audit record. It now
+  records the row index only.
+
+Two engine-level correctness fixes also land in this release:
+
+- **Aggregation resume no longer bricks a run after a FAILED-flush crash** —
+  a crash between marking aggregation tokens terminally failed and
+  releasing their BLOCKED scheduler rows left durable BLOCKED rows whose
+  tokens were already terminal; on resume the restore path saw an empty
+  live-BUFFERED set and raised `AuditIntegrityError` on every attempt,
+  making the run permanently unresumable. The aggregation restore arm now
+  journal-releases BLOCKED rows whose tokens carry a terminal outcome
+  before restoring, mirroring the proven coalesce path (elspeth-55546a6fd6).
+- **Multi-worker N>1 leader/follower coordination hardened** — the real
+  `elspeth join` end-to-end exercise surfaced and closed several N>1
+  defects: a follower whose leader finalized mid-drain now exits clean
+  rather than reporting eviction; the post-finalize source-lifecycle write
+  no longer downgrades a terminal `EXHAUSTED` state; `elspeth run` /
+  `elspeth resume` surface a takeover as a clean eviction exit instead of a
+  fatal traceback; the session-fork blob-copy invariant is no longer
+  suppressed when the blob map is empty; the peer-lease wait is bounded to
+  the liveness window and honours shutdown; follower teardown propagates
+  Tier-1 audit-integrity errors instead of swallowing them; and the
+  `PENDING_SINK` drain correctly recognizes peer-owned work and loops until
+  no peer leases or scheduled work remain.
+
+The shipped `examples/multi_worker` harness also had its pass/fail verdict
+corrected: a follower exiting non-zero was logged but not folded into the
+final decision, so the run could print PASS after a worker failed. The
+verdict now requires both the attribution assertion (≥2 workers each
+completed a row) and a clean exit from the leader and every follower.
+
+A follow-up is tracked for `web_scrape`'s `max_body_bytes`, which is
+enforced only after `AuditedHTTPClient` has already buffered and
+audit-captured the full body; a true pre-buffer cap belongs in the shared
+client as a streaming byte-limit (elspeth-a6f246d02a).
+
+### Operational
+
+- **The web session database also resets on upgrade (in addition to the
+  audit DB above)** — the session database schema epoch advances to 19
+  (`SESSION_SCHEMA_EPOCH`). It is not migrated in place: 0.6.0 boot fails
+  closed on a pre-0.6.0 session DB with `SessionSchemaError: Session DB
+  schema version 18 does not match SESSION_SCHEMA_EPOCH=19. Pre-release
+  ELSPETH does not migrate session databases. Delete the session DB file
+  and restart.` Before first start on 0.6.0, stop `elspeth-web.service`,
+  back up and remove `data/sessions.db` (and its `-wal`/`-shm` sidecars),
+  and restart; the bootstrap recreates the schema on first start.
+  `data/auth.db` is a SEPARATE file — local user accounts survive the
+  reset. Procedure: `docs/runbooks/staging-session-db-recreation.md`.
+- **Ship a frontend dist rebuilt from this release's source** — the web UI
+  is served from `src/elspeth/web/frontend/dist/`, which is gitignored and
+  built out of band (`cd src/elspeth/web/frontend && npm run build`); it is
+  produced by neither CI nor the Docker image. Producing the 0.6.0 web
+  deploy MUST rebuild the dist from `release/0.6.0` HEAD rather than reuse a
+  prebuilt bundle. A dist built before `ebbf90fcd` (the ADR-025
+  plural-`sources` migration) reads the dropped singular `state.source` and
+  crashes the chat panel with `TypeError: Cannot read properties of
+  undefined (reading 'options')` on guided source-select and on reloading
+  any composed session.
+
+---
+
+## [0.5.4] - 2026-06-19 (maintenance fixes folded into 0.6.0)
 
 Maintenance line opened on top of RC-5.3, carrying correctness fixes that
-post-date the 0.5.3 cut.
+post-date the 0.5.3 cut. These fixes ship as part of the 0.6.0 release
+rather than as a standalone 0.5.4 tag.
 
 ### Fixed
 

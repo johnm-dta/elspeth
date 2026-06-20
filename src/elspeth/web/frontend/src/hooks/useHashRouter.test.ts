@@ -366,6 +366,24 @@ describe("useHashRouter — Batch 2 fixes", () => {
     window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, handler);
   });
 
+  it("popstate to an empty hash clears the active session", async () => {
+    useSessionStore.setState({
+      sessions: [{ id: "sess-1", title: "Session 1" } as never],
+      activeSessionId: "sess-1",
+      selectSession: vi.fn(),
+    } as never);
+    window.history.replaceState(null, "", "#/sess-1");
+    renderHook(() => useHashRouter());
+
+    await act(async () => {
+      window.history.replaceState(null, "", window.location.pathname);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(window.location.hash).toBe("");
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+  });
+
   // ── Two rapid hashchanges ────────────────────────────────────────────────
 
   it("two rapid hashchanges both fire their respective modal events in order", async () => {

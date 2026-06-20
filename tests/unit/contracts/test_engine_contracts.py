@@ -117,6 +117,28 @@ class TestPendingOutcomePostInit:
         po = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.DEFAULT_FLOW)
         assert po.error_hash is None
 
+    def test_scheduler_pending_sink_requires_bool(self) -> None:
+        with pytest.raises(ValueError, match="scheduler_pending_sink must be a bool"):
+            PendingOutcome(
+                outcome=TerminalOutcome.SUCCESS,
+                path=TerminalPath.DEFAULT_FLOW,
+                scheduler_pending_sink=1,  # type: ignore[arg-type]
+            )
+
+    def test_rejects_non_enum_outcome_before_pair_formatting(self) -> None:
+        with pytest.raises(ValueError, match="outcome must be TerminalOutcome or None"):
+            PendingOutcome(
+                outcome="success",  # type: ignore[arg-type]
+                path=TerminalPath.DEFAULT_FLOW,
+            )
+
+    def test_rejects_non_enum_path_before_name_formatting(self) -> None:
+        with pytest.raises(ValueError, match="path must be TerminalPath"):
+            PendingOutcome(
+                outcome=None,
+                path="buffered",  # type: ignore[arg-type]
+            )
+
     def test_routed_without_error_hash_accepted(self) -> None:
         po = PendingOutcome(outcome=TerminalOutcome.SUCCESS, path=TerminalPath.GATE_ROUTED)
         assert po.error_hash is None

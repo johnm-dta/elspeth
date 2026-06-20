@@ -131,8 +131,8 @@ def _build_branch_pipeline(
         all_plugins.extend(transforms)
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=cast("SourceProtocol", source),
-        source_settings=source_settings,
+        sources={"primary": cast("SourceProtocol", source)},
+        source_settings_map={"primary": source_settings},
         transforms=all_wired,
         sinks=cast("dict[str, SinkProtocol]", sinks),
         aggregations={},
@@ -141,7 +141,7 @@ def _build_branch_pipeline(
     )
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in all_plugins],
         sinks={name: as_sink(s) for name, s in sinks.items()},
         gates=[gate],
@@ -149,7 +149,7 @@ def _build_branch_pipeline(
     )
 
     settings = ElspethSettings(
-        source=SourceSettings(plugin="list_source", on_success="gate_in", options={}),
+        sources={"primary": SourceSettings(plugin="list_source", on_success="gate_in", options={})},
         sinks={name: SinkSettings(plugin="collect", on_write_failure="discard", options={}) for name in sinks},
         gates=[gate],
         coalesce=[coalesce],

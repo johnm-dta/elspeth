@@ -203,14 +203,14 @@ def test_derive_rows_processed_fork_counts_source_rows_not_leaves() -> None:
         fork_to=["sink_a", "sink_b"],
     )
     config = PipelineConfig(
-        source=as_source(src),
+        sources={"primary": as_source(src)},
         transforms=[],
         sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
         gates=[gate],
     )
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(src),
-        source_settings=SourceSettings(plugin=src.name, on_success="gate_in", options={}),
+        sources={"primary": as_source(src)},
+        source_settings_map={"primary": SourceSettings(plugin=src.name, on_success="gate_in", options={})},
         transforms=[],
         sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
         gates=[gate],
@@ -288,8 +288,8 @@ def test_derive_rows_processed_aggregation_counts_source_rows_not_result() -> No
         output_mode=OutputMode.TRANSFORM,
     )
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(src),
-        source_settings=SourceSettings(plugin=src.name, on_success="agg_in", options={}),
+        sources={"primary": as_source(src)},
+        source_settings_map={"primary": SourceSettings(plugin=src.name, on_success="agg_in", options={})},
         transforms=[],
         sinks={"output": as_sink(out)},
         aggregations={"sum_agg": (as_transform(agg), agg_settings)},
@@ -299,7 +299,7 @@ def test_derive_rows_processed_aggregation_counts_source_rows_not_result() -> No
     agg_node_id = agg_id_map[next(iter(agg_id_map))]
     agg.node_id = agg_node_id
     config = PipelineConfig(
-        source=as_source(src),
+        sources={"primary": as_source(src)},
         transforms=[as_transform(agg)],
         sinks={"output": as_sink(out)},
         aggregation_settings={agg_node_id: agg_settings},
@@ -367,14 +367,14 @@ def test_derive_rows_processed_expand_counts_source_rows_not_children() -> None:
     xf = _ExpandTransform()
     wired = wire_transforms([as_transform(xf)], source_connection="source_out", final_sink="output", names=["expand-transform"])
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(src),
-        source_settings=SourceSettings(plugin=src.name, on_success="source_out", options={}),
+        sources={"primary": as_source(src)},
+        source_settings_map={"primary": SourceSettings(plugin=src.name, on_success="source_out", options={})},
         transforms=wired,
         sinks={"output": as_sink(out)},
         aggregations={},
         gates=[],
     )
-    config = PipelineConfig(source=as_source(src), transforms=[as_transform(xf)], sinks={"output": as_sink(out)})
+    config = PipelineConfig(sources={"primary": as_source(src)}, transforms=[as_transform(xf)], sinks={"output": as_sink(out)})
     run = Orchestrator(db).run(config, graph=graph, payload_store=MockPayloadStore())
 
     # Live truth: 1 source row, 3 expanded children, 1 expand parent.
@@ -389,19 +389,22 @@ def test_derive_rows_processed_expand_counts_source_rows_not_children() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# F2 (resume-fork-reemit) — rows_coalesce_failed graft, end-to-end via the
-# coalesce TIMEOUT path (review item C).
+# rows_coalesce_failed cumulative audit derive, end-to-end via the coalesce
+# TIMEOUT path (elspeth-7294de558e — closes F2 review Item D).
 #
-# rows_coalesce_failed is the ONE ExecutionCounters field the audit trail does
-# not record (a failed coalesce emits the operation roll-up to telemetry only;
-# derive_resume_terminal_status_from_audit has no arm for it and returns 0). The
-# with-rows resume branch therefore GRAFTS it from the live re-drive counter
-# captured in the resume loop (resume() in core.py). This is a real regression
-# fix, not future-proofing: handle_coalesce_timeouts → check_timeouts (the
-# quorum_not_met_at_timeout site that increments rows_coalesce_failed) is called
-# PER-ROW inside the resume re-drive loop (resume.py:268-276), so a coalesce that
-# times out before quorum DURING RE-DRIVE increments the live counter that the
-# graft carries into the final RunResult.
+# rows_coalesce_failed historically had NO audit arm: a failed coalesce emitted
+# its operation roll-up to telemetry only, so the with-rows resume branch
+# GRAFTED the value from the live re-drive counter — which only saw failures
+# during THAT resume's re-drive and forgot run-1 failures consumed before the
+# interrupt (resumed runs under-reported vs the uninterrupted oracle: 1 vs 3 in
+# this topology). derive_resume_terminal_status_from_audit now reconstructs it
+# from the durable FAILED node_states that CoalesceExecutor._fail_pending
+# writes at the run's coalesce nodes, counted as DISTINCT (coalesce node,
+# row_id) pairs (one failed BARRIER == one row, regardless of how many branch
+# tokens it consumed — token_outcomes are per BRANCH and carry no node
+# attribution, so they cannot be the anchor). The query is run-scoped and
+# resume re-drives record under the SAME run_id, so the derived value covers
+# run-1 AND resume failures: run_B == run_A, asserted as EQUALITY below.
 #
 # Constructing the timeout deterministically: CoalesceExecutor takes an
 # injectable clock (Orchestrator(clock=...) → CoalesceExecutor._clock). A source
@@ -410,23 +413,22 @@ def test_derive_rows_processed_expand_counts_source_rows_not_children() -> None:
 # triggering its count=100 trigger) elapse past the coalesce timeout by the time
 # the NEXT row's per-row handle_coalesce_timeouts runs.
 #
-# REGRESSION-GUARD STRENGTH (observed red/green, F2 review item C): with the
-# graft line removed from core.py, run_B.rows_coalesce_failed drops to 0 (derive
-# has no audit arm) while run_A reports 3 → the run_B >= 1 assertion goes RED.
-# Restoring the graft → run_B == 1 → GREEN. The drop-to-0 proves the assertion
-# exercises the graft, not some incidental path.
+# Constructing a RESUMABLE interrupt (multi-source branch): mid-source
+# interrupts are no longer resumable (IncompleteSourceResumeError — resume
+# refuses a non-exhausted source), so run_B interrupts on its FINAL source row
+# (all rows processed, EOF flushes not yet run) and the interruption is
+# reshaped into the exhausted-then-crashed-EOF-flush state exactly as
+# tests/integration/pipeline/test_rc6_eof_resume_proof.py does:
+# run_sources.lifecycle_state='exhausted' (what finalize_source_iteration
+# records before the EOF flush) + runs.status='failed' (what the failure
+# ceremony records when that flush crashes).
 #
-# SCOPE (Item D — tracked: filigree elspeth-7294de558e — NOT asserted as equality):
-# run_A (uninterrupted) and run_B (resumed) do NOT report the same
-# rows_coalesce_failed — run_A times out every barrier (3) while run_B only re-drives
-# barriers still PENDING at the interrupt (1). rows_coalesce_failed is the lone
-# resume-scoped field: run-1-consumed timeouts are live-counter-only and unrecoverable
-# on resume (the per-row timeout check makes every barrier either unaged-at-interrupt →
-# not re-fired, or aged → already consumed in run-1). Exact run_A == run_B is therefore
-# structurally unreachable via the timeout path; the load-bearing guard is run_B >= 1
-# (the graft carries the re-drive failure), which is what the regression fix restores.
-# The exact under-report (run_A == 3, run_B == 1) is characterization-pinned at the end
-# of the test below so the limitation can't silently widen or be silently "fixed".
+# REGRESSION-GUARD STRENGTH: run-1 consumes at least one timed-out barrier
+# before the interrupt (asserted non-vacuously via the derive query pre-resume)
+# and the resume consumes the rest at its EOF coalesce flush. A regression to
+# resume-local counting (the old graft) drops run_B below run_A; a regression
+# to per-branch-outcome counting over-reports a multi-branch barrier. Both go
+# RED on the equality pin.
 # ─────────────────────────────────────────────────────────────────────────
 
 
@@ -473,7 +475,7 @@ class _ClockAdvancingCoalesceSource(_TestSourceBase):
             )
             contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
             self._schema_contract = contract
-            yield SourceRow.valid(row, contract=contract)
+            yield SourceRow.valid(row, contract=contract, source_row_index=index - 1)
 
 
 def _build_quorum_timeout_coalesce(clock, rows, *, shutdown_event=None, interrupt_after=None):
@@ -527,8 +529,8 @@ def _build_quorum_timeout_coalesce(clock, rows, *, shutdown_event=None, interrup
         output_mode="transform",
     )
     graph = ExecutionGraph.from_plugin_instances(
-        source=as_source(source),
-        source_settings=SourceSettings(plugin=source.name, on_success="fork_input", options={}),
+        sources={"primary": as_source(source)},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="fork_input", options={})},
         transforms=[],
         sinks={"output": as_sink(output_sink)},
         aggregations={"agg_branch_hold": (as_transform(batch_transform), agg_settings)},
@@ -538,7 +540,7 @@ def _build_quorum_timeout_coalesce(clock, rows, *, shutdown_event=None, interrup
     agg_node_id = graph.get_aggregation_id_map()[AggregationName("agg_branch_hold")]
     batch_transform.node_id = agg_node_id
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(batch_transform)],
         sinks={"output": as_sink(output_sink)},
         aggregation_settings={agg_node_id: agg_settings},
@@ -546,7 +548,7 @@ def _build_quorum_timeout_coalesce(clock, rows, *, shutdown_event=None, interrup
         coalesce_settings=[coalesce],
     )
     settings = ElspethSettings(
-        source={"plugin": source.name, "on_success": "fork_input", "options": {}},
+        sources={"primary": {"plugin": source.name, "on_success": "fork_input", "options": {}}},
         sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
         gates=[fork_gate],
         coalesce=[coalesce],
@@ -560,15 +562,16 @@ def _build_quorum_timeout_coalesce(clock, rows, *, shutdown_event=None, interrup
 # check_timeouts → quorum_not_met_at_timeout path under test. The warning is
 # expected and filtered to keep CI output clean.
 @pytest.mark.filterwarnings("ignore:Coalesce .*quorum_count.*equals branch count:UserWarning")
-def test_resume_grafts_rows_coalesce_failed_from_timeout_redrive() -> None:
-    """End-to-end: a coalesce that times out (quorum_not_met) DURING RESUME
-    re-drive has its rows_coalesce_failed carried into the resumed RunResult by
-    the F2 graft. Non-vacuous: run_A reports a non-zero count and run_B (resume)
-    reports a non-zero count via the live re-drive counter the graft restores.
+def test_resume_derives_rows_coalesce_failed_from_durable_audit() -> None:
+    """End-to-end: a resumed run's rows_coalesce_failed EQUALS the uninterrupted
+    oracle's — coalesce failures consumed in run-1 BEFORE the interrupt and
+    failures consumed during the resume are both reconstructed from the durable
+    FAILED node_states at the run's coalesce nodes (elspeth-7294de558e; the old
+    resume-only graft reported only re-drive failures and under-reported 1 vs 3
+    in this topology).
 
-    See the module comment above for the deterministic-timeout construction, the
-    observed removed-graft red / restored-graft green, and the Item-D scoping
-    (run_A != run_B by design — rows_coalesce_failed is resume-scoped).
+    See the module comment above for the deterministic-timeout construction and
+    the exhausted-source reshape that makes the interrupt resumable.
     """
     import threading
 
@@ -586,8 +589,9 @@ def test_resume_grafts_rows_coalesce_failed_from_timeout_redrive() -> None:
 
     base_rows = [{"value": 10}, {"value": 20}, {"value": 30}]
 
-    # ── Run A (uninterrupted oracle): every barrier times out at the next row's
-    #    per-row handle_coalesce_timeouts → rows_coalesce_failed == 3. ──
+    # ── Run A (uninterrupted oracle): every barrier fails — rows 1 and 2 time
+    #    out at the next row's per-row handle_coalesce_timeouts, row 3 at the
+    #    end-of-source coalesce flush → rows_coalesce_failed == 3. ──
     db_a = make_landscape_db()
     clock_a = MockClock(start=1000.0)
     cfg_a, graph_a, settings_a = _build_quorum_timeout_coalesce(clock_a, base_rows)
@@ -597,16 +601,18 @@ def test_resume_grafts_rows_coalesce_failed_from_timeout_redrive() -> None:
         f"got rows_coalesce_failed={run_a.rows_coalesce_failed}, status={run_a.status}"
     )
 
-    # ── Run B: interrupt with a barrier still PENDING, then resume. The resume
-    #    loop's per-row handle_coalesce_timeouts trips the restored barrier on
-    #    re-drive → live result.rows_coalesce_failed > 0 → graft carries it. ──
+    # ── Run B: interrupt on the FINAL source row (all rows processed, EOF
+    #    flushes not yet run, at least one barrier already consumed by a
+    #    per-row timeout), reshape to the exhausted+crashed-EOF-flush state,
+    #    then resume. The resume's EOF coalesce flush consumes the remaining
+    #    barriers; the audit derive must report run-1 + resume cumulatively. ──
     db_b = make_landscape_db()
     ps_b = MockPayloadStore()
     checkpoint_mgr = CheckpointManager(db_b)
     checkpoint_config = RuntimeCheckpointConfig.from_settings(CheckpointSettings(enabled=True, frequency="every_row"))
     clock_b = MockClock(start=1000.0)
     shutdown = threading.Event()
-    cfg_b, graph_b, settings_b = _build_quorum_timeout_coalesce(clock_b, base_rows, shutdown_event=shutdown, interrupt_after=2)
+    cfg_b, graph_b, settings_b = _build_quorum_timeout_coalesce(clock_b, base_rows, shutdown_event=shutdown, interrupt_after=len(base_rows))
     try:
         Orchestrator(db_b, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config, clock=clock_b).run(
             cfg_b, graph=graph_b, settings=settings_b, payload_store=ps_b, shutdown_event=shutdown
@@ -615,10 +621,27 @@ def test_resume_grafts_rows_coalesce_failed_from_timeout_redrive() -> None:
     except GracefulShutdownError:
         pass
 
+    # Reshape the interruption into the exhausted-then-crashed-EOF-flush state
+    # (same construction as test_rc6_eof_resume_proof.py): 'exhausted' is what
+    # finalize_source_iteration records before the EOF flushes run; 'failed' is
+    # what the failure ceremony records when an EOF flush crashes. This is the
+    # resumable shape on the multi-source branch — a mid-source interrupt is
+    # refused with IncompleteSourceResumeError.
     with db_b.engine.connect() as conn:
         run_id = conn.execute(select(runs_table.c.run_id)).fetchone().run_id
         conn.execute(text("UPDATE runs SET status='failed' WHERE run_id=:rid"), {"rid": run_id})
+        conn.execute(text("UPDATE run_sources SET lifecycle_state='exhausted' WHERE run_id=:rid"), {"rid": run_id})
         conn.commit()
+
+    # Non-vacuity: run-1 must have already consumed SOME (but not all) barrier
+    # failures before the interrupt — otherwise this test would not distinguish
+    # cumulative audit derivation from the old resume-only graft.
+    run1_failed_barriers = RecorderFactory(db_b).query.count_failed_coalesce_barrier_rows(run_id)
+    assert 1 <= run1_failed_barriers < run_a.rows_coalesce_failed, (
+        f"run-1 must consume at least one barrier failure pre-interrupt and leave at least one for the "
+        f"resume (got {run1_failed_barriers} of {run_a.rows_coalesce_failed}); the topology drifted — "
+        f"re-derive the interrupt point."
+    )
 
     recovery_mgr = RecoveryManager(db_b, checkpoint_mgr)
     check = recovery_mgr.can_resume(run_id, graph_b)
@@ -631,35 +654,21 @@ def test_resume_grafts_rows_coalesce_failed_from_timeout_redrive() -> None:
     resume_orch = Orchestrator(db_b, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config, clock=clock_r)
     run_b = resume_orch.resume(resume_point, rcfg, rgraph, payload_store=ps_b, settings=rsettings)
 
-    # LOAD-BEARING regression guard: the resumed RunResult carries the re-drive
-    # coalesce-timeout failure. Removing the graft line in core.py drops this to 0.
-    assert run_b.rows_coalesce_failed >= 1, (
-        f"Resumed run must carry the re-drive coalesce-timeout failure via the F2 graft; "
-        f"got rows_coalesce_failed={run_b.rows_coalesce_failed}, status={run_b.status}. "
-        f"If this is 0, the graft in resume() (core.py) was removed/broken — derive cannot "
-        f"reconstruct rows_coalesce_failed (telemetry-only roll-up), so the live re-drive "
-        f"counter is the only source."
-    )
-
-    # CHARACTERIZATION PIN of the Item-D under-report (filigree elspeth-7294de558e).
-    # run_A (uninterrupted oracle) times out all 3 barriers; run_B (resume) re-drives
-    # only the 1 barrier still PENDING at the interrupt — the other 2 were consumed in
-    # run-1 and are unrecoverable (telemetry-only, no audit arm). So the resumed value
-    # STRUCTURALLY under-reports. Pinning exact values makes the limitation a guard, not
-    # prose: it goes RED if the under-report silently widens (B→0, also caught by the
-    # >=1 graft guard above) OR is silently "fixed" (B→3 == A) — the latter would mean an
-    # audit arm now reconstructs it cumulatively, which is exactly the elspeth-7294de558e
-    # resolution and MUST update this pin rather than land green by accident.
+    # ── EQUALITY PIN (the elspeth-7294de558e resolution): the resumed run
+    # reports the SAME rows_coalesce_failed as the uninterrupted oracle. The
+    # old graft carried only re-drive failures (run_B == 1 here, pinned as a
+    # characterization of the under-report until the audit arm existed); the
+    # derive now reconstructs run-1 + resume failures from FAILED coalesce
+    # node_states, one per DISTINCT (coalesce node, row) barrier. ──
     assert run_a.rows_coalesce_failed == 3, (
-        f"PIN: uninterrupted oracle must time out all 3 barriers; got {run_a.rows_coalesce_failed}. "
+        f"PIN: uninterrupted oracle must fail all 3 barriers; got {run_a.rows_coalesce_failed}. "
         f"If this changed, the timeout topology moved — re-derive the expected oracle count."
     )
-    assert run_b.rows_coalesce_failed == 1, (
-        f"PIN: resumed run under-reports — it re-drives only the 1 barrier PENDING at the interrupt; "
-        f"got {run_b.rows_coalesce_failed}. B != 1 means the under-report widened or rows_coalesce_failed "
-        f"gained an audit arm (the elspeth-7294de558e fix) — update this pin, do not let it pass silently."
-    )
-    assert run_b.rows_coalesce_failed < run_a.rows_coalesce_failed, (
-        f"PIN: resumed rows_coalesce_failed must UNDER-report vs the uninterrupted oracle until an audit "
-        f"arm exists (elspeth-7294de558e). oracle={run_a.rows_coalesce_failed}, resumed={run_b.rows_coalesce_failed}."
+    assert run_b.rows_coalesce_failed == run_a.rows_coalesce_failed, (
+        f"Resumed run must report the full run's coalesce failures (run-1 pre-interrupt + resume), "
+        f"derived from durable audit: oracle={run_a.rows_coalesce_failed}, "
+        f"resumed={run_b.rows_coalesce_failed} (run-1 had consumed {run1_failed_barriers} pre-interrupt). "
+        f"resumed < oracle means resume-local counting regressed (the old graft); "
+        f"resumed > oracle means per-branch over-counting (the counter is per failed BARRIER, "
+        f"one DISTINCT (coalesce node, row) pair)."
     )

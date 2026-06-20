@@ -84,6 +84,11 @@ _FINISH_REASON_ERRORS: dict[FinishReason, tuple[str, str]] = {
     FinishReason.CONTENT_FILTER: ("content_filtered", "Response blocked by provider content filter"),
 }
 
+# Bounded local retry constants for sequential multi-query transient errors.
+# Mirrors transforms/azure/base.py _CAPACITY_RETRY_* constants.
+_SEQUENTIAL_RETRY_INITIAL_DELAY_SECONDS: float = 0.05
+_SEQUENTIAL_RETRY_MAX_DELAY_SECONDS: float = 1.0
+
 
 @dataclass(frozen=True, slots=True)
 class _FinishReasonError:
@@ -441,6 +446,7 @@ class MultiQueryStrategy:
     align_output_contract: Callable[[SchemaContract], SchemaContract]
     align_output_row_contract: Callable[[PipelineRow], PipelineRow]
     executor: PooledExecutor | None = None
+    max_capacity_retry_seconds: int = 3600
     _query_templates: Mapping[str, PromptTemplate] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -771,6 +777,53 @@ class MultiQueryStrategy:
 
         return self._QuerySuccess(fields=partial, audit_metadata=audit_metadata)
 
+    def _sequential_retry_timeout_result(
+        self,
+        last_error: LLMClientError,
+        query_idx: int,
+        query_name: str,
+        started_at: float,
+        discarded_successful_queries: int,
+    ) -> TransformResult:
+        """Build the bounded-retry-exhausted row result for sequential mode.
+
+        Mirrors Azure _capacity_retry_timeout_result shape so the engine and
+        downstream audit code see the same reason/elapsed_seconds/max_seconds
+        fields regardless of provider.
+        """
+        elapsed = time.monotonic() - started_at
+        return TransformResult.error(
+            {
+                "reason": "retry_timeout",
+                "failed_query_name": query_name,
+                "failed_query_index": query_idx,
+                "error": str(last_error),
+                "elapsed_seconds": elapsed,
+                "max_seconds": self.max_capacity_retry_seconds,
+                "discarded_successful_queries": discarded_successful_queries,
+            },
+            retryable=False,
+        )
+
+    def _sequential_retry_shutdown_result(
+        self,
+        query_idx: int,
+        query_name: str,
+        started_at: float,
+    ) -> TransformResult:
+        """Build the shutdown-during-retry row result for sequential mode."""
+        elapsed = time.monotonic() - started_at
+        return TransformResult.error(
+            {
+                "reason": "shutdown_requested",
+                "error": "Run cancellation requested during sequential query retry backoff",
+                "failed_query_name": query_name,
+                "failed_query_index": query_idx,
+                "elapsed_seconds": elapsed,
+            },
+            retryable=False,
+        )
+
     def _execute_sequential(
         self,
         row: PipelineRow,
@@ -782,37 +835,68 @@ class MultiQueryStrategy:
     ) -> TransformResult:
         """Execute queries sequentially (pool_size=1 fallback).
 
-        Short-circuits on first error. Retryable LLMClientErrors are returned
-        as error results instead of being re-raised, so the engine retry doesn't
-        wastefully re-execute all queries from scratch.
+        Short-circuits on first non-retryable error. Retryable LLMClientErrors
+        (429/5xx/network) are retried locally with exponential backoff bounded
+        by max_capacity_retry_seconds, mirroring the Azure
+        _analyze_field_with_capacity_retry pattern. Earlier succeeded queries
+        are NOT re-executed on retry of a later query.
         """
         accumulated_outputs: dict[str, Any] = {}
         accumulated_audit: dict[str, object] = {}
 
+        retry_budget_started_at = time.monotonic()
+        retry_deadline = retry_budget_started_at + float(self.max_capacity_retry_seconds)
+
         for query_idx, spec in enumerate(self.query_specs):
-            try:
-                result = self._execute_one_query(
-                    query_idx,
-                    spec,
-                    row,
-                    state_id,
-                    token_id,
-                    provider,
-                    tracer,
-                    shutdown_event,
-                )
-            except LLMClientError as e:
-                # Sequential mode: no AIMD retry — return retryable error result
-                return TransformResult.error(
-                    {
-                        "reason": "multi_query_failed",
-                        "failed_query_name": spec.name,
-                        "failed_query_index": query_idx,
-                        "error": str(e),
-                        "discarded_successful_queries": query_idx,
-                    },
-                    retryable=e.retryable,
-                )
+            retry_delay = _SEQUENTIAL_RETRY_INITIAL_DELAY_SECONDS
+
+            while True:
+                try:
+                    result = self._execute_one_query(
+                        query_idx,
+                        spec,
+                        row,
+                        state_id,
+                        token_id,
+                        provider,
+                        tracer,
+                        shutdown_event,
+                    )
+                    break  # success or non-retryable error result - exit retry loop
+                except LLMClientError as e:
+                    if not e.retryable:
+                        # Non-retryable (ContextLength, ContentPolicy) - fail immediately
+                        return TransformResult.error(
+                            {
+                                "reason": "multi_query_failed",
+                                "failed_query_name": spec.name,
+                                "failed_query_index": query_idx,
+                                "error": str(e),
+                                "discarded_successful_queries": query_idx,
+                            },
+                            retryable=False,
+                        )
+
+                    # Retryable (RateLimit/Server/Network) - apply bounded local retry
+                    if _shutdown_event_is_set(shutdown_event):
+                        return self._sequential_retry_shutdown_result(query_idx, spec.name, retry_budget_started_at)
+
+                    now = time.monotonic()
+                    if now >= retry_deadline:
+                        return self._sequential_retry_timeout_result(e, query_idx, spec.name, retry_budget_started_at, query_idx)
+
+                    sleep_seconds = min(retry_delay, retry_deadline - now)
+                    if sleep_seconds > 0:
+                        if isinstance(shutdown_event, threading.Event):
+                            if shutdown_event.wait(timeout=sleep_seconds):
+                                return self._sequential_retry_shutdown_result(query_idx, spec.name, retry_budget_started_at)
+                        else:
+                            time.sleep(sleep_seconds)
+
+                    if time.monotonic() >= retry_deadline:
+                        return self._sequential_retry_timeout_result(e, query_idx, spec.name, retry_budget_started_at, query_idx)
+
+                    retry_delay = min(retry_delay * 2.0, _SEQUENTIAL_RETRY_MAX_DELAY_SECONDS)
 
             # Error from template/JSON/validation/non-retryable LLM
             if isinstance(result, TransformResult):
@@ -1040,7 +1124,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bb3e0f267aa98f99"
+    source_file_hash: str | None = "sha256:87b5d3934bea79c9"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1297,6 +1381,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                 align_output_contract=self._align_output_contract,
                 align_output_row_contract=self._align_output_row_contract,
                 executor=self._query_executor,
+                max_capacity_retry_seconds=self._max_capacity_retry_seconds,
             )
 
             # Multi-query emits prefixed fields — compute guaranteed field sets
@@ -1615,8 +1700,8 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                     "When you author LLM judgment semantics — a scoring scale, rubric, category meaning, threshold, signal weighting, cutoff, comparison set, or subjective criterion definition — stage a vague_term review on the LLM node before set_pipeline.",
                     "Measurable adjectives are not exempt: if the user gives the metric/cutoff, use it; if you choose a cutoff such as 'over 6 ft' or a ranking rule such as 'top quartile', review that authored threshold semantics.",
                     "Prompt-template review is not enough for authored judgment semantics: put both interpretation_requirements in the LLM node options before set_pipeline — one vague_term for the rubric/definition/threshold/category semantics and one llm_prompt_template for the raw prompt.",
-                    "For an authored-judgment vague_term review, use a stable user_term preserving the user's criterion phrase, not the whole task phrase; for an adjective embedded in prose, use the adjective or noun phrase that names the criterion.",
-                    "For an authored-judgment vague_term review, llm_draft must equal the semantics you wrote; only an llm_prompt_template review is incomplete.",
+                    "Use a stable user_term preserving the user's criterion phrase, not the whole task phrase; for an adjective embedded in prose, use the adjective or noun phrase that names the criterion.",
+                    "llm_draft must equal the semantics you wrote; only an llm_prompt_template review is incomplete.",
                     "When repairing or upserting an LLM node, repeat the review preflight; carry forward existing pending LLM interpretation requirements and add missing vague_term or prompt shield requirements before stopping.",
                     "Do not stop by saying the rubric is part of the reviewed prompt. If you wrote the scale, label meanings, thresholds, cutoff, comparison rule, tie break, or signals, add the separate vague_term requirement and request its review.",
                     "If the prompt asks the model to return a score, rating, rank, class, or pass/fail result, that output shape is authored judgement semantics when you chose the scale, class meaning, threshold, or ranking rule.",
@@ -1627,15 +1712,14 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                     "Single-query LLM output is written to response_field. Prompt-requested JSON keys are not separate pipeline fields unless another transform parses them; preserve response_field through cleanup instead of invented prompt-internal keys.",
                     "The LLM transform preserves upstream row fields while adding response_field; it does not remove raw scrape fields. If a web_scrape-to-LLM workflow must save results without raw HTML or fingerprints, put a field_mapper cleanup node between the LLM and the sink.",
                     "If internet content, public web content, search results, crawled pages, or other untrusted remote text will flow into this LLM, prompt-injection shielding is important: surface this to the user as a strong recommendation.",
-                    "For prompt-injection shielding when untrusted remote text flows into this LLM, recommend azure_prompt_shield or the deployment's equivalent before the LLM; continuing without it is allowed.",
-                    "For prompt-injection shielding when untrusted remote text flows into this LLM, recommendation is not permission to add a node automatically — do not insert it automatically unless requested, policy-required, or explicitly high-risk.",
-                    "If the workflow proceeds without an authorized prompt shield, surface a pipeline_decision warning on the LLM node with user_term prompt_injection_shield_recommendation.",
-                    "For an unshielded-LLM pipeline_decision warning, use a draft recommending azure_prompt_shield while stating that internet-controlled text will otherwise flow directly to the LLM.",
-                    "LLM-node reviews stack: an authored web-content scoring prompt can need llm_prompt_template, vague_term, and a prompt_injection_shield_recommendation warning on the same LLM node.",
+                    "Recommend azure_prompt_shield or the deployment's equivalent before the LLM; recommendation is not permission to add a node, so do not insert it automatically unless requested, policy-required, or explicitly high-risk.",
+                    "If the workflow proceeds without an authorized prompt shield, stage a pipeline_decision review on the LLM node with user_term prompt_injection_shield_recommendation.",
+                    "Its draft should recommend azure_prompt_shield while stating that internet-controlled text will otherwise flow directly to the LLM.",
+                    "LLM-node reviews stack: an authored web-content scoring prompt can need llm_prompt_template, vague_term, and prompt_injection_shield_recommendation requirements on the same LLM node.",
                     "Interpretation reviews are not transform stages. Do not create passthrough, review, recommendation, or placeholder nodes for LLM reviews; put the review objects in this LLM node's interpretation_requirements list.",
                     "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",
                     "This is prompt-injection defense; do not substitute azure_content_safety. Use azure_content_safety only for harmful-content moderation or safety classification.",
-                    "max_concurrency and per_minute_rate_limit interact — neither bounds the other; set both when the provider has hard rate caps.",
+                    "Concurrency is pool_size (1 = sequential, no pooling). Tune dispatch pacing with min_dispatch_delay_ms / max_dispatch_delay_ms and bound capacity retries with max_capacity_retry_seconds; there is no max_concurrency or per_minute_rate_limit field.",
                 ),
             )
         return None

@@ -152,7 +152,7 @@ class BatchClassifierMetrics(BaseTransform):
     name = "batch_classifier_metrics"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:1b14e60f23f8848e"
+    source_file_hash: str | None = "sha256:9342302b423d86c6"
     config_model = BatchClassifierMetricsConfig
     is_batch_aware = True
     capability_tags: tuple[str, ...] = ("narrative-summary",)
@@ -384,13 +384,13 @@ class BatchClassifierMetrics(BaseTransform):
     ) -> tuple[BatchClassifierMetricsRow, TransformResult | None]:
         labels = self._labels_for(pairs)
         if self._positive_label is not None and not scalar_bucket_contains(labels, self._positive_label):
-            reason: TransformErrorReason = {
-                "reason": "validation_failed",
-                "cause": "positive_label_missing",
-                "expected": str(self._positive_label),
-                "errors": [str(label) for label in labels],
-            }
-            return {}, TransformResult.error(reason, retryable=False)
+            # A configured positive_label absent from the batch is legitimate data,
+            # not a config fault: rare-positive monitoring (fraud/defects) expects
+            # all-negative batches. Include it as a label so its binary metrics come
+            # out honestly as tp=0/fn=0/tn=count with precision/recall=None, instead
+            # of erroring (plugins review Batch 3 item 11). Macro/micro aggregates
+            # exclude its None metrics, so they are unaffected.
+            append_unique_bucket_value(labels, self._positive_label)
 
         confusion: Counter[tuple[ScalarBucketKey, ScalarBucketKey]] = Counter()
         for pair in pairs:

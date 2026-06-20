@@ -22,6 +22,7 @@ format stability.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -73,6 +74,60 @@ _LLM_REQUEST_RESERVED_KEYS = frozenset(
 )
 
 
+def _require_non_empty_str(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+    if not value.strip():
+        raise ValueError(f"{field_name} must be non-empty")
+    return value
+
+
+def _require_finite_number(value: object, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"{field_name} must be int or float, got {type(value).__name__}: {value!r}")
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite, got {value!r}")
+
+
+def _require_mapping(value: object, field_name: str) -> None:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping, got {type(value).__name__}: {value!r}")
+
+
+def _require_string_mapping(value: object, field_name: str) -> None:
+    _require_mapping(value, field_name)
+    assert isinstance(value, Mapping)
+    for key, item in value.items():
+        if type(key) is not str:
+            raise TypeError(f"{field_name} key must be str, got {type(key).__name__}: {key!r}")
+        if type(item) is not str:
+            raise TypeError(f"{field_name}[{key!r}] must be str, got {type(item).__name__}: {item!r}")
+
+
+def _require_message_sequence(value: object) -> None:
+    if isinstance(value, str | bytes | bytearray) or not isinstance(value, Sequence):
+        raise TypeError(f"messages must be a sequence of mappings, got {type(value).__name__}: {value!r}")
+
+
+def _require_messages_tuple(value: object) -> None:
+    if type(value) is not tuple:
+        raise TypeError(f"messages must be tuple[Mapping[str, Any], ...], got {type(value).__name__}: {value!r}")
+    for idx, message in enumerate(value):
+        _require_mapping(message, f"messages[{idx}]")
+        assert isinstance(message, Mapping)
+        for key in message:
+            if type(key) is not str:
+                raise TypeError(f"messages[{idx}] key must be str, got {type(key).__name__}: {key!r}")
+
+
+def _require_http_status_code(value: object, field_name: str, *, optional: bool = False) -> None:
+    require_int(value, field_name, optional=optional, min_value=100)
+    if value is not None:
+        assert isinstance(value, int)
+    if value is not None and value > 599:
+        raise ValueError(f"{field_name} must be <= 599, got {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class LLMCallRequest:
     """Audit record for an outbound LLM API request."""
@@ -85,6 +140,11 @@ class LLMCallRequest:
     extra_kwargs: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
 
     def __post_init__(self) -> None:
+        _require_non_empty_str(self.model, "model")
+        _require_message_sequence(self.messages)
+        _require_finite_number(self.temperature, "temperature")
+        _require_non_empty_str(self.provider, "provider")
+        require_int(self.max_tokens, "max_tokens", optional=True, min_value=0)
         # Always deep-freeze inner message dicts — a pre-built tuple may
         # still contain mutable inner dicts (e.g. tuple([{"role": "user"}])).
         object.__setattr__(
@@ -93,6 +153,8 @@ class LLMCallRequest:
             tuple(deep_freeze(m) for m in self.messages),
         )
         freeze_fields(self, "extra_kwargs")
+        _require_messages_tuple(self.messages)
+        _require_mapping(self.extra_kwargs, "extra_kwargs")
         if collisions := (_LLM_REQUEST_RESERVED_KEYS & self.extra_kwargs.keys()):
             msg = f"extra_kwargs contains reserved key(s) that would overwrite audit fields: {collisions}"
             raise ValueError(msg)
@@ -126,6 +188,10 @@ class LLMCallResponse:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "raw_response")
+        _require_non_empty_str(self.model, "model")
+        if type(self.usage) is not TokenUsage:
+            raise TypeError(f"usage must be TokenUsage, got {type(self.usage).__name__}: {self.usage!r}")
+        _require_mapping(self.raw_response, "raw_response")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to audit-trail dict.
@@ -149,10 +215,10 @@ class LLMCallError:
     retryable: bool
 
     def __post_init__(self) -> None:
-        if not self.type:
-            raise ValueError("LLMCallError.type must not be empty")
-        if not self.message:
-            raise ValueError("LLMCallError.message must not be empty")
+        _require_non_empty_str(self.type, "LLMCallError.type")
+        _require_non_empty_str(self.message, "LLMCallError.message")
+        if type(self.retryable) is not bool:
+            raise TypeError(f"LLMCallError.retryable must be bool, got {type(self.retryable).__name__}: {self.retryable!r}")
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to audit-trail dict.
@@ -198,6 +264,16 @@ class HTTPCallRequest:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "headers", "json", "params", "audit_metadata")
+        method = _require_non_empty_str(self.method, "method")
+        if method.upper() != method:
+            raise ValueError(f"method must be uppercase, got {method!r}")
+        _require_non_empty_str(self.url, "url")
+        _require_string_mapping(self.headers, "headers")
+        require_int(self.hop_number, "hop_number", optional=True, min_value=1)
+        if self.resolved_ip is not None:
+            _require_non_empty_str(self.resolved_ip, "resolved_ip")
+        if self.redirect_from is not None:
+            _require_non_empty_str(self.redirect_from, "redirect_from")
         if self.hop_number is not None and self.resolved_ip is None and self.redirect_from is None:
             msg = "hop_number without resolved_ip requires redirect_from for blocked redirect attempts"
             raise ValueError(msg)
@@ -249,7 +325,7 @@ class HTTPCallResponse:
     redirect_count: int = 0
 
     def __post_init__(self) -> None:
-        require_int(self.status_code, "status_code", min_value=100)
+        _require_http_status_code(self.status_code, "status_code")
         require_int(self.body_size, "body_size", optional=True, min_value=0)
         require_int(self.redirect_count, "redirect_count", min_value=0)
         if self.body is not None and self.body_size is None:
@@ -294,10 +370,9 @@ class HTTPCallError:
     status_code: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.type:
-            raise ValueError("HTTPCallError.type must not be empty")
-        if not self.message:
-            raise ValueError("HTTPCallError.message must not be empty")
+        _require_non_empty_str(self.type, "HTTPCallError.type")
+        _require_non_empty_str(self.message, "HTTPCallError.message")
+        _require_http_status_code(self.status_code, "status_code", optional=True)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to audit-trail dict.

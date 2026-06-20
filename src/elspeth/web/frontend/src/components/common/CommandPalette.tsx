@@ -327,8 +327,17 @@ export function CommandPalette({
           ) : (
             <>
               {grouped.action.length > 0 && (
-                <div className="command-palette-group">
-                  <div className="command-palette-group-header">Actions</div>
+                <div
+                  className="command-palette-group"
+                  role="group"
+                  aria-labelledby="cmd-group-action"
+                >
+                  <div
+                    id="cmd-group-action"
+                    className="command-palette-group-header"
+                  >
+                    Actions
+                  </div>
                   {grouped.action.map((cmd) => {
                     globalIndex++;
                     const idx = globalIndex;
@@ -360,8 +369,17 @@ export function CommandPalette({
               )}
 
               {grouped.navigation.length > 0 && (
-                <div className="command-palette-group">
-                  <div className="command-palette-group-header">Navigation</div>
+                <div
+                  className="command-palette-group"
+                  role="group"
+                  aria-labelledby="cmd-group-navigation"
+                >
+                  <div
+                    id="cmd-group-navigation"
+                    className="command-palette-group-header"
+                  >
+                    Navigation
+                  </div>
                   {grouped.navigation.map((cmd) => {
                     globalIndex++;
                     const idx = globalIndex;
@@ -393,8 +411,17 @@ export function CommandPalette({
               )}
 
               {grouped.session.length > 0 && (
-                <div className="command-palette-group">
-                  <div className="command-palette-group-header">Sessions</div>
+                <div
+                  className="command-palette-group"
+                  role="group"
+                  aria-labelledby="cmd-group-session"
+                >
+                  <div
+                    id="cmd-group-session"
+                    className="command-palette-group-header"
+                  >
+                    Sessions
+                  </div>
                   {grouped.session.map((cmd) => {
                     globalIndex++;
                     const idx = globalIndex;

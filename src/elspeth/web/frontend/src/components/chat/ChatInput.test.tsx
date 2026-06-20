@@ -213,7 +213,7 @@ describe("ChatInput empty-state placeholder", () => {
     return {
       id: "comp-1",
       version,
-      source: null,
+      sources: {},
       nodes: [],
       edges: [],
       outputs: [],
@@ -288,6 +288,32 @@ describe("ChatInput composing cancel", () => {
     await user.click(screen.getByRole("button", { name: "Stop composing" }));
 
     expect(onCancel).toHaveBeenCalledOnce();
+  });
+});
+
+describe("ChatInput max length", () => {
+  beforeEach(() => {
+    resetStore(useSessionStore);
+    resetStore(useBlobStore);
+    resetStore(useInterpretationEventsStore);
+  });
+
+  it("passes the configured maxLength to the textarea", () => {
+    const inputRef = { current: null } as RefObject<HTMLTextAreaElement>;
+
+    render(
+      <ChatInput
+        onSend={vi.fn()}
+        disabled={false}
+        inputRef={inputRef}
+        maxLength={4096}
+      />,
+    );
+
+    expect(screen.getByLabelText(/message input/i)).toHaveAttribute(
+      "maxlength",
+      "4096",
+    );
   });
 });
 

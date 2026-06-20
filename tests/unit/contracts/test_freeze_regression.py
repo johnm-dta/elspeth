@@ -50,6 +50,8 @@ def _make_lineage(**kwargs: object) -> RowLineage:
         "run_id": "run-1",
         "source_node_id": "node-src",
         "row_index": 0,
+        "source_row_index": 0,
+        "ingest_sequence": 0,
         "source_data_hash": "abc",
         "created_at": datetime.now(UTC),
         "payload_available": True,
@@ -434,7 +436,7 @@ class TestPipelineConfigNestedMutationRejected:
         from elspeth.engine.orchestrator.types import PipelineConfig
 
         config = PipelineConfig(
-            source=MagicMock(),
+            sources={"primary": MagicMock()},
             transforms=[],
             sinks={"out": MagicMock()},
             config={"nested": {"key": "val"}},

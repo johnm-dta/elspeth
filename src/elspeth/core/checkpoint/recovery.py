@@ -10,7 +10,9 @@ The actual resume logic (Orchestrator.resume()) is implemented separately.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
@@ -23,24 +25,28 @@ from elspeth.contracts import (
     PipelineRow,
     PluginSchema,
     ResumeCheck,
+    ResumedRow,
     ResumePoint,
     RunStatus,
     SchemaContract,
     TerminalPath,
 )
-from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.barrier_scalars import BarrierScalars
+from elspeth.contracts.errors import AuditIntegrityError, EmptyResumeStateError
+from elspeth.contracts.types import NodeID
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.checkpoint.manager import CheckpointCorruptionError, CheckpointManager, IncompatibleCheckpointError
 from elspeth.core.checkpoint.serialization import checkpoint_loads
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.schema import (
+    blocked_barrier_hold_clause,
     node_states_table,
     rows_table,
     runs_table,
     token_outcomes_table,
+    token_work_items_table,
     tokens_table,
 )
 
@@ -53,36 +59,119 @@ _METADATA_CHUNK_SIZE = 500
 _CHECKPOINT_STATE_CACHE_MAX = 16
 _DELEGATION_PATHS = (TerminalPath.FORK_PARENT.value, TerminalPath.EXPAND_PARENT.value)
 _RESUMABLE_RUN_STATUSES = frozenset({RunStatus.FAILED, RunStatus.INTERRUPTED})
-_CheckpointStateCacheKey = tuple[str, str | None, str | None]
+# (checkpoint_id, barrier_scalars_json) — keyed by payload so a re-read of the
+# same checkpoint row with mutated JSON cannot serve a stale deserialization.
+_CheckpointStateCacheKey = tuple[str, str | None]
 
 __all__ = [
     "IncompleteTokenSpec",
+    "NonResumableRunError",
     "RecoveryManager",
     "ResumeCheck",  # Re-exported from contracts for convenience
     "ResumePoint",  # Re-exported from contracts for convenience
+    "check_run_status_resumable",
 ]
+
+
+# TIER-2: Operator-interpretable refuse signal — the audit DB is intact and
+# truthful; the run's CURRENT status (e.g. RUNNING: another worker holds the
+# run mid-flight) means resuming now would be incorrect. Same register as
+# elspeth.contracts.errors.IncompleteSourceResumeError: an operator-facing
+# precondition failure carrying run_id + reason, NOT audit corruption
+# (contrast the run-immutability guard's AuditIntegrityError in
+# RunLifecycleRepository.update_run_status).
+class NonResumableRunError(Exception):
+    """Raised by ``ResumeCoordinator.resume()`` when run status precludes resume.
+
+    ``RecoveryManager.can_resume()`` is ADVISORY — callers may skip it — so
+    ``resume()`` re-checks the run status at entry via the same shared
+    implementation (:func:`check_run_status_resumable`) and raises this
+    error before any mutation (elspeth-2f23292372, operator option b).
+
+    Carries ``run_id`` and the human-readable ``reason`` from the shared
+    check so CLI/API callers can surface a precise "not resumable" outcome
+    without parsing the exception text.
+    """
+
+    def __init__(self, run_id: str, reason: str) -> None:
+        self.run_id = run_id
+        self.reason = reason
+        super().__init__(f"Cannot resume run {run_id!r}: {reason}")
+
+
+def _fetch_run(db: LandscapeDB, run_id: str) -> Row[Any] | None:
+    """Fetch the ``runs`` row for ``run_id``, or None if absent."""
+    with db.engine.connect() as conn:
+        return conn.execute(select(runs_table).where(runs_table.c.run_id == run_id)).fetchone()
+
+
+def check_run_status_resumable(db: LandscapeDB, run_id: str) -> tuple[RunStatus | None, ResumeCheck]:
+    """Existence + run-status portion of :meth:`RecoveryManager.can_resume`.
+
+    SINGLE shared implementation for the advisory ``can_resume`` surface and
+    the enforcing entry guard in ``ResumeCoordinator.resume()`` — the two
+    must never drift (elspeth-2f23292372).
+
+    Returns:
+        ``(run_status, check)``: ``run_status`` is ``None`` when the run does
+        not exist. ``check`` carries ``can_resume=True`` when the status alone
+        does not preclude resume; checkpoint existence, topology, and contract
+        integrity remain ``can_resume``'s remit, not this function's.
+
+    Raises:
+        CheckpointCorruptionError: If the persisted status is not a valid
+            ``RunStatus`` — audit corruption, never a clean refuse.
+    """
+    run = _fetch_run(db, run_id)
+    if run is None:
+        return None, ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
+
+    try:
+        run_status = RunStatus(run.status)
+    except ValueError as exc:
+        raise CheckpointCorruptionError(f"Run {run_id} has invalid status {run.status!r}; audit trail is corrupt") from exc
+
+    if run_status == RunStatus.COMPLETED:
+        return run_status, ResumeCheck(can_resume=False, reason="Run already completed successfully")
+
+    if run_status == RunStatus.RUNNING:
+        # §B.3 + §H test #2(c) (epoch 21, ADR-030, slice 4 flip):
+        #
+        # RUNNING + LIVE seat → REFUSED (name incumbent, direct to `elspeth
+        # join`); slice 2 shipped this arm.
+        #
+        # RUNNING + EXPIRED/ABSENT seat → RESUMABLE (dead-leader takeover):
+        # the seat's expiry IS the proof of lost custody; check-then-act here
+        # is acceptable because the leadership CAS in ``acquire_run_leadership``
+        # (the first durable act of resume()) is the true arbiter.
+        #
+        # Lives in the SHARED implementation so the advisory can_resume() and
+        # the enforcing resume() entry guard produce the SAME verdict
+        # (the elspeth-2f23292372 parity contract).
+        leader = RunCoordinationRepository(db.engine).live_leader(run_id=run_id, now=datetime.now(UTC))
+        if leader is not None and leader.seat_live:
+            reason = (
+                f"Run is in progress under live leader {leader.leader_worker_id!r} "
+                f"(seat expires {leader.leader_heartbeat_expires_at.isoformat()}) — "
+                "use `elspeth join` to attach as a follower"
+            )
+            return run_status, ResumeCheck(can_resume=False, reason=reason)
+        # Seat is absent or expired: dead-leader takeover path → resumable.
+        return run_status, ResumeCheck(can_resume=True)
+
+    if run_status not in _RESUMABLE_RUN_STATUSES:
+        return run_status, ResumeCheck(can_resume=False, reason=f"Run status {run_status.value!r} is not resumable")
+
+    return run_status, ResumeCheck(can_resume=True)
 
 
 @dataclass(frozen=True, slots=True)
 class IncompleteTokenSpec:
     """A non-delegation child token that lacks a terminal outcome on a resumed run.
 
-    Identity fields read directly from persisted columns (Tier-1: no defaults, no
-    coercion). ``token_data_ref`` is NULL for fork children (they share the
-    parent/source payload, retrievable by ``row_id``) and set for expand children
-    and post-coalesce merged tokens. ``max_attempt`` is the highest ``attempt``
-    already recorded for this token in ``node_states`` (-1 if none); the re-drive
-    uses ``max_attempt + 1``.
-
-    Validates its own identity at construction (``__post_init__``) rather than
-    deferring to the downstream ``TokenInfo`` guard: this spec reaches
-    ``reconstruct_token_row`` — which uses ``token_id`` in diagnostics and
-    ``token_data_ref`` as a payload-store key — BEFORE any ``TokenInfo`` is built.
-    NOT NULL (the DB constraint) is not the same as non-empty, so an empty-string
-    identity read from a corrupt/tampered Tier-1 row must crash here, mirroring the
-    sibling identity types (``TokenInfo``, ``ValueSourceFinding``).
-
-    All fields are scalars or None — no deep_freeze guard needed (frozen=True suffices).
+    Identity fields read directly from persisted columns (Tier-1: no defaults,
+    no coercion). ``token_data_ref`` is NULL for fork children and set for
+    expand children and post-coalesce merged tokens.
     """
 
     token_id: str
@@ -96,34 +185,20 @@ class IncompleteTokenSpec:
     max_attempt: int
 
     def __post_init__(self) -> None:
-        """Validate identity invariants at construction time (Tier-1 boundary).
-
-        ``token_id`` and ``row_id`` are the fundamental identity fields — every
-        audit record references them; empty strings would produce valid-looking
-        but meaningless audit entries. The optional lineage/payload fields are
-        either NULL (legitimately not applicable) or non-empty strings — an empty
-        string is anomalous, and ``token_data_ref`` in particular is dereferenced
-        as a payload-store key before any ``TokenInfo`` guard exists.
-        """
-        for _field_name in ("token_id", "row_id"):
-            _value = getattr(self, _field_name)
-            if not isinstance(_value, str):
-                raise TypeError(f"IncompleteTokenSpec.{_field_name} must be str, got {type(_value).__name__}: {_value!r}")
-            if not _value:
-                raise ValueError(f"IncompleteTokenSpec.{_field_name} must not be empty")
-        for _field_name in ("branch_name", "fork_group_id", "join_group_id", "expand_group_id", "token_data_ref"):
-            _value = getattr(self, _field_name)
-            if _value is not None:
-                if not isinstance(_value, str):
-                    raise TypeError(f"IncompleteTokenSpec.{_field_name} must be str or None, got {type(_value).__name__}: {_value!r}")
-                if not _value:
-                    raise ValueError(f"IncompleteTokenSpec.{_field_name} must be None or non-empty string, got {_value!r}")
-
-
-@dataclass(frozen=True, slots=True)
-class _RestoredCheckpointStates:
-    aggregation_state: AggregationCheckpointState | None
-    coalesce_state: CoalesceCheckpointState | None
+        """Validate Tier-1 identity invariants at construction time."""
+        for field_name in ("token_id", "row_id"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str):
+                raise TypeError(f"IncompleteTokenSpec.{field_name} must be str, got {type(value).__name__}: {value!r}")
+            if not value:
+                raise ValueError(f"IncompleteTokenSpec.{field_name} must not be empty")
+        for field_name in ("branch_name", "fork_group_id", "join_group_id", "expand_group_id", "token_data_ref"):
+            value = getattr(self, field_name)
+            if value is not None:
+                if not isinstance(value, str):
+                    raise TypeError(f"IncompleteTokenSpec.{field_name} must be str or None, got {type(value).__name__}: {value!r}")
+                if not value:
+                    raise ValueError(f"IncompleteTokenSpec.{field_name} must be None or non-empty string, got {value!r}")
 
 
 class RecoveryManager:
@@ -131,7 +206,7 @@ class RecoveryManager:
 
     Recovery protocol:
     1. Check if run can be resumed (failed status + checkpoint exists)
-    2. Load checkpoint and aggregation state
+    2. Load checkpoint and barrier scalar metadata
     3. Identify unprocessed rows (sequence > checkpoint.sequence)
     4. Resume processing from checkpoint position
 
@@ -153,7 +228,7 @@ class RecoveryManager:
         """
         self._db = db
         self._checkpoint_manager = checkpoint_manager
-        self._checkpoint_state_cache: dict[_CheckpointStateCacheKey, _RestoredCheckpointStates] = {}
+        self._checkpoint_state_cache: dict[_CheckpointStateCacheKey, BarrierScalars | None] = {}
 
     def can_resume(self, run_id: str, graph: ExecutionGraph) -> ResumeCheck:
         """Check if a run can be resumed.
@@ -177,23 +252,12 @@ class RecoveryManager:
             CheckpointCorruptionError: If schema contract integrity check fails.
                 This is a Tier 1 failure - corruption cannot be silently ignored.
         """
-        run = self._get_run(run_id)
-        if run is None:
-            return ResumeCheck(can_resume=False, reason=f"Run {run_id} not found")
-
-        try:
-            run_status = RunStatus(run.status)
-        except ValueError as exc:
-            raise CheckpointCorruptionError(f"Run {run_id} has invalid status {run.status!r}; audit trail is corrupt") from exc
-
-        if run_status == RunStatus.COMPLETED:
-            return ResumeCheck(can_resume=False, reason="Run already completed successfully")
-
-        if run_status == RunStatus.RUNNING:
-            return ResumeCheck(can_resume=False, reason="Run is still in progress")
-
-        if run_status not in _RESUMABLE_RUN_STATUSES:
-            return ResumeCheck(can_resume=False, reason=f"Run status {run_status.value!r} is not resumable")
+        # Existence + status checks live in check_run_status_resumable so
+        # this advisory surface and the enforcing entry guard in
+        # ResumeCoordinator.resume() share ONE implementation.
+        _run_status, status_check = check_run_status_resumable(self._db, run_id)
+        if not status_check.can_resume:
+            return status_check
 
         try:
             checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
@@ -201,7 +265,14 @@ class RecoveryManager:
             # Return ResumeCheck instead of propagating exception (API contract)
             return ResumeCheck(can_resume=False, reason=str(e))
         if checkpoint is None:
-            return ResumeCheck(can_resume=False, reason="No checkpoint found for recovery")
+            # F1 Task 3.2: journal-flavoured refuse — the checkpoint row is the
+            # run's resume BASELINE (scalars + topology anchor); buffered work
+            # itself lives in journal BLOCKED rows. D4 (Task 3.3) guarantees a
+            # sequence-0 baseline exists for every checkpointing-enabled run.
+            return ResumeCheck(
+                can_resume=False,
+                reason="Run has no resume baseline (run predates run-start checkpointing or checkpointing was disabled)",
+            )
 
         # Validate topological compatibility
         validator = CheckpointCompatibilityValidator()
@@ -222,10 +293,8 @@ class RecoveryManager:
 
         Returns all information needed to resume processing:
         - The checkpoint itself (for audit trail)
-        - Token ID to resume from
-        - Node ID where processing stopped
         - Sequence number for ordering
-        - Deserialized aggregation state (if any)
+        - Deserialized barrier scalar metadata (if any)
 
         Args:
             run_id: The run to get resume point for
@@ -238,12 +307,10 @@ class RecoveryManager:
         if not check.can_resume:
             return None
 
-        # can_resume already loaded this checkpoint and gated IncompatibleCheckpointError
-        # (returning can_resume=False, handled above). get_latest_checkpoint raises that
-        # error deterministically from the stored format_version, so it cannot fire here
-        # after can_resume passed — no defensive re-catch. A checkpoint can still appear or
-        # change between the two reads, which is why we re-load and re-validate topology below.
-        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        try:
+            checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
+        except IncompatibleCheckpointError:
+            return None
         if checkpoint is None:
             return None
 
@@ -252,15 +319,12 @@ class RecoveryManager:
             return None
 
         self.verify_contract_integrity(run_id)
-        restored_states = self._restore_checkpoint_states(checkpoint)
+        barrier_scalars = self._restore_barrier_scalars(checkpoint)
 
         return ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
-            aggregation_state=restored_states.aggregation_state,
-            coalesce_state=restored_states.coalesce_state,
+            barrier_scalars=barrier_scalars,
         )
 
     def get_unprocessed_row_data(
@@ -269,12 +333,18 @@ class RecoveryManager:
         payload_store: PayloadStore,
         *,
         source_schema_class: type[PluginSchema],
-    ) -> list[tuple[str, int, dict[str, Any]]]:
+    ) -> list[ResumedRow]:
         """Get row data for unprocessed rows with type fidelity preservation.
 
         Retrieves actual row data (not just IDs) for rows that need
-        processing during resume. Returns tuples of (row_id, row_index, row_data)
+        processing during resume. Returns ``ResumedRow`` instances
         ordered by row_index for deterministic processing.
+
+        Used on the pre-RC6 single-source resume path where ``run_sources``
+        is empty; every persisted row still carries its originating
+        ``source_node_id`` (NOT NULL per schema), which is preserved on
+        the ResumedRow so downstream consumers can look up the row's
+        schema contract by source node identity (ADR-025 §3).
 
         IMPORTANT: Type Fidelity Preservation (REQUIRED)
         -------------------------------------------------
@@ -298,7 +368,7 @@ class RecoveryManager:
                 The schema must have allow_coercion=True to handle string→typed conversions.
 
         Returns:
-            List of (row_id, row_index, row_data) tuples, ordered by row_index.
+            List of ResumedRow records, ordered by row_index.
             Empty list if run cannot be resumed or all rows were processed.
 
         Raises:
@@ -311,10 +381,15 @@ class RecoveryManager:
         if not row_ids:
             return []
 
-        result: list[tuple[str, int, dict[str, Any]]] = []
+        result: list[ResumedRow] = []
 
         # Batch query: Fetch row metadata in chunks to respect SQLite bind limit.
-        row_metadata: dict[str, tuple[int, str | None]] = {}
+        # ADR-025 §4: source_node_id is now load-bearing on every row, not
+        # just multi-source pipelines. Pre-RC6 audit DBs without
+        # ``run_sources`` records still carry source_node_id on rows
+        # (NOT NULL per schema) and resume must propagate it so downstream
+        # consumers look up the per-row schema contract by source identity.
+        row_metadata: dict[str, tuple[int, NodeID, str | None]] = {}
         with self._db.engine.connect() as conn:
             for i in range(0, len(row_ids), _METADATA_CHUNK_SIZE):
                 chunk = row_ids[i : i + _METADATA_CHUNK_SIZE]
@@ -322,17 +397,18 @@ class RecoveryManager:
                     select(
                         rows_table.c.row_id,
                         rows_table.c.row_index,
+                        rows_table.c.source_node_id,
                         rows_table.c.source_data_ref,
                     ).where(rows_table.c.row_id.in_(chunk))
                 ).fetchall()
                 for r in rows_result:
-                    row_metadata[r.row_id] = (r.row_index, r.source_data_ref)
+                    row_metadata[r.row_id] = (r.row_index, NodeID(r.source_node_id), r.source_data_ref)
 
         for row_id in row_ids:
             if row_id not in row_metadata:
                 raise AuditIntegrityError(f"Row {row_id} not found in database — audit data corruption (Tier 1 violation)")
 
-            row_index, source_data_ref = row_metadata[row_id]
+            row_index, source_node_id, source_data_ref = row_metadata[row_id]
 
             if source_data_ref is None:
                 raise ValueError(
@@ -356,7 +432,7 @@ class RecoveryManager:
                     f"Error: {exc}"
                 ) from exc
 
-            if not isinstance(degraded_data, dict):
+            if type(degraded_data) is not dict:
                 raise AuditIntegrityError(
                     f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
                     f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"
@@ -382,7 +458,118 @@ class RecoveryManager:
                     f"The source plugin's schema must declare fields matching the stored row structure."
                 )
 
-            result.append((row_id, row_index, row_data))
+            result.append(
+                ResumedRow(
+                    row_id=row_id,
+                    row_index=row_index,
+                    source_node_id=source_node_id,
+                    row_data=row_data,
+                )
+            )
+
+        return result
+
+    def get_unprocessed_row_data_by_source(
+        self,
+        run_id: str,
+        payload_store: PayloadStore,
+        *,
+        source_schema_classes: Mapping[NodeID, type[PluginSchema]],
+    ) -> list[ResumedRow]:
+        """Get unprocessed row data with source-scoped type restoration.
+
+        Multi-source resume cannot validate every persisted payload through a
+        single source schema. Rows carry ``source_node_id`` in Landscape, and
+        this method uses that node identity to select the schema class that
+        originally ingested the row. Returns ``ResumedRow`` instances
+        ordered by ``ingest_sequence`` (ADR-025 §4).
+        """
+        row_ids = self.get_unprocessed_rows(run_id)
+        if not row_ids:
+            return []
+
+        row_metadata: dict[str, tuple[int, int, NodeID, str | None]] = {}
+        with self._db.engine.connect() as conn:
+            for i in range(0, len(row_ids), _METADATA_CHUNK_SIZE):
+                chunk = row_ids[i : i + _METADATA_CHUNK_SIZE]
+                rows_result = conn.execute(
+                    select(
+                        rows_table.c.row_id,
+                        rows_table.c.row_index,
+                        rows_table.c.ingest_sequence,
+                        rows_table.c.source_node_id,
+                        rows_table.c.source_data_ref,
+                    ).where(rows_table.c.row_id.in_(chunk))
+                ).fetchall()
+                for r in rows_result:
+                    row_metadata[r.row_id] = (r.row_index, r.ingest_sequence, NodeID(r.source_node_id), r.source_data_ref)
+
+        # Per Three-Tier Trust Model: the audit DB is Tier 1; ``row_ids`` comes
+        # from ``get_unprocessed_rows()`` and ``row_metadata`` is built from the
+        # same DB in the lookup above. A ``row_id`` missing from ``row_metadata``
+        # is internal audit corruption. Let the KeyError raise from the sort
+        # key — no defensive ``else -1`` arm that would silently mis-order
+        # corrupt data before any explicit check could fire.
+        ordered_row_ids = sorted(
+            row_ids,
+            key=lambda row_id: row_metadata[row_id][1],
+        )
+        result: list[ResumedRow] = []
+        for row_id in ordered_row_ids:
+            row_index, _ingest_sequence, source_node_id, source_data_ref = row_metadata[row_id]
+            if source_node_id not in source_schema_classes:
+                raise AuditIntegrityError(
+                    f"Row {row_id} references source_node_id={source_node_id!r}, but resume has no schema class for that source. "
+                    "Per-source run_sources metadata is incomplete or corrupt."
+                )
+
+            if source_data_ref is None:
+                raise ValueError(
+                    f"Row {row_id} has no source_data_ref — row was recorded without "
+                    f"payload storage, so recovery cannot reconstruct its data. "
+                    f"Re-run the pipeline from scratch instead of resuming."
+                )
+
+            try:
+                payload_bytes = payload_store.retrieve(source_data_ref)
+            except PayloadNotFoundError as exc:
+                raise ValueError(f"Row {row_id} payload has been purged (hash={exc.content_hash}) - cannot resume") from exc
+
+            try:
+                degraded_data = json.loads(payload_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise AuditIntegrityError(
+                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
+                    f"cannot decode persisted row data (Tier 1 violation). "
+                    f"Error: {exc}"
+                ) from exc
+
+            if type(degraded_data) is not dict:
+                raise AuditIntegrityError(
+                    f"Corrupt payload for row {row_id} (ref={source_data_ref}) — "
+                    f"expected dict, got {type(degraded_data).__name__} (Tier 1 violation)"
+                )
+
+            source_schema_class = source_schema_classes[source_node_id]
+            validated = source_schema_class.model_validate(degraded_data)
+            row_data = validated.to_row()
+            if degraded_data and not row_data:
+                raise ValueError(
+                    f"Resume failed for row {row_id}: Schema validation returned empty data "
+                    f"but source had {len(degraded_data)} fields. "
+                    f"Schema class '{source_schema_class.__name__}' appears to have no fields defined. "
+                    f"Cannot resume - this would silently discard all row data. "
+                    f"The source plugin's schema must declare fields matching the stored row structure."
+                )
+
+            result.append(
+                ResumedRow(
+                    row_id=row_id,
+                    row_index=row_index,
+                    source_node_id=source_node_id,
+                    row_data=row_data,
+                )
+            )
 
         return result
 
@@ -392,8 +579,9 @@ class RecoveryManager:
         Uses token outcomes to determine which rows need processing:
         - Rows with non-delegation terminal outcomes are done
         - Rows whose tokens lack terminal outcomes need reprocessing
-        - Rows already buffered in checkpoint aggregation state are excluded
-          (they will be restored from checkpoint, not reprocessed)
+        - Rows whose incomplete tokens are all buffered at barriers are
+          excluded (they are restored from journal BLOCKED rows at processor
+          construction, not reprocessed)
 
         This correctly handles multi-sink scenarios where rows are routed to
         different sinks in interleaved order. The previous row_index boundary
@@ -411,11 +599,12 @@ class RecoveryManager:
         if checkpoint is None:
             return []
 
-        # Extract buffered token IDs from checkpoint aggregation state.
-        # These buffered tokens will be restored from checkpoint state and must not
-        # trigger duplicate reprocessing, but row-level exclusion is unsafe when a row
-        # has mixed buffered and non-buffered incomplete tokens.
-        buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint)
+        # Buffered-token exclusion: tokens held at barriers are RESTORED from
+        # journal BLOCKED rows at processor construction (F1), not re-driven
+        # from source, so they must not trigger duplicate reprocessing. Row-level
+        # exclusion is unsafe when a row has mixed buffered and non-buffered
+        # incomplete tokens, hence the all-incomplete-tokens-buffered filter below.
+        buffered_token_ids = self._get_buffered_journal_token_ids(run_id)
 
         with self._db.engine.connect() as conn:
             # CORRECT SEMANTICS FOR FORK/AGGREGATION/COALESCE RECOVERY:
@@ -480,9 +669,9 @@ class RecoveryManager:
             # - Case 3: Has tokens but none have terminal outcomes (delegation only)
             #
             # NOTE: PostgreSQL requires ORDER BY columns to be in SELECT when using DISTINCT.
-            # We select both row_id and row_index, then extract just row_id from results.
+            # We select both row_id and ingest_sequence, then extract just row_id from results.
             query = (
-                select(rows_table.c.row_id, rows_table.c.row_index)
+                select(rows_table.c.row_id, rows_table.c.ingest_sequence)
                 .select_from(rows_table)
                 .outerjoin(
                     tokens_table,
@@ -499,7 +688,7 @@ class RecoveryManager:
                     # Case 3: Has tokens but no terminal outcomes (fork parent only)
                     (~rows_table.c.row_id.in_(rows_with_terminal))
                 )
-                .order_by(rows_table.c.row_index)
+                .order_by(rows_table.c.ingest_sequence)
                 .distinct()
             )
 
@@ -539,42 +728,13 @@ class RecoveryManager:
     def get_incomplete_tokens_by_row(self, run_id: str) -> dict[str, list[IncompleteTokenSpec]]:
         """Return incomplete non-delegation child tokens, grouped by row_id.
 
-        A token is incomplete when it is NOT a delegation marker (FORK_PARENT /
-        EXPAND_PARENT) and has NO completed terminal outcome. Mirrors get_unprocessed_rows'
-        completion semantics (shared _DELEGATION_PATHS) so recovery selection and resume
-        reconstruction cannot drift apart. Returns fork, expand, AND post-coalesce tokens —
-        each is dispatched in resume_incomplete_token.
-
-        BUFFERED-TOKEN EXCLUSION (mirrors get_unprocessed_rows' buffered exclusion):
-        tokens that are buffered in restored aggregation state OR held at a restored
-        coalesce barrier (collected by _get_buffered_checkpoint_token_ids — see that method
-        for the two arms) are EXCLUDED at the token level here. Such tokens are NOT re-driven
-        on resume: they are restored into the executor's in-memory state (aggregation buffer /
-        coalesce _pending) by restore_from_checkpoint and flushed/merged FROM that state.
-        Re-driving them double-emits or crashes the barrier:
-        - A coalesce-held branch re-driven re-arrives at the barrier where it already waits
-          (restored into _pending) → CoalesceExecutor.accept's duplicate-arrival guard fires
-          (OrchestrationInvariantError).
-        - An aggregation-buffered branch re-driven re-enters processing while it is ALSO
-          flushed from the restored buffer at end-of-source → double terminal outcome /
-          duplicate physical sink write.
-
-        Exclusion is at the TOKEN level (filter before grouping), so a row with mixed state
-        (one buffered token + one genuinely-incomplete sibling) still returns the
-        genuinely-incomplete token, while a row whose only incomplete tokens are all buffered
-        does not appear in the returned dict at all. With the same buffered exclusion applied,
-        get_incomplete_tokens_by_row's rows are a subset of get_unprocessed_rows ON THE RESUME
-        PATH — i.e. when a checkpoint exists. This holds for the only caller (resume, gated by
-        can_resume, which requires a checkpoint).
-
-        The subset relation does NOT hold unconditionally: unlike get_unprocessed_rows, this
-        method has no `checkpoint is None -> return []` early-return. With no checkpoint it
-        applies an empty buffered set (a no-op exclusion) and still returns every incomplete
-        token, whereas get_unprocessed_rows returns []. In that (non-resume) case this method's
-        rows are a SUPERSET, not a subset. Safe because the run is unresumable then anyway.
+        A token is incomplete when it is not a delegation marker and has no
+        completed terminal outcome. Tokens held at barriers (journal BLOCKED
+        rows with a barrier_key) are excluded because those are flushed from
+        executor state restored from the journal rather than re-driven from
+        source (F1).
         """
-        checkpoint = self._checkpoint_manager.get_latest_checkpoint(run_id)
-        buffered_token_ids = self._get_buffered_checkpoint_token_ids(checkpoint) if checkpoint is not None else set()
+        buffered_token_ids = self._get_buffered_journal_token_ids(run_id)
 
         with self._db.engine.connect() as conn:
             delegation_tokens = (
@@ -615,23 +775,20 @@ class RecoveryManager:
             rows = conn.execute(query).fetchall()
 
         by_row: dict[str, list[IncompleteTokenSpec]] = {}
-        for r in rows:
-            # Buffered/held tokens are restored-and-flushed from checkpoint state, not
-            # re-driven (see docstring). Exclude at the token level so mixed-state rows
-            # still return their genuinely-incomplete tokens.
-            if r.token_id in buffered_token_ids:
+        for row in rows:
+            if row.token_id in buffered_token_ids:
                 continue
-            by_row.setdefault(r.row_id, []).append(
+            by_row.setdefault(row.row_id, []).append(
                 IncompleteTokenSpec(
-                    token_id=r.token_id,
-                    row_id=r.row_id,
-                    branch_name=r.branch_name,
-                    fork_group_id=r.fork_group_id,
-                    join_group_id=r.join_group_id,
-                    expand_group_id=r.expand_group_id,
-                    token_data_ref=r.token_data_ref,
-                    step_in_pipeline=r.step_in_pipeline,
-                    max_attempt=-1 if r.max_attempt is None else int(r.max_attempt),
+                    token_id=row.token_id,
+                    row_id=row.row_id,
+                    branch_name=row.branch_name,
+                    fork_group_id=row.fork_group_id,
+                    join_group_id=row.join_group_id,
+                    expand_group_id=row.expand_group_id,
+                    token_data_ref=row.token_data_ref,
+                    step_in_pipeline=row.step_in_pipeline,
+                    max_attempt=-1 if row.max_attempt is None else int(row.max_attempt),
                 )
             )
         return by_row
@@ -643,34 +800,9 @@ class RecoveryManager:
         source_row: PipelineRow,
         payload_store: PayloadStore,
     ) -> PipelineRow:
-        """Build the PipelineRow to re-drive an incomplete token with.
-
-        Fork children share the source payload → return source_row unchanged. Expand
-        children / post-coalesce tokens carry a self-contained {data, contract} envelope
-        in token_data_ref → restore both type-faithfully (checkpoint_loads +
-        SchemaContract.from_checkpoint, which hash-validates the contract). No nodes-table
-        lookup: the contract the token was produced under is persisted with its payload
-        (ADDENDUM 3 — nodes.output_contract_json is NULL for non-source nodes in prod,
-        making the nodes-table approach unsalvageable).
-
-        Args:
-            spec: IncompleteTokenSpec from get_incomplete_tokens_by_row.
-            run_id: The run being resumed (for diagnostic messages).
-            source_row: The source PipelineRow for this row_id (used for fork children
-                that share the parent/source payload).
-            payload_store: PayloadStore to retrieve token_data_ref bytes from.
-
-        Returns:
-            PipelineRow to re-drive the incomplete token with.
-
-        Raises:
-            ValueError: If token_data_ref is set but the payload has been purged.
-            AuditIntegrityError: If the retrieved payload is not a valid {data, contract}
-                envelope (Tier-1 corruption guard), or if the contract hash does not match
-                (via SchemaContract.from_checkpoint — Tier-1 integrity).
-        """
+        """Build the PipelineRow to re-drive an incomplete token with."""
         if spec.token_data_ref is None:
-            return source_row  # fork child — shares the source payload
+            return source_row
 
         try:
             payload_bytes = payload_store.retrieve(spec.token_data_ref)
@@ -688,60 +820,68 @@ class RecoveryManager:
                 f"Got type={type(envelope).__name__!r}."
             )
 
-        # SchemaContract.from_checkpoint validates the version_hash (Tier-1 integrity).
-        # It raises AuditIntegrityError if the hash does not match — crash is correct,
-        # the contract stored in the audit trail is our data (Tier-1) and must be pristine.
         contract = SchemaContract.from_checkpoint(envelope["contract"])
         return PipelineRow(envelope["data"], contract)
 
-    def _get_buffered_checkpoint_token_ids(self, checkpoint: Checkpoint) -> set[str]:
-        """Collect token IDs restored from checkpoint state."""
-        buffered_token_ids: set[str] = set()
+    def _get_buffered_journal_token_ids(self, run_id: str) -> set[str]:
+        """Collect token IDs held at barriers in the scheduler journal.
 
-        restored_states = self._restore_checkpoint_states(checkpoint)
-        if restored_states.aggregation_state is not None:
-            for node_checkpoint in restored_states.aggregation_state.nodes.values():
-                for token in node_checkpoint.tokens:
-                    buffered_token_ids.add(token.token_id)
+        F1: journal BLOCKED rows (token_work_items) own buffered token
+        payloads; resume restores them into executor buffers at processor
+        construction, so they are excluded from the re-drive work set.
 
-        if restored_states.coalesce_state is not None:
-            for pending in restored_states.coalesce_state.pending:
-                for coalesce_token in pending.branches.values():
-                    buffered_token_ids.add(coalesce_token.token_id)
+        The shared ``blocked_barrier_hold_clause`` predicate keeps ADR-028
+        queue-holds IN the re-drive work set — a queue-held token is
+        throttled, not waiting at a barrier, and nothing restores it if
+        resume skips it.
+        """
+        with self._db.engine.connect() as conn:
+            rows = (
+                conn.execute(
+                    select(token_work_items_table.c.token_id)
+                    .where(token_work_items_table.c.run_id == run_id)
+                    .where(blocked_barrier_hold_clause())
+                )
+                .scalars()
+                .all()
+            )
+        return set(rows)
 
-        return buffered_token_ids
+    def count_blocked_barrier_items(self, run_id: str) -> int:
+        """Count journal BLOCKED barrier holds for a run.
 
-    def _restore_checkpoint_states(self, checkpoint: Checkpoint) -> _RestoredCheckpointStates:
-        """Deserialize typed checkpoint states once per observed checkpoint payload."""
-        key = (
-            checkpoint.checkpoint_id,
-            checkpoint.aggregation_state_json,
-            checkpoint.coalesce_state_json,
-        )
+        Public resume-inspection surface (F1): "what will be restored rather
+        than re-driven" is the journal's BLOCKED rows with a non-NULL
+        ``barrier_key``. Used by the resume coordinator's quiescence gate
+        (a run with zero unprocessed rows but blocked barrier work must NOT
+        early-complete) and by the CLI resume preflight display.
+        """
+        with self._db.engine.connect() as conn:
+            result = conn.execute(
+                select(func.count())
+                .select_from(token_work_items_table)
+                .where(token_work_items_table.c.run_id == run_id)
+                .where(blocked_barrier_hold_clause())
+            ).scalar_one()
+        return int(result)
+
+    def _restore_barrier_scalars(self, checkpoint: Checkpoint) -> BarrierScalars | None:
+        """Deserialize barrier scalar metadata once per observed checkpoint payload."""
+        key = (checkpoint.checkpoint_id, checkpoint.barrier_scalars_json)
         if key in self._checkpoint_state_cache:
-            cached = self._checkpoint_state_cache[key]
-            return cached
+            return self._checkpoint_state_cache[key]
 
-        agg_state = None
-        if checkpoint.aggregation_state_json:
-            # Use checkpoint_loads for type restoration (datetime -> datetime, not string)
-            raw = checkpoint_loads(checkpoint.aggregation_state_json)
-            agg_state = AggregationCheckpointState.from_dict(raw)
+        scalars: BarrierScalars | None = None
+        if checkpoint.barrier_scalars_json:
+            # checkpoint_loads preserves float fidelity for the trigger-offset latches
+            raw = checkpoint_loads(checkpoint.barrier_scalars_json)
+            scalars = BarrierScalars.from_dict(raw)
 
-        coalesce_state = None
-        if checkpoint.coalesce_state_json:
-            raw = checkpoint_loads(checkpoint.coalesce_state_json)
-            coalesce_state = CoalesceCheckpointState.from_dict(raw)
-
-        restored = _RestoredCheckpointStates(
-            aggregation_state=agg_state,
-            coalesce_state=coalesce_state,
-        )
         if len(self._checkpoint_state_cache) >= _CHECKPOINT_STATE_CACHE_MAX:
             oldest_key = next(iter(self._checkpoint_state_cache))
             del self._checkpoint_state_cache[oldest_key]
-        self._checkpoint_state_cache[key] = restored
-        return restored
+        self._checkpoint_state_cache[key] = scalars
+        return scalars
 
     def _get_run(self, run_id: str) -> Row[Any] | None:
         """Get run metadata from the database.
@@ -752,61 +892,90 @@ class RecoveryManager:
         Returns:
             Row result with run data, or None if not found
         """
-        with self._db.engine.connect() as conn:
-            result = conn.execute(select(runs_table).where(runs_table.c.run_id == run_id)).fetchone()
-
-        return result
+        return _fetch_run(self._db, run_id)
 
     def verify_contract_integrity(self, run_id: str) -> SchemaContract:
         """Verify schema contract integrity for a run.
 
-        Retrieves the stored schema contract and verifies its integrity
-        via hash comparison. This is a Tier 1 check - missing or corrupt
-        contracts indicate audit trail tampering or database corruption.
+        Per ADR-025 §3 Decision 5, ``run_sources.schema_contract_json`` is the
+        single authoritative writer/reader for per-source schema contracts;
+        ``runs.schema_contract_json`` is no longer consulted. Every declared
+        source in a run must have a recorded contract before any row from
+        that source enters the pipeline (Fix 2 in the multi-source-token-
+        scheduler change set), so missing rows here mean the audit trail
+        was never populated — Tier-1 corruption.
+
+        Verifies hash integrity on every source's contract. Returns the
+        contract of the lowest-ordered ``source_node_id`` (deterministic)
+        for the legacy single-source consumer surface — multi-source
+        callers must reach into ``RunLifecycleRepository.get_run_source_resume_records``
+        for per-source contracts.
 
         Args:
             run_id: Run to verify
 
         Returns:
-            SchemaContract - always returns a valid contract
+            SchemaContract - the first source's contract, ordered by ``source_node_id``.
 
         Raises:
-            CheckpointCorruptionError: If contract is missing OR hash mismatch detected.
+            CheckpointCorruptionError: If no ``run_sources`` rows exist, if any
+                stored contract is missing, malformed, or has mismatched hash,
+                or if the run itself doesn't exist.
                 Per CLAUDE.md Tier-1 trust model: "Bad data in the audit trail = crash immediately"
-                Missing contract is treated as corruption - NO backward compatibility.
         """
         factory = RecorderFactory(self._db)
 
+        # Verify the run exists (Tier-1: missing run = corruption surfaced to caller).
+        if factory.run_lifecycle.get_run(run_id) is None:
+            raise CheckpointCorruptionError(f"Run '{run_id}' not found in audit trail. Resume cannot proceed against an unrecorded run.")
+
         try:
-            contract = factory.run_lifecycle.get_run_contract(run_id)
+            source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
         except AuditIntegrityError as e:
-            # get_run_contract raises AuditIntegrityError for hash verification failures
-            # and run-not-found. Convert to CheckpointCorruptionError for checkpoint-specific context.
+            # get_run_source_resume_records raises AuditIntegrityError on every per-source
+            # corruption mode: missing schema JSON, missing contract JSON, missing or
+            # mismatched contract hash. Convert to CheckpointCorruptionError so the
+            # checkpoint-resume call surface stays a single exception type.
             raise CheckpointCorruptionError(
                 f"Contract integrity verification failed for run '{run_id}': {e}. "
-                f"Resume aborted - audit trail may be corrupted or tampered with."
+                f"Resume aborted - per-source contract metadata is corrupt or missing."
             ) from e
         except (ValueError, KeyError) as e:
-            # get_run_contract deserializes via ContractAuditRecord.from_json, which raises
-            # json.JSONDecodeError (subclass of ValueError) for malformed JSON, or KeyError
-            # for missing required fields. Both indicate Tier 1 data corruption — stored
-            # contract JSON is garbage.
+            # ContractAuditRecord.from_json() raises json.JSONDecodeError (subclass of
+            # ValueError) for malformed JSON, or KeyError for missing required fields.
+            # Both indicate Tier-1 data corruption — stored contract JSON is garbage.
             raise CheckpointCorruptionError(
                 f"Contract integrity verification failed for run '{run_id}': {e}. "
-                f"Resume aborted - stored contract JSON is malformed (database corruption)."
+                f"Resume aborted - stored per-source contract JSON is malformed (database corruption)."
             ) from e
 
-        if contract is None:
-            # TIER-1 AUDIT INTEGRITY: Missing contract = audit trail corruption
-            # Per CLAUDE.md: "Bad data in the audit trail = crash immediately"
-            # Per NO LEGACY CODE POLICY: No backward compatibility for pre-contract runs
-            raise CheckpointCorruptionError(
-                f"Schema contract is missing from audit trail for run '{run_id}'. "
-                f"This indicates either:\n"
-                f"  1. The audit database is corrupt or incomplete\n"
-                f"  2. The run was started with a version that didn't record contracts\n"
-                f"Resume cannot proceed safely without the schema contract. "
-                f"The audit trail must be complete and trustworthy."
-            )
+        if not source_records:
+            # ADR-025 §3: a run with no ``run_sources`` rows reflects the
+            # "nothing to resume, start fresh" outcome — typically an
+            # ``on_start`` failure, a source-level abort before the first
+            # ingest, or an infrastructure crash before any row was
+            # persisted. The audit DB is intact and truthfully records
+            # that the run did no work; it is NOT Tier-1 corruption.
+            #
+            # Raising ``EmptyResumeStateError`` here lets the CLI present
+            # a clean "this run is not resumable; start a fresh run"
+            # message rather than the audit-corruption traceback the
+            # legacy ``CheckpointCorruptionError`` produced — that was
+            # the reachability gap reported by elspeth-241608388f, where
+            # the CLI's outer ``try`` lacked any handler for the
+            # corruption-typed bubble and the operator saw a misleading
+            # invariant traceback for a benign outcome.
+            #
+            # ``EmptyResumeStateError`` is a subclass of
+            # ``OrchestrationInvariantError`` so any existing
+            # ``except OrchestrationInvariantError`` catch still
+            # matches it by type; the CLI catches the typed exception
+            # explicitly before the broader Tier-1 handler.
+            raise EmptyResumeStateError(run_id=run_id)
 
-        return contract
+        # Deterministic single-source return for the legacy caller surface.
+        # Multi-source callers should reach into ``get_run_source_resume_records``
+        # for per-source contracts; this method only confirms integrity and
+        # exposes the canonical first-source view for the unit-test contract.
+        first_source_node_id = sorted(source_records)[0]
+        return source_records[first_source_node_id].schema_contract

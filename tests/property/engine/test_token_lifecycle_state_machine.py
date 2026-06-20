@@ -179,7 +179,7 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
 
         # Begin a run
         self.run = self.factory.run_lifecycle.begin_run(
-            config={"source": {"plugin": "test"}, "sinks": {"default": {"plugin": "test"}}},
+            config={"sources": {"primary": {"plugin": "test"}}, "sinks": {"default": {"plugin": "test"}}},
             canonical_version="1.0",
         )
 
@@ -236,6 +236,8 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
             source_node_id=self.source_node.node_id,
             row_index=self.row_index,
             data=data,
+            source_row_index=self.row_index,
+            ingest_sequence=self.row_index,
         )
         self.row_index += 1
 
@@ -566,8 +568,16 @@ class TokenLifecycleStateMachine(RuleBasedStateMachine):
                 ).fetchone()
 
                 if result is not None and result[0] is not None:
-                    # This is a merged token - verify it has parent links
-                    parent_ids = get_token_parent_ids(self.db, token_id)
+                    # This is a merged token - verify it has parent links.
+                    # Query on the SAME connection: opening a second
+                    # db.connection() here would nest transactions on the
+                    # in-memory StaticPool under the write-intent begin
+                    # discipline (one DBAPI connection, explicit BEGINs).
+                    parent_rows = conn.execute(
+                        text("SELECT parent_token_id FROM token_parents WHERE token_id = :token_id"),
+                        {"token_id": token_id},
+                    ).fetchall()
+                    parent_ids = [r[0] for r in parent_rows]
                     assert len(parent_ids) >= 2, f"Merged token {token_id} should have at least 2 parents, got {len(parent_ids)}"
 
     @invariant()
@@ -600,7 +610,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -618,6 +628,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data={"value": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             # Create multiple tokens for same row
@@ -635,7 +647,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -653,6 +665,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data={"value": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             token = factory.data_flow.create_token(row_id=row.row_id)
@@ -693,7 +707,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -711,6 +725,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data=data,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             token = factory.data_flow.create_token(row_id=row.row_id)
@@ -753,7 +769,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -771,6 +787,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data=data,
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             token = factory.data_flow.create_token(row_id=row.row_id)
@@ -802,7 +820,7 @@ class TestTokenLifecycleInvariants:
             factory = make_factory(db)
 
             run = factory.run_lifecycle.begin_run(
-                config={"source": {"plugin": "test"}},
+                config={"sources": {"primary": {"plugin": "test"}}},
                 canonical_version="1.0",
             )
 
@@ -820,6 +838,8 @@ class TestTokenLifecycleInvariants:
                 source_node_id=source_node.node_id,
                 row_index=0,
                 data={"value": 1},
+                source_row_index=0,
+                ingest_sequence=0,
             )
 
             # Create parent token and fork with variable number of branches

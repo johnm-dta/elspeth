@@ -300,6 +300,24 @@ class TestExtractPluginAttributes:
         assert attrs.class_name == "MyPlugin"
         assert attrs.source_file_hash is None
 
+    def test_extract_detects_plugin_named_by_module_constant(self, tmp_path: Path) -> None:
+        """A module-level string constant used as `name` still marks a plugin."""
+        source = """\
+            PLUGIN_NAME = "dynamic"
+
+            class DynamicSource:
+                name = PLUGIN_NAME
+                plugin_version = "1.0.0"
+                source_file_hash = None
+        """
+        file_path = _write_plugin(tmp_path, source)
+        results = extract_plugin_attributes(file_path)
+
+        assert len(results) == 1
+        attrs = results[0]
+        assert attrs.class_name == "DynamicSource"
+        assert attrs.source_file_hash is None
+
     def test_extract_ignores_non_plugin_classes(self, tmp_path: Path) -> None:
         """Classes without a `name` class attribute are not plugin classes."""
         source = """\

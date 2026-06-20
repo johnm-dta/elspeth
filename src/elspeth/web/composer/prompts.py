@@ -138,8 +138,8 @@ def _state_referenced_plugins(state: CompositionState) -> set[tuple[str, str]]:
     ``schemas_referenced_by_state`` and ``schemas_gap`` telemetry fields.
     """
     referenced: set[tuple[str, str]] = set()
-    if state.source is not None:
-        referenced.add(("source", state.source.plugin))
+    for source in state.sources.values():
+        referenced.add(("source", source.plugin))
     for node in state.nodes:
         # gate / coalesce nodes have plugin=None — no plugin-options
         # schema to load, so they don't contribute to the gap.
@@ -231,7 +231,7 @@ def build_context_string(
     def _format_pairs(pairs: set[tuple[str, str]] | frozenset[tuple[str, str]]) -> list[str]:
         return sorted(f"{kind}/{plugin}" for (kind, plugin) in pairs)
 
-    state_exists = state.source is not None or bool(state.nodes) or bool(state.outputs)
+    state_exists = bool(state.sources) or bool(state.nodes) or bool(state.outputs)
 
     if schemas_loaded is _SCHEMAS_LOADED_UNSET:
         schemas_loaded_view: list[str] = [_SCHEMAS_LOADED_UNSET_MARKER]

@@ -185,25 +185,26 @@ def find_type_definitions(file_path: Path) -> list[tuple[str, int, str]]:
         if isinstance(node, ast.ClassDef):
             # Check for @dataclass decorator
             for decorator in node.decorator_list:
-                is_dataclass_name = isinstance(decorator, ast.Name) and decorator.id == "dataclass"
-                is_dataclass_call = (
-                    isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == "dataclass"
-                )
-                if is_dataclass_name or is_dataclass_call:
+                decorator_target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                decorator_name = _dotted_name(decorator_target)
+                if decorator_name is not None and decorator_name.rsplit(".", 1)[-1] == "dataclass":
                     definitions.append((node.name, node.lineno, "dataclass"))
 
             # Check for TypedDict, NamedTuple, Enum base classes
             for base in node.bases:
-                if isinstance(base, ast.Name):
-                    if base.id == "TypedDict":
-                        definitions.append((node.name, node.lineno, "TypedDict"))
-                    elif base.id == "NamedTuple":
-                        definitions.append((node.name, node.lineno, "NamedTuple"))
-                    elif base.id == "Enum":
-                        definitions.append((node.name, node.lineno, "Enum"))
-                    elif base.id in ("BaseModel", "PluginSchema"):
-                        # Pydantic models in config are OK (trust boundary)
-                        pass
+                base_name = _dotted_name(base)
+                if base_name is None:
+                    continue
+                base_leaf = base_name.rsplit(".", 1)[-1]
+                if base_leaf == "TypedDict":
+                    definitions.append((node.name, node.lineno, "TypedDict"))
+                elif base_leaf == "NamedTuple":
+                    definitions.append((node.name, node.lineno, "NamedTuple"))
+                elif base_leaf == "Enum":
+                    definitions.append((node.name, node.lineno, "Enum"))
+                elif base_leaf in ("BaseModel", "PluginSchema"):
+                    # Pydantic models in config are OK (trust boundary)
+                    pass
 
     return definitions
 
@@ -461,6 +462,11 @@ class ImportIndex:
     # Map from file to its top-level module (cached)
     _file_modules: dict[Path, str] = field(default_factory=dict)
 
+    def _record_import(self, module: str, name: str, py_file: Path) -> None:
+        bucket = self._by_import.setdefault((module, name), [])
+        if py_file not in bucket:
+            bucket.append(py_file)
+
     @classmethod
     def build(cls, src_dir: Path) -> ImportIndex:
         """Parse all Python files once and build the import index."""
@@ -474,11 +480,27 @@ class ImportIndex:
 
             index._file_modules[py_file] = get_top_level_module(py_file, src_dir)
 
+            import_aliases: dict[str, str] = {}
+            imported_modules: set[str] = set()
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module:
                     for alias in node.names:
-                        key = (node.module, alias.name)
-                        index._by_import.setdefault(key, []).append(py_file)
+                        index._record_import(node.module, alias.name, py_file)
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.asname:
+                            import_aliases[alias.asname] = alias.name
+                        else:
+                            imported_modules.add(alias.name)
+
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Attribute):
+                    continue
+                usage = _qualified_import_usage(node, import_aliases, imported_modules)
+                if usage is None:
+                    continue
+                module, name = usage
+                index._record_import(module, name, py_file)
 
         return index
 
@@ -491,7 +513,7 @@ class ImportIndex:
         for (module, name), importing_files in self._by_import.items():
             if name != type_name:
                 continue
-            if defining_module not in module:
+            if not _module_matches_definition(module, defining_module):
                 continue
             for py_file in importing_files:
                 if py_file == defining_file:
@@ -501,6 +523,53 @@ class ImportIndex:
                 usages.append(py_file)
 
         return usages
+
+
+def _module_matches_definition(imported_module: str, defining_module: str) -> bool:
+    return imported_module == defining_module or imported_module.endswith(f".{defining_module}")
+
+
+def _qualified_import_usage(
+    node: ast.Attribute,
+    import_aliases: dict[str, str],
+    imported_modules: set[str],
+) -> tuple[str, str] | None:
+    dotted = _dotted_name(node)
+    if dotted is None:
+        return None
+
+    parts = dotted.split(".")
+    if len(parts) < 2:
+        return None
+
+    alias_target = import_aliases.get(parts[0])
+    if alias_target is not None:
+        resolved_parts = [alias_target, *parts[1:]]
+        return ".".join(resolved_parts[:-1]), resolved_parts[-1]
+
+    for imported_module in sorted(imported_modules, key=len, reverse=True):
+        prefix = f"{imported_module}."
+        if not dotted.startswith(prefix):
+            continue
+        remainder = dotted[len(prefix) :]
+        if not remainder:
+            continue
+        remainder_parts = remainder.split(".")
+        module_parts = [imported_module, *remainder_parts[:-1]]
+        return ".".join(module_parts), remainder_parts[-1]
+
+    return None
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        parent = _dotted_name(node.value)
+        if parent is None:
+            return None
+        return f"{parent}.{node.attr}"
+    return None
 
 
 def find_cross_boundary_usages(src_dir: Path, type_name: str, defining_file: Path) -> list[Path]:

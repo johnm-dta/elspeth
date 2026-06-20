@@ -35,6 +35,7 @@ Current architecture and design references.
 - [Landscape System](architecture/landscape.md) — audit trail architecture
 - [Landscape Entry Points](architecture/landscape-entry-points.md) — where audit records are created
 - [Telemetry](architecture/telemetry.md) — operational visibility architecture
+- [Barrier Machinery](architecture/barrier-machinery.md) — aggregation and coalesce as structural twins; paired-surfaces table and paired-change checklist
 - [ADR Index](architecture/adr/README.md) — accepted architecture decisions
 
 ## Contracts

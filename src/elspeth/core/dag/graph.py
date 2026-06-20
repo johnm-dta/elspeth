@@ -52,6 +52,7 @@ if TYPE_CHECKING:
         AggregationSettings,
         CoalesceSettings,
         GateSettings,
+        QueueSettings,
         SourceSettings,
     )
     from elspeth.core.dag.models import WiredTransform
@@ -159,6 +160,7 @@ class ExecutionGraph:
         self._route_resolution_map: dict[tuple[NodeID, str], RouteDestination] = {}
         self._pipeline_nodes: list[NodeID] | None = None  # Ordered processing nodes (no source/sinks); None = not yet populated
         self._node_step_map: dict[NodeID, int] = {}  # node_id -> audit step (source=0)
+        self._validation_warnings: tuple[GraphValidationWarning, ...] = ()
 
     @property
     def node_count(self) -> int:
@@ -282,11 +284,12 @@ class ExecutionGraph:
 
         Validates:
         1. Graph is acyclic (no cycles)
-        2. Exactly one source node exists
+        2. One or more source nodes exist
         3. At least one sink node exists
-        4. All nodes are reachable from source (no disconnected/orphaned nodes)
+        4. All nodes are reachable from at least one source (no disconnected/orphaned nodes)
         5. Edge labels are unique per source node
         6. Every gate→sink MOVE edge has a corresponding route label entry
+        7. Fan-in to ordinary executable nodes is explicit through QUEUE nodes
 
         Does NOT check schema compatibility - plugins validate their own
         schemas during construction.
@@ -304,21 +307,22 @@ class ExecutionGraph:
             except nx.NetworkXNoCycle as exc:
                 raise GraphValidationError("Graph contains a cycle") from exc
 
-        # Check for exactly one source
+        # Check for one or more sources
         # All nodes have "info" - added via add_node(), direct access is safe
         sources = [node_id for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == NodeType.SOURCE]
-        if len(sources) != 1:
-            raise GraphValidationError(f"Graph must have exactly one source, found {len(sources)}")
+        if not sources:
+            raise GraphValidationError("Graph must have at least one source")
 
         # Check for at least one sink
         sinks = self.get_sinks()
         if len(sinks) < 1:
             raise GraphValidationError("Graph must have at least one sink")
 
-        # Check for unreachable nodes (nodes not reachable from source)
-        source_id = sources[0]  # We already validated exactly one source exists
-        reachable = nx.descendants(self._graph, source_id)
-        reachable.add(source_id)  # Include source itself in reachable set
+        # Check for unreachable nodes (nodes not reachable from any source)
+        reachable: set[str] = set()
+        for source_id in sources:
+            reachable.update(nx.descendants(self._graph, source_id))
+            reachable.add(source_id)
 
         all_nodes = set(self._graph.nodes())
         unreachable = all_nodes - reachable
@@ -329,8 +333,30 @@ class ExecutionGraph:
             raise GraphValidationError(
                 f"Graph validation failed: {len(unreachable)} unreachable node(s) detected:\n"
                 f"  {', '.join(unreachable_details)}\n"
-                f"All nodes must be reachable from the source node '{source_id}'."
+                f"All nodes must be reachable from at least one source node."
             )
+
+        for node_id_str, node_attrs in self._graph.nodes(data=True):
+            node_info = cast(NodeInfo, node_attrs["info"])
+            # QUEUE and COALESCE are structural join primitives. SINK is a
+            # terminal write boundary: ADR-025 Decision 9 allows direct
+            # multi-source fan-in here, with ingest_sequence as the ordering
+            # authority. Ordinary processing nodes must still route through
+            # an explicit QUEUE.
+            if node_info.node_type in {NodeType.QUEUE, NodeType.SINK, NodeType.COALESCE}:
+                continue
+            incoming_move_predecessors = {
+                from_id
+                for from_id, _to_id, _key, edge_data in self._graph.in_edges(node_id_str, keys=True, data=True)
+                if edge_data["mode"] == RoutingMode.MOVE
+            }
+            if len(incoming_move_predecessors) > 1:
+                raise GraphValidationError(
+                    f"Node '{node_id_str}' has fan-in from multiple producers without a queue. "
+                    "Route multiple producers through an explicit queue node before ordinary processing.",
+                    component_id=node_id_str,
+                    component_type=node_info.node_type.value,
+                )
 
         # Check outgoing edge labels are unique per node.
         # The orchestrator's edge_map keys by (from_node, label), so duplicate
@@ -415,20 +441,9 @@ class ExecutionGraph:
         except nx.NetworkXUnfeasible as e:
             raise GraphValidationError(f"Cannot sort graph: {e}") from e
 
-    def get_source(self) -> NodeID:
-        """Get the source node ID.
-
-        Returns:
-            The source node ID.
-
-        Raises:
-            GraphValidationError: If not exactly one source exists (construction bug).
-        """
-        # All nodes have "info" - added via add_node(), direct access is safe
-        sources = [NodeID(node_id) for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == NodeType.SOURCE]
-        if len(sources) != 1:
-            raise GraphValidationError(f"Expected exactly 1 source node, found {len(sources)}. This indicates a graph construction bug.")
-        return sources[0]
+    def get_sources(self) -> list[NodeID]:
+        """Get all source node IDs."""
+        return [NodeID(node_id) for node_id, data in self._graph.nodes(data=True) if data["info"].node_type == NodeType.SOURCE]
 
     def get_sinks(self) -> list[NodeID]:
         """Get all sink node IDs.
@@ -543,16 +558,6 @@ class ExecutionGraph:
         """Check if a node is a sink node."""
         return self.get_node_info(node_id).node_type == NodeType.SINK
 
-    def get_first_transform_node(self) -> NodeID | None:
-        """Get the first processing node after source via continue edge.
-
-        Returns:
-            Node ID of the first processing node (transform/gate/aggregation),
-            or None for source-only pipelines.
-        """
-        source_id = self.get_source()
-        return self.get_next_node(source_id)
-
     def get_next_node(self, node_id: NodeID) -> NodeID | None:
         """Follow the continue MOVE edge to the next processing node.
 
@@ -586,12 +591,16 @@ class ExecutionGraph:
         if self._pipeline_nodes is not None:
             return list(self._pipeline_nodes)
 
-        first_node = self.get_first_transform_node()
-        if first_node is None:
+        sources = self.get_sources()
+        if not sources:
             return []
 
         reachable: set[NodeID] = set()
-        pending: list[NodeID] = [first_node]
+        pending: list[NodeID] = []
+        for source_id in sources:
+            next_node = self.get_next_node(source_id)
+            if next_node is not None:
+                pending.append(next_node)
         while pending:
             current = pending.pop()
             if current in reachable:
@@ -609,10 +618,10 @@ class ExecutionGraph:
         return [node_id for node_id in (NodeID(node) for node in self.topological_order()) if node_id in reachable]
 
     def build_step_map(self) -> dict[NodeID, int]:
-        """Build node -> audit step map (source=0, processing nodes start at 1)."""
-        source_id = self.get_source()
+        """Build node -> audit step map (sources=0, processing nodes start at 1)."""
+        source_ids = self.get_sources()
 
-        step_map: dict[NodeID, int] = {source_id: 0}
+        step_map: dict[NodeID, int] = dict.fromkeys(source_ids, 0)
         for idx, node_id in enumerate(self.get_pipeline_node_sequence(), start=1):
             step_map[node_id] = idx
 
@@ -667,13 +676,15 @@ class ExecutionGraph:
     @classmethod
     def from_plugin_instances(
         cls,
-        source: SourceProtocol,
-        source_settings: SourceSettings,
-        transforms: Sequence[WiredTransform],
-        sinks: Mapping[str, SinkProtocol],
-        aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]],
-        gates: Sequence[GateSettings],
+        *,
+        sources: Mapping[str, SourceProtocol],
+        source_settings_map: Mapping[str, SourceSettings],
+        transforms: Sequence[WiredTransform] = (),
+        sinks: Mapping[str, SinkProtocol] | None = None,
+        aggregations: Mapping[str, tuple[TransformProtocol, AggregationSettings]] | None = None,
+        gates: Sequence[GateSettings] = (),
         coalesce_settings: Sequence[CoalesceSettings] | None = None,
+        queues: Mapping[str, QueueSettings] | None = None,
     ) -> ExecutionGraph:
         """Build ExecutionGraph from plugin instances.
 
@@ -683,14 +694,20 @@ class ExecutionGraph:
         Routing is explicit: terminal transforms and sources declare their
         output sink via on_success. There is no default_sink fallback.
 
+        Per ADR-025 §2 the source surface is plural-only: callers pass
+        ``sources`` and ``source_settings_map`` keyed by source name. The
+        prior singular ``source=`` / ``source_settings=`` keyword
+        arguments and their legacy single-source facade are deleted.
+
         Args:
-            source: Instantiated source plugin
-            source_settings: Source settings (wiring metadata)
+            sources: Named source plugin instances (one or more per graph).
+            source_settings_map: Source settings keyed by the same source names.
             transforms: Wired transforms (plugin instance + settings metadata)
             sinks: Dict of sink_name -> instantiated sink
             aggregations: Dict of agg_name -> (transform_instance, AggregationSettings)
             gates: Config-driven gate settings
             coalesce_settings: Coalesce configs for fork/join patterns
+            queues: Declared pass-through scheduling queues
 
         Returns:
             ExecutionGraph with schemas populated
@@ -704,13 +721,14 @@ class ExecutionGraph:
 
         return build_execution_graph(
             cls=cls,
-            source=source,
-            source_settings=source_settings,
+            sources=sources,
+            source_settings_map=source_settings_map,
             transforms=transforms,
             sinks=sinks,
             aggregations=aggregations,
             gates=gates,
             coalesce_settings=coalesce_settings,
+            queues=queues,
         )
 
     # ===== PUBLIC SETTERS (construction-time) =====
@@ -755,6 +773,10 @@ class ExecutionGraph:
         """Set the node_id -> audit step mapping."""
         self._node_step_map = dict(mapping)
 
+    def set_validation_warnings(self, warnings: Sequence[GraphValidationWarning]) -> None:
+        """Set non-fatal graph construction warnings."""
+        self._validation_warnings = tuple(warnings)
+
     def add_route_resolution_entry(self, gate_id: NodeID, label: str, dest: RouteDestination) -> None:
         """Add a single entry to the route resolution map."""
         self._route_resolution_map[(gate_id, label)] = dest
@@ -773,6 +795,11 @@ class ExecutionGraph:
             No substring matching required - use this for direct lookup.
         """
         return dict(self._sink_id_map)
+
+    @property
+    def validation_warnings(self) -> tuple[GraphValidationWarning, ...]:
+        """Non-fatal graph construction warnings emitted during build."""
+        return self._validation_warnings
 
     def get_transform_id_map(self) -> dict[int, NodeID]:
         """Get explicit sequence -> node_id mapping for transforms.

@@ -26,6 +26,7 @@ from elspeth.web.secrets.schemas import (
     ValidateSecretResponse,
 )
 from elspeth.web.secrets.service import WebSecretService
+from elspeth.web.validation import validate_secret_name
 
 
 def create_secrets_router() -> APIRouter:
@@ -42,6 +43,12 @@ def create_secrets_router() -> APIRouter:
     def _get_settings(request: Request) -> WebSettings:
         settings: WebSettings = request.app.state.settings
         return settings
+
+    def _validated_path_secret_name(name: str) -> str:
+        try:
+            return validate_secret_name(name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="Invalid secret name") from exc
 
     @router.get("", response_model=list[SecretInventoryResponse])
     async def list_secrets(
@@ -113,6 +120,7 @@ def create_secrets_router() -> APIRouter:
 
         Returns 204 on success, 404 if the secret does not exist for this user.
         """
+        name = _validated_path_secret_name(name)
         service = _get_service(request)
         settings = _get_settings(request)
         deleted = await run_sync_in_worker(
@@ -148,6 +156,7 @@ def create_secrets_router() -> APIRouter:
         app-level exception handlers in ``web/app.py``; only the
         success / absence cases are represented as a ``ValidateSecretResponse``.
         """
+        name = _validated_path_secret_name(name)
         service = _get_service(request)
         settings = _get_settings(request)
         available = await run_sync_in_worker(

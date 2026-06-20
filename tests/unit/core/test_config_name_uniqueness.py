@@ -56,7 +56,7 @@ class TestCrossTypeNameCollisions:
         """A transform and gate sharing the same name must be rejected."""
         with pytest.raises(ValidationError, match=r"both.*transform.*and.*gate|both.*gate.*and.*transform"):
             ElspethSettings(
-                source=_source(),
+                sources={"primary": _source()},
                 sinks={"output": _sink()},
                 transforms=[
                     TransformSettings(
@@ -82,7 +82,7 @@ class TestCrossTypeNameCollisions:
         """A transform and aggregation sharing the same name must be rejected."""
         with pytest.raises(ValidationError, match=r"both.*transform.*and.*aggregation|both.*aggregation.*and.*transform"):
             ElspethSettings(
-                source=_source(),
+                sources={"primary": _source()},
                 sinks={"output": _sink()},
                 transforms=[
                     TransformSettings(
@@ -111,7 +111,7 @@ class TestCrossTypeNameCollisions:
         """A gate and coalesce sharing the same name must be rejected."""
         with pytest.raises(ValidationError, match=r"both.*gate.*and.*coalesce|both.*coalesce.*and.*gate"):
             ElspethSettings(
-                source=_source(),
+                sources={"primary": _source()},
                 sinks={"output": _sink()},
                 gates=[
                     GateSettings(
@@ -134,7 +134,7 @@ class TestCrossTypeNameCollisions:
         """A transform and sink sharing the same name must be rejected."""
         with pytest.raises(ValidationError, match=r"both.*transform.*and.*sink|both.*sink.*and.*transform"):
             ElspethSettings(
-                source=_source(),
+                sources={"primary": _source()},
                 sinks={
                     "output": _sink(),
                     "shared_name": _sink(options={"path": "shared.json", "schema": {"mode": "observed"}}),
@@ -154,7 +154,7 @@ class TestCrossTypeNameCollisions:
     def test_all_unique_names_across_types_accepted(self) -> None:
         """Distinct names across all types should pass validation."""
         config = ElspethSettings(
-            source=_source(),
+            sources={"primary": _source()},
             sinks={
                 "output": _sink(),
                 "flagged": _sink(options={"path": "flagged.json", "schema": {"mode": "observed"}}),
@@ -179,4 +179,4 @@ class TestCrossTypeNameCollisions:
             ],
         )
         # Should not raise
-        assert config.source.plugin == "csv"
+        assert config.sources["primary"].plugin == "csv"

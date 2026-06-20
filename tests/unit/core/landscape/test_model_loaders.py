@@ -417,6 +417,13 @@ class TestRowLoader:
             "run_id": "run-1",
             "source_node_id": "node-src",
             "row_index": 42,
+            # source_row_index (per-source position) and ingest_sequence (global
+            # ingest order) are NOT NULL audit columns the loader maps. Use values
+            # distinct from row_index to honour the G22 fabrication ban (these are
+            # not derived from row_index) and to prove the loader maps each column
+            # to the correct Row field rather than conflating them.
+            "source_row_index": 5,
+            "ingest_sequence": 17,
             "source_data_hash": "hash123",
             "created_at": NOW,
             "source_data_ref": "ref://payload/abc",
@@ -432,6 +439,8 @@ class TestRowLoader:
         assert isinstance(result, Row)
         assert result.row_id == "row-1"
         assert result.row_index == 42
+        assert result.source_row_index == 5
+        assert result.ingest_sequence == 17
         assert result.source_data_hash == "hash123"
         assert result.source_data_ref == "ref://payload/abc"
 

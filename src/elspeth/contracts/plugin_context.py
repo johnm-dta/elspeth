@@ -63,7 +63,7 @@ class TransformErrorToken:
     destination: str = "discard"  # Sink name or "discard"
 
 
-@dataclass
+@dataclass(init=False)
 class PluginContext:
     """Context passed to every plugin operation.
 
@@ -81,7 +81,7 @@ class PluginContext:
     """
 
     run_id: str
-    config: Mapping[str, Any]
+    _config: Mapping[str, Any] = field(repr=False)
 
     # === Audit & Infrastructure ===
     landscape: PluginAuditWriter | None = None
@@ -141,12 +141,59 @@ class PluginContext:
     # before orchestrator normalization/wrapping.
     _pending_quarantine_validation_errors: list[tuple[str, str]] = field(default_factory=list)
 
-    def __post_init__(self) -> None:
+    def __init__(
+        self,
+        run_id: str,
+        config: Mapping[str, Any] | None = None,
+        landscape: PluginAuditWriter | None = None,
+        payload_store: PayloadStore | None = None,
+        rate_limit_registry: RateLimitRegistryProtocol | None = None,
+        concurrency_config: RuntimeConcurrencyConfig | None = None,
+        shutdown_event: threading.Event | None = None,
+        node_id: str | None = None,
+        token: TokenInfo | None = None,
+        batch_token_ids: tuple[str, ...] | None = None,
+        aggregation_batch: AggregationBatchContext | None = None,
+        contract: SchemaContract | None = None,
+        state_id: str | None = None,
+        operation_id: str | None = None,
+        telemetry_emit: Callable[[Any], None] | None = None,
+        _pending_quarantine_validation_errors: list[tuple[str, str]] | None = None,
+        _config: Mapping[str, Any] | None = None,
+    ) -> None:
+        if config is not None and _config is not None:
+            raise TypeError("PluginContext accepts either config or _config, not both")
+        raw_config = config if config is not None else _config
+        if raw_config is None:
+            raise TypeError("PluginContext missing required argument: 'config'")
+
+        self.run_id = run_id
         # Deep-freeze config so plugins cannot mutate the run configuration
         # after the audit snapshot (settings_json, config_hash) is recorded.
         # PluginContext is not frozen (checkpoint/token need mutation), but
         # config must be immutable for audit integrity.
-        self.config = deep_freeze(self.config)
+        self._config = deep_freeze(raw_config)
+        self.landscape = landscape
+        self.payload_store = payload_store
+        self.rate_limit_registry = rate_limit_registry
+        self.concurrency_config = concurrency_config
+        self.shutdown_event = shutdown_event
+        self.node_id = node_id
+        self.token = token
+        self.batch_token_ids = batch_token_ids
+        self.aggregation_batch = aggregation_batch
+        self.contract = contract
+        self.state_id = state_id
+        self.operation_id = operation_id
+        self.telemetry_emit = telemetry_emit if telemetry_emit is not None else (lambda event: None)
+        self._pending_quarantine_validation_errors = (
+            [] if _pending_quarantine_validation_errors is None else _pending_quarantine_validation_errors
+        )
+
+    @property
+    def config(self) -> Mapping[str, Any]:
+        """Frozen run configuration exposed read-only for audit integrity."""
+        return self._config
 
     @staticmethod
     def _validation_error_match_key(row: Any) -> str:

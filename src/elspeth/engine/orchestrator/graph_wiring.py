@@ -33,10 +33,10 @@ if TYPE_CHECKING:
 
 
 def assign_plugin_node_ids(
-    source: SourceProtocol,
+    sources: Mapping[str, SourceProtocol],
     transforms: Sequence[RowPlugin],
     sinks: Mapping[str, SinkProtocol],
-    source_id: NodeID,
+    source_id_map: Mapping[str, NodeID],
     transform_id_map: Mapping[int, NodeID],
     sink_id_map: Mapping[SinkName, NodeID],
 ) -> None:
@@ -46,18 +46,23 @@ def assign_plugin_node_ids(
     node_id: str | None and the orchestrator populates it.
 
     Args:
-        source: Source plugin instance
+        sources: Source plugin instances keyed by source name
         transforms: List of transform plugins
         sinks: Dict of sink_name -> sink plugin
-        source_id: Node ID for source
+        source_id_map: Source name -> source node ID
         transform_id_map: Maps transform sequence -> node_id
         sink_id_map: Maps sink_name -> node_id
 
     Raises:
         OrchestrationInvariantError: If transform/sink not in ID map
     """
-    # Set node_id on source
-    source.node_id = source_id
+    # Set node_id on sources
+    for source_name, source in sources.items():
+        if source_name not in source_id_map:
+            raise OrchestrationInvariantError(
+                f"Source '{source_name}' not found in graph source map. Graph has mappings for sources: {list(source_id_map.keys())}"
+            )
+        source.node_id = source_id_map[source_name]
 
     # Set node_id on transforms
     # Note: Aggregation transforms already have node_id set by CLI (mapped from
@@ -103,8 +108,8 @@ def build_dag_traversal_context(
         node_to_plugin[gate_node_id] = gate
 
     node_to_next: dict[NodeID, NodeID | None] = {}
-    source_id = graph.get_source()
-    node_to_next[source_id] = graph.get_next_node(source_id)
+    for source_id in graph.get_sources():
+        node_to_next[source_id] = graph.get_next_node(source_id)
     for node_id in graph.get_pipeline_node_sequence():
         node_to_next[node_id] = graph.get_next_node(node_id)
     for coalesce_node_id in graph.get_coalesce_id_map().values():
@@ -113,7 +118,6 @@ def build_dag_traversal_context(
     return DAGTraversalContext(
         node_step_map=node_step_map,
         node_to_plugin=node_to_plugin,
-        first_transform_node_id=graph.get_first_transform_node(),
         node_to_next=node_to_next,
         coalesce_node_map=graph.get_coalesce_id_map(),
         branch_first_node=graph.get_branch_first_nodes(),

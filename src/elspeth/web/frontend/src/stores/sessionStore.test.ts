@@ -68,7 +68,7 @@ function makeCompositionState(version: number, nodeIds: string[] = []): Composit
   return {
     id: `state-${version}`,
     version,
-    source: null,
+    sources: {},
     nodes: nodeIds.map((id) => ({
       id,
       node_type: "transform",
@@ -694,6 +694,104 @@ describe("sessionStore", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it("stops inflight message polling when the store is reset", async () => {
+      vi.useFakeTimers();
+      try {
+        const {
+          sendMessage: mockSendMessage,
+          fetchMessages,
+          fetchComposerProgress,
+        } = await import("@/api/client");
+        const sendDeferred =
+          deferred<{ message: ChatMessage; state: null }>();
+        (mockSendMessage as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+          sendDeferred.promise,
+        );
+        (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+        (fetchComposerProgress as ReturnType<typeof vi.fn>).mockResolvedValue({
+          session_id: "session-1",
+          request_id: "msg-pending",
+          phase: "idle",
+          headline: "",
+          evidence: [],
+          likely_next: null,
+          reason: null,
+          updated_at: "2026-04-26T10:00:00Z",
+        });
+
+        useSessionStore.setState({ activeSessionId: "session-1", messages: [] });
+        const sendPromise = useSessionStore.getState().sendMessage("hello");
+        await Promise.resolve();
+
+        await vi.advanceTimersByTimeAsync(1500);
+        expect(fetchMessages).toHaveBeenCalledTimes(1);
+
+        useSessionStore.getState().reset();
+        await vi.advanceTimersByTimeAsync(4500);
+        expect(fetchMessages).toHaveBeenCalledTimes(1);
+
+        sendDeferred.resolve({
+          message: {
+            id: "msg-final",
+            session_id: "session-1",
+            role: "assistant",
+            content: "ok",
+            tool_calls: null,
+            created_at: "2026-04-26T10:00:01Z",
+          },
+          state: null,
+        });
+        await sendPromise;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("drops a stale send response after the active session changes", async () => {
+      const { sendMessage: mockSendMessage } = await import("@/api/client");
+      const sendDeferred = deferred<{
+        message: ChatMessage;
+        state: CompositionState | null;
+      }>();
+      (mockSendMessage as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+        sendDeferred.promise,
+      );
+
+      useSessionStore.setState({
+        activeSessionId: "session-1",
+        messages: [],
+        compositionState: makeCompositionState(1),
+      });
+      const sendPromise = useSessionStore.getState().sendMessage("hello");
+      await Promise.resolve();
+
+      const sessionTwoState = makeCompositionState(2);
+      useSessionStore.setState({
+        activeSessionId: "session-2",
+        messages: [],
+        compositionState: sessionTwoState,
+        isComposing: false,
+      });
+      sendDeferred.resolve({
+        message: {
+          id: "stale-assistant",
+          session_id: "session-1",
+          role: "assistant",
+          content: "stale",
+          tool_calls: null,
+          created_at: "2026-04-26T10:00:01Z",
+        },
+        state: makeCompositionState(99),
+      });
+      await sendPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("session-2");
+      expect(state.messages).toEqual([]);
+      expect(state.compositionState).toBe(sessionTwoState);
+      expect(state.isComposing).toBe(false);
     });
 
     it("preserves the optimistic user message when the canonical row has not yet appeared", async () => {

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from elspeth.contracts import Checkpoint, NodeType
-from elspeth.core.canonical import compute_full_topology_hash, stable_hash
+from elspeth.core.canonical import compute_full_topology_hash
 from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.dag import ExecutionGraph
 
@@ -28,17 +28,20 @@ def _checkpoint_for_graph(graph: ExecutionGraph) -> Checkpoint:
     return Checkpoint(
         checkpoint_id="cp-compat-001",
         run_id="run-compat-001",
-        token_id="tok-compat-001",
-        node_id="checkpoint-node",
         sequence_number=7,
         created_at=datetime.now(UTC),
         upstream_topology_hash=compute_full_topology_hash(graph),
-        checkpoint_node_config_hash=stable_hash(graph.get_node_info("checkpoint-node").config),
         format_version=Checkpoint.CURRENT_FORMAT_VERSION,
     )
 
 
-def test_validate_rejects_missing_checkpoint_node() -> None:
+def test_validate_rejects_node_removal_via_topology_hash() -> None:
+    """Removing a node still invalidates the checkpoint.
+
+    The full-topology hash embeds every node, so node removal is rejected
+    without a per-node anchor (the former anchor-node existence check was
+    strictly subsumed by the hash comparison).
+    """
     original_graph = _graph(checkpoint_config={"version": 1})
     checkpoint = _checkpoint_for_graph(original_graph)
 
@@ -48,10 +51,16 @@ def test_validate_rejects_missing_checkpoint_node() -> None:
 
     assert result.can_resume is False
     assert result.reason is not None
-    assert "no longer exists" in result.reason
+    assert "Pipeline configuration changed since checkpoint was created." in result.reason
 
 
-def test_validate_rejects_checkpoint_node_config_change() -> None:
+def test_validate_rejects_node_config_change_via_topology_hash() -> None:
+    """Changing any node's config still invalidates the checkpoint.
+
+    The full-topology hash embeds every node's config hash, so config drift
+    is rejected without a per-node anchor (the former anchor-node config
+    check was strictly subsumed by the hash comparison).
+    """
     original_graph = _graph(checkpoint_config={"version": 1})
     checkpoint = _checkpoint_for_graph(original_graph)
 
@@ -61,7 +70,7 @@ def test_validate_rejects_checkpoint_node_config_change() -> None:
 
     assert result.can_resume is False
     assert result.reason is not None
-    assert "configuration has changed" in result.reason
+    assert "Pipeline configuration changed since checkpoint was created." in result.reason
 
 
 def test_validate_rejects_topology_hash_mismatch() -> None:

@@ -186,6 +186,36 @@ class TestLLMCallRequest:
         assert d["frequency_penalty"] == 0.5
 
 
+class TestLLMCallRequestConstructionInvariants:
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"model": ""},
+            {"provider": ""},
+            {"temperature": float("nan")},
+            {"temperature": float("inf")},
+            {"temperature": "0.0"},
+            {"max_tokens": -1},
+            {"max_tokens": 1.5},
+            {"max_tokens": True},
+            {"messages": "not-a-message-sequence"},
+            {"messages": ["not-a-message-mapping"]},
+            {"messages": [{1: "non-string-key"}]},
+        ],
+    )
+    def test_rejects_malformed_request_shape(self, overrides: dict[str, object]) -> None:
+        kwargs: dict[str, object] = {
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "temperature": 0.0,
+            "provider": "openai",
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises((TypeError, ValueError)):
+            LLMCallRequest(**kwargs)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # LLMCallResponse
 # ---------------------------------------------------------------------------
@@ -231,6 +261,28 @@ class TestLLMCallResponse:
         )
         with pytest.raises(AttributeError):
             obj.content = "modified"  # type: ignore[misc]
+
+
+class TestLLMCallResponseConstructionInvariants:
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"model": ""},
+            {"usage": {"prompt_tokens": 1}},
+            {"raw_response": ["not", "a", "mapping"]},
+        ],
+    )
+    def test_rejects_malformed_response_shape(self, overrides: dict[str, object]) -> None:
+        kwargs: dict[str, object] = {
+            "content": "Hello",
+            "model": "gpt-4",
+            "usage": TokenUsage.unknown(),
+            "raw_response": {},
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises((TypeError, ValueError)):
+            LLMCallResponse(**kwargs)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -496,6 +548,34 @@ class TestHTTPCallRequest:
         assert obj.resolved_ip is None
 
 
+class TestHTTPCallRequestConstructionInvariants:
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"method": ""},
+            {"method": "get"},
+            {"method": object()},
+            {"url": ""},
+            {"headers": [("Accept", "application/json")]},
+            {"headers": {"Accept": object()}},
+            {"hop_number": 0, "resolved_ip": "1.2.3.4"},
+            {"hop_number": -1, "resolved_ip": "1.2.3.4"},
+            {"hop_number": 1.5, "resolved_ip": "1.2.3.4"},
+            {"hop_number": True, "resolved_ip": "1.2.3.4"},
+        ],
+    )
+    def test_rejects_malformed_request_shape(self, overrides: dict[str, object]) -> None:
+        kwargs: dict[str, object] = {
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {"Accept": "application/json"},
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises((TypeError, ValueError)):
+            HTTPCallRequest(**kwargs)  # type: ignore[arg-type]
+
+
 # ---------------------------------------------------------------------------
 # HTTPCallResponse
 # ---------------------------------------------------------------------------
@@ -670,6 +750,30 @@ class TestHTTPCallError:
         obj = HTTPCallError(type="err", message="msg")
         with pytest.raises(AttributeError):
             obj.type = "other"  # type: ignore[misc]
+
+
+class TestHTTPCallErrorConstructionInvariants:
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"type": object()},
+            {"message": object()},
+            {"status_code": 99},
+            {"status_code": 600},
+            {"status_code": 1.5},
+            {"status_code": True},
+        ],
+    )
+    def test_rejects_malformed_error_shape(self, overrides: dict[str, object]) -> None:
+        kwargs: dict[str, object] = {
+            "type": "HTTPError",
+            "message": "HTTP 500",
+            "status_code": 500,
+        }
+        kwargs.update(overrides)
+
+        with pytest.raises((TypeError, ValueError)):
+            HTTPCallError(**kwargs)  # type: ignore[arg-type]
 
 
 class TestHTTPCallResponseListBodyFreeze:

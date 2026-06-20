@@ -15,6 +15,7 @@ score GREEN here without bouncing back to the user.
 | `csv-classifier/` | Fixed schemas that omit observed columns and silently discard every row when paired with `on_validation_failure=discard`. |
 | `url-text-smoke/` | URL strings fed into a `text`/`csv` source's `path` field instead of being wrapped as a blob and processed via `web_scrape`. |
 | `numeric-gate/` | Gates comparing string-typed CSV fields to numeric literals without prior `type_coerce` or a numeric source schema. |
+| `deep-routing-cascade/` | Uploaded CSV loan-triage prompts that require blob discovery, source inspection, three transforms, five chained gates, and seven outputs without exhausting the repair budget. |
 
 ## Convergence-bar GREEN criteria
 

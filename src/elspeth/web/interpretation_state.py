@@ -367,8 +367,15 @@ def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewS
     """Return unresolved interpretation-review sites across source and transforms."""
 
     sites: list[InterpretationReviewSite] = []
-    if state.source is not None:
-        sites.extend(_pending_source_sites(state.source))
+    # Source-level interpretation review is keyed to the default source
+    # component (SOURCE_COMPONENT_ID). _pending_source_sites and the
+    # resolution path (resolve_interpretation_event / invented_source) both
+    # hardcode that component id, so only the default named source carries a
+    # resolvable review site; named non-default sources are not reviewable
+    # through this subsystem.
+    default_source = state.sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in state.sources else None
+    if default_source is not None:
+        sites.extend(_pending_source_sites(default_source))
     web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
     for node in state.nodes:
         node_sites = [*_pending_node_sites(node), *_legacy_placeholder_sites(node)]
@@ -420,10 +427,16 @@ def materialize_state_for_execution(state: CompositionState) -> CompositionState
         return InterpretationReviewPending(sites=pending_sites)
 
     changed = False
-    materialized_source = state.source
-    if state.source is not None:
-        materialized_source = _materialize_source_for_execution(state.source)
-        changed = changed or materialized_source is not state.source
+    # Mirror interpretation_sites' scope: only the default source component
+    # carries reviewable composer-authored metadata, so materialization (which
+    # enforces the reviewed-content-hash drift check) operates on it alone.
+    materialized_sources = dict(state.sources)
+    default_source = materialized_sources[SOURCE_COMPONENT_ID] if SOURCE_COMPONENT_ID in materialized_sources else None
+    if default_source is not None:
+        materialized_default = _materialize_source_for_execution(default_source)
+        if materialized_default is not default_source:
+            materialized_sources[SOURCE_COMPONENT_ID] = materialized_default
+            changed = True
     materialized_nodes: list[NodeSpec] = []
     for node in state.nodes:
         materialized = _materialize_node_for_execution(node, state.nodes)
@@ -431,7 +444,7 @@ def materialize_state_for_execution(state: CompositionState) -> CompositionState
         changed = changed or materialized is not node
     if not changed:
         return state
-    return replace(state, source=materialized_source, nodes=tuple(materialized_nodes))
+    return replace(state, sources=materialized_sources, nodes=tuple(materialized_nodes))
 
 
 def _materialize_node_for_authoring(node: NodeSpec) -> NodeSpec:
@@ -523,7 +536,14 @@ def _pending_source_sites(source: SourceSpec) -> tuple[InterpretationReviewSite,
                 kind=InterpretationKind.INVENTED_SOURCE,
             ),
         )
-    if requirement["status"] == "resolved":
+    # A resolved invented_source is clean ONLY while its accepted artifact still
+    # matches the current source content_hash. Resolved-but-drifted (the source
+    # content_hash changed after the review was accepted) falls through to a
+    # pending review site — the single source of truth for /validate and
+    # /execute — rather than letting the downstream
+    # _materialize_source_for_execution drift guard raise a bare ValueError that
+    # the route layer mis-maps to a 404/500.
+    if requirement["status"] == "resolved" and requirement["accepted_artifact_hash"] == metadata["content_hash"]:
         return ()
     return (
         InterpretationReviewSite(

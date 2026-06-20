@@ -27,8 +27,7 @@ def ldb() -> LandscapeDB:
         sa.Column("id", sa.String, primary_key=True),
         sa.Column("value", sa.String),
     )
-    with db.connection() as conn:
-        metadata.create_all(conn.engine)
+    metadata.create_all(db.engine)
     return db
 
 
@@ -96,8 +95,7 @@ class TestExecuteFetchall:
             sa.Column("id", sa.String, primary_key=True),
             sa.Column("value", sa.String),
         )
-        with db.connection() as conn:
-            metadata.create_all(conn.engine)
+        metadata.create_all(db.engine)
         ops = DatabaseOps(db)
         ops.execute_insert(table.insert().values(id="a", value="before"))
 

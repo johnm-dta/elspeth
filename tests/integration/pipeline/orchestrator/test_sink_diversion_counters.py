@@ -45,7 +45,7 @@ class DivertSecondRowSink(_TestSinkBase):
             artifact=ArtifactDescriptor.for_file(
                 path=f"memory://{self.name}_{self._artifact_counter}",
                 size_bytes=len(str(primary_rows)),
-                content_hash=f"hash_{self._artifact_counter}",
+                content_hash=f"{self._artifact_counter:064x}",
             ),
             diversions=diversions,
         )
@@ -56,7 +56,7 @@ def test_diverted_sink_rows_do_not_remain_counted_as_success(payload_store, land
     source = ListSource([{"value": 1}, {"value": 2}], on_success="default")
     sink = DivertSecondRowSink("default")
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={"default": as_sink(sink)},
     )

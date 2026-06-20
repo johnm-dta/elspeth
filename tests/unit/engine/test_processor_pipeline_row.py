@@ -1,7 +1,7 @@
 # tests/unit/engine/test_processor_pipeline_row.py
 """Tests for RowProcessor with PipelineRow support (Task 6)."""
 
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -11,7 +11,7 @@ from elspeth.engine.processor import DAGTraversalContext
 from elspeth.engine.spans import SpanFactory
 from elspeth.testing import make_field, make_row, make_source_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_factory, make_landscape_db
+from tests.fixtures.landscape import make_recorder_with_run
 
 
 def _make_contract() -> SchemaContract:
@@ -32,11 +32,17 @@ def _make_contract() -> SchemaContract:
 
 
 def _make_mock_factory() -> MagicMock:
-    """Create a mock RecorderFactory with execution and data_flow sub-mocks."""
-    factory = MagicMock()
-    factory.data_flow.create_row.return_value = Mock(row_id="row_001")
-    factory.data_flow.create_token.return_value = Mock(token_id="token_001")
-    return factory
+    """Create a real RecorderFactory with spies on row/token writes."""
+    setup = make_recorder_with_run(
+        run_id="run_001",
+        source_node_id="source_001",
+        source_plugin_name="test-source",
+    )
+    factory = setup.factory
+    factory.data_flow.create_row = MagicMock(wraps=factory.data_flow.create_row)  # type: ignore[method-assign]
+    factory.data_flow.create_token = MagicMock(wraps=factory.data_flow.create_token)  # type: ignore[method-assign]
+    factory.data_flow.create_row_with_token = MagicMock(wraps=factory.data_flow.create_row_with_token)  # type: ignore[method-assign]
+    return factory  # type: ignore[return-value]
 
 
 def _make_mock_span_factory() -> SpanFactory:
@@ -49,7 +55,6 @@ def _empty_traversal(source_node_id: str = "source_001") -> DAGTraversalContext:
     return DAGTraversalContext(
         node_step_map={source_node: 0},
         node_to_plugin={},
-        first_transform_node_id=None,
         node_to_next={source_node: None},
         coalesce_node_map={},
     )
@@ -74,6 +79,7 @@ class TestRowProcessorPipelineRow:
             source_on_success="default",
             source_plugin=None,
             traversal=_empty_traversal(),
+            scheduler=factory.scheduler,
         )
 
         assert processor._source_plugin is None
@@ -95,12 +101,11 @@ class TestRowProcessorPipelineRow:
             source_on_success="default",
             source_plugin=None,
             traversal=_empty_traversal(),
+            scheduler=factory.scheduler,
         )
 
         source_row = make_source_row({"amount": 100}, contract=contract)
-        landscape_db = make_landscape_db()
-        landscape_factory = make_factory(landscape_db)
-        ctx = make_context(run_id="run_001", landscape=landscape_factory)
+        ctx = make_context(run_id="run_001", landscape=factory.plugin_audit_writer())
 
         # No transforms - token should be created and completed immediately
         processor.process_row(
@@ -108,11 +113,12 @@ class TestRowProcessorPipelineRow:
             source_row=source_row,
             transforms=[],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
-        # Should have created a row and token via data_flow repository
-        factory.data_flow.create_row.assert_called_once()
-        factory.data_flow.create_token.assert_called_once()
+        # Should have created a row and token atomically via data_flow repository
+        factory.data_flow.create_row_with_token.assert_called_once()
 
     def test_process_row_creates_pipeline_row(self) -> None:
         """process_row should create token with PipelineRow containing contract."""
@@ -130,18 +136,19 @@ class TestRowProcessorPipelineRow:
             source_node_id=NodeID("source_001"),
             source_on_success="default",
             traversal=_empty_traversal(),
+            scheduler=factory.scheduler,
         )
 
         source_row = make_source_row({"amount": 100}, contract=contract)
-        landscape_db = make_landscape_db()
-        landscape_factory = make_factory(landscape_db)
-        ctx = make_context(run_id="run_001", landscape=landscape_factory)
+        ctx = make_context(run_id="run_001", landscape=factory.plugin_audit_writer())
 
         results = processor.process_row(
             row_index=0,
             source_row=source_row,
             transforms=[],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
 
         # Single-token no-transform path should produce exactly one terminal result.
@@ -170,6 +177,7 @@ class TestRowProcessorPipelineRow:
             source_node_id=NodeID("source_001"),
             source_on_success="default",
             traversal=_empty_traversal(),
+            scheduler=factory.scheduler,
         )
 
         # Since elspeth-a27e71979f, SourceRow.__post_init__ rejects contract=None
@@ -178,7 +186,7 @@ class TestRowProcessorPipelineRow:
         from elspeth.contracts import SourceRow
 
         with pytest.raises(TypeError, match="contract"):
-            SourceRow.valid({"amount": 100})
+            SourceRow.valid({"amount": 100})  # type: ignore[call-arg]
 
 
 class TestRowProcessorExistingRow:
@@ -200,13 +208,22 @@ class TestRowProcessorExistingRow:
             source_node_id=NodeID("source_001"),
             source_on_success="default",
             traversal=_empty_traversal(),
+            scheduler=factory.scheduler,
         )
 
         # PipelineRow for resume (row already exists in database)
         row_data = make_row({"amount": 100}, contract=contract)
-        landscape_db = make_landscape_db()
-        landscape_factory = make_factory(landscape_db)
-        ctx = make_context(run_id="run_001", landscape=landscape_factory)
+        factory.data_flow.create_row(
+            run_id="run_001",
+            source_node_id="source_001",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            row_id="existing_row_001",
+            data=row_data.to_dict(),
+        )
+        factory.data_flow.create_row.reset_mock()
+        ctx = make_context(run_id="run_001", landscape=factory.plugin_audit_writer())
 
         results = processor.process_existing_row(
             row_id="existing_row_001",
@@ -246,12 +263,21 @@ class TestRowProcessorExistingRow:
             source_on_success="default",
             source_plugin=source_plugin,
             traversal=_empty_traversal(),
+            scheduler=factory.scheduler,
         )
 
         row_data = make_row({"amount": 100}, contract=contract)
-        landscape_db = make_landscape_db()
-        landscape_factory = make_factory(landscape_db)
-        ctx = make_context(run_id="run_001", landscape=landscape_factory)
+        factory.data_flow.create_row(
+            run_id="run_001",
+            source_node_id="source_001",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            row_id="existing_row_001",
+            data=row_data.to_dict(),
+        )
+        factory.data_flow.create_row.reset_mock()
+        ctx = make_context(run_id="run_001", landscape=factory.plugin_audit_writer())
 
         with patch("elspeth.engine.processor.run_boundary_checks") as boundary_check:
             processor.process_existing_row(

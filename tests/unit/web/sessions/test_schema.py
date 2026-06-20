@@ -18,6 +18,20 @@ from elspeth.web.sessions.schema import (
 )
 
 
+def _create_all_on_mock_engine(engine) -> None:
+    try:
+        metadata.create_all(engine)
+    finally:
+        # SQLAlchemy's mock PostgreSQL create_all path marks cycle-breaking
+        # foreign keys with a transient _create_rule. If left on the shared
+        # metadata object, later SQLite create_all calls omit those inline FKs.
+        _MISSING = object()
+        for table in metadata.tables.values():
+            for constraint in table.constraints:
+                if getattr(constraint, "_create_rule", _MISSING) is not _MISSING:
+                    constraint._create_rule = None
+
+
 @pytest.fixture
 def engine():
     eng = create_session_engine("sqlite:///:memory:")
@@ -62,7 +76,7 @@ def test_sqlite_trigger_ddl_is_not_emitted_for_postgres_schema() -> None:
     emitted: list[str] = []
     engine = create_mock_engine("postgresql://", lambda sql, *_, **__: emitted.append(str(sql)))
 
-    metadata.create_all(engine)
+    _create_all_on_mock_engine(engine)
 
     assert any("CREATE TABLE chat_messages" in statement for statement in emitted)
     assert not any("CREATE TRIGGER" in statement for statement in emitted)
@@ -77,7 +91,7 @@ def test_postgres_schema_uses_postgres_non_blank_check_syntax() -> None:
         lambda sql, *_, **__: emitted.append(str(sql.compile(dialect=engine.dialect))),
     )
 
-    metadata.create_all(engine)
+    _create_all_on_mock_engine(engine)
 
     ddl = "\n".join(emitted)
     assert "ck_composition_proposals_composer_provenance_all_or_none" in ddl
@@ -145,6 +159,39 @@ def test_current_schema_enforces_ready_blob_hash_check(engine) -> None:
                     status="ready",
                 )
             )
+
+
+def test_initialize_session_schema_rejects_same_named_check_with_weakened_sql(tmp_path) -> None:
+    """A current-epoch DB with a same-named weaker CHECK is stale.
+
+    Regression for elspeth-28bb7fcacb: the validator compared only CHECK names,
+    so a manually rebuilt/stale ``ck_blobs_ready_hash`` accepted startup even
+    when its SQL no longer enforced the ready-blob 64-char lowercase-hex hash
+    invariant.
+    """
+    db_path = tmp_path / "sessions.db"
+    eng = create_session_engine(f"sqlite:///{db_path}")
+    initialize_session_schema(eng)
+    eng.dispose()
+
+    strong = "status != 'ready' OR (content_hash IS NOT NULL AND length(content_hash) = 64 AND content_hash NOT GLOB '*[^a-f0-9]*')"
+    weak = "status != 'ready' OR content_hash IS NOT NULL"
+    eng = create_session_engine(f"sqlite:///{db_path}")
+    with eng.begin() as conn:
+        original_sql = conn.execute(text("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'blobs'")).scalar_one()
+        assert "CONSTRAINT ck_blobs_ready_hash" in original_sql
+        assert strong in original_sql
+        conn.execute(text("PRAGMA writable_schema = ON"))
+        conn.execute(
+            text("UPDATE sqlite_master SET sql = :sql WHERE type = 'table' AND name = 'blobs'"),
+            {"sql": original_sql.replace(strong, weak)},
+        )
+        conn.execute(text("PRAGMA writable_schema = OFF"))
+    eng.dispose()
+
+    reopened = create_session_engine(f"sqlite:///{db_path}")
+    with pytest.raises(SessionSchemaError, match="CHECK constraint SQL mismatch"):
+        initialize_session_schema(reopened)
 
 
 # ---------------------------------------------------------------------------

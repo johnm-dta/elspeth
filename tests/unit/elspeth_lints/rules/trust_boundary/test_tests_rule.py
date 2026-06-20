@@ -15,7 +15,13 @@ from pathlib import Path
 from elspeth_lints.core.cli import main
 from elspeth_lints.core.protocols import Finding, RuleContext
 from elspeth_lints.rules.trust_boundary.tests import RULE as TESTS_RULE
-from elspeth_lints.rules.trust_boundary.tests.metadata import RULE_METADATA, SUGGESTION_MISSING, SUGGESTION_WEAK
+from elspeth_lints.rules.trust_boundary.tests.metadata import (
+    RULE_METADATA,
+    RULE_NONRAISING_HAS_TESTREF,
+    RULE_NONRAISING_RAISES,
+    SUGGESTION_MISSING,
+    SUGGESTION_WEAK,
+)
 
 TESTS_RULE_MODULE = importlib.import_module("elspeth_lints.rules.trust_boundary.tests.rule")
 TRUST_BOUNDARY_MODULE = importlib.import_module("elspeth.contracts.trust_boundary")
@@ -1070,3 +1076,122 @@ def test_raising_assertion_directly_in_test_body_still_passes(tmp_path: Path) ->
         repo_root=tmp_path,
     )
     assert findings == [], f"Direct in-body pytest.raises must pass TBE3; got: {[(f.rule_id, f.message[:80]) for f in findings]}"
+
+
+# ---------------------------------------------------------------------------
+# non_raising boundary honesty check (mechanical, no test_ref)
+# ---------------------------------------------------------------------------
+
+
+def test_nonraising_clean_returns_no_findings(tmp_path: Path) -> None:
+    """A non_raising boundary that returns a sentinel on the guarded branch passes."""
+    findings = _analyze_at(
+        """
+        from collections.abc import Mapping
+
+        @trust_boundary(
+            tier=3,
+            source="LLM tool-call arguments",
+            source_param="arguments",
+            suppresses=("R5",),
+            invariant="returns None on malformed input",
+            non_raising=True,
+        )
+        def extract(arguments):
+            source = arguments["source"] if "source" in arguments else None
+            if not isinstance(source, Mapping):
+                return None
+            return source["content"] if "content" in source else None
+        """,
+        repo_root=tmp_path,
+    )
+    assert findings == [], f"Clean non_raising boundary must pass; got: {[(f.rule_id, f.message[:80]) for f in findings]}"
+
+
+def test_nonraising_raise_on_source_param_guard_is_flagged(tmp_path: Path) -> None:
+    """A raise gated by a source_param-derived check contradicts the non_raising claim."""
+    findings = _analyze_at(
+        """
+        from collections.abc import Mapping
+
+        @trust_boundary(
+            tier=3,
+            source="LLM tool-call arguments",
+            source_param="arguments",
+            suppresses=("R5",),
+            invariant="returns None on malformed input",
+            non_raising=True,
+        )
+        def extract(arguments):
+            source = arguments["source"] if "source" in arguments else None
+            if not isinstance(source, Mapping):
+                raise ValueError("source must be a mapping")
+            return source.get("content")
+        """,
+        repo_root=tmp_path,
+    )
+    assert [f.rule_id for f in findings] == [RULE_NONRAISING_RAISES]
+
+
+def test_nonraising_tier1_raise_through_call_is_not_flagged(tmp_path: Path) -> None:
+    """A Tier-1 raise guarded by a value laundered through a function call is allowed.
+
+    This is the ``validate_pipeline`` shape: the boundary's own shape checks
+    return/continue, while a separate raise crashes on the analyzer's OWN
+    generated output (``transform(state)``). Because the value flows through a
+    function call, it is no longer rooted at ``source_param`` — the raise is a
+    legitimate Tier-1 invariant crash, not a boundary rejection, so the
+    non_raising claim still holds.
+    """
+    findings = _analyze_at(
+        """
+        from collections.abc import Mapping
+
+        def transform(value):
+            return {"ok": True}
+
+        @trust_boundary(
+            tier=3,
+            source="composer pipeline state",
+            source_param="state",
+            suppresses=("R1",),
+            invariant="returns a result on malformed input; never raises on state",
+            non_raising=True,
+        )
+        def validate(state):
+            for node in state.nodes:
+                provider = node.options["provider"] if "provider" in node.options else None
+                if not isinstance(provider, Mapping):
+                    continue
+            generated = transform(state)
+            if not isinstance(generated, dict):
+                raise TypeError("transform() produced a non-dict — internal bug")
+            return generated
+        """,
+        repo_root=tmp_path,
+    )
+    assert findings == [], (
+        f"Tier-1 raise on call-laundered data must not be flagged; got: {[(f.rule_id, f.message[:90]) for f in findings]}"
+    )
+
+
+def test_nonraising_with_test_ref_is_flagged(tmp_path: Path) -> None:
+    """non_raising=True combined with test_ref is a contradiction."""
+    findings = _analyze_at(
+        """
+        @trust_boundary(
+            tier=3,
+            source="x",
+            source_param="data",
+            suppresses=("R1",),
+            invariant="returns None on absence",
+            non_raising=True,
+            test_ref="tests/test_boundary.py::test_x",
+            test_fingerprint="deadbeef",
+        )
+        def foo(data):
+            return data["x"] if "x" in data else None
+        """,
+        repo_root=tmp_path,
+    )
+    assert [f.rule_id for f in findings] == [RULE_NONRAISING_HAS_TESTREF]

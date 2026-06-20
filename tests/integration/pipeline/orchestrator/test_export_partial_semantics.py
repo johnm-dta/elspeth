@@ -38,7 +38,7 @@ from tests.fixtures.plugins import CollectSink, FailingSource, ListSource
 def _make_export_enabled_settings() -> ElspethSettings:
     """Create minimal settings with export enabled to the default sink."""
     return ElspethSettings(
-        source=SourceSettings(plugin="list_source", on_success="default", options={}),
+        sources={"primary": SourceSettings(plugin="list_source", on_success="default", options={})},
         sinks={"default": SinkSettings(plugin="collect", on_write_failure="discard", options={})},
         landscape={"export": {"enabled": True, "sink": "default", "format": "json"}},
     )
@@ -72,7 +72,7 @@ class TestExportFailurePartialRunSemantics:
         source = ListSource([{"value": 1}], on_success="default")
         sink = CollectSink("default")
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -164,7 +164,7 @@ class TestExportFailurePartialRunSemantics:
         source = FailingSource(error_message="source load failure")
         sink = CollectSink("default")
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )

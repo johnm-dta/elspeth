@@ -231,6 +231,21 @@ class TestR1FalsePositiveFiltering:
         r1_findings = [f for f in findings if f.rule_id == "R1"]
         assert len(r1_findings) == 0, "httpx.AsyncClient.get() should not be flagged"
 
+    def test_starlette_headers_get_not_flagged(self) -> None:
+        """starlette Headers.get() is the multidict Mapping accessor, not dict.get()."""
+        source = dedent("""
+            from starlette.datastructures import Headers
+
+            async def __call__(self, scope, receive, send):
+                headers = Headers(scope=scope)
+                supplied = headers.get("x-request-id")
+                return supplied
+        """)
+        findings = parse_and_visit(source)
+
+        r1_findings = [f for f in findings if f.rule_id == "R1"]
+        assert len(r1_findings) == 0, "starlette Headers.get() should not be flagged as dict.get()"
+
     def test_httpx_module_get_with_variable_url_not_flagged(self) -> None:
         """httpx.get(variable_url) is module-level HTTP transport, not dict access."""
         source = dedent("""

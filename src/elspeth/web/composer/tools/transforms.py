@@ -23,6 +23,7 @@ from elspeth.web.composer.state import (
     _batch_aware_placement_error,
     _batch_aware_required_input_fields_error,
     _validate_gate_expression,
+    _validate_gate_route_parity,
 )
 from elspeth.web.composer.tools._common import (
     ToolContext,
@@ -249,9 +250,10 @@ def _handle_upsert_node(
     # Offensive programming: _execute_upsert_node succeeded above, so the
     # node it just upserted MUST be on the post-mutation state. Absence
     # here would be a bug in state.with_node, not a runtime condition.
-    assert node is not None, (
-        f"_execute_upsert_node succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
-    )
+    if node is None:
+        raise AssertionError(
+            f"_execute_upsert_node succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
+        )
     return _attach_post_call_hints(
         result,
         context.catalog,
@@ -456,6 +458,9 @@ def _execute_upsert_node(
         expr_error = _validate_gate_expression(condition)
         if expr_error is not None:
             return _failure_result(state, f"Node '{node_id}': {expr_error}")
+        parity_error = _validate_gate_route_parity(condition, validated.routes)
+        if parity_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {parity_error}")
     if node_type == "aggregation":
         trigger_error = _validate_aggregation_trigger(validated.trigger)
         if trigger_error is not None:
@@ -537,12 +542,12 @@ def _execute_upsert_edge(
     # must match the output name for the pipeline to work at runtime.
     output_names = {o.name for o in new_state.outputs}
     if to_node in output_names:
-        if from_node == "source":
+        if from_node in new_state.sources:
             if edge_type != "on_success":
                 return _failure_result(state, "Source sink edges must use 'on_success'.")
-            if new_state.source is not None and new_state.source.on_success != to_node:
-                new_source = replace(new_state.source, on_success=to_node)
-                new_state = new_state.with_source(new_source)
+            source = new_state.sources[from_node]
+            if source.on_success != to_node:
+                new_state = new_state.with_named_source(from_node, replace(source, on_success=to_node))
         else:
             node = next((n for n in new_state.nodes if n.id == from_node), None)
             if node is not None:
@@ -561,7 +566,7 @@ def _execute_upsert_edge(
                         return _failure_result(state, f"Only gates can use '{edge_type}' edges to sinks.")
                     route_key = "true" if edge_type == "route_true" else "false"
                     routes = dict(node.routes or {})
-                    if routes.get(route_key) != to_node:
+                    if route_key not in routes or routes[route_key] != to_node:
                         routes[route_key] = to_node
                         new_state = new_state.with_node(replace(node, routes=routes))
                 elif edge_type == "fork":
@@ -759,9 +764,10 @@ def _handle_patch_node_options(
     # Offensive programming: _execute_patch_node_options succeeded above, so
     # the node it just upserted MUST be on the post-mutation state. Absence
     # here would be a bug in state.with_node, not a runtime condition.
-    assert node is not None, (
-        f"_execute_patch_node_options succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
-    )
+    if node is None:
+        raise AssertionError(
+            f"_execute_patch_node_options succeeded for node '{node_id}' but the post-mutation state does not contain it — invariant violation."
+        )
     return _attach_post_call_hints(
         result,
         context.catalog,

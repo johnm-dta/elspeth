@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
 from elspeth.contracts.probes import CollectionProbe, CollectionReadinessResult
 from elspeth.core.dependency_config import CollectionProbeConfig
 from elspeth.plugins.infrastructure.clients.retrieval.connection import ChromaConnectionConfig
+
+
+class _Closeable(Protocol):
+    """Structural type for clients that release resources via close().
+
+    The concrete chromadb client always defines close(), but the abstract
+    ClientAPI return type of chromadb.HttpClient/PersistentClient does not
+    declare it. Casting to this Protocol lets mypy see close() without a
+    runtime hasattr() branch, so a genuinely missing close() (dependency/API
+    drift) raises AttributeError instead of being silently skipped.
+    """
+
+    def close(self) -> None: ...
 
 
 class ChromaCollectionProbe:
@@ -39,7 +52,9 @@ class ChromaCollectionProbe:
     def probe(self) -> CollectionReadinessResult:
         """Check collection existence and document count."""
         import chromadb  # ImportError crashes — missing package is a config bug, not "unreachable"
+        import httpx  # httpx transport errors inherit only from Exception, not ChromaError
 
+        client = None
         try:
             # Client construction CAN fail for infrastructure reasons (server down,
             # TLS errors, path permissions) — caught below as "unreachable".
@@ -78,15 +93,27 @@ class ChromaCollectionProbe:
                 count=None,
                 message=f"Collection '{self.collection_name}' not found",
             )
-        except (chromadb.errors.ChromaError, ConnectionError, OSError) as exc:
+        except (chromadb.errors.ChromaError, ConnectionError, OSError, ValueError, httpx.HTTPError) as exc:
             # Infrastructure failures: server down, auth errors, TLS failures,
             # path permission errors, connection refused, etc.
+            # ValueError: chromadb 1.5.5 raises plain ValueError on unreachable HTTP server.
+            # httpx.HTTPError: httpx transport errors inherit only from Exception,
+            # not from ChromaError/ConnectionError/OSError.
             return CollectionReadinessResult(
                 collection=self.collection_name,
                 reachable=False,
                 count=None,
                 message=f"Collection '{self.collection_name}' unreachable: {type(exc).__name__}: {exc}",
             )
+        finally:
+            # Always release the underlying client. The concrete chromadb client
+            # exposes close() even though the abstract ClientAPI return type does
+            # not declare it, so we cast to _Closeable to satisfy mypy. If client
+            # construction itself failed, client remains None and we skip the
+            # close; a genuinely missing close() (API drift) raises loudly rather
+            # than leaking the SQLite/HTTP resource.
+            if client is not None:
+                cast(_Closeable, client).close()
 
 
 _PROBE_REGISTRY: dict[str, type] = {

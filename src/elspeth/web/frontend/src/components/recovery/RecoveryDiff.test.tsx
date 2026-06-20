@@ -51,7 +51,7 @@ function makeState(overrides: Partial<CompositionState> = {}): CompositionState 
   return {
     id: "state-1",
     version: 1,
-    source: makeSource(),
+    sources: { source: makeSource() },
     nodes: [makeNode("clean")],
     edges: [],
     outputs: [],
@@ -65,10 +65,10 @@ describe("RecoveryDiff", () => {
     render(
       <RecoveryDiff
         currentState={makeState({
-          source: makeSource({ plugin: "csv", options: { path: "old.csv" } }),
+          sources: { source: makeSource({ plugin: "csv", options: { path: "old.csv" } }) },
         })}
         recoveredState={makeState({
-          source: makeSource({ plugin: "json", options: { path: "new.json" } }),
+          sources: { source: makeSource({ plugin: "json", options: { path: "new.json" } }) },
         })}
       />,
     );
@@ -82,8 +82,8 @@ describe("RecoveryDiff", () => {
   it("handles null source collections", () => {
     render(
       <RecoveryDiff
-        currentState={makeState({ source: null })}
-        recoveredState={makeState({ source: makeSource() })}
+        currentState={makeState({ sources: {} })}
+        recoveredState={makeState({ sources: { source: makeSource() } })}
       />,
     );
 

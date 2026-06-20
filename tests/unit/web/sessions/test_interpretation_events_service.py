@@ -403,7 +403,7 @@ def _llm_generated_source(*, content_hash: str = "0" * 64, with_authoring: bool 
         metadata=PipelineMetadata(name="Phase 5b Test", description=""),
         version=1,
     )
-    source = state.to_dict()["source"]
+    source = state.to_dict()["sources"]["source"]
     assert source is not None
     return source
 
@@ -801,6 +801,64 @@ async def test_03_resolve_accepted_as_drafted_uses_llm_draft(service) -> None:
 
 
 @pytest.mark.asyncio
+async def test_resolve_interpretation_event_preserves_named_sources(service) -> None:
+    """Interpretation approval must not collapse multi-source composer state."""
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            sources={
+                "orders": {
+                    "plugin": "csv",
+                    "on_success": "orders_rows",
+                    "options": {"path": "orders.csv", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                },
+                "customers": {
+                    "plugin": "csv",
+                    "on_success": "customers_rows",
+                    "options": {"path": "customers.csv", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                },
+            },
+            nodes=[_llm_node()],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    event = await service.create_pending_interpretation_event(
+        session_id=session_id,
+        composition_state_id=state.id,
+        affected_node_id="llm_transform_1",
+        tool_call_id="call_42",
+        user_term="cool",
+        kind=InterpretationKind.VAGUE_TERM,
+        llm_draft="Innovative and creative",
+        model_identifier="anthropic/claude-opus-4-7",
+        model_version="2026-05-01",
+        provider="anthropic",
+        composer_skill_hash="a" * 64,
+    )
+
+    _resolved, new_state = await service.resolve_interpretation_event(
+        session_id=session_id,
+        event_id=event.id,
+        choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+        amended_value=None,
+        actor="user:alice",
+        runtime_model_identifier="anthropic/claude-sonnet-4-7",
+        runtime_model_version="2026-05-02",
+    )
+
+    assert new_state.sources is not None
+    assert set(new_state.sources) == {"orders", "customers"}
+    assert new_state.sources["orders"]["on_success"] == "orders_rows"
+
+
+@pytest.mark.asyncio
 async def test_03b_resolve_recomputes_validation_for_patched_live_state(service) -> None:
     """Resolve must not carry stale unresolved-placeholder validation errors.
 
@@ -940,7 +998,8 @@ async def test_resolve_invented_source_updates_authoring_metadata_without_mutati
         session_id=session_id,
         source=_llm_generated_source(content_hash=content_hash),
     )
-    original_source = state.source
+    assert state.sources is not None
+    original_source = state.sources[SOURCE_COMPONENT_ID]
     event = await service.create_pending_interpretation_event(
         session_id=session_id,
         composition_state_id=state.id,
@@ -965,17 +1024,19 @@ async def test_resolve_invented_source_updates_authoring_metadata_without_mutati
 
     assert resolved.kind is InterpretationKind.INVENTED_SOURCE
     assert resolved.accepted_value == event.llm_draft
-    assert new_state.source is not None
+    assert new_state.sources is not None
+    new_source = new_state.sources[SOURCE_COMPONENT_ID]
+    assert new_source is not None
     assert original_source is not None
-    assert new_state.source["plugin"] == original_source["plugin"]
-    assert new_state.source["on_success"] == original_source["on_success"]
-    assert new_state.source["on_validation_failure"] == original_source["on_validation_failure"]
-    assert new_state.source["options"]["path"] == original_source["options"]["path"]
-    authoring = new_state.source["options"][SOURCE_AUTHORING_KEY]
+    assert new_source["plugin"] == original_source["plugin"]
+    assert new_source["on_success"] == original_source["on_success"]
+    assert new_source["on_validation_failure"] == original_source["on_validation_failure"]
+    assert new_source["options"]["path"] == original_source["options"]["path"]
+    authoring = new_source["options"][SOURCE_AUTHORING_KEY]
     assert authoring["content_hash"] == content_hash
     assert authoring["review_event_id"] == str(event.id)
     assert authoring["resolved_kind"] == InterpretationKind.INVENTED_SOURCE.value
-    requirement = new_state.source["options"][INTERPRETATION_REQUIREMENTS_KEY][0]
+    requirement = new_source["options"][INTERPRETATION_REQUIREMENTS_KEY][0]
     assert requirement["status"] == "resolved"
     assert requirement["event_id"] == str(event.id)
     assert requirement["accepted_value"] == event.llm_draft
@@ -1557,8 +1618,8 @@ async def test_create_pending_after_session_opt_out_writes_surface_specific_audi
     assert len(materialized.sites) == 1
     assert materialized.sites[0].component_id == "rate_node"
     assert materialized.sites[0].kind is InterpretationKind.LLM_PROMPT_TEMPLATE
-    assert latest_state.source is not None
-    source_options = latest_state.source.options
+    assert latest_state.sources is not None
+    source_options = latest_state.sources[SOURCE_COMPONENT_ID].options
     source_requirement = source_options[INTERPRETATION_REQUIREMENTS_KEY][0]
     assert source_requirement["status"] == "resolved"
     assert source_requirement["accepted_value"] == "https://example.gov.au"

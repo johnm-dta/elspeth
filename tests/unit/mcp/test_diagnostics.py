@@ -55,6 +55,8 @@ def _create_completed_run_with_quarantine(
         source_node_id=f"source-{run_id}",
         row_index=0,
         data={"col": "bad-value"},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = factory.data_flow.create_token(row.row_id)
     factory.data_flow.record_token_outcome(
@@ -191,3 +193,36 @@ def test_diagnose_quarantine_count_scoped_to_recent_runs_only() -> None:
     assert quarantined is not None
     # Should only count the recent run's quarantine, not the old one
     assert quarantined["count"] == 1, f"Expected 1 quarantined row (recent only), got {quarantined['count']}"
+
+
+def test_diagnose_reports_high_error_completed_with_failures_runs() -> None:
+    """High-error completed_with_failures runs should be diagnostic warnings."""
+    db = make_landscape_db()
+    factory = make_factory(db)
+    run_id = "high-error-mixed-run"
+    factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
+    factory.data_flow.register_node(
+        run_id=run_id,
+        plugin_name="csv",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        node_id="source",
+        schema_config=_DYNAMIC_SCHEMA,
+    )
+    for index in range(11):
+        factory.data_flow.record_validation_error(
+            run_id,
+            "source",
+            {"bad": f"value-{index}"},
+            "missing field",
+            "observed",
+            "quarantine",
+        )
+    factory.run_lifecycle.complete_run(run_id, RunStatus.COMPLETED_WITH_FAILURES)
+
+    report = diagnose(db, factory)
+
+    high_errors = _get_problem(report, "high_error_rates")
+    assert high_errors is not None
+    assert {"run_id": run_id, "errors": 11} in high_errors["runs"]

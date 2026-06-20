@@ -154,6 +154,24 @@ def _chat_turn_audit_rows(client: TestClient, session_id: str) -> list:
     return [m for m in messages if m.role == "audit" and '"_kind": "chat_turn_audit"' in m.content]
 
 
+def _llm_call_audit_bodies(client: TestClient, session_id: str) -> list[dict]:
+    service = client.app.state.session_service
+    messages = asyncio.run(service.get_messages(UUID(session_id), limit=None))
+    rows: list[dict] = []
+    for message in messages:
+        if message.role != "audit":
+            continue
+        try:
+            content = json.loads(message.content)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(content, dict):
+            continue
+        if content.get("_kind") == "llm_call_audit":
+            rows.append(content)
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -317,6 +335,35 @@ class TestStepChatSuccess:
         assert isinstance(body["latency_ms"], int)
         assert body["latency_ms"] >= 0
 
+    def test_successful_step_chat_persists_llm_call_audit_row(self, composer_test_client: TestClient) -> None:
+        """The guided chat LLM call must persist a ComposerLLMCall sidecar.
+
+        ``ComposerChatTurn`` proves a user-facing chat turn happened; it is not
+        a substitute for the lower-level ``ComposerLLMCall`` row that records
+        the outbound model request.  Chain solving already emits that row; the
+        per-step chat path must do the same.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("acked")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="ping",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        audits = _llm_call_audit_bodies(composer_test_client, session_id)
+        assert len(audits) == 1, audits
+        audit = audits[0]
+        assert audit["status"] == "success"
+        assert audit["model_requested"]
+
     def test_synthetic_unavailable_persists_audit_message(self, composer_test_client: TestClient) -> None:
         """Slice 5.1: synthetic-unavailable chat round-trips also persist audit.
 
@@ -346,6 +393,9 @@ class TestStepChatSuccess:
         assert body["status"] == "synthetic_unavailable"
         assert body["error_class"] == "TimeoutError"
         assert body["chat_turn_seq"] == 0
+        llm_audits = _llm_call_audit_bodies(composer_test_client, session_id)
+        assert len(llm_audits) == 1, llm_audits
+        assert llm_audits[0]["status"] == "timeout"
 
     def test_two_chat_turns_advance_seq_monotonically(self, composer_test_client: TestClient) -> None:
         """Slice 5: chat_turn_seq is monotonic across multiple chat turns in the same step."""
@@ -444,10 +494,13 @@ class TestStep1SourceResolution:
         assert body["guided_session"]["step"] == "step_2_sink"
         assert body["next_turn"]["type"] == "single_select"
         assert body["next_turn"]["step_index"] == 1
-        assert body["composition_state"]["source"]["plugin"] == "csv"
-        source_options = body["composition_state"]["source"]["options"]
+        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
+        source_options = body["composition_state"]["sources"]["source"]["options"]
         assert source_options["schema"]["mode"] == "observed"
         assert source_options["path"].endswith("_teal_colours.csv")
+        audits = _llm_call_audit_bodies(composer_test_client, session_id)
+        assert len(audits) == 1, audits
+        assert audits[0]["status"] == "success"
 
 
 class TestStepChatRejections:
@@ -667,6 +720,130 @@ class TestStepChatTransientFailure:
         assert len(chat_history) == 2
         assert chat_history[0]["content"] == "anything"
         assert chat_history[1]["content"] == "I'm unavailable right now; you can still use the wizard controls."
+
+    def test_litellm_budget_exceeded_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
+        """BudgetExceededError from the LLM seam → 200 with the synthetic unavailable message.
+
+        Regression for elspeth-4cec1a03b9: ``BudgetExceededError`` is a direct
+        ``Exception`` subclass (NOT an ``APIError`` descendant), so the
+        wrapper's old narrow catch tuple let it escape into the route as an
+        unhandled 500. It is an operational provider-budget failure that must
+        be absorbed into the synthetic-unavailable contract — parity with the
+        non-guided ``_explain_run_diagnostics`` absorb set (sibling ab3ad30e87).
+        """
+        from litellm.exceptions import BudgetExceededError
+
+        session_id = _create_session(composer_test_client)
+        seeded = _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=BudgetExceededError(current_cost=10.0, max_budget=5.0)),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="anything",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message"] == "I'm unavailable right now; you can still use the wizard controls."
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["guided_session"]["terminal"] is None
+        assert body["guided_session"]["history"] == seeded["guided_session"]["history"]
+        chat_history = body["guided_session"]["chat_history"]
+        assert len(chat_history) == 2
+        assert chat_history[0]["content"] == "anything"
+        assert chat_history[1]["content"] == "I'm unavailable right now; you can still use the wizard controls."
+
+    def test_litellm_guardrail_raised_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
+        """GuardrailRaisedException from the LLM seam → 200 with the synthetic message.
+
+        Companion to the budget case (elspeth-4cec1a03b9): the content-policy
+        guardrail failure is likewise a direct ``Exception`` subclass that
+        bypassed the old catch tuple. Absorbed into the synthetic-unavailable
+        contract; the session is not terminated.
+        """
+        from litellm.exceptions import GuardrailRaisedException
+
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=GuardrailRaisedException(guardrail_name="pii", message="blocked")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="anything",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message"] == "I'm unavailable right now; you can still use the wizard controls."
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["guided_session"]["terminal"] is None
+
+    def test_litellm_blocked_pii_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
+        """BlockedPiiEntityError from the LLM seam → 200 with the synthetic message.
+
+        Third member of the elspeth-4cec1a03b9 absorb set (parity with
+        ab3ad30e87): a direct ``Exception`` subclass that bypassed the old
+        catch tuple. Absorbed into the synthetic-unavailable contract.
+        """
+        from litellm.exceptions import BlockedPiiEntityError
+
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=BlockedPiiEntityError(entity_type="email", guardrail_name="pii")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="anything",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message"] == "I'm unavailable right now; you can still use the wizard controls."
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["guided_session"]["terminal"] is None
+
+    def test_litellm_guardrail_intervention_normal_string_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
+        """GuardrailInterventionNormalStringError from the LLM seam → 200 with the synthetic message.
+
+        Fourth member of the elspeth-4cec1a03b9 named absorb set. The ticket
+        enumerates this class explicitly; its MRO is a direct ``Exception``
+        subclass (NOT a subclass of ``GuardrailRaisedException`` nor
+        ``APIError``), so before the catch-tuple widening it escaped
+        ``solve_step_chat_with_auto_drop`` to an unhandled 500 instead of the
+        synthetic-unavailable audit contract.
+        """
+        from litellm.exceptions import GuardrailInterventionNormalStringError
+
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=GuardrailInterventionNormalStringError(message="intervention")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="anything",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message"] == "I'm unavailable right now; you can still use the wizard controls."
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["guided_session"]["terminal"] is None
 
     def test_malformed_litellm_response_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
         """Empty choices list (IndexError in solve_step_chat) → synthetic message."""

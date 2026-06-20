@@ -186,6 +186,46 @@ async def test_three_identical_arg_error_failures_inject_hint_before_fourth_turn
 
 
 @pytest.mark.asyncio
+async def test_three_distinct_arg_error_failures_inject_drift_hint_before_fourth_turn() -> None:
+    """Same-tool failed payload drift must also reach the model before surrender."""
+    catalog = _mock_catalog()
+    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings())
+    state = _empty_state()
+
+    turns = [
+        _make_response_with_tool("call_1", "set_metadata", {"patch": {"name": "Draft A"}}),
+        _make_response_with_tool("call_2", "set_metadata", {"patch": {"name": "Draft B"}}),
+        _make_response_with_tool("call_3", "set_metadata", {"patch": {"name": "Draft C"}}),
+        _make_text_only_response("I am stuck."),
+    ]
+
+    arg_error = ToolArgumentError(argument="patch", expected="valid metadata patch", actual_type="dict")
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "elspeth.web.composer.tool_batch.execute_tool",
+            side_effect=[arg_error, arg_error, arg_error],
+        ),
+    ):
+        mock_llm.side_effect = turns
+        await service.compose("Build something", [], state)
+
+    assert mock_llm.call_count == 4
+    fourth_call_messages = mock_llm.call_args_list[3].args[0]
+    hint_messages = [
+        m
+        for m in fourth_call_messages
+        if isinstance(m, dict) and m.get("role") == "user" and "[ELSPETH-SYSTEM-HINT]" in str(m.get("content", ""))
+    ]
+    assert len(hint_messages) == 1
+    hint_text = hint_messages[0]["content"]
+    assert "set_metadata" in hint_text
+    assert "drift" in hint_text.lower()
+    assert "different arguments" in hint_text
+
+
+@pytest.mark.asyncio
 async def test_discovery_success_between_mutation_failures_does_not_break_anchor() -> None:
     """Regression test for the smoke-session bug discovered 2026-05-06.
 

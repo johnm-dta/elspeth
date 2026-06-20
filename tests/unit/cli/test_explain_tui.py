@@ -6,6 +6,7 @@ Tests that require LandscapeDB (screen loading, state transitions with real DB)
 are deferred to integration tier. Uses RecorderFactory to access data_flow repository.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -115,6 +116,59 @@ class TestExplainScreenLoading:
         assert data["transforms"][0]["node_type"] == "transform"
         assert len(data["sinks"]) == 1
         assert data["sinks"][0]["name"] == "csv_sink"
+
+    def test_load_pipeline_structure_honors_lineage_selectors(self) -> None:
+        """TUI mode must focus the same row/token/sink selector as no-tui mode."""
+        mock_db = MagicMock()
+        nodes = [
+            self._make_mock_node(node_id="src-1", plugin_name="csv_source", node_type=NodeType.SOURCE),
+            self._make_mock_node(node_id="tfm-1", plugin_name="filter", node_type=NodeType.TRANSFORM),
+            self._make_mock_node(node_id="sink-1", plugin_name="csv_sink", node_type=NodeType.SINK),
+        ]
+        lineage_result = SimpleNamespace(
+            token=SimpleNamespace(token_id="tok-123", row_id="row-456"),
+            node_states=(
+                SimpleNamespace(node_id="src-1"),
+                SimpleNamespace(node_id="tfm-1"),
+                SimpleNamespace(node_id="sink-1"),
+            ),
+        )
+
+        with (
+            patch("elspeth.tui.screens.explain_screen.RecorderFactory") as MockFactory,
+            patch("elspeth.tui.screens.explain_screen.explain_lineage") as mock_explain,
+        ):
+            factory = MockFactory.return_value
+            factory.data_flow.get_nodes.return_value = nodes
+            mock_explain.return_value = lineage_result
+            screen = ExplainScreen(
+                db=mock_db,
+                run_id="run-123",
+                row_id="row-456",
+                token_id="tok-123",
+                sink="main",
+            )
+
+        assert isinstance(screen.state, LoadedState)
+        mock_explain.assert_called_once_with(
+            factory.query,
+            factory.data_flow,
+            run_id="run-123",
+            token_id="tok-123",
+            row_id="row-456",
+            sink="main",
+        )
+        data = screen.get_lineage_data()
+        assert data is not None
+        assert data["tokens"] == [
+            {
+                "token_id": "tok-123",
+                "row_id": "row-456",
+                "path": ["src-1", "tfm-1", "sink-1"],
+            }
+        ]
+        labels = [node["label"] for node in screen.state.tree.get_tree_nodes()]
+        assert "Token: tok-123 (row: row-456)" in labels
 
     def test_load_pipeline_structure_db_error(self) -> None:
         """Database error during loading produces LoadingFailedState."""

@@ -13,13 +13,13 @@ Grades:
 """
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, CompoundSelect, select, union
 
 from elspeth.contracts import Determinism, ReproducibilityGrade
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape.schema import calls_table, node_states_table, nodes_table, runs_table
+from elspeth.core.landscape.schema import calls_table, node_states_table, nodes_table, operations_table, runs_table
 
 __all__ = [
     "ReproducibilityGrade",
@@ -102,6 +102,43 @@ def compute_grade(db: "LandscapeDB", run_id: str) -> ReproducibilityGrade:
 _PURGE_REF_CHUNK_SIZE = 100
 
 
+def _replay_critical_response_query(
+    *,
+    run_id: str,
+    non_reproducible_values: Sequence[Determinism],
+    response_ref_condition: ColumnElement[bool],
+) -> CompoundSelect[Any]:
+    """Find replay-critical state-call and operation-call responses."""
+    determinism_values = [d.value for d in non_reproducible_values]
+    state_call_query = (
+        select(calls_table.c.call_id)
+        .select_from(
+            calls_table.join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id).join(
+                nodes_table,
+                (node_states_table.c.node_id == nodes_table.c.node_id) & (node_states_table.c.run_id == nodes_table.c.run_id),
+            )
+        )
+        .where(node_states_table.c.run_id == run_id)
+        .where(nodes_table.c.determinism.in_(determinism_values))
+        .where(calls_table.c.response_hash.isnot(None))
+        .where(response_ref_condition)
+    )
+    operation_call_query = (
+        select(calls_table.c.call_id)
+        .select_from(
+            calls_table.join(operations_table, calls_table.c.operation_id == operations_table.c.operation_id).join(
+                nodes_table,
+                (operations_table.c.node_id == nodes_table.c.node_id) & (operations_table.c.run_id == nodes_table.c.run_id),
+            )
+        )
+        .where(operations_table.c.run_id == run_id)
+        .where(nodes_table.c.determinism.in_(determinism_values))
+        .where(calls_table.c.response_hash.isnot(None))
+        .where(response_ref_condition)
+    )
+    return union(state_call_query, operation_call_query)
+
+
 def update_grade_after_purge(db: "LandscapeDB", run_id: str, deleted_refs: Sequence[str] | None = None) -> None:
     """Degrade reproducibility grade after payload purge.
 
@@ -124,7 +161,9 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str, deleted_refs: Seque
         run_id: Run ID to potentially degrade
         deleted_refs: Payload refs actually removed by the purge operation.
     """
-    with db.connection() as conn:
+    # Read-then-write in one transaction: carry write intent so the WAL write
+    # lock is taken at BEGIN (no BUSY_SNAPSHOT upgrade hazard under peers).
+    with db.write_connection() as conn:
         # Tier 1 validation: verify audit data integrity before mutation
         query = select(runs_table.c.reproducibility_grade).where(runs_table.c.run_id == run_id)
         result = conn.execute(query)
@@ -168,31 +207,26 @@ def update_grade_after_purge(db: "LandscapeDB", run_id: str, deleted_refs: Seque
             Determinism.IO_WRITE,
         ]
 
-        # Query: calls via state_id → node_states → nodes (for determinism).
-        # Performance: relies on ix_calls_state index on calls.state_id (schema.py).
-        # Acceptable at current scale; may need a composite index if multi-run
-        # databases grow to millions of calls.
-        critical_response_query = (
-            select(calls_table.c.call_id)
-            .select_from(
-                calls_table.join(node_states_table, calls_table.c.state_id == node_states_table.c.state_id).join(
-                    nodes_table,
-                    (node_states_table.c.node_id == nodes_table.c.node_id) & (node_states_table.c.run_id == nodes_table.c.run_id),
-                )
-            )
-            .where(node_states_table.c.run_id == run_id)
-            .where(nodes_table.c.determinism.in_([d.value for d in non_reproducible_values]))
-            .where(calls_table.c.response_hash.isnot(None))  # Response existed
-        )
-
         purged_critical = None
         if deleted_refs is None:
-            purged_critical = conn.execute(critical_response_query.where(calls_table.c.response_ref.is_(None)).limit(1)).fetchone()
+            purged_critical = conn.execute(
+                _replay_critical_response_query(
+                    run_id=run_id,
+                    non_reproducible_values=non_reproducible_values,
+                    response_ref_condition=calls_table.c.response_ref.is_(None),
+                ).limit(1)
+            ).fetchone()
         else:
             unique_deleted_refs = tuple(dict.fromkeys(deleted_refs))
             for offset in range(0, len(unique_deleted_refs), _PURGE_REF_CHUNK_SIZE):
                 chunk = unique_deleted_refs[offset : offset + _PURGE_REF_CHUNK_SIZE]
-                purged_critical = conn.execute(critical_response_query.where(calls_table.c.response_ref.in_(chunk)).limit(1)).fetchone()
+                purged_critical = conn.execute(
+                    _replay_critical_response_query(
+                        run_id=run_id,
+                        non_reproducible_values=non_reproducible_values,
+                        response_ref_condition=calls_table.c.response_ref.in_(chunk),
+                    ).limit(1)
+                ).fetchone()
                 if purged_critical is not None:
                     break
 

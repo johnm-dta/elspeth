@@ -430,7 +430,7 @@ def test_resume_calls_prepare_for_run() -> None:
     def fake_prepare_for_run() -> None:
         calls.append("prepare_for_run")
 
-    def fake_reconstruct_resume_state(self, resume_point, payload_store):  # type: ignore[no-untyped-def]
+    def fake_reconstruct_resume_state(self, resume_point, payload_store, *, worker_id=None):  # type: ignore[no-untyped-def]
         assert calls == ["prepare_for_run"], (
             "Orchestrator.resume() must invoke prepare_for_run() before reconstructing resume state (ADR-010 §Decision 3)"
         )
@@ -444,22 +444,37 @@ def test_resume_calls_prepare_for_run() -> None:
         checkpoint = Checkpoint(
             checkpoint_id="cp-resume-bootstrap",
             run_id="run-resume-bootstrap",
-            token_id="tok-resume-bootstrap",
-            node_id="node-resume-bootstrap",
             sequence_number=1,
             created_at=datetime.now(UTC),
             upstream_topology_hash="a" * 64,
-            checkpoint_node_config_hash="b" * 64,
             format_version=Checkpoint.CURRENT_FORMAT_VERSION,
         )
         resume_point = ResumePoint(
             checkpoint=checkpoint,
-            token_id=checkpoint.token_id,
-            node_id=checkpoint.node_id,
             sequence_number=checkpoint.sequence_number,
         )
 
-        orchestrator = Orchestrator(make_landscape_db())
+        db = make_landscape_db()
+        # The resume() entry guard (elspeth-2f23292372) re-checks the run's
+        # status in the audit DB before any recovery work, so the run under
+        # resume must exist as FAILED for the bootstrap ordering to be reached.
+        from elspeth.contracts import RunStatus
+        from elspeth.core.landscape.schema import runs_table
+
+        with db.connection() as conn:
+            conn.execute(
+                runs_table.insert().values(
+                    run_id="run-resume-bootstrap",
+                    started_at=datetime.now(UTC),
+                    config_hash="cfg",
+                    settings_json="{}",
+                    canonical_version="sha256-rfc8785-v1",
+                    status=RunStatus.FAILED,
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+        orchestrator = Orchestrator(db)
 
         with pytest.raises(ReconstructReached):
             orchestrator.resume(

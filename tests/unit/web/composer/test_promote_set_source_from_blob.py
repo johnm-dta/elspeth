@@ -193,6 +193,28 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             )
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
+    def test_placeholder_blob_id_returns_boundary_failure(self) -> None:
+        """Invalid placeholder ids are rejected before blob lookup."""
+        engine, session_id = _session_engine_with_session()
+        result = _execute_set_source_from_blob(
+            {
+                "blob_id": "__missing__",
+                "on_success": "out",
+            },
+            _empty_state(),
+            ToolContext(
+                catalog=_mock_catalog(),
+                session_engine=engine,
+                session_id=session_id,
+            ),
+        )
+
+        assert result.success is False
+        assert "not a valid UUID" in result.data["error"]
+        assert "upload" in result.data["error"]
+        assert "list_blobs" in result.data["error"]
+        assert "not found" not in result.data["error"].lower()
+
     def test_valid_arguments_dispatch_normally(self, tmp_path: Path) -> None:
         """Functional smoke: a valid call wires the blob as the source.
 
@@ -230,8 +252,7 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
             ctx,
         )
         assert bind_result.success is True
-        assert bind_result.updated_state.source is not None
-        assert bind_result.updated_state.source.on_success == "out"
+        assert bind_result.updated_state.sources["source"].on_success == "out"
 
     def test_omitted_options_validates_at_model_layer(self) -> None:
         """``options`` is optional at the model layer (default ``{}``).
@@ -297,8 +318,8 @@ class TestPromoteSetSourceFromBlobArgErrorRouting:
         )
 
         assert bind_result.success is True, bind_result.data
-        assert bind_result.updated_state.source is not None
-        options = bind_result.updated_state.source.options
+        assert "source" in bind_result.updated_state.sources
+        options = bind_result.updated_state.sources["source"].options
         assert options[SOURCE_AUTHORING_KEY] == {
             "modality": CreationModality.LLM_GENERATED.value,
             "content_hash": create_result.data["content_hash"],
@@ -403,3 +424,91 @@ def test_redaction_passes_through_when_no_blob_ref() -> None:
     assert isinstance(redacted["options"], str)
     assert "/tmp/data.csv" in redacted["options"]
     assert REDACTED_BLOB_SOURCE_PATH not in redacted["options"]
+
+
+# ---------------------------------------------------------------------------
+# TSV-delimiter parity (bug elspeth-da09ed23d4)
+# ---------------------------------------------------------------------------
+
+
+class TestSetSourceFromBlobTsvDelimiter:
+    """A ``.tsv`` blob (uploaded as ``text/csv``) must bind a csv source whose
+    ``delimiter`` is a tab, matching what ``inspect_blob_content`` reports.
+
+    Without this, ``CSVSourceConfig.delimiter`` defaults to comma and the
+    tab-separated rows parse as a single column at runtime — the inspect-vs-bind
+    parity gap the ticket names.
+    """
+
+    def _bind_csv_blob(
+        self,
+        *,
+        filename: str,
+        content: str,
+        tmp_path: Path,
+        options: dict[str, Any] | None = None,
+    ) -> Any:
+        # Embed the blob content verbatim in the user message so the blob is
+        # classified VERBATIM (operator-supplied), not LLM-authored — that keeps
+        # the harness free of full composer provenance just to exercise the
+        # delimiter-derivation path.
+        user_message_content = f"Bind this tabular blob as the source:\n{content}"
+        engine, session_id, user_message_id = _session_engine_with_user_message(user_message_content)
+        catalog = _mock_catalog()
+        ctx = ToolContext(
+            catalog=catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            user_message_id=user_message_id,
+            user_message_content=user_message_content,
+        )
+        create_result = _execute_create_blob(
+            {"filename": filename, "mime_type": "text/csv", "content": content},
+            _empty_state(),
+            ctx,
+        )
+        assert create_result.success is True, create_result.data
+        bind_result = _execute_set_source_from_blob(
+            {
+                "blob_id": create_result.data["blob_id"],
+                "on_success": "out",
+                "options": options if options is not None else {"schema": {"mode": "observed"}},
+            },
+            _empty_state(),
+            ctx,
+        )
+        return bind_result
+
+    def test_tsv_blob_binds_csv_source_with_tab_delimiter(self, tmp_path: Path) -> None:
+        bind_result = self._bind_csv_blob(
+            filename="data.tsv",
+            content="a\tb\tc\n1\t2\t3\n",
+            tmp_path=tmp_path,
+        )
+        assert bind_result.success is True, bind_result.data
+        source = bind_result.updated_state.sources["source"]
+        assert source.plugin == "csv"
+        assert source.options.get("delimiter") == "\t"
+
+    def test_caller_supplied_delimiter_is_not_overridden(self, tmp_path: Path) -> None:
+        bind_result = self._bind_csv_blob(
+            filename="data.tsv",
+            content="a;b;c\n1;2;3\n",
+            tmp_path=tmp_path,
+            options={"delimiter": ";", "schema": {"mode": "observed"}},
+        )
+        assert bind_result.success is True, bind_result.data
+        source = bind_result.updated_state.sources["source"]
+        assert source.options.get("delimiter") == ";"
+
+    def test_csv_blob_does_not_inject_delimiter(self, tmp_path: Path) -> None:
+        bind_result = self._bind_csv_blob(
+            filename="data.csv",
+            content="a,b,c\n1,2,3\n",
+            tmp_path=tmp_path,
+        )
+        assert bind_result.success is True, bind_result.data
+        source = bind_result.updated_state.sources["source"]
+        assert source.plugin == "csv"
+        assert source.options.get("delimiter") is None

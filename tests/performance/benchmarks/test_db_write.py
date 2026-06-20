@@ -105,6 +105,8 @@ def test_create_row_throughput() -> None:
                 source_node_id=source_node_id,
                 row_index=i,
                 data={"id": i, "value": f"row_{i}", "amount": i * 1.5},
+                source_row_index=i,
+                ingest_sequence=i,
             )
 
     rows_per_sec = iterations / timing.wall_seconds
@@ -133,6 +135,8 @@ def test_create_token_throughput() -> None:
             source_node_id=source_node_id,
             row_index=i,
             data={"id": i},
+            source_row_index=i,
+            ingest_sequence=i,
         )
         row_ids.append(row.row_id)
 
@@ -169,6 +173,8 @@ def test_begin_node_state_throughput() -> None:
             source_node_id=source_node_id,
             row_index=i,
             data={"id": i},
+            source_row_index=i,
+            ingest_sequence=i,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         token_ids.append(token.token_id)
@@ -211,6 +217,8 @@ def test_record_outcome_throughput() -> None:
             source_node_id=source_node_id,
             row_index=i,
             data={"id": i},
+            source_row_index=i,
+            ingest_sequence=i,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         token_ids.append(token.token_id)

@@ -20,7 +20,7 @@ Keep types.py as pure data definitions with minimal dependencies.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Protocol
@@ -30,8 +30,9 @@ from elspeth.contracts.run_result import RunResult as RunResult  # re-exported
 
 if TYPE_CHECKING:
     from elspeth.contracts import PendingOutcome, RowResult, SinkProtocol, SourceProtocol, TokenInfo
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+    from elspeth.contracts.barrier_scalars import BarrierScalars
+    from elspeth.contracts.checkpoint import ResumedRow
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
@@ -61,8 +62,18 @@ class RowProcessorHandle(Protocol):
     """Orchestrator-facing processor contract stored in run/loop contexts."""
 
     @property
+    def run_id(self) -> str:
+        """Expose the run identifier for scheduler recovery diagnostics."""
+        ...
+
+    @property
     def token_manager(self) -> Any:
         raise NotImplementedError
+
+    @property
+    def coordination_token(self) -> CoordinationToken | None:
+        """Leader fencing token bound at construction (ADR-030)."""
+        ...
 
     def process_row(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
@@ -82,10 +93,88 @@ class RowProcessorHandle(Protocol):
     def handle_timeout_flush(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
 
-    def get_aggregation_checkpoint_state(self) -> AggregationCheckpointState:
+    def drain_scheduled_work(self, ctx: PluginContext) -> list[RowResult]:
+        """Drain recoverable durable scheduler work during resume."""
+        ...
+
+    def has_scheduled_work(self) -> bool:
+        """Return whether the durable scheduler has active non-terminal work."""
+        ...
+
+    def active_scheduled_row_ids(self) -> frozenset[str]:
+        """Return row IDs represented by active durable scheduler work."""
+        ...
+
+    def summarize_scheduled_work(self) -> tuple[str, ...]:
+        """Return grouped active scheduler work for invariant diagnostics."""
+        ...
+
+    def has_unresolved_scheduler_work(self) -> bool:
+        """Return whether scheduler work remains short of a durable sink handoff."""
+        ...
+
+    def has_peer_active_leases(self) -> bool:
+        """Return whether any peer worker holds an unexpired LEASED item (ADR-030)."""
+        ...
+
+    def peer_lease_wait_budget_seconds(self) -> float:
+        """Return bounded wait budget for peer-held active item leases."""
+        ...
+
+    def peer_active_lease_owners(self) -> tuple[str, ...]:
+        """Return the distinct peer lease_owners holding unexpired LEASED rows (ADR-030)."""
+        ...
+
+    def reap_expired_peer_leases(self) -> int:
+        """Drive lease maintenance once so dead peers are reaped; return count recovered (ADR-030)."""
+        ...
+
+    def summarize_unresolved_scheduler_work(self) -> tuple[str, ...]:
+        """Return grouped unresolved scheduler work for invariant diagnostics."""
+        ...
+
+    def run_barrier_intake(self, ctx: PluginContext) -> list[RowResult]:
+        """Run one journal-first barrier intake pass (ADR-030 §E.2, §D step 3)."""
+        ...
+
+    def has_blocked_barrier_work(self) -> bool:
+        """Return whether durable BLOCKED barrier holds remain (§D step-3 loop)."""
+        ...
+
+    def count_unquiesced_scheduler_work(self) -> int:
+        """Count §D step-2 unquiesced journal work (READY + non-pending-sink LEASED)."""
+        ...
+
+    def summarize_unquiesced_scheduler_work(self) -> tuple[str, ...]:
+        """Return grouped §D step-2 unquiesced work for invariant diagnostics."""
+        ...
+
+    def mark_blocked_barrier_terminal(self, barrier_key: str, token_ids: tuple[str, ...]) -> int:
+        """Mark durable scheduler work consumed by a barrier as terminal."""
+        ...
+
+    def complete_coalesce_merge(
+        self,
+        *,
+        coalesce_name: CoalesceName,
+        consumed_tokens: tuple[TokenInfo, ...],
+        merged_token: TokenInfo,
+        coalesce_node_id: NodeID,
+        ctx: PluginContext,
+    ) -> list[RowResult]:
+        """Atomically complete an out-of-claim coalesce fire and drive the merged token (F1/D6)."""
         raise NotImplementedError
 
-    def get_coalesce_checkpoint_state(self) -> CoalesceCheckpointState | None:
+    def mark_sink_bound_scheduler_terminal(self, token_id: str) -> None:
+        """Mark scheduler sink handoff complete after sink outcome durability."""
+        ...
+
+    def mark_sink_bound_scheduler_terminal_many(self, token_ids: tuple[str, ...]) -> None:
+        """Mark scheduler sink handoffs complete after durable batch sink outcomes."""
+        ...
+
+    def get_barrier_scalars(self) -> BarrierScalars:
+        """Compose the underivable barrier scalars from the live executors (F1)."""
         raise NotImplementedError
 
     def resume_incomplete_token(
@@ -125,8 +214,14 @@ class PipelineConfig:
     The ``frozen=True`` decorator prevents field reassignment after
     construction, ensuring pipeline config is immutable during a run.
 
+    Per ADR-025 Decision §1, the pipeline source surface is plural by
+    contract and by code. Callers iterate ``sources.items()`` and pass
+    the active ``SourceProtocol`` as an explicit parameter to each
+    per-source method; PipelineConfig itself no longer exposes a
+    "current source" pseudo-attribute.
+
     Attributes:
-        source: Source plugin instance
+        sources: Source plugin instances keyed by stable source name (non-empty).
         transforms: Transform plugin instances (processed in DAG order)
         sinks: Dict of sink_name -> sink plugin instance
         config: Additional run configuration
@@ -135,7 +230,7 @@ class PipelineConfig:
         coalesce_settings: Coalesce configurations for merging fork paths
     """
 
-    source: SourceProtocol
+    sources: Mapping[str, SourceProtocol]
     transforms: Sequence[RowPlugin]
     sinks: Mapping[str, SinkProtocol]
     config: Mapping[str, Any] = field(default_factory=dict)
@@ -144,10 +239,12 @@ class PipelineConfig:
     coalesce_settings: Sequence[CoalesceSettings] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if not self.sinks:
-            from elspeth.contracts.errors import OrchestrationInvariantError
+        from elspeth.contracts.errors import OrchestrationInvariantError
 
+        if not self.sinks:
             raise OrchestrationInvariantError("PipelineConfig requires at least one sink")
+        if not self.sources:
+            raise OrchestrationInvariantError("PipelineConfig requires at least one source")
         # Freeze mutable container fields. freeze_fields deep-freezes recursively,
         # converting nested dicts/lists to MappingProxyType/tuple throughout.
         # transforms/gates/coalesce_settings contain frozen dataclass instances
@@ -155,7 +252,7 @@ class PipelineConfig:
         object.__setattr__(self, "transforms", tuple(self.transforms))
         object.__setattr__(self, "gates", tuple(self.gates))
         object.__setattr__(self, "coalesce_settings", tuple(self.coalesce_settings))
-        freeze_fields(self, "sinks", "config", "aggregation_settings")
+        freeze_fields(self, "sources", "sinks", "config", "aggregation_settings")
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,6 +503,7 @@ class GraphArtifacts:
 
     edge_map: Mapping[tuple[NodeID, str], str]
     source_id: NodeID
+    source_id_map: Mapping[str, NodeID]
     sink_id_map: Mapping[SinkName, NodeID]
     transform_id_map: Mapping[int, NodeID]
     config_gate_id_map: Mapping[GateName, NodeID]
@@ -415,6 +513,7 @@ class GraphArtifacts:
         freeze_fields(
             self,
             "edge_map",
+            "source_id_map",
             "sink_id_map",
             "transform_id_map",
             "config_gate_id_map",
@@ -482,7 +581,6 @@ class LoopContext:
     agg_transform_lookup: Mapping[str, AggNodeEntry]
     coalesce_executor: CoalesceExecutor | None
     coalesce_node_map: Mapping[CoalesceName, NodeID]
-    last_token_id: str | None = None
 
     def __post_init__(self) -> None:
         freeze_fields(self, "agg_transform_lookup", "coalesce_node_map")
@@ -509,35 +607,135 @@ class ResumeState:
 
     Bundles the state reconstruction results needed to process resumed rows.
     Short-lived: consumed immediately by the resume method.
+
+    Per ADR-025 Decision §3, schema contracts are plural-by-source.
+    ``schema_contracts_by_source`` is non-optional **and never empty** —
+    resume reconstruction either populates one contract per source from
+    ``run_sources`` (RC6 audit DBs) or one contract keyed by the
+    single-source NodeID derived from ``rows.source_node_id`` (pre-RC6
+    audit DBs). The previous singular ``schema_contract`` field has
+    been deleted; consumers look up each row's contract via
+    ``schema_contracts_by_source[row.source_node_id]``.
+
+    The empty case — a run that failed before any row was committed
+    and before any ``run_sources`` records were written (``on_start``
+    failure, source-level abort, infrastructure crash pre-ingest) — is
+    refused **upstream** in ``_reconstruct_resume_state`` via
+    :class:`EmptyResumeStateError`. That exception is the interpretable
+    "nothing to resume" outcome; the construction-time guard below is
+    the chokepoint that pins the invariant against future regressions
+    where some caller bypasses the upstream check.
     """
 
     factory: RecorderFactory
     run_id: str
-    restored_aggregation_state: Mapping[str, AggregationCheckpointState]
-    restored_coalesce_state: CoalesceCheckpointState | None
-    unprocessed_rows: Sequence[tuple[str, int, dict[str, Any]]]
-    schema_contract: SchemaContract
+    unprocessed_rows: Sequence[ResumedRow]
     # F1 fix: incomplete child tokens grouped by row_id — used by the resume loop
     # to dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
     # instead of whole-row restart (which re-emits completed branches).
     incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
     # RecoveryManager needed by resume loop for reconstruct_token_row.
     recovery_manager: RecoveryManager
+    schema_contracts_by_source: Mapping[NodeID, SchemaContract]
+    source_names_by_source: Mapping[NodeID, str]
+    source_lifecycle_by_source: Mapping[NodeID, str]
+    # F1: True when the scheduler journal carries BLOCKED barrier rows for the
+    # run. Those tokens are EXCLUDED from unprocessed_rows (they are restored
+    # into executor buffers at processor construction, not re-driven), so the
+    # resume quiescence gate must consult this flag — a fully-buffered crashed
+    # run has zero unprocessed rows but must still run the processing path so
+    # the restored buffers flush.
+    has_restored_barrier_work: bool = False
+    # F1: old->retry batch_id mapping from handle_incomplete_batches; consumed
+    # by the processor's journal restore (BUFFERED token_outcomes still carry
+    # the dead original batch ids after a flush-interrupting crash).
+    batch_id_remap: Mapping[str, str] = field(default_factory=dict)
+    # ADR-030 (epoch 21): the leader fencing token minted by resume()'s
+    # seat-acquisition CAS (acquire_run_leadership) — the resume path's FIRST
+    # durable act. Carried by value out of reconstruct_resume_state to the
+    # processor / checkpoint / finalize collaborators; never re-read mid-run.
+    # A frozen dataclass — no freezing needed here.
+    coordination_token: CoordinationToken | None = None
 
     def __post_init__(self) -> None:
+        # Local import to avoid hoisting OrchestrationInvariantError into the
+        # module header — it's only referenced inside this guard, and the
+        # contracts package is already an L0 dependency so this is not a
+        # layer-architecture concern.
+        from elspeth.contracts.errors import OrchestrationInvariantError
+
         # incomplete_by_row is a dict[str, list[IncompleteTokenSpec]] of frozen specs;
         # deep_freeze converts it to MappingProxyType[str, tuple[IncompleteTokenSpec, ...]].
         # The resume loop consumes it via membership (`row_id in incomplete_by_row`) and
         # iteration (`for s in incomplete_by_row[row_id]`), both fine on the frozen shape.
         # recovery_manager is a live service object (not a container) — NOT frozen here.
-        freeze_fields(self, "restored_aggregation_state", "incomplete_by_row")
-        # unprocessed_rows contains raw row dicts that PipelineRow expects as
-        # plain dict — deep_freeze would convert them to MappingProxyType.
+        freeze_fields(
+            self,
+            "incomplete_by_row",
+            "schema_contracts_by_source",
+            "source_names_by_source",
+            "source_lifecycle_by_source",
+            "batch_id_remap",
+        )
+        # unprocessed_rows is a Sequence of ResumedRow instances. Each
+        # ResumedRow is fully deep-frozen in its own __post_init__ (row_data
+        # is MappingProxyType via freeze_fields, not a plain dict). Tuple-
+        # ifying the outer Sequence is sufficient — further deep_freeze
+        # traversal is not needed because every leaf is already immutable.
+        # Consumers that need row_data as a plain dict (e.g. PipelineRow) call
+        # dict(row.row_data) explicitly at the construction boundary (see
+        # engine/orchestrator/core.py _reconstruct_resume_state loop).
         if not isinstance(self.unprocessed_rows, tuple):
             object.__setattr__(self, "unprocessed_rows", tuple(self.unprocessed_rows))
+        # ADR-025 §3: schema_contracts_by_source is non-empty by invariant.
+        # The empty case (no rows committed, no run_sources records) is
+        # handled upstream by ``_reconstruct_resume_state`` via
+        # :class:`EmptyResumeStateError` — ResumeState is never
+        # constructed in that case. This guard pins the invariant so a
+        # future caller that bypasses the upstream check fails loudly
+        # rather than silently picking an arbitrary contract.
+        if not self.schema_contracts_by_source:
+            raise OrchestrationInvariantError(
+                "ResumeState.schema_contracts_by_source must not be empty. "
+                "Empty-state resume should have been refused upstream via "
+                "EmptyResumeStateError before ResumeState was constructed. "
+                "If you're hitting this, the upstream check is missing."
+            )
+        # ADR-025 §3: resume rejects rather than picks an arbitrary
+        # contract. Every row's ``source_node_id`` must have a
+        # corresponding entry in ``schema_contracts_by_source`` —
+        # otherwise the loop would have to pick a default, which is
+        # the failure mode this ADR closes.
+        missing = {row.source_node_id for row in self.unprocessed_rows} - set(self.schema_contracts_by_source)
+        if missing:
+            raise OrchestrationInvariantError(
+                "ResumeState.schema_contracts_by_source is missing entries for "
+                f"source_node_id(s): {sorted(missing)}. Available keys: "
+                f"{sorted(self.schema_contracts_by_source)}. Resume rejects rather "
+                "than picks an arbitrary contract (ADR-025 §3)."
+            )
 
 
-# Factory that creates a per-sink checkpoint callback.
-# Takes a sink_node_id (str) and returns a callback invoked after each
-# token is written to that sink.
-type _CheckpointFactory = Callable[[str], Callable[[TokenInfo], None]]
+class CheckpointAfterSinkCallback(Protocol):
+    """Post-sink callback with an explicit batch flush boundary."""
+
+    def __call__(self, token: TokenInfo) -> None:
+        """Record per-token checkpoint progress after durable sink handling."""
+        ...
+
+    def flush(self) -> None:
+        """Flush batched scheduler terminalization after callback use."""
+        ...
+
+
+class _CheckpointFactory(Protocol):
+    """Factory that creates per-sink checkpoint callbacks.
+
+    ``terminalize_scheduler`` is enabled only for sink writes whose pending
+    outcome carries a durable scheduler PENDING_SINK handoff for every token in
+    the grouped batch.
+    """
+
+    def __call__(self, sink_node_id: str, *, terminalize_scheduler: bool = True) -> CheckpointAfterSinkCallback:
+        """Return a callback invoked after each token is written to a sink."""
+        ...

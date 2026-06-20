@@ -11,6 +11,7 @@
 //   1006 (abnormal) -- network drop, auto-reconnect with backoff
 //   1011 (internal) -- server error, do NOT reconnect, poll REST
 //   4001 (auth)     -- token invalid/expired, do NOT reconnect, trigger logout
+//   4004 (not found) -- run unavailable/not owned, do NOT reconnect
 //
 // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped).
 // ============================================================================
@@ -33,8 +34,12 @@ import type {
  * - onComplete: Terminal. Pipeline finished successfully.
  * - onCancelled: Terminal. Pipeline was cancelled.
  * - onFailed: Terminal. Pipeline aborted due to unrecoverable error.
+ * - onConnected: Socket opened, including after a reconnect.
+ * - onDisconnected: Abnormal close entered the reconnect loop.
  * - onAuthFailure: Close code 4001. Token invalid/expired.
  *   Caller should trigger authStore.logout(). No reconnect attempt.
+ * - onRunUnavailable: Close code 4004. Run not found or not owned.
+ *   Caller should surface the unavailable run. No reconnect attempt.
  */
 export interface WebSocketCallbacks {
   onProgress: (event: RunEvent, data: RunEventProgress) => void;
@@ -42,7 +47,10 @@ export interface WebSocketCallbacks {
   onComplete: (event: RunEvent, data: RunEventCompleted) => void;
   onCancelled: (event: RunEvent, data: RunEventCancelled) => void;
   onFailed: (event: RunEvent, data: RunEventFailed) => void;
+  onConnected?: () => void;
+  onDisconnected?: () => void;
   onAuthFailure: () => void;
+  onRunUnavailable?: () => void;
 }
 
 /** Handle returned by connectToRun for explicit close. */
@@ -67,6 +75,7 @@ const MAX_RECONNECT_DELAY_MS = 30_000;
  * Returns a connection handle with a close() method. The connection
  * auto-reconnects on abnormal disconnects (code 1006 or unknown codes)
  * until close() is called explicitly or a terminal close code is received.
+ * Close code 4004 is terminal: the run is unavailable or not owned.
  */
 export function connectToRun(
   runId: string,
@@ -114,6 +123,7 @@ export function connectToRun(
     socket.onopen = (): void => {
       // Reset backoff on successful connection
       reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+      callbacks.onConnected?.();
     };
 
     socket.onmessage = (messageEvent: MessageEvent): void => {
@@ -163,6 +173,13 @@ export function connectToRun(
           callbacks.onAuthFailure();
           return;
 
+        case 4004:
+          // Run unavailable -- not found or not owned by this user.
+          // Do NOT reconnect. Surface the unavailable run to the caller.
+          closed = true;
+          callbacks.onRunUnavailable?.();
+          return;
+
         default:
           // Unknown close code -- treat as abnormal, attempt reconnect.
           scheduleReconnect();
@@ -174,6 +191,7 @@ export function connectToRun(
   function scheduleReconnect(): void {
     if (closed) return;
 
+    callbacks.onDisconnected?.();
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();

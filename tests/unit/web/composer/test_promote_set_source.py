@@ -118,5 +118,4 @@ class TestPromoteSetSourceArgErrorRouting:
             ToolContext(catalog=_mock_catalog()),
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "csv"
+        assert result.updated_state.sources["source"].plugin == "csv"

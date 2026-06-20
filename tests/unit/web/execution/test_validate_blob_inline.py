@@ -190,7 +190,7 @@ def test_validate_substitutes_ready_inline_blob_marker_before_settings_load(
     # patched, so the bundle and graph are threaded through opaquely — a plain
     # SimpleNamespace is honest and keeps the unspecced-mock debt from growing.
     mock_bundle = SimpleNamespace(
-        source=SimpleNamespace(),
+        sources={"source": SimpleNamespace()},
         transforms=(),
         sinks={"results": SimpleNamespace()},
         aggregations={},

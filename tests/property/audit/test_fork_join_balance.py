@@ -247,8 +247,8 @@ def _build_production_graph(config: PipelineConfig) -> ExecutionGraph:
     )
 
     return ExecutionGraph.from_plugin_instances(
-        source=config.source,
-        source_settings=SourceSettings(plugin=config.source.name, on_success=source_on_success, options={}),
+        sources={"primary": config.sources["primary"]},
+        source_settings_map={"primary": SourceSettings(plugin=config.sources["primary"].name, on_success=source_on_success, options={})},
         transforms=wired_transforms,
         sinks=config.sinks,
         aggregations={},
@@ -260,6 +260,27 @@ def _build_production_graph(config: PipelineConfig) -> ExecutionGraph:
 # =============================================================================
 # Property Tests: DAG Construction Invariants
 # =============================================================================
+
+
+def _scrub_scheduler_work_for_outcomeless_tokens(db: LandscapeDB, run_id: str) -> None:
+    """Reconcile the durable scheduler journal with a simulated interruption.
+
+    These fixtures simulate a crash by surgically deleting terminal outcomes
+    (and, for barrier cases, the merged-token artifacts) from a run that
+    actually completed. In production the terminal-outcome write strictly
+    precedes work-item terminalization, so a token with no terminal outcome
+    can never carry a TERMINAL work item; the reachable crash window for such
+    a token is "continuation not yet enqueued". Delete the work items of every
+    token left outcome-less so the journal matches the crash state the fixture
+    models — otherwise resume's re-enqueue collides with journal rows from the
+    completed run.
+    """
+    with db.engine.connect() as conn:
+        conn.execute(
+            text("DELETE FROM token_work_items WHERE run_id = :run_id AND token_id NOT IN (SELECT token_id FROM token_outcomes)"),
+            {"run_id": run_id},
+        )
+        conn.commit()
 
 
 class TestDagForkBranchValidation:
@@ -290,8 +311,8 @@ class TestDagForkBranchValidation:
         # This should fail at graph construction
         with pytest.raises(GraphValidationError, match="unknown_branch"):
             ExecutionGraph.from_plugin_instances(
-                source=as_source(source),
-                source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+                sources={"primary": as_source(source)},
+                source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
                 transforms=[],
                 sinks={"default": as_sink(sink)},  # No "unknown_branch" sink
                 gates=[gate],
@@ -315,8 +336,8 @@ class TestDagForkBranchValidation:
 
         # This should succeed - branches match sink names
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -359,8 +380,8 @@ class TestDagForkBranchValidation:
 
         # This should succeed - branches match coalesce branches
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"default": as_sink(sink)},
             gates=[gate],
@@ -400,8 +421,8 @@ class TestDagForkBranchValidation:
         # RoutingAction.fork_to_paths() validates uniqueness
         with pytest.raises((GraphValidationError, ValueError), match=r"[Dd]uplicate"):
             ExecutionGraph.from_plugin_instances(
-                source=as_source(source),
-                source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+                sources={"primary": as_source(source)},
+                source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
                 transforms=[],
                 sinks={"default": as_sink(sink)},
                 gates=[gate],
@@ -430,8 +451,8 @@ class TestDagForkBranchValidation:
 
         with pytest.raises(GraphValidationError, match="branch_b"):
             ExecutionGraph.from_plugin_instances(
-                source=as_source(source),
-                source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+                sources={"primary": as_source(source)},
+                source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
                 transforms=[],
                 sinks={"default": as_sink(sink)},
                 gates=[gate],
@@ -475,15 +496,15 @@ class TestForkJoinRuntimeBalance:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -493,7 +514,7 @@ class TestForkJoinRuntimeBalance:
 
         # Settings needed for fork execution
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -567,7 +588,7 @@ class TestForkJoinEdgeCases:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -597,15 +618,15 @@ class TestForkJoinEdgeCases:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -616,7 +637,7 @@ class TestForkJoinEdgeCases:
         from elspeth.core.config import ElspethSettings
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -675,15 +696,15 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -692,7 +713,7 @@ class TestForkRecoveryInvariant:
         )
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -725,31 +746,13 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run.run_id)
         # Create a checkpoint (required for recovery to work)
-        # Use actual token and sink node from the run
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            # Get an actual token from the run
-            actual_token = conn.execute(
-                text("""
-                    SELECT t.token_id
-                    FROM tokens t
-                    JOIN rows r ON r.row_id = t.row_id
-                    WHERE r.run_id = :run_id
-                    LIMIT 1
-                """),
-                {"run_id": run.run_id},
-            ).fetchone()
-            # Token must exist since run completed successfully
-            assert actual_token is not None, "No tokens found for run"
-            token_id = actual_token.token_id
-
         checkpoint_manager = CheckpointManager(db)
         checkpoint_manager.create_checkpoint(
             run_id=run.run_id,
-            token_id=token_id,  # Use actual token from run
-            node_id=sink_node_ids[0],  # Use actual sink node ID from graph
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -815,14 +818,14 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -830,7 +833,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[],
         )
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -884,21 +887,13 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
             conn.commit()
 
-        # A checkpoint is the precondition for resume. Anchor it on a real token
-        # and the sink node from the run.
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
+        # A checkpoint is the precondition for resume.
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -979,14 +974,14 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -994,7 +989,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[],
         )
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -1039,6 +1034,7 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         return db, payload_store, config, graph, settings_obj, run_id, incomplete_token_id
 
     def _resume_run(
@@ -1056,18 +1052,10 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
 
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -1282,6 +1270,8 @@ class TestForkRecoveryInvariant:
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             data={"items": [1, 2]},
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
@@ -1404,6 +1394,8 @@ class TestForkRecoveryInvariant:
             run_id=run.run_id,
             source_node_id=source.node_id,
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             data={"key": "value"},
         )
 
@@ -1517,14 +1509,14 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
         )
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[gate],
@@ -1532,7 +1524,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[],
         )
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -1579,6 +1571,7 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # Exercise the method under test — no checkpoint or run-status required.
         checkpoint_mgr = CheckpointManager(db)
         recovery = RecoveryManager(db, checkpoint_mgr)
@@ -1656,6 +1649,8 @@ class TestForkRecoveryInvariant:
             run_id=run.run_id,
             source_node_id=source_node.node_id,
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             data={"items": [1, 2]},
         )
         parent_token = factory.data_flow.create_token(row_id=row.row_id)
@@ -1760,6 +1755,8 @@ class TestForkRecoveryInvariant:
             run_id=run.run_id,
             source_node_id=source_node.node_id,
             row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
             data={"source_val": 99},
         )
         source_schema = SchemaContract(
@@ -2014,8 +2011,8 @@ class TestForkRecoveryInvariant:
         wired_b = wire_transforms([pass_b], source_connection="path_b", final_sink="done_b", names=["pass_b"])
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=wired_a + wired_b,
             sinks={"output": as_sink(sink)},
             gates=[gate],
@@ -2024,7 +2021,7 @@ class TestForkRecoveryInvariant:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(pass_a), as_transform(pass_b)],
             sinks={"output": as_sink(sink)},
             gates=[gate],
@@ -2032,7 +2029,7 @@ class TestForkRecoveryInvariant:
         )
 
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "gate_in", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "gate_in", "options": {}}},
             sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
             gates=[gate],
             coalesce=[coalesce],
@@ -2164,7 +2161,13 @@ class TestForkRecoveryInvariant:
             # and its dependents in a single connection without a strict topological order.
             # All rows being deleted are barrier artifacts from this specific run; the
             # connection is committed before FKs are re-enabled to keep the DB consistent.
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            _fk_driver = conn.connection.driver_connection  # raw sqlite3 conn
+            assert _fk_driver is not None
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline autobegins an explicit BEGIN on the
+            # first conn.execute(), so toggle FKs at the raw driver level
+            # (driver autocommit) before the transaction starts.
+            _fk_driver.execute("PRAGMA foreign_keys = OFF")
 
             # 1. merged token outcomes (COMPLETED at sink)
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
@@ -2192,8 +2195,9 @@ class TestForkRecoveryInvariant:
                 {"nid": str(coalesce_node_id_for_deletion), "rid": run_id},
             )
             conn.commit()
-            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            _fk_driver.execute("PRAGMA foreign_keys = ON")
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Oracle: incomplete specs must be the TWO branch children (Case 2) ────
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
@@ -2216,19 +2220,10 @@ class TestForkRecoveryInvariant:
             )
 
         # ── Resume ────────────────────────────────────────────────────────────────
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
-
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -2259,7 +2254,7 @@ class TestForkRecoveryInvariant:
         assert post_stats["total_fork_groups"] == 1, f"Fork-group count must remain 1 (one row, one fork); got {post_stats}"
 
     def test_resume_coalesce_held_branch_not_redriven(self) -> None:
-        """A branch HELD at a coalesce barrier (checkpointed into coalesce pending) must
+        """A branch HELD at a coalesce barrier (a journal BLOCKED row) must
         NOT be re-driven on resume — it is restored into the executor's _pending and
         flushes there. Re-driving it re-arrives at the barrier and crashes the
         duplicate-arrival guard. Only the genuinely-incomplete (not-yet-arrived) sibling
@@ -2278,55 +2273,47 @@ class TestForkRecoveryInvariant:
             terminal outcome (pre-merge state).
           - HELD branch: its coalesce-node node_state is reverted to the held/open state
             (status='open', completed_at = NULL — the state CoalesceExecutor.accept's
-            begin_node_state writes on arrival) and its real state_id is captured. It is
-            then placed into a genuine CoalesceCheckpointState (pending.branches) carrying
-            its real row_data + contract + state_id, passed to
-            create_checkpoint(coalesce_state=). On resume, restore_from_checkpoint
-            repopulates _pending with this branch — it is "already arrived", awaiting the
-            sibling. The HELD branch is chosen as the one with the smaller token_id so it
-            is dispatched FIRST on resume (specs order by step_in_pipeline, token_id), which
+            begin_node_state writes on arrival). Its durable scheduler work item is
+            re-created in the crash-faithful BLOCKED state through the PRODUCTION
+            journal verbs (enqueue_ready_claimed + mark_blocked with
+            barrier_key='merge', the coalesce name) carrying its real row payload —
+            F1: the journal BLOCKED row is the ONLY barrier-buffer truth. On resume,
+            processor._restore_barriers_from_journal repopulates _pending with this
+            branch — it is "already arrived", awaiting the sibling. The HELD branch is
+            chosen as the one with the smaller token_id so a buggy re-drive would be
+            dispatched FIRST on resume (specs order by step_in_pipeline, token_id), which
             makes the duplicate-arrival the deterministic RED (it re-arrives while it is the
             only _pending entry, before any merge could complete).
-          - SIBLING branch: its coalesce-node node_state is DELETED (genuinely
-            not-yet-arrived) and it is NOT in the checkpoint pending. It must re-drive.
+          - SIBLING branch: ALL its node_states are DELETED (genuinely not-yet-started)
+            and it has NO BLOCKED journal row. Its durable scheduler work item is
+            restored to the crash-faithful state: READY at its branch-first node with
+            its coalesce cursor, enqueued by the fork but never claimed (RC6: the fork
+            enqueues both branch continuations before either is processed, so by the
+            time one branch is HELD at the barrier the sibling's work item exists).
 
-        After this, _get_buffered_checkpoint_token_ids returns the held branch token
-        (asserted as a precondition: proof the coalesce-pending arm is live). The
-        incomplete-spec oracle (get_incomplete_tokens_by_row) returns BOTH branch tokens
-        BEFORE the fix (UNFILTERED) — including the held branch — which is the defect.
+        After this, _get_buffered_journal_token_ids returns the held branch token
+        (asserted as a precondition: proof the journal barrier-hold arm is live), so
+        resume excludes it from the re-drive work set and restores it from the
+        journal instead.
 
-        RED (fix absent — get_incomplete_tokens_by_row does NOT exclude buffered tokens):
-        resume dispatches BOTH branch tokens to resume_incomplete_token. The held branch
-        (dispatched first) is re-driven from its branch_first_node with coalesce context,
-        re-arrives at the barrier via _maybe_coalesce_token → CoalesceExecutor.accept. But
-        it is ALREADY in _pending['merge', row] (restored from the checkpoint), so accept()
-        hits the duplicate-arrival guard (coalesce_executor.py ~562-570):
-        Observed: OrchestrationInvariantError — "Duplicate arrival for branch 'path_a' at
-        coalesce 'merge'. Existing token: <id>, new token: <id>. This indicates a bug in
-        fork, retry, or checkpoint/resume logic." (existing == new token id: the held
-        branch re-arriving on itself; branch name is whichever token_id sorts first). This
-        is a DISTINCT exception from the I1a orphan AuditIntegrityError that the
-        before-barrier cell produces — confirming this cell pins the duplicate-arrival
-        defect specifically.
-
-        GREEN (fix present — buffered tokens excluded from the incomplete-spec oracle):
-        only the sibling re-drives; it arrives at the barrier where the restored held branch
-        already waits; require_all is satisfied → barrier fires exactly once → merged token
-        created → sink written once. The restored held branch's open node_state is completed
-        by _execute_merge (status 'open' is non-terminal). Conservation holds, zero orphans,
-        one outcome per leaf.
+        Invariant proven: the HELD branch is NOT re-driven — it is restored into the
+        executor's _pending from its durable BLOCKED journal row and flushes there;
+        re-driving it would re-arrive at the barrier and crash the duplicate-arrival
+        guard. Only the genuinely not-yet-started sibling is processed (via resume's
+        scheduler drain of its READY work item); it arrives at the barrier where the
+        restored held branch already waits; require_all is satisfied → barrier fires
+        exactly once → merged token created → sink written once. The restored held
+        branch's open node_state is completed by _execute_merge (status 'open' is
+        non-terminal). Conservation holds, zero orphans, one outcome per leaf.
         """
-        from elspeth.contracts.coalesce_checkpoint import (
-            CoalesceCheckpointState,
-            CoalescePendingCheckpoint,
-            CoalesceTokenCheckpoint,
-        )
+        from datetime import datetime
+
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus
+        from elspeth.contracts.schema_contract import PipelineRow
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import CheckpointSettings
         from elspeth.core.landscape.schema import token_outcomes_table, token_parents_table, tokens_table
-        from elspeth.engine.coalesce_executor import COALESCE_CHECKPOINT_VERSION
 
         db, payload_store, config, graph, settings_obj, run_id, _run1 = self._setup_coalesce_pipeline()
 
@@ -2395,8 +2382,9 @@ class TestForkRecoveryInvariant:
         row_id = held_branch.row_id
 
         # ── Capture the held branch's coalesce-node state_id (real node_state) ─────
-        # restore_from_checkpoint requires a valid state_id for the held branch's pending
-        # node_state — reuse the genuine run-1 coalesce-node node_state for path_a.
+        # The journal restore derives the held branch's PENDING hold from the OPEN
+        # node_state at the coalesce node (get_open_node_state_ids) — reuse the
+        # genuine run-1 coalesce-node node_state for the held branch.
         with db.engine.connect() as conn:
             held_state_row = conn.execute(
                 text("""
@@ -2412,15 +2400,20 @@ class TestForkRecoveryInvariant:
         )
         held_state_id = held_state_row.state_id
 
-        # ── The contract the row was produced under (for the held branch's checkpoint) ──
+        # ── The contract the row was produced under (for the journal row payloads) ──
         checkpoint_mgr = CheckpointManager(db)
         recovery_for_contract = RecoveryManager(db, checkpoint_mgr)
         source_contract = recovery_for_contract.verify_contract_integrity(run_id)
-        contract_dict = source_contract.to_checkpoint_format()
 
         # ── Interrupt: undo the barrier; revert path_a to PENDING, drop path_b's arrival ──
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            _fk_driver = conn.connection.driver_connection  # raw sqlite3 conn
+            assert _fk_driver is not None
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline autobegins an explicit BEGIN on the
+            # first conn.execute(), so toggle FKs at the raw driver level
+            # (driver autocommit) before the transaction starts.
+            _fk_driver.execute("PRAGMA foreign_keys = OFF")
             # Merged token artifacts (the barrier's output)
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
             conn.execute(text("DELETE FROM node_states WHERE token_id = :tid"), {"tid": merged_token_id})
@@ -2439,51 +2432,87 @@ class TestForkRecoveryInvariant:
                 text("UPDATE node_states SET status = 'open', completed_at = NULL, output_hash = NULL WHERE state_id = :sid"),
                 {"sid": held_state_id},
             )
-            # SIBLING branch (path_b): delete its coalesce-node node_state entirely — it is
-            # genuinely not-yet-arrived (pre-barrier crash before path_b reached the barrier).
+            # SIBLING branch (path_b): delete ALL its node_states — it is genuinely
+            # not-yet-started (crash after the fork enqueued its work item but before
+            # any worker claimed it), so no node visit may remain on the audit trail.
             conn.execute(
-                text("DELETE FROM node_states WHERE token_id = :tid AND node_id = :nid AND run_id = :rid"),
-                {"tid": incomplete_branch.token_id, "nid": coalesce_node_id, "rid": run_id},
+                text("DELETE FROM node_states WHERE token_id = :tid AND run_id = :rid"),
+                {"tid": incomplete_branch.token_id, "rid": run_id},
             )
             conn.commit()
-            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            _fk_driver.execute("PRAGMA foreign_keys = ON")
 
-        # ── Build a GENUINE CoalesceCheckpointState holding path_a at the barrier ──
-        held_token_ckpt = CoalesceTokenCheckpoint(
-            token_id=held_branch.token_id,
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
+
+        # ── Restore the SIBLING's durable scheduler work item (crash-faithful) ────
+        # In a real RC6 crash at this point the fork had already enqueued BOTH branch
+        # continuations; the held branch's item went BLOCKED at the barrier (re-seeded
+        # below through the production journal verbs) while the sibling's item sat
+        # READY, never claimed. Re-enqueue the sibling at its branch-first node with
+        # its coalesce cursor so resume's scheduler drain re-drives it into the
+        # restored barrier.
+        branch_index_by_name = {"path_a": 0, "path_b": 1}
+        sibling_first_node = str(graph.get_transform_id_map()[branch_index_by_name[incomplete_branch.branch_name]])
+        with db.engine.connect() as conn:
+            sibling_ingest_sequence = conn.execute(
+                text("SELECT ingest_sequence FROM rows WHERE row_id = :rid"),
+                {"rid": row_id},
+            ).scalar_one()
+        scheduler_repo = RecorderFactory(db).scheduler
+        scheduler_repo.enqueue_ready(
+            run_id=run_id,
+            token_id=incomplete_branch.token_id,
             row_id=row_id,
-            branch_name=held_branch_name,
-            fork_group_id=held_branch.fork_group_id,
-            join_group_id=None,
-            expand_group_id=None,
-            row_data={"value": 1},
-            contract=contract_dict,
-            state_id=held_state_id,
-            arrival_offset_seconds=0.0,
+            node_id=sibling_first_node,
+            step_index=1,
+            ingest_sequence=sibling_ingest_sequence,
+            row_payload_json=scheduler_repo.serialize_row_payload(PipelineRow(data={"value": 1}, contract=source_contract)),
+            available_at=datetime.now(UTC),
+            branch_name=incomplete_branch.branch_name,
+            fork_group_id=incomplete_branch.fork_group_id,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name="merge",
         )
-        coalesce_state = CoalesceCheckpointState(
-            version=COALESCE_CHECKPOINT_VERSION,
-            pending=(
-                CoalescePendingCheckpoint(
-                    coalesce_name="merge",
-                    row_id=row_id,
-                    elapsed_age_seconds=0.5,
-                    branches={held_branch_name: held_token_ckpt},
-                    lost_branches={},
-                ),
-            ),
-            completed_keys=(),
-        )
-
-        # ── Create the checkpoint WITH the genuine coalesce pending state ──
-        sink_node_ids = graph.get_sinks()
-        checkpoint_mgr.create_checkpoint(
+        # ── Re-seed the HELD branch's BLOCKED journal row (F1: journal is truth) ──
+        # Production journal verbs, exactly as a live barrier hold is recorded: the
+        # fork enqueued the branch continuation at its branch-first node, a worker
+        # claimed it, the branch arrived at the coalesce and accept() held it →
+        # mark_blocked(barrier_key='merge') stamped barrier_blocked_at. The BLOCKED
+        # row carries the branch's row payload — resume restores _pending from it
+        # (processor._restore_barriers_from_journal ← list_blocked_barrier_items).
+        held_first_node = str(graph.get_transform_id_map()[branch_index_by_name[held_branch_name]])
+        seed_now = datetime.now(UTC)
+        held_item = scheduler_repo.enqueue_ready_claimed(
             run_id=run_id,
             token_id=held_branch.token_id,
-            node_id=sink_node_ids[0],
+            row_id=row_id,
+            node_id=held_first_node,
+            step_index=1,
+            ingest_sequence=sibling_ingest_sequence,
+            row_payload_json=scheduler_repo.serialize_row_payload(PipelineRow(data={"value": 1}, contract=source_contract)),
+            available_at=seed_now,
+            lease_owner="test-harness",
+            lease_seconds=60,
+            now=seed_now,
+            branch_name=held_branch_name,
+            fork_group_id=held_branch.fork_group_id,
+            coalesce_node_id=coalesce_node_id,
+            coalesce_name="merge",
+        )
+        scheduler_repo.mark_blocked(
+            work_item_id=held_item.work_item_id,
+            queue_key=None,
+            barrier_key="merge",  # coalesce barrier_key == coalesce NAME (restore partition D1)
+            now=seed_now,
+            expected_lease_owner="test-harness",
+        )
+
+        # ── Create the checkpoint (F1: scalars only — no barrier blob) ──
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
-            coalesce_state=coalesce_state,
         )
         with db.engine.connect() as conn:
             conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
@@ -2491,13 +2520,11 @@ class TestForkRecoveryInvariant:
 
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
 
-        # ── PRECONDITION: the coalesce-pending arm is genuinely live ──
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
-        buffered_ids = recovery_mgr._get_buffered_checkpoint_token_ids(checkpoint)
+        # ── PRECONDITION: the journal barrier-hold arm is genuinely live ──
+        buffered_ids = recovery_mgr._get_buffered_journal_token_ids(run_id)
         assert held_branch.token_id in buffered_ids, (
-            f"PRECONDITION FAILED: the held path_a token must be in the checkpoint coalesce-pending "
-            f"buffered set (else the held-branch exclusion path is skipped). buffered_ids={buffered_ids}"
+            f"PRECONDITION FAILED: the held path_a token must be in the journal BLOCKED barrier-hold "
+            f"set (else the held-branch exclusion path is skipped). buffered_ids={buffered_ids}"
         )
         assert incomplete_branch.token_id not in buffered_ids, (
             f"path_b must NOT be buffered (it is the not-yet-arrived sibling); buffered_ids={buffered_ids}"
@@ -2667,6 +2694,7 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == o.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Oracle: exactly the merged token as Case-4 spec ───────────────────────
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
@@ -2686,18 +2714,10 @@ class TestForkRecoveryInvariant:
         )
 
         # ── Resume ────────────────────────────────────────────────────────────────
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
-
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=next(iter(sink_node_ids)),
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -2907,8 +2927,8 @@ class TestForkRecoveryInvariant:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="explode_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="explode_in", options={})},
             transforms=wired_transforms,
             sinks={"output": as_sink(sink)},
             gates=[],
@@ -2916,12 +2936,12 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[],
         )
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(explode), as_transform(pass_after)],
             sinks={"output": as_sink(sink)},
         )
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "explode_in", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "explode_in", "options": {}}},
             sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
         )
 
@@ -2974,20 +2994,13 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            any_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert any_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=any_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -3203,8 +3216,8 @@ class TestForkRecoveryInvariant:
         wired_b = wire_transforms([pass_b], source_connection="path_b", final_sink="done_b", names=["pass_b"])
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=wired_a + wired_b,
             sinks={"output": as_sink(sink)},
             gates=[gate],
@@ -3212,14 +3225,14 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[coalesce],
         )
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(record_a), as_transform(pass_b)],
             sinks={"output": as_sink(sink)},
             gates=[gate],
             coalesce_settings=[coalesce],
         )
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "gate_in", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "gate_in", "options": {}}},
             sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
             gates=[gate],
             coalesce=[coalesce],
@@ -3286,7 +3299,13 @@ class TestForkRecoveryInvariant:
 
         # ── Interrupt: undo the barrier (same pattern as test_resume_fork_to_coalesce_before_barrier) ──
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            _fk_driver = conn.connection.driver_connection  # raw sqlite3 conn
+            assert _fk_driver is not None
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline autobegins an explicit BEGIN on the
+            # first conn.execute(), so toggle FKs at the raw driver level
+            # (driver autocommit) before the transaction starts.
+            _fk_driver.execute("PRAGMA foreign_keys = OFF")
             # 1. merged token outcomes
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
             # 2. merged token node_states
@@ -3306,22 +3325,15 @@ class TestForkRecoveryInvariant:
                 {"nid": str(coalesce_node_id), "rid": run_id},
             )
             conn.commit()
-            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            _fk_driver.execute("PRAGMA foreign_keys = ON")
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Checkpoint + mark failed ──────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            any_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert any_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=any_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -3493,14 +3505,14 @@ class TestForkRecoveryInvariant:
             fork_to=["sink_a", "sink_b"],
         )
         config_a = PipelineConfig(
-            source=as_source(source_a),
+            sources={"primary": as_source(source_a)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a_a), "sink_b": as_sink(sink_b_a)},
             gates=[gate],
         )
         graph_a = ExecutionGraph.from_plugin_instances(
-            source=as_source(source_a),
-            source_settings=SourceSettings(plugin=source_a.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source_a)},
+            source_settings_map={"primary": SourceSettings(plugin=source_a.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a_a), "sink_b": as_sink(sink_b_a)},
             gates=[gate],
@@ -3508,7 +3520,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[],
         )
         settings_a = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -3533,14 +3545,14 @@ class TestForkRecoveryInvariant:
         sink_a_b = CollectSink("sink_a")
         sink_b_b = CollectSink("sink_b")
         config_b = PipelineConfig(
-            source=as_source(source_b),
+            sources={"primary": as_source(source_b)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a_b), "sink_b": as_sink(sink_b_b)},
             gates=[gate],
         )
         graph_b = ExecutionGraph.from_plugin_instances(
-            source=as_source(source_b),
-            source_settings=SourceSettings(plugin=source_b.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source_b)},
+            source_settings_map={"primary": SourceSettings(plugin=source_b.name, on_success="gate_in", options={})},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a_b), "sink_b": as_sink(sink_b_b)},
             gates=[gate],
@@ -3548,7 +3560,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[],
         )
         settings_b = ElspethSettings(
-            source={"plugin": "test", "on_success": "sink_a", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "sink_a", "options": {}}},
             sinks={
                 "sink_a": {"plugin": "test", "on_write_failure": "discard"},
                 "sink_b": {"plugin": "test", "on_write_failure": "discard"},
@@ -3577,20 +3589,13 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db_b, run_id)
         # Create checkpoint + mark run failed (resume preconditions).
         checkpoint_mgr = CheckpointManager(db_b)
-        sink_node_ids = graph_b.get_sinks()
-        with db_b.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph_b,
         )
         with db_b.engine.connect() as conn:
@@ -3688,15 +3693,15 @@ class TestForkRecoveryInvariant:
         #
         # SCOPE CAVEAT — rows_coalesce_failed (F2 review item A/D): this fixture
         # has rows_coalesce_failed == 0 on BOTH sides, so that field reconciles
-        # vacuously here. The audit trail does NOT record a queryable signal for
-        # coalesce-operation failures (telemetry-only roll-up), so derive() can
-        # only ever return 0 for it; the with-rows branch grafts the live
-        # re-drive counter back over that 0 (see resume() in core.py). The
-        # reconciliation loop's rows_coalesce_failed assertion is therefore only
-        # meaningful for coalesce failures that occur DURING THIS RESUME's
-        # re-drive — run-1 (pre-interrupt) coalesce failures were live-counter-
-        # only, are never re-driven, and are OUT of reconciliation scope (operator
-        # follow-up: make rows_coalesce_failed a queryable terminal audit signal).
+        # vacuously here. The field IS audit-derived now (the old resume-graft
+        # over a derive-time 0 was deleted with F1):
+        # derive_resume_terminal_status_from_audit sets rows_coalesce_failed
+        # from query.count_failed_coalesce_barrier_rows — DISTINCT
+        # (coalesce node, row_id) pairs with FAILED node_states, the
+        # _fail_pending writes — which is cumulative over run-1 AND resume
+        # re-drives (elspeth-7294de558e). A non-vacuous reconciliation of this
+        # field needs a fixture that actually fails a coalesce barrier; this
+        # test only proves the zero case.
         counter_fields = (
             "rows_processed",
             "rows_succeeded",
@@ -3772,10 +3777,11 @@ class TestForkRecoveryInvariant:
         ``derive_resume_terminal_status_from_audit`` reconstructs the cumulative
         counters from the audit trail.
 
-        ``rows_coalesced`` is reconstructed purely by ``derive`` (line 124 of
-        run_status.py — it is NOT grafted from the live re-drive counter; only
-        ``rows_coalesce_failed`` is grafted, see ``resume()`` in core.py).  So
-        the line-124 lever bites the RESUMED run B (derive-reconstructed) while
+        ``rows_coalesced`` is reconstructed purely by ``derive`` (the
+        ``(SUCCESS, COALESCED)`` arm of run_status.py — nothing is grafted
+        from live re-drive counters; ``rows_coalesce_failed`` is likewise
+        audit-derived, via ``count_failed_coalesce_barrier_rows``).  So the
+        derive-arm lever bites the RESUMED run B (derive-reconstructed) while
         run A's value comes from the live accumulator.
 
         OBSERVED RED (lever: delete the ``counters.rows_coalesced += 1`` line
@@ -3808,7 +3814,7 @@ class TestForkRecoveryInvariant:
         ``rows_coalesce_failed == 0`` on both sides (reconciled vacuously here,
         which is correct — that field's non-vacuous resume coverage lives in
         ``test_adr_019_resume_counter_parity.py::
-        test_resume_grafts_rows_coalesce_failed_from_timeout_redrive``).
+        test_resume_derives_rows_coalesce_failed_from_durable_audit``).
         """
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus
@@ -3855,7 +3861,13 @@ class TestForkRecoveryInvariant:
         coalesce_node_id_for_deletion = graph.get_coalesce_id_map()[CoalesceName("merge")]
 
         with db.engine.connect() as conn:
-            conn.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            _fk_driver = conn.connection.driver_connection  # raw sqlite3 conn
+            assert _fk_driver is not None
+            # PRAGMA foreign_keys is a silent no-op inside a transaction; the
+            # write-intent begin discipline autobegins an explicit BEGIN on the
+            # first conn.execute(), so toggle FKs at the raw driver level
+            # (driver autocommit) before the transaction starts.
+            _fk_driver.execute("PRAGMA foreign_keys = OFF")
             # 1. merged token outcomes (COMPLETED at sink)
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.token_id == merged_token_id))
             # 2. merged token node_states
@@ -3875,24 +3887,16 @@ class TestForkRecoveryInvariant:
                 {"nid": str(coalesce_node_id_for_deletion), "rid": run_id},
             )
             conn.commit()
-            conn.exec_driver_sql("PRAGMA foreign_keys = ON")
+            _fk_driver.execute("PRAGMA foreign_keys = ON")
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Resume ────────────────────────────────────────────────────────────
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
-
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -4035,8 +4039,8 @@ class TestForkRecoveryInvariant:
             output_mode=OutputMode.TRANSFORM,
         )
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(src),
-            source_settings=SourceSettings(plugin=src.name, on_success="agg_in", options={}),
+            sources={"primary": as_source(src)},
+            source_settings_map={"primary": SourceSettings(plugin=src.name, on_success="agg_in", options={})},
             transforms=[],
             sinks={"output": as_sink(out)},
             aggregations={"sum_agg": (as_transform(agg), agg_settings)},
@@ -4046,13 +4050,13 @@ class TestForkRecoveryInvariant:
         agg_node_id = agg_id_map[next(iter(agg_id_map))]
         agg.node_id = agg_node_id
         config = PipelineConfig(
-            source=as_source(src),
+            sources={"primary": as_source(src)},
             transforms=[as_transform(agg)],
             sinks={"output": as_sink(out)},
             aggregation_settings={agg_node_id: agg_settings},
         )
         settings = ElspethSettings(
-            source={"plugin": src.name, "on_success": "agg_in", "options": {}},
+            sources={"primary": {"plugin": src.name, "on_success": "agg_in", "options": {}}},
             sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
         )
         return db, config, graph, settings
@@ -4101,13 +4105,15 @@ class TestForkRecoveryInvariant:
         BUFFERED records — and the run finalizes COMPLETED.
 
         ``rows_buffered`` is reconstructed purely by derive's ``(None, BUFFERED)``
-        arm (line ~113 of run_status.py — NOT grafted; only ``rows_coalesce_failed``
-        is grafted).  So the line-113 lever bites the RESUMED run B
-        (derive-reconstructed) while run A's value comes from the live accumulator.
+        arm in run_status.py (nothing is grafted from live counters;
+        ``rows_coalesce_failed`` is likewise audit-derived, via
+        ``count_failed_coalesce_barrier_rows``).  So the derive-arm lever bites
+        the RESUMED run B (derive-reconstructed) while run A's value comes from
+        the live accumulator.
 
         OBSERVED RED (lever: delete ``counters.rows_buffered += 1`` from the
-        ``(None, BUFFERED)`` arm in run_status.py — the non-completed branch near
-        line 113, leaving the ``continue``; run
+        ``(None, BUFFERED)`` arm in run_status.py — the non-completed branch,
+        leaving the ``continue``; run
         ``-k test_resume_buffered_counter_reconciles_with_uninterrupted_run``):
             AssertionError: Resumed aggregation run must record at least one
             BUFFERED record (non-vacuous); got rows_buffered=0. ...
@@ -4149,18 +4155,10 @@ class TestForkRecoveryInvariant:
         # reconstructs the cumulative counters from the intact audit trail.
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -4224,33 +4222,29 @@ class TestForkRecoveryInvariant:
             f"uninterrupted={dict(run_a.routed_destinations)}, resumed={dict(run_b_resume.routed_destinations)}"
         )
 
-    def test_count_equals_n_rows_buffered_divergence_is_pinned(self) -> None:
-        """CHARACTERIZATION PIN — known F2 parity break (filigree elspeth-e1dd5e1303).
+    def test_rows_buffered_live_equals_derive_after_unification(self) -> None:
+        """rows_buffered parity on the count==N mid-stream trigger (elspeth-e1dd5e1303 FIXED).
 
         For a batch aggregation with a ``count == N`` trigger (fires mid-stream on
-        the Nth row, NOT at end-of-source), the live accumulator and derive disagree
-        on ``rows_buffered``:
+        the Nth row, NOT at end-of-source), the live accumulator historically
+        under-counted ``rows_buffered`` by one (N-1): the count-trigger's own token
+        was consumed by the flush without ever yielding a ``(None, BUFFERED)``
+        RowResult, while derive (which reconstructs the counter from the BUFFERED
+        audit records — one per accepted row) reported N.  This test pinned that
+        exact +1 divergence as a characterization test
+        (``test_count_equals_n_rows_buffered_divergence_is_pinned``).
 
-            uninterrupted oracle (live):  rows_buffered == N - 1
+        F1 Task 4.3 Step 2 unified the two: every buffer-accept now yields exactly
+        one ``(None, BUFFERED)`` RowResult — the flush-triggering token gets a
+        synthetic BUFFERED result emitted by the drain — so the live counter equals
+        the audit-derived value:
+
+            uninterrupted oracle (live):  rows_buffered == N
             resumed (derive):             rows_buffered == N
 
-        So a RESUMED run reports ``rows_buffered`` exactly one higher than the
-        uninterrupted oracle.  Every OTHER counter field reconciles — this is the
-        sole divergent field.  The canonical end-of-source-flush topology
-        (``count > N``) does not exhibit it (live == derive == N), which is why
-        ``test_resume_buffered_counter_reconciles_with_uninterrupted_run`` uses
-        ``count > N`` and the F2 reconciliation suite sidesteps this case.
-
-        WHY A CHARACTERIZATION PIN, NOT AN xfail: the follow-up note asked for an
-        "xfail-style pinning test so the divergence can't silently widen."  A strict
-        xfail asserting the ideal (resumed == oracle) catches an accidental *fix*
-        (xpass → fail) but a *widening* divergence (gap → 2) still just fails → stays
-        xfail → green, silently violating the stated goal.  This pin asserts the
-        EXACT current values, so it goes RED on widening, narrowing, OR a fix in
-        either direction — strictly stronger for "can't silently widen."  This is
-        NOT an endorsement of either value: elspeth-e1dd5e1303 tracks the decision
-        of which (N-1 or N) is authoritative; resolving it requires updating this
-        pin to the chosen value.
+        INVARIANT (same strength as the old pin, flipped to the unified value):
+        live == derive == N exactly, and EVERY other counter field reconciles too —
+        any re-divergence in either direction goes RED here.
         """
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus
@@ -4271,16 +4265,7 @@ class TestForkRecoveryInvariant:
         run_id = run_b1.run_id
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id, token_id=actual_token.token_id, node_id=sink_node_ids[0], sequence_number=1, graph=graph
-        )
+        checkpoint_mgr.create_checkpoint(run_id=run_id, sequence_number=1, barrier_scalars=None, graph=graph)
         with db.engine.connect() as conn:
             conn.execute(text("UPDATE runs SET status = 'failed' WHERE run_id = :run_id"), {"run_id": run_id})
             conn.commit()
@@ -4293,26 +4278,27 @@ class TestForkRecoveryInvariant:
         run_b_resume = resume_orchestrator.resume(resume_point, config, graph, payload_store=payload_store, settings=settings_obj)
         assert run_b_resume.status == RunStatus.COMPLETED, run_b_resume.status
 
-        # ── Pin the EXACT divergence (elspeth-e1dd5e1303) ─────────────────────
-        assert run_a.rows_buffered == n - 1, (
-            f"PIN: uninterrupted oracle (live accumulator) must report rows_buffered == N-1 == {n - 1} "
-            f"on a count==N mid-stream trigger; got {run_a.rows_buffered}. If this changed, the live "
-            f"buffered-accounting semantics moved — update elspeth-e1dd5e1303 and this pin."
+        # ── Unified value: live == derive == N exactly (elspeth-e1dd5e1303 fix) ──
+        assert run_a.rows_buffered == n, (
+            f"UNIFICATION: uninterrupted oracle (live accumulator) must report rows_buffered == N == {n} "
+            f"on a count==N mid-stream trigger — every buffer-accept (including the flush-triggering "
+            f"token) yields exactly one (None, BUFFERED) RowResult; got {run_a.rows_buffered}. "
+            f"An N-1 here means the count-trigger token's synthetic BUFFERED emission regressed "
+            f"(F1 Task 4.3 Step 2, elspeth-e1dd5e1303)."
         )
         assert run_b_resume.rows_buffered == n, (
-            f"PIN: resumed run (derive) must report rows_buffered == N == {n} (one BUFFERED audit record "
-            f"per input row); got {run_b_resume.rows_buffered}. If this changed, derive's (None, BUFFERED) "
-            f"arm moved — update elspeth-e1dd5e1303 and this pin."
+            f"UNIFICATION: resumed run (derive) must report rows_buffered == N == {n} (one BUFFERED audit "
+            f"record per input row); got {run_b_resume.rows_buffered}. If this changed, derive's "
+            f"(None, BUFFERED) arm moved — see elspeth-e1dd5e1303."
         )
-        assert run_b_resume.rows_buffered == run_a.rows_buffered + 1, (
-            f"PIN: the known F2 parity break is exactly +1 (resumed over oracle). "
-            f"oracle={run_a.rows_buffered}, resumed={run_b_resume.rows_buffered}, "
-            f"delta={run_b_resume.rows_buffered - run_a.rows_buffered}. A delta != 1 means the divergence "
-            f"WIDENED or was fixed — neither may land silently. See elspeth-e1dd5e1303."
+        assert run_b_resume.rows_buffered == run_a.rows_buffered, (
+            f"UNIFICATION: live and derive must agree on rows_buffered for the count==N topology. "
+            f"oracle={run_a.rows_buffered}, resumed={run_b_resume.rows_buffered}. ANY delta is a "
+            f"re-divergence of the unified counter (elspeth-e1dd5e1303) and may not land silently."
         )
 
-        # ── rows_buffered must be the SOLE divergent field ────────────────────
-        other_fields = (
+        # ── EVERY counter field must reconcile (no divergent field remains) ────
+        all_fields = (
             "rows_processed",
             "rows_succeeded",
             "rows_failed",
@@ -4323,15 +4309,15 @@ class TestForkRecoveryInvariant:
             "rows_coalesced",
             "rows_coalesce_failed",
             "rows_expanded",
+            "rows_buffered",
             "rows_diverted",
         )
-        for field in other_fields:
+        for field in all_fields:
             a_val = getattr(run_a, field)
             b_val = getattr(run_b_resume, field)
             assert b_val == a_val, (
-                f"PIN: '{field}' must reconcile on the count==N topology (only rows_buffered is known to "
-                f"diverge). uninterrupted={a_val}, resumed={b_val}. A NEW divergent field is a regression "
-                f"beyond the tracked elspeth-e1dd5e1303 limitation."
+                f"'{field}' must reconcile on the count==N topology (live/derive unification, "
+                f"elspeth-e1dd5e1303). uninterrupted={a_val}, resumed={b_val}."
             )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -4392,14 +4378,14 @@ class TestForkRecoveryInvariant:
 
         sink_map = {name: as_sink(sink) for name, sink in sinks_by_name.items()}
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks=sink_map,
             gates=[gate],
         )
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=[],
             sinks=sink_map,
             gates=[gate],
@@ -4407,7 +4393,7 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[],
         )
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": first_sink, "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": first_sink, "options": {}}},
             sinks={name: {"plugin": "test", "on_write_failure": "discard"} for name in sink_names},
             gates=[gate],
         )
@@ -4441,6 +4427,8 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == outcome.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
+
     def _checkpoint_and_resume(
         self,
         db: LandscapeDB,
@@ -4461,18 +4449,10 @@ class TestForkRecoveryInvariant:
         from elspeth.core.config import CheckpointSettings
 
         checkpoint_mgr = CheckpointManager(db)
-        sink_node_ids = graph.get_sinks()
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=sink_node_ids[0],
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -4720,6 +4700,7 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == o.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
 
         recovery_mgr = RecoveryManager(db, CheckpointManager(db))
@@ -4819,6 +4800,7 @@ class TestForkRecoveryInvariant:
             conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == sink_a_rows[0].outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # By-row grouping oracle: exactly ONE row group, exactly ONE incomplete spec,
         # grouped under the interrupted row's row_id.
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
@@ -4876,13 +4858,13 @@ class TestForkRecoveryInvariant:
         sink = CollectSink("output")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"output": as_sink(sink)},
         )
         graph = _build_production_graph(config)
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "source_out", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "source_out", "options": {}}},
             sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
         )
 
@@ -4914,6 +4896,7 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == o.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # The incomplete linear token, if classified as fork/expand/coalesce, would
         # carry NO lineage fields — the resume loop's filter must NOT route it to
         # resume_incomplete_token (it routes to process_existing_row instead).
@@ -5125,8 +5108,8 @@ class TestForkRecoveryInvariant:
         wired_post = wire_transforms([post_merge], source_connection="merge", final_sink="output", names=["post_merge"])
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=wired_a + wired_b + wired_post,
             sinks={"output": as_sink(sink)},
             gates=[gate],
@@ -5134,14 +5117,14 @@ class TestForkRecoveryInvariant:
             coalesce_settings=[coalesce],
         )
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(pass_a), as_transform(pass_b), as_transform(post_merge)],
             sinks={"output": as_sink(sink)},
             gates=[gate],
             coalesce_settings=[coalesce],
         )
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "gate_in", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "gate_in", "options": {}}},
             sinks={"output": {"plugin": "test", "on_write_failure": "discard"}},
             gates=[gate],
             coalesce=[coalesce],
@@ -5195,6 +5178,7 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == o.outcome_id))
             conn.commit()
 
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
         # ── Oracle: exactly the merged token as Case-4 spec ──
         checkpoint_mgr = CheckpointManager(db)
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
@@ -5209,17 +5193,10 @@ class TestForkRecoveryInvariant:
         assert spec.token_data_ref == merged_data_ref, f"recovery must surface the merged token_data_ref; got {spec.token_data_ref!r}"
 
         # ── Resume ──
-        with db.engine.connect() as conn:
-            actual_token = conn.execute(
-                text("SELECT t.token_id AS token_id FROM tokens t JOIN rows r ON r.row_id = t.row_id WHERE r.run_id = :run_id LIMIT 1"),
-                {"run_id": run_id},
-            ).fetchone()
-        assert actual_token is not None
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id=actual_token.token_id,
-            node_id=next(iter(sink_node_ids)),
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
         )
         with db.engine.connect() as conn:
@@ -5294,23 +5271,24 @@ class TestForkRecoveryInvariant:
         """matrix #5: a row with MIXED buffered + incomplete fork children is NOT excluded.
 
         get_unprocessed_rows (recovery.py) excludes a row from reprocessing ONLY when
-        ALL its incomplete leaf tokens are buffered in checkpoint aggregation state
-        (lines 474-501).  The bug this guards is row-level exclusion: dropping a row
+        ALL its incomplete leaf tokens are held at barriers in the scheduler journal
+        (BLOCKED rows with a barrier_key — F1: the journal is the only barrier-buffer
+        truth).  The bug this guards is row-level exclusion: dropping a row
         because it has ANY buffered token, which would silently orphan a sibling
         non-buffered incomplete token.
 
-        Construction (genuine buffered state, NOT hand-crafted JSON):
+        Construction (genuine buffered state, via the production journal verbs):
         - One source row forks to sink_a + sink_b (real fork run via production paths).
         - BOTH branches' terminal outcomes are deleted so both are INCOMPLETE leaves
           (a "buffered" token is by definition pending — it has no terminal outcome yet;
           leaving sink_a's outcome in place would make it terminal, not buffered, and the
           mixed-state arithmetic would not engage).
-        - The (now-incomplete) sink_a fork-child is placed into a genuine
-          AggregationCheckpointState (typed dataclass) carrying its REAL row_data +
-          contract, passed to CheckpointManager.create_checkpoint — so
-          _get_buffered_checkpoint_token_ids returns the sink_a token (asserted as a
+        - The (now-incomplete) sink_a fork-child is marked held-at-barrier through the
+          PRODUCTION journal verbs (enqueue_ready_claimed + mark_blocked with a
+          barrier_key) carrying its REAL row payload — so
+          _get_buffered_journal_token_ids returns the sink_a token (asserted as a
           precondition: proof the mixed-state path is live, not skipped).
-        - sink_b is left incomplete and NON-buffered.
+        - sink_b is left incomplete and NON-buffered (no BLOCKED journal row).
 
         The row therefore has one buffered-incomplete (sink_a) + one non-buffered
         incomplete (sink_b) token.  row_incomplete={sink_a, sink_b}; buffered={sink_a}.
@@ -5328,11 +5306,9 @@ class TestForkRecoveryInvariant:
         AssertionError — "mixed-state row must NOT be excluded ...: unprocessed=[]"
         (the row is silently dropped → sink_b would be orphaned).
         """
-        from elspeth.contracts.aggregation_checkpoint import (
-            AggregationCheckpointState,
-            AggregationNodeCheckpoint,
-            AggregationTokenCheckpoint,
-        )
+        from datetime import datetime
+
+        from elspeth.contracts.schema_contract import PipelineRow
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.landscape.schema import token_outcomes_table
 
@@ -5359,42 +5335,20 @@ class TestForkRecoveryInvariant:
         row_id = buffered_child.row_id
 
         # The run's stored schema contract is what the row was produced under — reuse it
-        # for the buffered token's checkpoint entry (genuine, not fabricated).
+        # for the buffered token's journal row payload (genuine, not fabricated).
         checkpoint_mgr = CheckpointManager(db)
         recovery_for_contract = RecoveryManager(db, checkpoint_mgr)
         source_contract = recovery_for_contract.verify_contract_integrity(run_id)
-        contract_dict = source_contract.to_checkpoint_format()
 
-        # ── Build a GENUINE AggregationCheckpointState buffering the sink_a token ──
-        # The node_id key is opaque to _get_buffered_checkpoint_token_ids (it only reads
-        # nodes.values() → tokens → token_id), but create_checkpoint validates node_id is
-        # in the graph, so key the buffered state on a real node id (the source node).
-        agg_node_key = str(graph.get_source())
-        buffered_token_ckpt = AggregationTokenCheckpoint(
-            token_id=buffered_child.token_id,
-            row_id=row_id,
-            branch_name="sink_a",
-            fork_group_id=buffered_child.fork_group_id,
-            join_group_id=None,
-            expand_group_id=None,
-            row_data={"value": 0},
-            contract_version=source_contract.version_hash(),
-            contract=contract_dict,
-        )
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                agg_node_key: AggregationNodeCheckpoint(
-                    tokens=(buffered_token_ckpt,),
-                    batch_id="batch-mixed-state-test",
-                    elapsed_age_seconds=0.5,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=1,
-                    completed_flush_count=0,
-                )
-            },
-        )
+        # The barrier_key is opaque to recovery's journal arm:
+        # _get_buffered_journal_token_ids reads only "BLOCKED + barrier_key IS NOT
+        # NULL" (blocked_barrier_hold_clause); the key is validated against the
+        # pipeline's barriers only at processor restore time, which this
+        # function-level test never reaches.  Use a real node id (the source node)
+        # as the key, mirroring the old opaque-node-id convention.
+        source_node_ids = graph.get_sources()
+        assert source_node_ids, "expected at least one source node in fork recovery test graph"
+        barrier_key_for_seed = str(source_node_ids[0])
 
         # ── Interrupt: delete BOTH branches' terminal outcomes ──
         # sink_a → buffered-incomplete (restored from checkpoint state, not reprocessed);
@@ -5417,27 +5371,59 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == o.outcome_id))
             conn.commit()
 
-        # ── Create the checkpoint WITH the genuine aggregation state ──
-        checkpoint_mgr.create_checkpoint(
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
+        # ── Seed the sink_a token's BLOCKED journal row (F1: journal is truth) ──
+        # Production journal verbs, exactly as a live barrier hold is recorded:
+        # enqueue+claim, then mark_blocked stamps barrier_blocked_at.
+        with db.engine.connect() as conn:
+            row_ingest_sequence = conn.execute(
+                text("SELECT ingest_sequence FROM rows WHERE row_id = :rid"),
+                {"rid": row_id},
+            ).scalar_one()
+        scheduler_repo = RecorderFactory(db).scheduler
+        seed_now = datetime.now(UTC)
+        seeded_item = scheduler_repo.enqueue_ready_claimed(
             run_id=run_id,
             token_id=buffered_child.token_id,
-            node_id=agg_node_key,
+            row_id=row_id,
+            node_id=barrier_key_for_seed,
+            step_index=1,
+            ingest_sequence=row_ingest_sequence,
+            row_payload_json=scheduler_repo.serialize_row_payload(PipelineRow(data={"value": 0}, contract=source_contract)),
+            available_at=seed_now,
+            lease_owner="test-harness",
+            lease_seconds=60,
+            now=seed_now,
+            branch_name="sink_a",
+            fork_group_id=buffered_child.fork_group_id,
+        )
+        scheduler_repo.mark_blocked(
+            work_item_id=seeded_item.work_item_id,
+            queue_key=None,
+            barrier_key=barrier_key_for_seed,
+            now=seed_now,
+            expected_lease_owner="test-harness",
+        )
+
+        # A checkpoint is the resume precondition (get_unprocessed_rows returns []
+        # for a run with no checkpoint). F1: it carries scalars only — no blob.
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
             sequence_number=1,
+            barrier_scalars=None,
             graph=graph,
-            aggregation_state=agg_state,
         )
 
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
 
         # ── PRECONDITION: the mixed-state path is genuinely live ──
-        # _get_buffered_checkpoint_token_ids must return the sink_a token (proof the
-        # exclusion logic at lines 474-501 actually executes — `if buffered_token_ids
-        # and unprocessed:`).  Without this, the test would pass vacuously.
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
-        buffered_ids = recovery_mgr._get_buffered_checkpoint_token_ids(checkpoint)
+        # _get_buffered_journal_token_ids must return the sink_a token (proof the
+        # exclusion logic in get_unprocessed_rows actually executes — `if
+        # buffered_token_ids and unprocessed:`).  Without this, the test would pass
+        # vacuously.
+        buffered_ids = recovery_mgr._get_buffered_journal_token_ids(run_id)
         assert buffered_child.token_id in buffered_ids, (
-            f"PRECONDITION FAILED: the sink_a token must be in the checkpoint buffered set "
+            f"PRECONDITION FAILED: the sink_a token must be in the journal BLOCKED barrier-hold set "
             f"(else the mixed-state exclusion path is skipped and the test is vacuous). "
             f"buffered_ids={buffered_ids}"
         )
@@ -5458,7 +5444,7 @@ class TestForkRecoveryInvariant:
         # The incomplete (non-buffered) sink_b child must surface as a resume spec; the
         # buffered (sink_a) child must NOT (it is restored-and-flushed from the aggregation
         # buffer, not re-driven — get_incomplete_tokens_by_row excludes buffered tokens at
-        # the token level via _get_buffered_checkpoint_token_ids' aggregation_state arm).
+        # the token level via _get_buffered_journal_token_ids' BLOCKED barrier-hold set).
         # This is the function-level guard for the aggregation arm; the full-resume
         # double-emit guard is test_resume_aggregation_buffered_fork_branch_not_redriven.
         by_row = recovery_mgr.get_incomplete_tokens_by_row(run_id)
@@ -5509,10 +5495,12 @@ class TestForkRecoveryInvariant:
             the 2 exploded children → both BUFFERED in the same batch) → sink 'output'
 
         Construction: run to completion, delete BOTH expand-child leaves' terminal outcomes
-        (both become incomplete), and place BOTH into a genuine AggregationCheckpointState
-        keyed on the real aggregation node id (all-buffered). Assert:
-        - _get_buffered_checkpoint_token_ids returns BOTH leaves (precondition: the
-          aggregation arm is live).
+        (both become incomplete), and re-seed BOTH as BLOCKED journal rows through the
+        production scheduler verbs (enqueue_ready_claimed + mark_blocked with
+        barrier_key = the real aggregation node id — F1: the journal is the only
+        barrier-buffer truth; all-buffered). Assert:
+        - _get_buffered_journal_token_ids returns BOTH leaves (precondition: the
+          journal barrier-hold arm is live).
         - get_unprocessed_rows EXCLUDES the row (all its incomplete leaves are buffered).
         - get_incomplete_tokens_by_row returns NOTHING for the row (token-level exclusion;
           mirrors the row-level exclusion so the resume loop never dispatches them).
@@ -5530,20 +5518,60 @@ class TestForkRecoveryInvariant:
         re-drivable resume specs.
         """
         import datetime
+        from typing import Any as _Any
 
-        from elspeth.contracts.aggregation_checkpoint import (
-            AggregationCheckpointState,
-            AggregationNodeCheckpoint,
-            AggregationTokenCheckpoint,
-        )
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
         from elspeth.contracts.enums import RunStatus
+        from elspeth.contracts.schema_contract import FieldContract as _FieldContract
+        from elspeth.contracts.schema_contract import PipelineRow as _PipelineRow
         from elspeth.contracts.schema_contract import SchemaContract as _SchemaContract
         from elspeth.core.checkpoint import CheckpointManager, RecoveryManager
         from elspeth.core.config import AggregationSettings, CheckpointSettings, SinkSettings, TriggerConfig
         from elspeth.core.landscape.schema import token_outcomes_table
+        from elspeth.plugins.infrastructure.base import BaseTransform
+        from elspeth.plugins.infrastructure.results import TransformResult
         from elspeth.plugins.transforms.json_explode import JSONExplode
-        from tests.integration.pipeline.test_aggregation_checkpoint_bug import BatchCollectorTransform
+        from elspeth.testing import make_pipeline_row
+        from tests.fixtures.base_classes import _TestSchema
+
+        class BatchCollectorTransform(BaseTransform):
+            """Batch-aware transform that collects rows until flush.
+
+            Minimal equivalent re-homed from the DELETED module
+            tests.integration.pipeline.test_aggregation_checkpoint_bug: in batch
+            mode it sums 'value' across the buffered rows; single rows pass
+            through unchanged.
+            """
+
+            name = "batch_collector"
+            determinism = Determinism.DETERMINISTIC
+            input_schema = _TestSchema
+            output_schema = _TestSchema
+            is_batch_aware = True
+            on_success: str | None = "output"
+
+            def __init__(self) -> None:
+                super().__init__({"schema": {"mode": "observed"}})
+
+            def process(self, row: _PipelineRow | list[_PipelineRow], ctx: _Any) -> TransformResult:
+                if isinstance(row, list):
+                    total = sum(r.get("value", 0) for r in row)
+                    output = {"id": row[0].get("id"), "value": total, "count": len(row)}
+                    contract = _SchemaContract(
+                        mode="OBSERVED",
+                        fields=(
+                            _FieldContract(normalized_name="id", original_name="id", python_type=int, required=False, source="inferred"),
+                            _FieldContract(
+                                normalized_name="value", original_name="value", python_type=int, required=False, source="inferred"
+                            ),
+                            _FieldContract(
+                                normalized_name="count", original_name="count", python_type=int, required=False, source="inferred"
+                            ),
+                        ),
+                        locked=True,
+                    )
+                    return TransformResult.success(_PipelineRow(output, contract), success_reason={"action": "batch"})
+                return TransformResult.success(make_pipeline_row(dict(row)), success_reason={"action": "single"})
 
         db = make_landscape_db()
         payload_store = MockPayloadStore()
@@ -5566,8 +5594,8 @@ class TestForkRecoveryInvariant:
             names=["explode", "agg"],
         )
         graph = ExecutionGraph.from_plugin_instances(
-            source=as_source(source),
-            source_settings=SourceSettings(plugin=source.name, on_success="explode_in", options={}),
+            sources={"primary": as_source(source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="explode_in", options={})},
             transforms=wired,
             sinks={"output": as_sink(sink)},
             gates=[],
@@ -5585,7 +5613,7 @@ class TestForkRecoveryInvariant:
             output_mode="transform",
         )
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(explode), agg_transform],
             sinks={"output": as_sink(sink)},
             aggregation_settings={agg_node_id: agg_settings},
@@ -5593,7 +5621,7 @@ class TestForkRecoveryInvariant:
         )
         checkpoint_settings = CheckpointSettings(enabled=True, frequency="every_row")
         settings_obj = ElspethSettings(
-            source={"plugin": "test", "on_success": "explode_in", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "explode_in", "options": {}}},
             sinks={"output": SinkSettings(plugin="test", on_write_failure="discard", options={})},
             aggregations=[agg_settings],
             checkpoint=checkpoint_settings,
@@ -5639,56 +5667,62 @@ class TestForkRecoveryInvariant:
                 conn.execute(token_outcomes_table.delete().where(token_outcomes_table.c.outcome_id == o.outcome_id))
             conn.commit()
 
-        # ── Build a GENUINE all-buffered AggregationCheckpointState (both leaves) ──
-        token_ckpts = []
+        _scrub_scheduler_work_for_outcomeless_tokens(db, run_id)
+        # The scrub keys on "no outcome rows at all", but these leaves keep their
+        # genuine incomplete (None, BUFFERED) outcomes — which a real crash-state
+        # WOULD carry — so their run-1 TERMINAL journal rows survive the scrub.
+        # Delete them explicitly: a crash before the flush would never have
+        # terminalized these rows, and the re-seed below replaces them with the
+        # crash-faithful BLOCKED state.
+        with db.engine.connect() as conn:
+            conn.execute(
+                text("DELETE FROM token_work_items WHERE run_id = :rid AND token_id IN (:a, :b)"),
+                {"rid": run_id, "a": children[0].token_id, "b": children[1].token_id},
+            )
+            conn.commit()
+        # ── Re-seed BOTH leaves as BLOCKED journal rows (F1: journal is truth) ──
+        # Production journal verbs, exactly as a live aggregation barrier hold is
+        # recorded: enqueue+claim at the aggregation node, then mark_blocked with
+        # barrier_key = str(aggregation node_id) stamps barrier_blocked_at. Each
+        # row carries the leaf's REAL payload (from its token_data_ref envelope).
+        with db.engine.connect() as conn:
+            row_ingest_sequence = conn.execute(
+                text("SELECT ingest_sequence FROM rows WHERE row_id = :rid"),
+                {"rid": row_id},
+            ).scalar_one()
+        scheduler_repo = RecorderFactory(db).scheduler
+        seed_now = datetime.datetime.now(datetime.UTC)
         for c in children:
             env = _envelope(c.token_data_ref)
-            token_ckpts.append(
-                AggregationTokenCheckpoint(
-                    token_id=c.token_id,
-                    row_id=row_id,
-                    branch_name=None,
-                    fork_group_id=None,
-                    join_group_id=None,
-                    expand_group_id=c.expand_group_id,
-                    row_data=env["data"],
-                    contract_version=_SchemaContract.from_checkpoint(dict(env["contract"])).version_hash(),
-                    contract=env["contract"],
-                )
+            leaf_payload = _PipelineRow(dict(env["data"]), _SchemaContract.from_checkpoint(dict(env["contract"])))
+            seeded_item = scheduler_repo.enqueue_ready_claimed(
+                run_id=run_id,
+                token_id=c.token_id,
+                row_id=row_id,
+                node_id=str(agg_node_id),
+                step_index=2,
+                ingest_sequence=row_ingest_sequence,
+                row_payload_json=scheduler_repo.serialize_row_payload(leaf_payload),
+                available_at=seed_now,
+                lease_owner="test-harness",
+                lease_seconds=60,
+                now=seed_now,
+                expand_group_id=c.expand_group_id,
             )
-        agg_state = AggregationCheckpointState(
-            version="5.0",
-            nodes={
-                str(agg_node_id): AggregationNodeCheckpoint(
-                    tokens=tuple(token_ckpts),
-                    batch_id="batch-all-buffered-test",
-                    elapsed_age_seconds=0.5,
-                    count_fire_offset=None,
-                    condition_fire_offset=None,
-                    accepted_count_total=len(token_ckpts),
-                    completed_flush_count=0,
-                )
-            },
-        )
-
-        sink_node_ids = graph.get_sinks()
-        checkpoint_mgr.create_checkpoint(
-            run_id=run_id,
-            token_id=children[0].token_id,
-            node_id=sink_node_ids[0],
-            sequence_number=1,
-            graph=graph,
-            aggregation_state=agg_state,
-        )
+            scheduler_repo.mark_blocked(
+                work_item_id=seeded_item.work_item_id,
+                queue_key=None,
+                barrier_key=str(agg_node_id),
+                now=seed_now,
+                expected_lease_owner="test-harness",
+            )
 
         recovery_mgr = RecoveryManager(db, checkpoint_mgr)
 
-        # ── PRECONDITION: the aggregation arm is live — both leaves are buffered ──
-        checkpoint = checkpoint_mgr.get_latest_checkpoint(run_id)
-        assert checkpoint is not None
-        buffered_ids = recovery_mgr._get_buffered_checkpoint_token_ids(checkpoint)
+        # ── PRECONDITION: the journal barrier-hold arm is live — both leaves buffered ──
+        buffered_ids = recovery_mgr._get_buffered_journal_token_ids(run_id)
         assert {children[0].token_id, children[1].token_id}.issubset(buffered_ids), (
-            f"PRECONDITION FAILED: both expand leaves must be in the checkpoint aggregation buffered set; buffered_ids={buffered_ids}"
+            f"PRECONDITION FAILED: both expand leaves must be in the journal BLOCKED barrier-hold set; buffered_ids={buffered_ids}"
         )
 
         # ── ROW-level exclusion: the all-buffered row is NOT in unprocessed_rows ──
@@ -5887,7 +5921,9 @@ class TestForkRecoveryInvariant:
             determinism=Determinism.DETERMINISTIC,
             schema_config=_OBSERVED_SCHEMA,
         )
-        row = factory.data_flow.create_row(run_id=run.run_id, source_node_id=node.node_id, row_index=0, data={"seed": 1})
+        row = factory.data_flow.create_row(
+            run_id=run.run_id, source_node_id=node.node_id, row_index=0, source_row_index=0, ingest_sequence=0, data={"seed": 1}
+        )
         parent = factory.data_flow.create_token(row_id=row.row_id)
 
         # ── (1) EXPAND path: child token_data_ref envelope carries the full domain ──

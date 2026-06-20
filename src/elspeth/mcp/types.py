@@ -28,7 +28,7 @@ OPERATION_STATUS_VALUES: tuple[OperationStatusValue, ...] = ("open", "completed"
 CallTypeValue = Literal["llm", "http", "http_redirect", "sql", "vector", "filesystem"]
 CallStatusValue = Literal["success", "error"]
 NodeStateStatusValue = Literal["open", "pending", "completed", "failed"]
-NodeTypeValue = Literal["source", "transform", "gate", "aggregation", "coalesce", "sink"]
+NodeTypeValue = Literal["source", "transform", "gate", "aggregation", "coalesce", "queue", "sink"]
 RoutingModeValue = Literal["move", "copy", "divert"]
 DAGFlowTypeValue = Literal["normal", "divert"]
 SchemaModeValue = Literal["fixed", "flexible", "observed", "parse"]
@@ -57,6 +57,8 @@ class RowRecord(TypedDict):
     run_id: str
     source_node_id: str
     row_index: int
+    source_row_index: int
+    ingest_sequence: int
     source_data_hash: str
     source_data_ref: str | None
     created_at: str | None
@@ -149,11 +151,19 @@ class NodeStateRecord(TypedDict, total=False):
     success_reason: dict[str, Any] | None
 
 
+class CollisionValueFingerprint(TypedDict):
+    """Non-reversible summary of a branch value involved in a coalesce collision."""
+
+    value_hash: str
+    value_type: str
+
+
 class CollisionFieldRecord(TypedDict):
     """Details of a single field collision during coalesce.
 
     When the coalesce node status is FAILED (e.g., union_collision_policy='fail'),
-    ``winner_branch`` and ``winner_value`` are None because no winner was selected.
+    ``winner_branch`` and ``winner_value_fingerprint`` are None because no winner
+    was selected.
     """
 
     field: str
@@ -162,11 +172,11 @@ class CollisionFieldRecord(TypedDict):
     winner_branch: str | None
     """Branch whose value was kept (last_wins or first_wins), or None if merge failed."""
 
-    winner_value: Any
-    """The value that won, or None if merge failed."""
+    winner_value_fingerprint: CollisionValueFingerprint | None
+    """Fingerprint of the value that won, or None if merge failed."""
 
-    competing_values: list[tuple[str, Any]]
-    """List of (branch_name, value) entries in merge order."""
+    competing_value_fingerprints: list[tuple[str, CollisionValueFingerprint]]
+    """List of (branch_name, value fingerprint) entries in merge order."""
 
 
 class CollisionRecord(TypedDict):

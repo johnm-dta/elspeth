@@ -18,7 +18,7 @@ def _setup(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFactory, str]
     setup = make_recorder_with_run(run_id=run_id, source_node_id="source-0", source_plugin_name="csv")
     db, factory, run_id_ = setup.db, setup.factory, setup.run_id
     register_test_node(factory.data_flow, run_id_, "transform-1", plugin_name="transform")
-    factory.data_flow.create_row(run_id_, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_row(run_id_, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     factory.data_flow.create_token("row-1", token_id="tok-1")
     state = factory.execution.begin_node_state("tok-1", "transform-1", run_id_, 0, {"name": "test"}, state_id="state-1")
     return db, factory, state.state_id
@@ -36,7 +36,7 @@ def _setup_no_store(*, run_id: str = "run-1") -> tuple[LandscapeDB, RecorderFact
     factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id=run_id)
     register_test_node(factory.data_flow, run_id, "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
     register_test_node(factory.data_flow, run_id, "transform-1", plugin_name="transform")
-    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     factory.data_flow.create_token("row-1", token_id="tok-1")
     state = factory.execution.begin_node_state("tok-1", "transform-1", run_id, 0, {"name": "test"}, state_id="state-1")
     return db, factory, state.state_id
@@ -71,7 +71,7 @@ class TestAllocateCallIndex:
         factory, run_id = setup.factory, setup.run_id
         register_test_node(factory.data_flow, run_id, "transform-1", plugin_name="t1")
         register_test_node(factory.data_flow, run_id, "transform-2", plugin_name="t2")
-        factory.data_flow.create_row(run_id, "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row(run_id, "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-a")
         factory.data_flow.create_token("row-1", token_id="tok-b")
         state_a = factory.execution.begin_node_state("tok-a", "transform-1", run_id, 0, {"x": 1}, state_id="state-a")
@@ -950,7 +950,7 @@ class TestGetCallResponseData:
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
         register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
 
@@ -982,7 +982,7 @@ class TestGetCallResponseData:
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
         register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
 
@@ -1019,7 +1019,7 @@ class TestGetCallResponseData:
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
         register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
 
@@ -1056,7 +1056,7 @@ class TestGetCallResponseData:
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
         register_test_node(factory.data_flow, "run-1", "transform-1", plugin_name="transform")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         state = factory.execution.begin_node_state("tok-1", "transform-1", "run-1", 0, {"name": "test"}, state_id="state-1")
 

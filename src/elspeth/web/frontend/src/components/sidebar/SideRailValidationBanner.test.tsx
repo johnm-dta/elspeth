@@ -128,6 +128,86 @@ describe("SideRailValidationBanner", () => {
     window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
   });
 
+  it("selects source validation entries and opens the graph modal", async () => {
+    const user = userEvent.setup();
+    const selectNode = vi.fn();
+    const onOpenGraph = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+    useSessionStore.setState({
+      compositionState: makeComposition(1),
+      selectNode,
+    } as never);
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        summary: "Validation failed",
+        checks: [],
+        errors: [
+          {
+            component_id: "source",
+            component_type: "source",
+            message: "Source path is outside the allowlist",
+            suggestion: null,
+          },
+        ],
+        warnings: [],
+        readiness: BLOCKED_READINESS,
+      },
+    });
+
+    render(<SideRailValidationBanner />);
+    await user.click(screen.getByRole("button", { name: /source:\s*source/ }));
+
+    expect(selectNode).toHaveBeenCalledWith("source");
+    expect(onOpenGraph).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+  });
+
+  it("selects sink validation entries and opens the graph modal", async () => {
+    const user = userEvent.setup();
+    const selectNode = vi.fn();
+    const onOpenGraph = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+    useSessionStore.setState({
+      compositionState: makeComposition(1, {
+        outputs: [
+          {
+            name: "validated_rows",
+            plugin: "jsonl_file",
+            options: {},
+          },
+        ],
+      }),
+      selectNode,
+    } as never);
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        summary: "Validation failed",
+        checks: [],
+        errors: [
+          {
+            component_id: "validated_rows",
+            component_type: "sink",
+            message: "Sink output path is outside the allowlist",
+            suggestion: null,
+          },
+        ],
+        warnings: [],
+        readiness: BLOCKED_READINESS,
+      },
+    });
+
+    render(<SideRailValidationBanner />);
+    await user.click(
+      screen.getByRole("button", { name: /sink:\s*validated_rows/ }),
+    );
+
+    expect(selectNode).toHaveBeenCalledWith("validated_rows");
+    expect(onOpenGraph).toHaveBeenCalledTimes(1);
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, onOpenGraph);
+  });
+
   describe("SuggestionList", () => {
     it("renders suggestion text and Apply button when suggestions are present", () => {
       useSessionStore.setState({

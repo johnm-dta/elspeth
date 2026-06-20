@@ -1007,7 +1007,13 @@ def test_known_secret_env_marker_cannot_bypass_unavailable_web_secret_contract(
     )
 
     assert result.success is True
-    assert result.to_dict()["data"] == {"name": secret_name, "available": False}
+    assert result.to_dict()["data"] == {
+        "name": secret_name,
+        "scope": "server",
+        "available": False,
+        "source_kind": "env",
+        "reason": "fingerprint_resolver_not_configured",
+    }
 
     with pytest.raises(SecretResolutionError) as exc_info:
         resolve_secret_refs(
@@ -1078,13 +1084,13 @@ def test_scenario_3_get_pipeline_state_preserves_redacted_patched_blob_path_that
         _mock_catalog(),
     )
     assert introspection.success is True
-    introspected_source = introspection.to_dict()["data"]["source"]
+    introspected_source = introspection.to_dict()["data"]["sources"]["source"]
     assert introspected_source["options"]["path"] == EXPECTED_REDACTED_BLOB_SOURCE_PATH
     assert introspected_source["options"]["blob_ref"] == blob_id
     assert str(source_path) not in json.dumps(introspection.to_dict()["data"])
 
     yaml_doc = yaml.safe_load(composer_yaml_generator.generate_yaml(initial_state))
-    assert yaml_doc["source"]["options"]["path"] == str(source_path)
+    assert yaml_doc["sources"]["source"]["options"]["path"] == str(source_path)
 
 
 async def _failed_progress_for_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ComposerProgressEvent:

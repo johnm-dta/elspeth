@@ -225,8 +225,8 @@ def test_edge_validation_timing_from_plugin_instances() -> None:
     # Should fail DURING from_plugin_instances (PHASE 2 validation)
     with pytest.raises(ValueError, match=r"Missing fields.*email"):
         ExecutionGraph.from_plugin_instances(
-            source=source,
-            source_settings=SourceSettings(plugin=source.name, on_success="out", options={}),
+            sources={"primary": source},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="out", options={})},
             transforms=[],
             sinks={"out": as_sink(MockSink())},
             aggregations={},

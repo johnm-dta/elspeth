@@ -64,6 +64,29 @@ def test_line_explode_preserves_empty_lines(ctx: PluginContext) -> None:
     assert [row.to_dict()["html_line"] for row in result.rows] == ["a", "", "b"]
 
 
+def test_line_explode_rejects_more_than_default_max_lines(ctx: PluginContext) -> None:
+    from elspeth.plugins.transforms.line_explode import DEFAULT_MAX_LINES, LineExplode
+
+    transform = LineExplode(
+        {
+            "schema": DYNAMIC_SCHEMA,
+            "source_field": "html",
+            "output_field": "html_line",
+        }
+    )
+    source_value = "\n".join(str(i) for i in range(DEFAULT_MAX_LINES + 1))
+
+    result = transform.process(make_pipeline_row({"html": source_value}), ctx)
+
+    assert result.status == "error"
+    assert result.reason is not None
+    assert result.reason["reason"] == "too_many_lines"
+    assert result.reason["field"] == "html"
+    assert result.reason["line_count"] == DEFAULT_MAX_LINES + 1
+    assert result.reason["max_lines"] == DEFAULT_MAX_LINES
+    assert not result.retryable
+
+
 def test_line_explode_can_omit_index(ctx: PluginContext) -> None:
     from elspeth.plugins.transforms.line_explode import LineExplode
 

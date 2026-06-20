@@ -21,12 +21,14 @@ from sqlalchemy import text
 from elspeth.contracts import (
     Determinism,
     PipelineRow,
+    ResumedRow,
     RunStatus,
     SourceProtocol,
     TransformProtocol,
 )
 from elspeth.contracts.results import SourceRow
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+from elspeth.contracts.types import NodeID
 from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
 from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape import LandscapeDB
@@ -45,7 +47,7 @@ from tests.fixtures.base_classes import (
     as_transform,
 )
 from tests.fixtures.factories import wire_transforms
-from tests.fixtures.landscape import make_landscape_db
+from tests.fixtures.landscape import leader_coordination_token, make_landscape_db
 from tests.fixtures.pipeline import build_production_graph
 from tests.fixtures.plugins import CollectSink, ListSource
 from tests.fixtures.stores import MockPayloadStore
@@ -73,15 +75,16 @@ class QuarantiningSource(_TestSourceBase):
         self._on_validation_failure = quarantine_sink
 
     def load(self, ctx: Any) -> Any:
-        for row in self._rows:
+        for source_row_index, row in enumerate(self._rows):
             if not row.get("valid", True):
                 yield SourceRow.quarantined(
                     row=row,
                     error="validation_failed:valid=False",
                     destination=self._on_validation_failure,
+                    source_row_index=source_row_index,
                 )
             else:
-                yield make_source_row(row)
+                yield make_source_row(row, source_row_index=source_row_index)
 
     def get_field_resolution(self) -> tuple[Mapping[str, str], str] | None:
         return ({"value": "value", "valid": "valid"}, "identity")
@@ -167,7 +170,7 @@ class TestT18CharacterizationExecuteRun:
         error_sink = as_sink(error_collect)
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink, "errors": error_sink},
         )
@@ -192,6 +195,7 @@ class TestT18CharacterizationExecuteRun:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # _execute_run returns RUNNING — run() wrapper sets COMPLETED
@@ -219,6 +223,7 @@ class TestT18CharacterizationExecuteRun:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Output sink gets 3 valid rows (doubled)
@@ -254,6 +259,7 @@ class TestT18CharacterizationExecuteRun:
                 config=config,
                 graph=graph,
                 payload_store=payload_store,
+                coordination_token=leader_coordination_token(factory, run_id),
             )
 
         # All 3 valid rows should have been processed
@@ -283,6 +289,7 @@ class TestT18CharacterizationExecuteRun:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Check that field resolution was recorded on the runs table
@@ -316,6 +323,7 @@ class TestT18CharacterizationExecuteRun:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         assert db._engine is not None
@@ -365,7 +373,7 @@ class TestT18CharacterizationExecuteRun:
         sink = as_sink(CollectSink("output"))
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": sink},
         )
@@ -435,7 +443,7 @@ class TestT18CharacterizationResumePath:
         output_sink = as_sink(CollectSink("output"))
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink},
         )
@@ -450,16 +458,21 @@ class TestT18CharacterizationResumePath:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
-        # Retrieve the actual row_id created during the original run
+        # Retrieve the actual row_id and source_node_id created during the original run.
+        # ADR-025 §3 + §4: resume rows are ResumedRow instances carrying
+        # source_node_id; the per-source contract map is keyed by that identity.
         assert db._engine is not None
         with db._engine.connect() as conn:
-            row_id = conn.execute(
-                text("SELECT row_id FROM rows WHERE run_id = :run_id LIMIT 1"),
+            row_record = conn.execute(
+                text("SELECT row_id, source_node_id FROM rows WHERE run_id = :run_id LIMIT 1"),
                 {"run_id": run_id},
-            ).scalar()
-        assert row_id is not None, "Original run should have created at least one row"
+            ).first()
+        assert row_record is not None, "Original run should have created at least one row"
+        row_id, source_node_id_str = row_record
+        source_node_id = NodeID(source_node_id_str)
 
         # Clear captures from original run
         captured_contracts.clear()
@@ -486,14 +499,21 @@ class TestT18CharacterizationResumePath:
             run_id=run_id,
             config=config,
             graph=graph,
-            unprocessed_rows=[(row_id, 0, {"value": 1})],
-            restored_aggregation_state={},
-            restored_coalesce_state=None,
+            unprocessed_rows=[
+                ResumedRow(
+                    row_id=row_id,
+                    row_index=0,
+                    source_node_id=source_node_id,
+                    row_data={"value": 1},
+                ),
+            ],
+            barrier_restore=None,
             payload_store=payload_store,
-            schema_contract=resume_contract,
             incomplete_by_row={},
             recovery_manager=MagicMock(),
             resume_checkpoint_id="t18-test-checkpoint",
+            schema_contracts_by_source={source_node_id: resume_contract},
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # The transform must have seen the contract during process()
@@ -549,7 +569,7 @@ class TestT18CharacterizationResumePath:
         output_sink = as_sink(CollectSink("output"))
 
         config = PipelineConfig(
-            source=source,
+            sources={"primary": source},
             transforms=[transform],
             sinks={"output": output_sink},
         )
@@ -564,6 +584,7 @@ class TestT18CharacterizationResumePath:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Reset counters — we only care about resume behavior
@@ -593,7 +614,13 @@ class TestT18CharacterizationResumePath:
             on_start_calls["sink"] += 1
             original_sink_on_start(ctx)
 
-        # Call _process_resumed_rows directly with empty rows
+        # Call _process_resumed_rows directly with empty rows.
+        # ADR-025 §3: schema_contracts_by_source is non-empty by contract;
+        # derive the source NodeID from the graph rather than fabricating one,
+        # so the test exercises the production reconstruction path identity.
+        sources_list = list(graph.get_sources())
+        assert len(sources_list) == 1, "single-source pipeline expected for this test"
+        source_node_id = sources_list[0]
         with patch.object(output_sink, "on_start", side_effect=tracking_sink_on_start):
             result = orchestrator._resume_coordinator.process_resumed_rows(
                 factory=factory,
@@ -601,13 +628,13 @@ class TestT18CharacterizationResumePath:
                 config=config,
                 graph=graph,
                 unprocessed_rows=[],
-                restored_aggregation_state={},
-                restored_coalesce_state=None,
+                barrier_restore=None,
                 payload_store=payload_store,
-                schema_contract=schema_contract,
                 incomplete_by_row={},
                 recovery_manager=MagicMock(),
                 resume_checkpoint_id="t18-test-checkpoint",
+                schema_contracts_by_source={source_node_id: schema_contract},
+                coordination_token=leader_coordination_token(factory, run_id),
             )
 
         # _process_resumed_rows also returns RUNNING (same as _execute_run)
@@ -674,8 +701,8 @@ def _build_aggregation_pipeline() -> tuple[SourceProtocol, TransformProtocol, An
 
     # Build graph via production path
     graph = ExecutionGraph.from_plugin_instances(
-        source=source,
-        source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+        sources={"primary": source},
+        source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
         transforms=wire_transforms([transform], source_connection="source_out", final_sink="output"),
         sinks={"output": output_sink},
         aggregations={},
@@ -698,7 +725,7 @@ def _build_aggregation_pipeline() -> tuple[SourceProtocol, TransformProtocol, An
     )
 
     config = PipelineConfig(
-        source=source,
+        sources={"primary": source},
         transforms=[transform],
         sinks={"output": output_sink},
         aggregation_settings={transform_node_id: agg_settings},
@@ -741,6 +768,9 @@ class TestT18CharacterizationAggregation:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            # Slice 3 (ADR-030 §E.2): journal-first barrier intake requires
+            # the run's leader token (begin_run minted the epoch-1 seat).
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         assert result.status == RunStatus.RUNNING
@@ -763,6 +793,7 @@ class TestT18CharacterizationAggregation:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # The single output row should have value=60 (10+20+30) and count=3
@@ -794,6 +825,7 @@ class TestT18CharacterizationAggregation:
             config=config,
             graph=graph,
             payload_store=payload_store,
+            coordination_token=leader_coordination_token(factory, run_id),
         )
 
         # Aggregated output reached the sink (proves flush was inside the loop)

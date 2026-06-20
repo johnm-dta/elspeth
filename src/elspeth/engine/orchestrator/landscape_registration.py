@@ -4,8 +4,8 @@ This module contains pure functions that write run-setup records to the
 Landscape audit trail:
 - register_nodes with the data-flow repository for every node in the execution
   graph (resolving plugin metadata, schema config, output contract per node)
-- record_schema_contract: persist the source schema contract at run and
-  source-node level and expose it to transforms via the plugin context
+- record_schema_contract: persist the source schema contract at source-node
+  level and expose it to transforms via the plugin context
 
 All functions operate on external state passed via parameters - they don't
 maintain internal state. This follows the same pattern as aggregation.py and
@@ -23,10 +23,11 @@ from typing import TYPE_CHECKING, Any
 
 from elspeth import __version__ as ENGINE_VERSION
 from elspeth.contracts import Determinism, NodeType
-from elspeth.contracts.errors import FrameworkBugError
+from elspeth.contracts.errors import FrameworkBugError, OrchestrationInvariantError
 from elspeth.contracts.types import NodeID
 
 if TYPE_CHECKING:
+    from elspeth.contracts import SourceProtocol
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.landscape.factory import RecorderFactory
@@ -73,9 +74,10 @@ def register_nodes_with_landscape(
             plugin_version = f"engine:{ENGINE_VERSION}"
             determinism = Determinism.DETERMINISTIC
             source_file_hash = None  # Engine-internal nodes have no source file
-        elif node_id in coalesce_node_ids:
-            # Coalesce nodes merge tokens from parallel paths - deterministic operation
-            # Use engine version to track which version of the coalesce logic was used
+        elif node_id in coalesce_node_ids or node_info.node_type == NodeType.QUEUE:
+            # Coalesce/queue nodes are engine-internal deterministic
+            # coordination nodes. Use engine version to track which version of
+            # the structural logic was used.
             plugin_version = f"engine:{ENGINE_VERSION}"
             determinism = Determinism.DETERMINISTIC
             source_file_hash = None  # Engine-internal nodes have no source file
@@ -104,8 +106,15 @@ def register_nodes_with_landscape(
         # Get output_contract for source nodes
         # Sources have get_schema_contract() method that returns their output contract
         output_contract = None
-        if node_id == source_id:
-            output_contract = config.source.get_schema_contract()
+        if node_info.node_type == NodeType.SOURCE:
+            if "source_name" not in node_info.config:
+                raise OrchestrationInvariantError(
+                    f"DAG source node '{node_info.node_id}' is missing 'source_name' in its config. "
+                    f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                    f"This is a graph-construction bug — node config keys: {sorted(node_info.config.keys())}."
+                )
+            source_name = str(node_info.config["source_name"])
+            output_contract = config.sources[source_name].get_schema_contract()
 
         factory.data_flow.register_node(
             run_id=run_id,
@@ -125,8 +134,9 @@ def record_schema_contract(
     factory: RecorderFactory,
     run_id: str,
     source_id: NodeID,
-    config: PipelineConfig,
     ctx: PluginContext,
+    *,
+    active_source: SourceProtocol,
 ) -> bool:
     """Record source schema contract if available.
 
@@ -137,12 +147,19 @@ def record_schema_contract(
     Returns:
         True if schema contract was recorded, False otherwise.
     """
-    schema_contract = config.source.get_schema_contract()
+    schema_contract = active_source.get_schema_contract()
     if schema_contract is None:
         return False
 
-    # Update run-level contract
-    factory.run_lifecycle.update_run_contract(run_id, schema_contract)
+    # Update source-scoped resume metadata before row processing can fail.
+    # Per ADR-025 §3 Decision 5 (G6), ``run_sources.schema_contract_json`` is
+    # the single authoritative writer/reader for resume contracts. Do not also
+    # write the legacy run-level singleton surface.
+    factory.run_lifecycle.update_run_source_contract(
+        run_id=run_id,
+        source_node_id=source_id,
+        schema_contract=schema_contract,
+    )
     # Update source node's output_contract (was NULL at registration)
     factory.data_flow.update_node_output_contract(run_id, source_id, schema_contract)
     # Make contract available to transforms via context

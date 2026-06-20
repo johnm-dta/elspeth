@@ -293,6 +293,48 @@ def create_blobs_router() -> APIRouter:
             headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(blob.filename, safe='')}"},
         )
 
+    @router.get("/{blob_id}/preview")
+    async def preview_blob_content(
+        session_id: UUID,
+        blob_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+        limit: int = Query(5000, ge=1, le=50_000),
+    ) -> Response:
+        """Return a bounded prefix for inline blob preview."""
+        blob_service = await _verify_session_and_get_blob_service(session_id, user, request)
+        blob = await _get_owned_blob(blob_service, session_id, blob_id)
+
+        if blob.status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Blob is in '{blob.status}' state and is not previewable",
+            )
+
+        try:
+            content, truncated = await blob_service.read_blob_preview(blob_id, limit_bytes=limit)
+        except BlobNotFoundError:
+            raise HTTPException(status_code=404, detail="Blob content not found") from None
+        except BlobStateError:
+            raise HTTPException(
+                status_code=409,
+                detail="Blob is not in a previewable state",
+            ) from None
+        except (BlobIntegrityError, BlobContentMissingError):
+            raise HTTPException(
+                status_code=500,
+                detail="Blob preview integrity verification failed",
+            ) from None
+
+        return Response(
+            content=content,
+            media_type=blob.mime_type,
+            headers={
+                "X-Preview-Truncated": "true" if truncated else "false",
+                "X-Preview-Limit": str(limit),
+            },
+        )
+
     @router.delete("/{blob_id}", status_code=204)
     async def delete_blob(
         session_id: UUID,

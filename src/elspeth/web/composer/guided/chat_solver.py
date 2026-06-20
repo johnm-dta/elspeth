@@ -6,28 +6,31 @@ replies with prose. Step 1's schema-form chat also has a narrow source/data
 schema tool palette so a complete source request can materialise data instead
 of stalling as prose.
 
-Audit: ``solve_step_chat`` itself does not record. The route handler
-(``post_guided_chat`` in ``web/sessions/routes.py``) constructs a
-``ComposerChatTurn`` from the ``StepChatResult`` returned by
-``solve_step_chat_with_auto_drop`` and persists it via the
-``BufferingRecorder`` drain. No ``ComposerLLMCall`` row is currently emitted
-for chat calls; this is a known asymmetry with the chain-solver path, which
-emits ``ComposerLLMCall`` via explicit ``recorder.record_llm_call`` calls in
-``_guided_solve_chain.py``. Closing that asymmetry is Phase B work.
+Audit: when supplied a ``ComposerLLMCallRecorder``, both LLM call sites in this
+module append one ``ComposerLLMCall`` row per provider request. The route
+handler (``post_guided_chat``) is responsible for draining the recorder after
+it persists any guided-session state changes.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 
+from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
+from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.llm_response_parsing import attach_llm_calls, build_llm_call_record
 from elspeth.web.composer.service import _litellm_acompletion
 
 
@@ -89,6 +92,43 @@ _STEP_1_SOURCE_TOOL: dict[str, Any] = {
         },
     },
 }
+
+
+def _record_llm_call(
+    *,
+    recorder: BufferingRecorder | None,
+    model: str,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None,
+    status: ComposerLLMCallStatus | None,
+    started_at: datetime,
+    started_ns: int,
+    temperature: float | None,
+    seed: int | None,
+    response: Any | None,
+    error_class: str | None,
+    error_message: str | None,
+) -> None:
+    if recorder is None or status is None:
+        return
+    recorder.record_llm_call(
+        build_llm_call_record(
+            model_requested=model,
+            messages=messages,
+            tools=tools,
+            status=status,
+            started_at=started_at,
+            started_ns=started_ns,
+            temperature=temperature,
+            seed=seed,
+            response=response,
+            error_class=error_class,
+            error_message=error_message,
+        )
+    )
+    current_exc = sys.exc_info()[1]
+    if current_exc is not None:
+        attach_llm_calls(current_exc, recorder)
 
 
 def _build_step_1_source_tool_prompt(*, plugin_hint: str | None) -> str:
@@ -197,6 +237,7 @@ async def maybe_resolve_step_1_source_chat(
     plugin_hint: str | None,
     temperature: float | None,
     seed: int | None,
+    recorder: BufferingRecorder | None = None,
 ) -> Step1SourceChatResolution | None:
     """Try to resolve a Step-1 schema-form chat message into source data.
 
@@ -207,33 +248,99 @@ async def maybe_resolve_step_1_source_chat(
     if not user_message:
         raise InvariantError("maybe_resolve_step_1_source_chat: user_message is empty (route validation gap)")
 
+    from litellm.exceptions import APIError as LiteLLMAPIError
+    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _build_step_1_source_tool_prompt(plugin_hint=plugin_hint)},
+        {"role": "user", "content": user_message},
+    ]
+    tools = [_STEP_1_SOURCE_TOOL]
     kwargs: dict[str, Any] = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": _build_step_1_source_tool_prompt(plugin_hint=plugin_hint)},
-            {"role": "user", "content": user_message},
-        ],
-        "tools": [_STEP_1_SOURCE_TOOL],
+        "messages": messages,
+        "tools": tools,
     }
     if temperature is not None:
         kwargs["temperature"] = temperature
     if seed is not None:
         kwargs["seed"] = seed
-    response = await _litellm_acompletion(**kwargs)
+    started_at = datetime.now(UTC)
+    started_ns = time.monotonic_ns()
+    status: ComposerLLMCallStatus | None = None
+    response: Any = None
+    error_class: str | None = None
+    error_message: str | None = None
+    try:
+        response = await _litellm_acompletion(**kwargs)
 
-    message = response.choices[0].message
-    tool_calls = message.tool_calls or ()
-    for tool_call in tool_calls:
-        function = tool_call.function
-        if function is None:
-            continue
-        if function.name != "resolve_source":
-            continue
-        arguments = function.arguments
-        if not isinstance(arguments, str):
-            raise ValueError(f"resolve_source function.arguments must be a JSON string; got {type(arguments).__name__}")
-        return _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
-    return None
+        message = response.choices[0].message
+        tool_calls = message.tool_calls or ()
+        for tool_call in tool_calls:
+            function = tool_call.function
+            if function is None:
+                continue
+            if function.name != "resolve_source":
+                continue
+            arguments = function.arguments
+            if not isinstance(arguments, str):
+                raise ValueError(f"resolve_source function.arguments must be a JSON string; got {type(arguments).__name__}")
+            result = _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
+            status = ComposerLLMCallStatus.SUCCESS
+            return result
+        status = ComposerLLMCallStatus.SUCCESS
+        return None
+    except TimeoutError:
+        status = ComposerLLMCallStatus.TIMEOUT
+        error_class = "TimeoutError"
+        error_message = "TimeoutError"
+        raise
+    except asyncio.CancelledError as exc:
+        status = ComposerLLMCallStatus.CANCELLED
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMAuthError as exc:
+        status = ComposerLLMCallStatus.AUTH_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMBadRequestError as exc:
+        status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMAPIError as exc:
+        status = ComposerLLMCallStatus.API_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except (IndexError, AttributeError, json.JSONDecodeError, ValueError) as exc:
+        status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+        error_class = type(exc).__name__
+        error_message = "malformed_response"
+        raise
+    except Exception as exc:
+        status = ComposerLLMCallStatus.API_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    finally:
+        _record_llm_call(
+            recorder=recorder,
+            model=model,
+            messages=messages,
+            tools=tools,
+            status=status,
+            started_at=started_at,
+            started_ns=started_ns,
+            temperature=temperature,
+            seed=seed,
+            response=response,
+            error_class=error_class,
+            error_message=error_message,
+        )
 
 
 async def solve_step_chat(
@@ -243,6 +350,7 @@ async def solve_step_chat(
     user_message: str,
     temperature: float | None,
     seed: int | None,
+    recorder: BufferingRecorder | None = None,
 ) -> str:
     """Send a user chat message to the LLM scoped to *step*; return the assistant reply.
 
@@ -268,30 +376,93 @@ async def solve_step_chat(
         # this, so reaching here means a server-side caller bug, not user input.
         raise InvariantError("solve_step_chat: user_message is empty (route validation gap)")
 
+    from litellm.exceptions import APIError as LiteLLMAPIError
+    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
     system_prompt = load_step_chat_skill(step)
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
     kwargs: dict[str, Any] = {
         "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
+        "messages": messages,
     }
     if temperature is not None:
         kwargs["temperature"] = temperature
     if seed is not None:
         kwargs["seed"] = seed
-    response = await _litellm_acompletion(**kwargs)
+    started_at = datetime.now(UTC)
+    started_ns = time.monotonic_ns()
+    status: ComposerLLMCallStatus | None = None
+    response: Any = None
+    error_class: str | None = None
+    error_message: str | None = None
+    try:
+        response = await _litellm_acompletion(**kwargs)
 
-    message = response.choices[0].message
-    # LiteLLM's typed contract: message.content is str | None (None when the
-    # response is a tool-call only).  Phase A doesn't attach tools, so a None
-    # or empty content is a defective response from the model — crash loudly
-    # per CLAUDE.md offensive-programming discipline.  We trust LiteLLM's
-    # type contract for "is a string"; if the dependency violates its own
-    # typing, .strip() raises AttributeError immediately at this site (still
-    # loud, no silent degradation).
-    content = message.content
-    if content is None or not content.strip():
-        raise InvariantError(f"solve_step_chat: LLM response missing message content (step={step.value}, model={model!r})")
-    # mypy: LiteLLM's response is `Any`, narrow to str at the trust boundary.
-    return str(content)
+        message = response.choices[0].message
+        # LiteLLM's typed contract: message.content is str | None (None when the
+        # response is a tool-call only).  Phase A doesn't attach tools, so a None
+        # or empty content is a defective response from the model — crash loudly
+        # per CLAUDE.md offensive-programming discipline.  We trust LiteLLM's
+        # type contract for "is a string"; if the dependency violates its own
+        # typing, .strip() raises AttributeError immediately at this site (still
+        # loud, no silent degradation).
+        content = message.content
+        if content is None or not content.strip():
+            raise InvariantError(f"solve_step_chat: LLM response missing message content (step={step.value}, model={model!r})")
+        status = ComposerLLMCallStatus.SUCCESS
+        # mypy: LiteLLM's response is `Any`, narrow to str at the trust boundary.
+        return str(content)
+    except TimeoutError:
+        status = ComposerLLMCallStatus.TIMEOUT
+        error_class = "TimeoutError"
+        error_message = "TimeoutError"
+        raise
+    except asyncio.CancelledError as exc:
+        status = ComposerLLMCallStatus.CANCELLED
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMAuthError as exc:
+        status = ComposerLLMCallStatus.AUTH_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMBadRequestError as exc:
+        status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMAPIError as exc:
+        status = ComposerLLMCallStatus.API_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except (IndexError, AttributeError, json.JSONDecodeError, InvariantError) as exc:
+        status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+        error_class = type(exc).__name__
+        error_message = "malformed_response"
+        raise
+    except Exception as exc:
+        status = ComposerLLMCallStatus.API_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    finally:
+        _record_llm_call(
+            recorder=recorder,
+            model=model,
+            messages=messages,
+            tools=None,
+            status=status,
+            started_at=started_at,
+            started_ns=started_ns,
+            temperature=temperature,
+            seed=seed,
+            response=response,
+            error_class=error_class,
+            error_message=error_message,
+        )

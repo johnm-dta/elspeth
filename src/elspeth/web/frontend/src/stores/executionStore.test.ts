@@ -56,7 +56,7 @@ describe("executionStore.validate", () => {
     resetInterpretationStore();
     useSessionStore.setState({
       activeSessionId: "session-1",
-      compositionState: { version: 1, source: null, nodes: [], outputs: [] },
+      compositionState: { version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
     } as never);
   });
 
@@ -226,7 +226,7 @@ describe("executionStore.validate", () => {
 
     const validatePromise = useExecutionStore.getState().validate("session-1");
     useSessionStore.setState({
-      compositionState: { version: 2, source: null, nodes: [], outputs: [] },
+      compositionState: { version: 2, sources: {}, nodes: [], edges: [], outputs: [] },
     } as never);
     resolveValidation(staleResult);
     const applied = await validatePromise;
@@ -285,6 +285,7 @@ function makeInterpretationEvent(
 function makeAccounting(overrides: Partial<RunAccounting> = {}): RunAccounting {
   return {
     source: { rows_processed: 1 },
+    sources: { source: { rows_processed: 1 } },
     tokens: {
       emitted: 9_324,
       terminal: 9_324,
@@ -607,6 +608,112 @@ describe("executionStore.cancel", () => {
   });
 });
 
+describe("executionStore WebSocket lifecycle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    resetInterpretationStore();
+  });
+
+  it("marks the active run disconnected during reconnect and clears it after the socket recovers", () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    handlers.onDisconnected();
+    expect(useExecutionStore.getState().wsDisconnected).toBe(true);
+
+    handlers.onConnected();
+    expect(useExecutionStore.getState().wsDisconnected).toBe(false);
+
+    handlers.onDisconnected();
+    const progressEvent: RunEvent = {
+      run_id: "run-1",
+      timestamp: "2026-04-26T05:32:00.000Z",
+      event_type: "progress",
+      data: {
+        source_rows_processed: 3,
+        tokens_succeeded: 2,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 1,
+        tokens_routed_failure: 0,
+      },
+    };
+    handlers.onProgress(progressEvent, progressEvent.data);
+    expect(useExecutionStore.getState().wsDisconnected).toBe(false);
+  });
+
+  it("surfaces run-unavailable websocket closes without leaving reconnect state active", () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      wsDisconnected: true,
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    handlers.onRunUnavailable();
+
+    expect(useExecutionStore.getState().wsDisconnected).toBe(false);
+    expect(useExecutionStore.getState().error).toBe(
+      "Run is unavailable or you do not have access.",
+    );
+  });
+});
+
+describe("executionStore.loadRuns", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useExecutionStore.getState().reset();
+    resetInterpretationStore();
+    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+  });
+
+  it("drops a run-list response that resolves after the active session changes", async () => {
+    const { fetchRuns } = await import("@/api/client");
+    const pendingRuns = deferred<Run[]>();
+    (fetchRuns as ReturnType<typeof vi.fn>).mockReturnValue(pendingRuns.promise);
+    const currentRun = makeRun({
+      id: "run-session-2",
+      session_id: "session-2",
+    });
+    useExecutionStore.setState({ runs: [currentRun] });
+
+    const loadPromise = useExecutionStore.getState().loadRuns("session-1");
+    useSessionStore.setState({ activeSessionId: "session-2" } as never);
+    pendingRuns.resolve([
+      makeRun({
+        id: "run-stale-session-1",
+        session_id: "session-1",
+      }),
+    ]);
+    await loadPromise;
+
+    expect(useExecutionStore.getState().runs).toEqual([currentRun]);
+  });
+});
+
 describe("executionStore progress events advance live accounting", () => {
   // The API run record no longer carries best-known live counters. Progress
   // events update state.progress, while completed events attach closed
@@ -738,6 +845,53 @@ describe("executionStore progress events advance live accounting", () => {
     const state = useExecutionStore.getState();
     expect(state.runs).toHaveLength(1);
     expect(state.runs[0]).toEqual(otherRun);
+  });
+
+  it("ignores progress events whose run_id does not match the active run", () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    useExecutionStore.setState({
+      runs: [makeRun()],
+      activeRunId: "run-1",
+      progress: {
+        source_rows_processed: 5,
+        tokens_succeeded: 4,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 2,
+        tokens_routed_failure: 0,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+    const handlers = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][2];
+
+    const staleEvent: RunEvent = {
+      run_id: "run-old",
+      timestamp: "2026-04-26T05:32:00.000Z",
+      event_type: "progress",
+      data: {
+        source_rows_processed: 99,
+        tokens_succeeded: 72,
+        tokens_failed: 9,
+        tokens_quarantined: 1,
+        tokens_routed_success: 9,
+        tokens_routed_failure: 9,
+      },
+    };
+    handlers.onProgress(staleEvent, staleEvent.data);
+
+    expect(useExecutionStore.getState().progress).toMatchObject({
+      source_rows_processed: 5,
+      tokens_succeeded: 4,
+      tokens_failed: 0,
+      tokens_quarantined: 0,
+      tokens_routed_success: 2,
+      tokens_routed_failure: 0,
+    });
   });
 
   it("does not zero state.runs[i] counters on error events with null progress", () => {

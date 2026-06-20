@@ -502,7 +502,7 @@ async def _seed_session_and_state(
         session_id,
         CompositionStateData(
             nodes=state_dict["nodes"],
-            source=state_dict["source"],
+            sources=state_dict["sources"],
             metadata_=state_dict["metadata"],
             is_valid=True,
         ),
@@ -1333,7 +1333,7 @@ async def test_auto_surface_re_surfaces_after_prompt_edit_not_bricked(
         merge=node_a.merge,
     )
     state_b = CompositionState(
-        source=state_a.source,
+        sources=state_a.sources,
         nodes=(node_b,),
         edges=state_a.edges,
         outputs=state_a.outputs,
@@ -1345,7 +1345,7 @@ async def test_auto_surface_re_surfaces_after_prompt_edit_not_bricked(
         session_id,
         CompositionStateData(
             nodes=state_dict_b["nodes"],
-            source=state_dict_b["source"],
+            sources=state_dict_b["sources"],
             metadata_=state_dict_b["metadata"],
             is_valid=True,
         ),

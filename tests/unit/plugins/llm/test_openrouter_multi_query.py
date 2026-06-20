@@ -6,6 +6,7 @@ LLMTransform with provider="openrouter" and queries dict config.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Generator
 from typing import Any
@@ -261,14 +262,18 @@ class TestSingleQueryProcessing:
         assert result.reason is not None
         assert "json" in result.reason["reason"].lower()
 
-    def test_process_row_rate_limit_returns_retryable_error(self) -> None:
-        """Rate limit errors return retryable error result (not raised).
+    def test_process_row_rate_limit_diverts_as_retry_timeout(self) -> None:
+        """A persistent rate-limit error exhausts the bounded local retry budget.
 
-        Multi-query sequential mode catches retryable LLMClientError and returns
-        TransformResult.error(retryable=True) to avoid wastefully re-executing
-        successful queries on engine retry.
+        B3.7: sequential multi-query mode retries retryable LLMClientErrors
+        (429/5xx/network) locally with bounded backoff up to
+        ``max_capacity_retry_seconds``. A *persistent* retryable error therefore
+        diverts with reason='retry_timeout' and retryable=False (terminal — the
+        engine must not re-run the row), superseding the pre-B3.7 immediate
+        retryable 'multi_query_failed' return. The budget is pinned to 1s so the
+        bounded retry exhausts quickly instead of napping toward the 3600s default.
         """
-        config = self._make_single_query_config()
+        config = self._make_single_query_config(max_capacity_retry_seconds=1)
         transform, mock_provider = _make_transform_with_mock_provider(config)
 
         mock_provider.execute_query.side_effect = RateLimitError("Rate limit exceeded")
@@ -278,18 +283,18 @@ class TestSingleQueryProcessing:
 
         result = transform._process_row(row, ctx)
         assert result.status == "error"
-        assert result.retryable is True
+        assert result.retryable is False
         assert result.reason is not None
-        assert result.reason["reason"] == "multi_query_failed"
+        assert result.reason["reason"] == "retry_timeout"
 
-    def test_process_row_server_error_returns_retryable_error(self) -> None:
-        """Server errors return retryable error result (not raised).
+    def test_process_row_server_error_diverts_as_retry_timeout(self) -> None:
+        """A persistent server (5xx) error exhausts the bounded local retry budget.
 
-        Multi-query sequential mode catches retryable LLMClientError and returns
-        TransformResult.error(retryable=True) to avoid wastefully re-executing
-        successful queries on engine retry.
+        B3.7: see ``test_process_row_rate_limit_diverts_as_retry_timeout``. A
+        persistent retryable ServerError diverts with reason='retry_timeout' and
+        retryable=False once the 1s budget is exhausted.
         """
-        config = self._make_single_query_config()
+        config = self._make_single_query_config(max_capacity_retry_seconds=1)
         transform, mock_provider = _make_transform_with_mock_provider(config)
 
         mock_provider.execute_query.side_effect = ServerError("503 Service Unavailable")
@@ -299,18 +304,18 @@ class TestSingleQueryProcessing:
 
         result = transform._process_row(row, ctx)
         assert result.status == "error"
-        assert result.retryable is True
+        assert result.retryable is False
         assert result.reason is not None
-        assert result.reason["reason"] == "multi_query_failed"
+        assert result.reason["reason"] == "retry_timeout"
 
-    def test_process_row_network_error_returns_retryable_error(self) -> None:
-        """Network errors return retryable error result (not raised).
+    def test_process_row_network_error_diverts_as_retry_timeout(self) -> None:
+        """A persistent network error exhausts the bounded local retry budget.
 
-        Multi-query sequential mode catches retryable LLMClientError and returns
-        TransformResult.error(retryable=True) to avoid wastefully re-executing
-        successful queries on engine retry.
+        B3.7: see ``test_process_row_rate_limit_diverts_as_retry_timeout``. A
+        persistent retryable NetworkError diverts with reason='retry_timeout' and
+        retryable=False once the 1s budget is exhausted.
         """
-        config = self._make_single_query_config()
+        config = self._make_single_query_config(max_capacity_retry_seconds=1)
         transform, mock_provider = _make_transform_with_mock_provider(config)
 
         mock_provider.execute_query.side_effect = NetworkError("Connection refused")
@@ -320,9 +325,9 @@ class TestSingleQueryProcessing:
 
         result = transform._process_row(row, ctx)
         assert result.status == "error"
-        assert result.retryable is True
+        assert result.retryable is False
         assert result.reason is not None
-        assert result.reason["reason"] == "multi_query_failed"
+        assert result.reason["reason"] == "retry_timeout"
 
     def test_process_row_client_error_not_retryable(self) -> None:
         """Non-retryable LLMClientError returns error result."""
@@ -1042,13 +1047,20 @@ class TestHTTPSpecificBehavior:
         transform: LLMTransform,
         collector: CollectorOutputPort,
     ) -> None:
-        """Network connection errors return retryable TransformResult.
+        """A persistent network error diverts the row as a bounded-retry timeout.
 
-        Multi-query sequential mode catches retryable LLMClientError and returns
-        TransformResult.error(retryable=True) instead of re-raising, to avoid
-        wastefully re-executing successful queries on engine retry.
+        B3.7: sequential multi-query mode absorbs retryable LLMClientErrors with
+        bounded local backoff up to ``max_capacity_retry_seconds``. A persistent
+        NetworkError therefore diverts (not re-raises) with reason='retry_timeout'
+        and retryable=False once the budget is exhausted, instead of the pre-B3.7
+        immediate retryable 'multi_query_failed' return. The strategy budget is
+        pinned to 1s so the bounded retry exhausts well inside the 10s flush
+        timeout (otherwise the 3600s default would stall the batch worker).
         """
         transform._provider.execute_query.side_effect = NetworkError("Connection refused")  # type: ignore[union-attr]
+        # Pin the retry budget low so the bounded-retry loop exhausts quickly.
+        # MultiQueryStrategy is a frozen dataclass, so swap in a replaced copy.
+        transform._strategy = dataclasses.replace(transform._strategy, max_capacity_retry_seconds=1)  # type: ignore[type-var]
 
         row = make_pipeline_row(
             {
@@ -1066,13 +1078,14 @@ class TestHTTPSpecificBehavior:
 
         assert len(collector.results) == 1
         _, result, _state_id = collector.results[0]
-        # NetworkError is retryable — multi-query catches it and returns a
-        # retryable TransformResult (not ExceptionResult) to preserve successful queries.
+        # NetworkError is retryable — multi-query absorbs it with bounded local
+        # retry and, on a persistent failure, diverts to a terminal (non-retryable)
+        # retry_timeout TransformResult rather than re-raising an ExceptionResult.
         assert isinstance(result, TransformResult), f"Expected TransformResult, got {type(result)}"
         assert result.status == "error"
-        assert result.retryable is True
+        assert result.retryable is False
         assert result.reason is not None
-        assert result.reason["reason"] == "multi_query_failed"
+        assert result.reason["reason"] == "retry_timeout"
 
 
 class TestResourceCleanup:

@@ -1,6 +1,6 @@
 // src/components/blobs/BlobRow.tsx
 import { useState } from "react";
-import { previewBlobContent } from "@/api/client";
+import { previewBlobContentSnippet } from "@/api/client";
 import type { BlobMetadata } from "@/types/api";
 
 const PREVIEWABLE_MIME_TYPES = new Set([
@@ -58,6 +58,7 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
 
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewContent, setPreviewContent] = useState<string | null>(null);
+  const [previewTruncated, setPreviewTruncated] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
 
@@ -75,8 +76,13 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
     setPreviewLoading(true);
     setPreviewError(null);
     try {
-      const text = await previewBlobContent(sessionId, blob.id);
-      setPreviewContent(text);
+      const preview = await previewBlobContentSnippet(
+        sessionId,
+        blob.id,
+        MAX_PREVIEW_CHARS,
+      );
+      setPreviewContent(preview.text);
+      setPreviewTruncated(preview.truncated);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to load preview";
       setPreviewError(message);
@@ -85,10 +91,13 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
     }
   };
 
-  const truncated = previewContent !== null && previewContent.length > MAX_PREVIEW_CHARS;
-  const displayContent = truncated
-    ? previewContent.slice(0, MAX_PREVIEW_CHARS)
-    : previewContent;
+  const truncated =
+    previewContent !== null &&
+    (previewTruncated || previewContent.length > MAX_PREVIEW_CHARS);
+  const displayContent =
+    previewContent !== null && truncated
+      ? previewContent.slice(0, MAX_PREVIEW_CHARS)
+      : previewContent;
 
   return (
     <div>

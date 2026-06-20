@@ -42,7 +42,7 @@ def _run_disposable_pipeline(rows: list[dict[str, Any]]) -> None:
     payload_store = MockPayloadStore()
     orchestrator = Orchestrator(db)
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in transforms_list],
         sinks={name: as_sink(s) for name, s in sinks.items()},
     )
@@ -107,7 +107,7 @@ class TestLeakDetection:
             )
             orchestrator = Orchestrator(db)
             config = PipelineConfig(
-                source=as_source(source),
+                sources={"primary": as_source(source)},
                 transforms=[as_transform(t) for t in transforms_list],
                 sinks={name: as_sink(s) for name, s in sinks.items()},
             )

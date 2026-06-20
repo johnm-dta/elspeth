@@ -43,6 +43,7 @@ from elspeth.contracts.export_records import (
     RoutingEventExportRecord,
     RowExportRecord,
     RunExportRecord,
+    SchedulerEventExportRecord,
     SecretResolutionExportRecord,
     TokenExportRecord,
     TokenOutcomeExportRecord,
@@ -74,6 +75,7 @@ class LandscapeExporter:
     - token: Row instances
     - token_parent: Token lineage for forks/joins
     - token_outcome: Terminal state for tokens
+    - scheduler_event: Durable scheduler state transitions and lease attribution
     - node_state: Processing records
     - routing_event: Routing decisions
     - call: External calls (may have state_id OR operation_id)
@@ -424,13 +426,29 @@ class LandscapeExporter:
         for outcome in all_token_outcomes:
             outcomes_by_token[outcome.token_id].append(outcome)
 
+        # Batch query 7: All durable scheduler transition events for this run
+        all_scheduler_events = self._factory.query.get_scheduler_events(run_id=run_id)
+        scheduler_events_by_token: defaultdict[str, list[Any]] = defaultdict(list)
+        for scheduler_event in all_scheduler_events:
+            scheduler_events_by_token[scheduler_event.token_id].append(scheduler_event)
+
         # Now iterate through rows using pre-loaded data (no more per-entity queries)
         for row in self._factory.query.get_rows(run_id):
+            if row.source_row_index is None:
+                raise AuditIntegrityError(
+                    f"Row '{row.row_id}' has no source_row_index. Run: {run_id}. This violates the multi-source row identity contract."
+                )
+            if row.ingest_sequence is None:
+                raise AuditIntegrityError(
+                    f"Row '{row.row_id}' has no ingest_sequence. Run: {run_id}. This violates the multi-source row identity contract."
+                )
             row_record: RowExportRecord = {
                 "record_type": "row",
                 "run_id": run_id,
                 "row_id": row.row_id,
                 "row_index": row.row_index,
+                "source_row_index": row.source_row_index,
+                "ingest_sequence": row.ingest_sequence,
                 "source_node_id": row.source_node_id,
                 "source_data_hash": row.source_data_hash,
                 "source_data_ref": row.source_data_ref,
@@ -486,6 +504,32 @@ class LandscapeExporter:
                         "expected_branches_json": outcome.expected_branches_json,
                     }
                     yield token_outcome_record
+
+                # Scheduler transition events (from pre-loaded dict)
+                for event in scheduler_events_by_token[token.token_id]:
+                    scheduler_event_record: SchedulerEventExportRecord = {
+                        "record_type": "scheduler_event",
+                        "run_id": run_id,
+                        "event_id": event.event_id,
+                        "token_id": event.token_id,
+                        "work_item_id": event.work_item_id,
+                        "node_id": event.node_id,
+                        "event_type": event.event_type.value,
+                        "from_status": event.from_status.value if event.from_status is not None else None,
+                        "to_status": event.to_status.value,
+                        "from_lease_owner": event.from_lease_owner,
+                        "to_lease_owner": event.to_lease_owner,
+                        "from_lease_expires_at": (
+                            event.from_lease_expires_at.isoformat() if event.from_lease_expires_at is not None else None
+                        ),
+                        "to_lease_expires_at": (event.to_lease_expires_at.isoformat() if event.to_lease_expires_at is not None else None),
+                        "from_attempt": event.from_attempt,
+                        "to_attempt": event.to_attempt,
+                        "recorded_at": event.recorded_at.isoformat(),
+                        "caller_owner": event.caller_owner,
+                        "context_json": event.context_json,
+                    }
+                    yield scheduler_event_record
 
                 # Node states for this token (from pre-loaded dict)
                 for state in states_by_token[token.token_id]:

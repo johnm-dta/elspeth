@@ -222,6 +222,8 @@ class TestResumeEdgeIDs:
                 source_node_id="source",
                 row_index=i,
                 data=row_data,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             tokens.append(token)
@@ -229,9 +231,8 @@ class TestResumeEdgeIDs:
         # 4. Create checkpoint (simulating partial run)
         checkpoint_mgr.create_checkpoint(
             run_id=run.run_id,
-            token_id=tokens[0].token_id,
-            node_id="gate",
             sequence_number=1,
+            barrier_scalars=None,
             graph=gate_graph,
         )
 

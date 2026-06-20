@@ -76,6 +76,15 @@ class TestTransformResultWithPipelineRow:
                 success_reason={"action": "processed"},
             )
 
+    @pytest.mark.parametrize("status", ("partial", 1))
+    def test_direct_construction_rejects_unknown_status(self, status: object) -> None:
+        with pytest.raises(ValueError, match=r"status.*success.*error"):
+            TransformResult(
+                status=cast(Any, status),
+                row=None,
+                reason=None,
+            )
+
     def test_success_multi_preserves_tuple_of_pipeline_rows_with_shared_contract(
         self,
         output_contract: SchemaContract,

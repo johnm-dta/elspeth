@@ -78,6 +78,7 @@ from elspeth.web.composer.llm_response_parsing import (
     token_usage_from_response,
 )
 from elspeth.web.composer.progress import (
+    advisor_checkpoint_progress_event,
     convergence_progress_event,
     emit_progress,
     model_call_progress_event,
@@ -116,7 +117,11 @@ from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightKey,
 )
 from elspeth.web.execution.schemas import (
+    CHECK_ADVISOR_SIGNOFF,
+    CHECK_INTERPRETATION_REVIEW,
+    CHECK_STATE_EXISTS,
     ValidationCheck,
+    ValidationCheckName,
     ValidationError,
     ValidationReadiness,
     ValidationReadinessBlocker,
@@ -305,12 +310,12 @@ def _state_is_structurally_empty(state: CompositionState) -> bool:
     the synthesizer's Pydantic-noise replacement, and we surface the prose
     instead.
 
-    "Structurally empty" means no source, no nodes, no outputs — the three
+    "Structurally empty" means no sources, no nodes, no outputs — the three
     user-meaningful state fields. ``edges`` is implied (edges only exist
     between declared nodes) and ``metadata`` is not load-bearing for this
     check.
     """
-    return state.source is None and not state.nodes and not state.outputs
+    return not state.sources and not state.nodes and not state.outputs
 
 
 def _tool_result_mutated_composition_state(
@@ -755,7 +760,7 @@ _INTERPRETATION_REVIEW_ORPHANED_CODE: Final[str] = "interpretation_review_orphan
 # Mirrors ``validation._CHECK_INTERPRETATION_REVIEW`` so the synthetic
 # fail-closed result names the same check as the runtime preflight; kept as a
 # local literal rather than importing a private validation symbol.
-_INTERPRETATION_REVIEW_CHECK_NAME: Final[str] = "interpretation_review"
+_INTERPRETATION_REVIEW_CHECK_NAME: Final[ValidationCheckName] = CHECK_INTERPRETATION_REVIEW
 
 
 def _orphaned_interpretation_review_validation(
@@ -854,7 +859,7 @@ def _no_mutation_empty_state_validation(blocker: str) -> ValidationResult:
     )
     return ValidationResult(
         is_valid=False,
-        checks=[ValidationCheck(name="state_exists", passed=False, detail=detail, affected_nodes=(), outcome_code=None)],
+        checks=[ValidationCheck(name=CHECK_STATE_EXISTS, passed=False, detail=detail, affected_nodes=(), outcome_code=None)],
         errors=[
             ValidationError(
                 component_id=None,
@@ -947,7 +952,7 @@ def _proof_repair_is_applicable(state: CompositionState) -> bool:
     The forced-repair gate must fire whenever ``compute_proof_diagnostics``
     might find blocking diagnostics. The proof step is a no-op for sources
     that aren't blob-backed (no bytes to read), so the gate's predicate is
-    "source is present AND options carries a ``blob_ref``" — *not* "state
+    "at least one source is present AND options carries a ``blob_ref``" — *not* "state
     changed this turn", because a blocker can survive session resume into
     a turn where the LLM does no mutations.
 
@@ -957,9 +962,7 @@ def _proof_repair_is_applicable(state: CompositionState) -> bool:
     is a documented part of the contract (path-based sources don't have
     one), so containment checking is the appropriate primitive here.
     """
-    if state.source is None:
-        return False
-    return "blob_ref" in state.source.options
+    return any("blob_ref" in source.options for source in state.sources.values())
 
 
 def _empty_state_uploaded_blob_repair_message(ready_blobs: tuple[Mapping[str, Any], ...], *, next_turn: int) -> str:
@@ -991,6 +994,10 @@ def _empty_state_uploaded_blob_repair_message(ready_blobs: tuple[Mapping[str, An
         "Continue by calling a build/edit tool: prefer set_pipeline with source.blob_id, "
         "or set_source_from_blob followed by the needed nodes and outputs. "
         "Use inspect_source(blob_id) when you need headers, sample_row_count, or inferred types. "
+        "If prior prose identified an unsupported requested primitive, for example from_json(payload) "
+        "inside value_transform.compute, treat that as a catalog constraint rather than a reason to stop. "
+        "Build the supported fallback already available in the request or conversation, such as keeping "
+        "payload as a string and routing on supported fields, and commit it with a tool call. "
         "Do not infer that a CSV is header-only from metadata, filename, prior prose, or a failed attempt; "
         "only inspect_source can establish the observed row count. "
         f"This is forced repair turn {next_turn} of {_MAX_REPAIR_TURNS}.\n\n"
@@ -1035,10 +1042,28 @@ def _compose_preflight_repair_message(runtime_result: ValidationResult, *, next_
         "fixing — that will not resolve the violation."
     )
 
+    credential_note = ""
+    if any(
+        error.error_code in {"fabricated_secret", "missing_secret_ref"}
+        or "Credential field(s)" in error.message
+        or "secret reference" in error.message
+        for error in runtime_result.errors
+    ):
+        credential_note = (
+            "\n\nCredential-secret diagnostic requirement:\n"
+            "- Before answering or finalising, call list_secret_refs and validate_secret_ref for the intended secret name "
+            "(for example OPENROUTER_API_KEY when the user asked for OpenRouter).\n"
+            "- If a secret is unavailable, report the returned reason "
+            "(fingerprint_resolver_not_configured, env_var_not_set, or value_decryption_failed) and the layer it identifies. "
+            "Do not answer by repeating the runtime preflight complaint.\n"
+            "- Do not inline a literal credential, use ${VAR} interpolation, or keep placeholders. "
+            "Only wire {secret_ref: NAME} after validate_secret_ref reports available=true."
+        )
+
     return (
         "[composer-system] Pre-finalisation runtime preflight found contract "
         "violation(s) — the pipeline cannot run as currently configured. "
-        "Do not respond to the user yet; resolve these first.\n\n" + "\n\n".join(rendered) + "\n\n" + budget_note
+        "Do not respond to the user yet; resolve these first.\n\n" + "\n\n".join(rendered) + "\n\n" + budget_note + credential_note
     )
 
 
@@ -1259,7 +1284,7 @@ class ComposerServiceImpl:
         state_d = result.updated_state.to_dict()
         return StatePayload(
             data=CompositionStateData(
-                source=state_d["source"],
+                sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],
@@ -2347,13 +2372,18 @@ class ComposerServiceImpl:
             hint_text = anti_anchor.build_hint()
             anti_anchor.consume_fire()
             llm_messages.append({"role": "user", "content": hint_text})
+            is_drift_hint = "drift without convergence" in hint_text
             await emit_progress(
                 progress,
                 ComposerProgressEvent(
                     phase="using_tools",
-                    headline="ELSPETH detected an anchored retry pattern.",
+                    headline="ELSPETH detected a no-progress retry pattern.",
                     evidence=(
-                        "The last 3 tool calls used identical arguments and produced the same error.",
+                        (
+                            "The last 3 tool calls used different arguments but failed the same repair loop."
+                            if is_drift_hint
+                            else "The last 3 tool calls used identical arguments and produced the same error."
+                        ),
                         "A structural hint was injected to help the model converge.",
                     ),
                     likely_next="The model will see the hint and try a different argument shape.",
@@ -2418,6 +2448,7 @@ class ComposerServiceImpl:
                                 state=state,
                                 session_id=session_id,
                                 recorder=recorder,
+                                progress=progress,
                             )
                             if (not verdict.ok) or verdict.blocking:
                                 # Advisor-blocked TERMINAL return on the P5
@@ -2710,6 +2741,7 @@ class ComposerServiceImpl:
                     state=state,
                     session_id=session_id,
                     recorder=recorder,
+                    progress=progress,
                 )
                 is_last_pass = (advisor_checkpoint_passes_used + 1) >= max_passes
                 if (not verdict.ok) or (verdict.blocking and is_last_pass):
@@ -3234,6 +3266,7 @@ class ComposerServiceImpl:
                 session_id=session_id,
                 llm_messages=llm_messages,
                 recorder=recorder,
+                progress=progress,
             )
             persist = await self._persist_turn_audit(
                 tool_outcomes=dispatch.tool_outcomes,
@@ -4147,6 +4180,7 @@ class ComposerServiceImpl:
         state: CompositionState,
         session_id: str | None,
         recorder: BufferingRecorder | None,
+        progress: ComposerProgressSink | None = None,
     ) -> AdvisorCheckpointVerdict:
         """Backend-initiated deterministic advisor checkpoint (early|end).
 
@@ -4161,7 +4195,12 @@ class ComposerServiceImpl:
         ``CLEAN`` (case-insensitive) is non-blocking. ``session_id`` is part of
         the checkpoint contract (threaded by callers and consumed downstream);
         it is intentionally not forwarded into the advisor call here.
+
+        ``progress`` (when threaded by the caller) receives a ``calling_model``
+        event before the advisor call so the snapshot is not frozen on its
+        previous phase while the model-distinct advisor runs.
         """
+        await emit_progress(progress, advisor_checkpoint_progress_event(phase))
         arguments = self._build_checkpoint_arguments(phase=phase, state=state)
         attempts = 2  # bounded retry; the underlying call wraps its own timeout
         last_exc: Exception | None = None
@@ -4198,6 +4237,7 @@ class ComposerServiceImpl:
         session_id: str | None,
         llm_messages: list[dict[str, Any]],
         recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None = None,
     ) -> bool:
         """Run the EARLY advisory checkpoint on the empty->non-empty pipeline
         TRANSITION (structurally <= once per session). Advisory only: inject the
@@ -4207,7 +4247,9 @@ class ComposerServiceImpl:
             return False
         if not _state_is_structurally_empty(prev_state):
             return False  # pipeline was already non-empty before this turn (or resumed session)
-        verdict = await self._run_advisor_checkpoint(phase="early", state=state, session_id=session_id, recorder=recorder)
+        verdict = await self._run_advisor_checkpoint(
+            phase="early", state=state, session_id=session_id, recorder=recorder, progress=progress
+        )
         if verdict.ok and verdict.blocking:
             llm_messages.append(
                 {
@@ -4701,12 +4743,14 @@ def _summarize_pipeline_for_advisor(state: CompositionState) -> str:
     if state.metadata.description:
         lines.append(f"Intent (stated): {state.metadata.description}")
 
-    # Source.
-    if state.source is None:
+    # Sources.
+    if not state.sources:
         lines.append("Source: (none set)")
     else:
-        opt_text = _render_options_for_advisor(state.source.options)
-        lines.append(f"Source: plugin={state.source.plugin} -> '{state.source.on_success}' [{opt_text}]")
+        for source_name, source in state.sources.items():
+            opt_text = _render_options_for_advisor(source.options)
+            label = "Source" if source_name == "source" else f"Source '{source_name}'"
+            lines.append(f"{label}: plugin={source.plugin} -> '{source.on_success}' [{opt_text}]")
 
     # Nodes (topology + control flow + per-node field contract).
     if not state.nodes:
@@ -4896,7 +4940,7 @@ def _render_interpolated_row_fields(node: NodeSpec) -> str:
 _ADVISOR_SIGNOFF_BLOCKED_CODE: Final[str] = "advisor_signoff_blocked"
 # Mirrors the orphan gate's check-name convention so the synthetic fail-closed
 # result names a stable check the UI/audit can key on.
-_ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME: Final[str] = "advisor_signoff"
+_ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME: Final[ValidationCheckName] = CHECK_ADVISOR_SIGNOFF
 
 
 def _advisor_signoff_blocked_validation(*, reason: str, findings: str) -> ValidationResult:

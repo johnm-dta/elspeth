@@ -131,9 +131,11 @@ function makeCompositionStateAfter5a(): CompositionState {
   return {
     id: "state-2",
     version: 2,
-    source: {
-      plugin: "inline_blob",
-      options: { blob_ref: "blob-1" },
+    sources: {
+      source: {
+        plugin: "inline_blob",
+        options: { blob_ref: "blob-1" },
+      },
     },
     // NodeSpec.id is the wire-side identifier matching the backend
     // node_id concept (see types/index.ts line 106-120).  The
@@ -212,7 +214,7 @@ function makeResolveResponse(
     new_state: {
       id: "state-3",
       version: 3,
-      source: { plugin: "inline_blob", options: { blob_ref: "blob-1" } },
+      sources: { source: { plugin: "inline_blob", options: { blob_ref: "blob-1" } } },
       nodes: [
         {
           id: LLM_NODE_ID,

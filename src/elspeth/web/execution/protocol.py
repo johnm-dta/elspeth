@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 from uuid import UUID
@@ -121,6 +122,14 @@ class ExecutionService(Protocol):
         check and run creation. The actual pipeline runs in a background
         thread via ThreadPoolExecutor — only the setup is async.
         """
+        ...
+
+    def get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session lock shared by execute and delete flows."""
+        ...
+
+    def cleanup_session_lock(self, session_id: str) -> None:
+        """Remove ephemeral per-session lock state after session deletion."""
         ...
 
     async def get_status(

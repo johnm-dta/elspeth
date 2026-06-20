@@ -25,6 +25,7 @@ from elspeth.web.composer.redaction import (
     SetSourceFromBlobArgumentsModel,
 )
 from elspeth.web.composer.source_inspection import (
+    delimiter_for_filename,
     facts_to_dict,
     inspect_blob_content,
 )
@@ -52,6 +53,7 @@ from elspeth.web.composer.tools._common import (
 )
 from elspeth.web.composer.tools.blobs import (
     BlobToolRecord,
+    _blob_id_uuid_validation_error,
     _blob_row_to_tool_dict,
     _PreparedBlobCreate,
     _sync_get_blob,
@@ -89,15 +91,19 @@ def _handle_set_source(
     context: ToolContext,
 ) -> ToolResult:
     result = _execute_set_source(arguments, state, context)
-    if result.updated_state.source is None:
+    if not result.success:
         return result
+    source_name = SetSourceArgumentsModel.model_validate(arguments).source_name
+    if source_name not in result.updated_state.sources:
+        return result
+    source = result.updated_state.sources[source_name]
     return _attach_post_call_hints(
         result,
         context.catalog,
         plugin_type="source",
         tool_name="set_source",
-        plugin_name=result.updated_state.source.plugin,
-        config_snapshot=result.updated_state.source.options,
+        plugin_name=source.plugin,
+        config_snapshot=source.options,
     )
 
 
@@ -105,10 +111,14 @@ _SET_SOURCE_DECLARATION = ToolDeclaration(
     name="set_source",
     handler=_handle_set_source,
     kind=ToolKind.MUTATION,
-    description="Set or replace the pipeline source.",
+    description="Set or replace a named pipeline source.",
     json_schema={
         "type": "object",
         "properties": {
+            "source_name": {
+                "type": "string",
+                "description": "Stable source root name. Defaults to 'source' for legacy single-source pipelines.",
+            },
             "plugin": {"type": "string", "description": "Source plugin name."},
             "on_success": {
                 "type": "string",
@@ -141,6 +151,27 @@ _MIME_TO_SOURCE: dict[str, tuple[str, dict[str, str]]] = {
     "text/jsonl": ("json", {"format": "jsonl"}),
     "text/plain": ("text", {}),
 }
+
+
+def _delimiter_extra_for_csv_blob(
+    plugin: str,
+    filename: str,
+    caller_options: Mapping[str, Any],
+) -> dict[str, str]:
+    """Derive a filename-implied csv delimiter for a blob-backed source.
+
+    ``_MIME_TO_SOURCE`` keys only on MIME type, so a ``.tsv`` file uploaded as
+    ``text/csv`` binds the ``csv`` plugin with no delimiter and parses as one
+    column at runtime. ``inspect_blob_content`` already reports the tab via
+    :func:`delimiter_for_filename`; reuse that single rule so inspection and
+    binding agree. Inject only a fixed tab and only when (a) the bound plugin is
+    ``csv``, (b) the filename means tab, and (c) the caller/LLM did not already
+    supply a delimiter (never clobber an explicit one).
+    """
+    if plugin != "csv" or "delimiter" in caller_options:
+        return {}
+    delimiter = delimiter_for_filename(filename)
+    return {"delimiter": delimiter} if delimiter is not None else {}
 
 
 class SourceBlobPayload(TypedDict):
@@ -256,6 +287,11 @@ def _reject_manual_source_authoring(
     return _manual_source_authoring_error(tool_name=tool_name)
 
 
+def _source_component_id(source_name: str) -> str:
+    """Return the legacy/default or named source component identifier."""
+    return "source" if source_name == "source" else f"source:{source_name}"
+
+
 def _resolve_source_blob(
     *,
     blob_id: str,
@@ -271,6 +307,9 @@ def _resolve_source_blob(
     """Resolve an existing ready blob into authoritative source options."""
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     manual_authoring_error = _reject_manual_source_authoring(caller_options, tool_name=tool_name)
     if manual_authoring_error is not None:
         return _failure_result(state, manual_authoring_error)
@@ -301,6 +340,7 @@ def _resolve_source_blob(
     merged_options: Mapping[str, Any] = {
         **caller_options,
         **mime_extra,
+        **_delimiter_extra_for_csv_blob(plugin, blob["filename"], caller_options),
         "path": blob["storage_path"],
         "blob_ref": blob["id"],
         "mode": "bind_source",
@@ -392,6 +432,7 @@ def _execute_set_source(
 
     plugin = validated.plugin
     options = validated.options
+    source_name = validated.source_name
 
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(context.catalog, "source", plugin)
@@ -412,7 +453,7 @@ def _execute_set_source(
         return _failure_result(state, manual_authoring_error)
     credential_error = _credential_wiring_contract_failure(
         state,
-        component_id="source",
+        component_id=_source_component_id(source_name),
         component_type="source",
         options=options,
     )
@@ -435,8 +476,9 @@ def _execute_set_source(
         options=options,
         on_validation_failure=on_vf,
     )
-    new_state = state.with_source(source)
-    return _mutation_result(new_state, ("source",), data=_vf_destination_note(new_state, on_vf))
+    new_state = state.with_named_source(source_name, source)
+    affected = (_source_component_id(source_name),)
+    return _mutation_result(new_state, affected, data=_vf_destination_note(new_state, on_vf))
 
 
 def _execute_set_source_from_blob(
@@ -500,9 +542,10 @@ def _execute_set_source_from_blob(
         options=resolved.options,
         on_validation_failure=on_vf,
     )
-    new_state = state.with_source(source)
+    source_name = validated.source_name
+    new_state = state.with_named_source(source_name, source)
     data = _vf_destination_note(new_state, on_vf) or {}
-    return _mutation_result(new_state, ("source",), data={**data, "source_blob": resolved.payload})
+    return _mutation_result(new_state, (_source_component_id(source_name),), data={**data, "source_blob": resolved.payload})
 
 
 _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
@@ -518,6 +561,10 @@ _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
         "type": "object",
         "properties": {
             "blob_id": {"type": "string", "description": "Blob ID to use as source."},
+            "source_name": {
+                "type": "string",
+                "description": "Source root name to bind. Defaults to 'source' for legacy single-source pipelines.",
+            },
             "plugin": {
                 "type": "string",
                 "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted.",
@@ -633,6 +680,9 @@ def _execute_inspect_source(
         return _failure_result(state, "Blob tools require session context.")
 
     blob_id = arguments["blob_id"]
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     blob = _sync_get_blob(context.session_engine, blob_id, context.session_id)
     if blob is None:
         return _failure_result(state, f"Blob '{blob_id}' not found.")
@@ -652,27 +702,13 @@ def _execute_inspect_source(
 
     _verify_blob_content_integrity(blob, data)
 
-    blob_id_warning: str | None = None
-    try:
-        blob_uuid = UUID(blob_id)
-    except ValueError:
-        blob_uuid = None
-        truncated = blob_id if len(blob_id) <= 64 else blob_id[:64] + "..."
-        blob_id_warning = (
-            f"blob_id_not_uuid: matched blob_id {truncated!r} is not a parseable "
-            "UUID — redacted_identity will omit blob_id and surface "
-            "content_hash_prefix only"
-        )
-
     facts = inspect_blob_content(
         content=data,
         filename=blob["filename"],
         mime_type=blob["mime_type"],
-        blob_id=blob_uuid,
+        blob_id=UUID(blob_id),
         content_hash=blob["content_hash"],
     )
-    if blob_id_warning is not None:
-        facts = replace(facts, warnings=(blob_id_warning, *facts.warnings))
     return _discovery_result(state, facts_to_dict(facts))
 
 
@@ -722,8 +758,6 @@ def _execute_patch_source_options(
     (``ComposerPluginCrashError`` → HTTP 500) — wrong disposition for
     Tier-3 input.
     """
-    if state.source is None:
-        return _failure_result(state, "No source configured to patch.")
     try:
         validated = PatchSourceOptionsArgumentsModel.model_validate(args)
     except PydanticValidationError as exc:
@@ -732,11 +766,21 @@ def _execute_patch_source_options(
             expected="object conforming to PatchSourceOptionsArgumentsModel",
             actual_type=type(exc).__name__,
         ) from exc
+    source_name = validated.source_name
+    if source_name not in state.sources:
+        return _failure_result(state, f"No source named '{source_name}' configured to patch.")
+    current_source = state.sources[source_name]
     patch = validated.patch
 
     manual_authoring_error = _reject_manual_source_authoring(patch, tool_name="patch_source_options")
     if manual_authoring_error is not None:
         return _failure_result(state, manual_authoring_error)
+    if "blob_ref" in patch:
+        return _failure_result(
+            state,
+            "Cannot patch 'blob_ref' on a source. Re-bind via set_source_from_blob "
+            "(or call clear_source first) to change the underlying blob.",
+        )
 
     # Lock the (path, blob_ref) pair on blob-backed sources.  Once
     # set_source_from_blob has bound a source to a blob, the path is the
@@ -744,8 +788,8 @@ def _execute_patch_source_options(
     # breaks runtime path resolution and composer/runtime agreement.
     # Replace the binding via a fresh set_source_from_blob (or
     # clear_source) instead of patching it.  See elspeth-07089fbaa3.
-    if "blob_ref" in state.source.options:
-        forbidden_keys = {"path", "blob_ref"} & patch.keys()
+    if "blob_ref" in current_source.options:
+        forbidden_keys = {"path"} & patch.keys()
         if forbidden_keys:
             return _failure_result(
                 state,
@@ -756,10 +800,10 @@ def _execute_patch_source_options(
                 "clear_source first) to change the underlying blob.",
             )
 
-    new_options = _apply_merge_patch(state.source.options, patch)
+    new_options = _apply_merge_patch(current_source.options, patch)
     credential_error = _credential_wiring_contract_failure(
         state,
-        component_id="source",
+        component_id=_source_component_id(source_name),
         component_type="source",
         options=new_options,
     )
@@ -773,16 +817,16 @@ def _execute_patch_source_options(
 
     # Pre-validate patched options against config model
     prevalidation_error = _prevalidate_source(
-        state.source.plugin,
+        current_source.plugin,
         new_options,
-        state.source.on_validation_failure,
+        current_source.on_validation_failure,
     )
     if prevalidation_error is not None:
         return _failure_result(state, prevalidation_error)
 
-    new_source = replace(state.source, options=new_options)
-    new_state = state.with_source(new_source)
-    return _mutation_result(new_state, ("source",))
+    new_source = replace(current_source, options=new_options)
+    new_state = state.with_named_source(source_name, new_source)
+    return _mutation_result(new_state, (_source_component_id(source_name),))
 
 
 def _handle_patch_source_options(
@@ -791,15 +835,19 @@ def _handle_patch_source_options(
     context: ToolContext,
 ) -> ToolResult:
     result = _execute_patch_source_options(arguments, state, context)
-    if result.updated_state.source is None:
+    if not result.success:
         return result
+    source_name = PatchSourceOptionsArgumentsModel.model_validate(arguments).source_name
+    if source_name not in result.updated_state.sources:
+        return result
+    source = result.updated_state.sources[source_name]
     return _attach_post_call_hints(
         result,
         context.catalog,
         plugin_type="source",
         tool_name="patch_source_options",
-        plugin_name=result.updated_state.source.plugin,
-        config_snapshot=result.updated_state.source.options,
+        plugin_name=source.plugin,
+        config_snapshot=source.options,
     )
 
 
@@ -807,12 +855,16 @@ _PATCH_SOURCE_OPTIONS_DECLARATION = ToolDeclaration(
     name="patch_source_options",
     handler=_handle_patch_source_options,
     kind=ToolKind.MUTATION,
-    description="Apply a shallow merge-patch to the current source options. "
+    description="Apply a shallow merge-patch to a named source's options. "
     "Keys in the patch overwrite existing keys. "
     "Keys set to null are deleted. Missing keys are unchanged.",
     json_schema={
         "type": "object",
         "properties": {
+            "source_name": {
+                "type": "string",
+                "description": "Source root name to patch. Defaults to 'source'.",
+            },
             "patch": {
                 "type": "object",
                 "description": "Merge-patch to apply to source options.",
@@ -831,10 +883,24 @@ def _execute_clear_source(
 ) -> ToolResult:
     """Remove the pipeline source."""
     del context  # unused; signature uniformity with the other handlers.
-    if state.source is None:
-        return _failure_result(state, "No source configured to clear.")
-    new_state = state.without_source()
-    return _mutation_result(new_state, ("source",))
+    extra_keys = set(args) - {"source_name"}
+    if extra_keys:
+        raise ToolArgumentError(
+            argument="clear_source arguments",
+            expected="only the optional 'source_name' key",
+            actual_type="unexpected extra keys",
+        )
+    source_name = args["source_name"] if "source_name" in args else "source"
+    if type(source_name) is not str or not source_name:
+        raise ToolArgumentError(
+            argument="source_name",
+            expected="a non-empty string",
+            actual_type=type(source_name).__name__,
+        )
+    new_state = state.without_named_source(source_name)
+    if new_state is None:
+        return _failure_result(state, f"No source named '{source_name}' configured to clear.")
+    return _mutation_result(new_state, (_source_component_id(source_name),))
 
 
 def _handle_clear_source(
@@ -849,8 +915,17 @@ _CLEAR_SOURCE_DECLARATION = ToolDeclaration(
     name="clear_source",
     handler=_handle_clear_source,
     kind=ToolKind.MUTATION,
-    description="Remove the source from the pipeline composition state.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    description="Remove a named source from the pipeline composition state.",
+    json_schema={
+        "type": "object",
+        "properties": {
+            "source_name": {
+                "type": "string",
+                "description": "Source root name to clear. Defaults to 'source'.",
+            },
+        },
+        "required": [],
+    },
 )
 
 

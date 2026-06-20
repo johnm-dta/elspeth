@@ -15,6 +15,46 @@ from enum import StrEnum
 from elspeth.contracts.freeze import freeze_fields
 
 
+def _require_non_empty_str(value: object, field_name: str) -> None:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+    if not value.strip():
+        raise ValueError(f"{field_name} must be non-empty")
+
+
+def _require_optional_non_empty_str(value: object, field_name: str) -> None:
+    if value is None:
+        return
+    _require_non_empty_str(value, field_name)
+
+
+def _require_string_tuple(value: object, field_name: str) -> None:
+    if type(value) is not tuple:
+        raise TypeError(f"{field_name} must be tuple[str, ...], got {type(value).__name__}: {value!r}")
+    for idx, item in enumerate(value):
+        _require_non_empty_str(item, f"{field_name}[{idx}]")
+
+
+def _require_enum_member(value: object, enum_type: type[StrEnum], field_name: str) -> None:
+    if not isinstance(value, enum_type):
+        raise TypeError(f"{field_name} must be {enum_type.__name__}, got {type(value).__name__}: {value!r}")
+
+
+def _require_enum_frozenset(value: object, enum_type: type[StrEnum], field_name: str) -> None:
+    if type(value) is not frozenset:
+        raise TypeError(f"{field_name} must be frozenset[{enum_type.__name__}], got {type(value).__name__}: {value!r}")
+    for item in value:
+        _require_enum_member(item, enum_type, f"{field_name} item")
+
+
+def _require_record_tuple(value: object, record_type: type[object], field_name: str) -> None:
+    if type(value) is not tuple:
+        raise TypeError(f"{field_name} must be tuple[{record_type.__name__}, ...], got {type(value).__name__}: {value!r}")
+    for idx, item in enumerate(value):
+        if type(item) is not record_type:
+            raise TypeError(f"{field_name}[{idx}] must be {record_type.__name__}, got {type(item).__name__}: {item!r}")
+
+
 class ContentKind(StrEnum):
     """The kind of content a field carries."""
 
@@ -90,6 +130,12 @@ class FieldSemanticFacts:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "configured_by")
+        _require_non_empty_str(self.field_name, "field_name")
+        _require_enum_member(self.content_kind, ContentKind, "content_kind")
+        _require_enum_member(self.text_framing, TextFraming, "text_framing")
+        _require_enum_member(self.value_type, SemanticValueType, "value_type")
+        _require_non_empty_str(self.fact_code, "fact_code")
+        _require_string_tuple(self.configured_by, "configured_by")
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +146,7 @@ class OutputSemanticDeclaration:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "fields")
+        _require_record_tuple(self.fields, FieldSemanticFacts, "fields")
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +173,14 @@ class FieldSemanticRequirement:
             "accepted_value_types",
             "configured_by",
         )
+        _require_non_empty_str(self.field_name, "field_name")
+        _require_enum_frozenset(self.accepted_content_kinds, ContentKind, "accepted_content_kinds")
+        _require_enum_frozenset(self.accepted_text_framings, TextFraming, "accepted_text_framings")
+        _require_non_empty_str(self.requirement_code, "requirement_code")
+        _require_enum_frozenset(self.accepted_value_types, SemanticValueType, "accepted_value_types")
+        _require_non_empty_str(self.severity, "severity")
+        _require_enum_member(self.unknown_policy, UnknownSemanticPolicy, "unknown_policy")
+        _require_string_tuple(self.configured_by, "configured_by")
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +191,7 @@ class InputSemanticRequirements:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "fields")
+        _require_record_tuple(self.fields, FieldSemanticRequirement, "fields")
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +213,21 @@ class SemanticEdgeContract:
     producer_facts: FieldSemanticFacts | None
     requirement: FieldSemanticRequirement
     outcome: SemanticOutcome
+
+    def __post_init__(self) -> None:
+        _require_non_empty_str(self.from_id, "from_id")
+        _require_non_empty_str(self.to_id, "to_id")
+        _require_non_empty_str(self.consumer_plugin, "consumer_plugin")
+        _require_optional_non_empty_str(self.producer_plugin, "producer_plugin")
+        _require_non_empty_str(self.producer_field, "producer_field")
+        _require_non_empty_str(self.consumer_field, "consumer_field")
+        if self.producer_facts is not None and type(self.producer_facts) is not FieldSemanticFacts:
+            raise TypeError(
+                f"producer_facts must be FieldSemanticFacts or None, got {type(self.producer_facts).__name__}: {self.producer_facts!r}"
+            )
+        if type(self.requirement) is not FieldSemanticRequirement:
+            raise TypeError(f"requirement must be FieldSemanticRequirement, got {type(self.requirement).__name__}: {self.requirement!r}")
+        _require_enum_member(self.outcome, SemanticOutcome, "outcome")
 
 
 def compare_semantic(

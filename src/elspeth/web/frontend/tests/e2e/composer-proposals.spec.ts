@@ -6,10 +6,12 @@ const sessionId = "proposal-session-1";
 const baseState = {
   id: "state-1",
   version: 1,
-  source: {
-    plugin: "csv",
-    options: { path: "input.csv" },
-    on_success: "classify_in",
+  sources: {
+    source: {
+      plugin: "csv",
+      options: { path: "input.csv" },
+      on_success: "classify_in",
+    },
   },
   nodes: [
     {

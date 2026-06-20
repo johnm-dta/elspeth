@@ -4,10 +4,13 @@ Uses SQLAlchemy Core (not ORM) for explicit control over queries
 and compatibility with multiple database backends.
 """
 
+from enum import StrEnum
+
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    ColumnElement,
     DateTime,
     Float,
     ForeignKey,
@@ -20,6 +23,8 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    and_,
+    select,
     text,
 )
 
@@ -60,11 +65,64 @@ metadata = MetaData()
 #  11 → resume fork/expand/coalesce re-emit fix: tokens.token_data_ref persists per-token
 #        payloads (expand children + coalesce merged tokens) and node_states.resume_checkpoint_id
 #        marks resume re-drives, so incomplete tokens are reconstructable + attributable.
-SQLITE_SCHEMA_EPOCH = 11
+#  12 → Multi-source foundation: per-source run records, source-scoped row
+#        indexes, global ingest sequence ordering, and durable token work items.
+#  13 → Durable scheduler continuation routing: token_work_items.on_success_sink
+#        preserves sink-bound continuations across resume/recovery.
+#  14 → Durable scheduler resume identity: token_work_items stores token lineage
+#        and coalesce cursor fields so resumed workers do not depend on in-memory
+#        pending_items state.
+#  15 → Durable scheduler sink handoff: token_work_items can persist a
+#        pending sink outcome without replaying the transform that produced it;
+#        run_sources.lifecycle_state is mechanically constrained.
+#  15 → Multi-worker scheduler durability: token_work_items grows a
+#        CHECK constraint that LEASED rows have a non-empty lease_owner
+#        (closes the wedge that elspeth-28aaa36a62's recovery sweep tolerates)
+#        and a covering index on (run_id, status, lease_owner,
+#        lease_expires_at) so the RC6 multi-worker drain sweep is index-only
+#        rather than O(workers²) per drain wave (elspeth-9990c81e14).
+#  16 → Scheduler state-transition audit: scheduler_events records immutable
+#        enqueue, claim, recovery, lease-loss, and terminalization transitions
+#        for durable lease attribution (elspeth-2b608abbd3,
+#        elspeth-9030f34c32).
+#  17 → Scheduler event lease-expiry evidence: scheduler_events stores
+#        from/to lease_expires_at timestamps and enforces event/status/attempt
+#        domains so lease recovery and heartbeat loss are exportable facts.
+#   17 → Token-scoped pending-sink lookup: token_work_items gains
+#        ix_token_work_items_pending_sink_token for post-sink terminalization.
+#   18 → Source exhaustion lifecycle evidence: run_sources.lifecycle_state
+#        distinguishes exhausted-before-EOF-engine-work from interrupted source
+#        iteration so resume can safely drain recoverable engine state.
+#   19 → Dead-lane and vestigial-anchor subtraction (F4+F2): scheduler WAITING
+#        status and mark_waiting/release_waiting event types removed from the
+#        scheduler_events CHECK constraints; checkpoints lose the token_id/
+#        node_id anchor columns and checkpoint_node_config_hash (full-topology
+#        hash subsumes per-node compatibility validation).
+#   20 → F1 durability unification: token_work_items.barrier_blocked_at added;
+#        checkpoints aggregation_state_json/coalesce_state_json replaced by
+#        barrier_scalars_json; restore_blocked event type removed from
+#        scheduler_events CHECK.
+#   21 → Option-C multi-worker coordination substrate (ADR-030, slice 2):
+#        run_coordination / run_workers / run_coordination_events /
+#        coalesce_branch_losses tables; token_work_items gains
+#        barrier_adopted_epoch (adoption CAS marker, written only by the
+#        slice-3 fenced adoption verb; NULL = intake-pending).
+SQLITE_SCHEMA_EPOCH = 21
 
 # Column width for node_id across all tables. Referenced by dag.py
 # for validation — changing this value requires an Alembic migration.
 NODE_ID_COLUMN_LENGTH = 64
+
+
+class RunSourceLifecycleState(StrEnum):
+    """Finite lifecycle states for per-source run metadata."""
+
+    READY = "ready"
+    LOADING = "loading"
+    EXHAUSTED = "exhausted"
+    LOADED = "loaded"
+    INTERRUPTED = "interrupted"
+
 
 # === Runs and Configuration ===
 
@@ -93,10 +151,6 @@ runs_table = Table(
     Column("exported_at", DateTime(timezone=True)),  # When export completed
     Column("export_format", String(16)),  # csv, json
     Column("export_sink", String(128)),  # Sink name used for export
-    # Schema contract for audit trail (Phase 5: Unified Schema Contracts)
-    # Stores the run-level schema contract with field resolution and types
-    Column("schema_contract_json", Text),  # Full contract with field resolution and types
-    Column("schema_contract_hash", String(16)),  # version_hash for integrity verification
     # Runtime-VAL manifest for audit trail (ADR-010 §Decision 3 M3).
     # Captures the set of DeclarationContract and Tier-1 error classes
     # registered at bootstrap, serialized as canonical JSON. Enables auditor
@@ -142,6 +196,31 @@ run_attributions_table = Table(
     CheckConstraint("auth_provider_type IN ('local', 'oidc', 'entra')", name="ck_run_attributions_auth_provider_type"),
 )
 Index("ix_run_attributions_user", run_attributions_table.c.initiated_by_user_id, run_attributions_table.c.auth_provider_type)
+
+run_sources_table = Table(
+    "run_sources",
+    metadata,
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("source_node_id", String(64), nullable=False),
+    Column("source_name", String(64), nullable=False),
+    Column("plugin_name", String(128), nullable=False),
+    Column("lifecycle_state", String(32), nullable=False),
+    Column("config_hash", String(64), nullable=False),
+    Column("schema_json", Text),
+    Column("schema_contract_json", Text),
+    Column("schema_contract_hash", String(16)),
+    Column("field_resolution_json", Text),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    PrimaryKeyConstraint("run_id", "source_node_id"),
+    UniqueConstraint("run_id", "source_name"),
+    CheckConstraint(
+        "lifecycle_state IN ('ready', 'loading', 'exhausted', 'loaded', 'interrupted')",
+        name="ck_run_sources_lifecycle_state",
+    ),
+    ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+)
+Index("ix_run_sources_run", run_sources_table.c.run_id)
+Index("ix_run_sources_source_name", run_sources_table.c.run_id, run_sources_table.c.source_name)
 
 # === Nodes (Plugin Instances) ===
 
@@ -192,6 +271,49 @@ edges_table = Table(
 )
 
 # === Source Rows ===
+#
+# Audit-DB invariants for the rows table (filigree elspeth-56c3cda89b,
+# ADR-bundle systems-thinker Finding 5, "Tragedy of the Commons"). The shared
+# resource is the audit database's invariant surface; the actors are 25+
+# downstream consumers (audit-readiness panel, ``elspeth explain``, MCP
+# failure-context, redaction policy, composer state, resume orchestrator,
+# replay verifier...). Each consumer carries its own assumption about
+# per-source provenance; without a central guarantor, the failure mode is
+# *simultaneous* across consumers rather than progressive.
+#
+# Invariants by mechanical enforcement status:
+#
+# 1. ``source_node_id NOT NULL`` (this table, line 225). STRUCTURALLY
+#    ENFORCED at schema level. Every row in the audit trail attributes to a
+#    specific source node, never NULL.
+#
+# 2. ``ingest_sequence`` is monotone per run and globally unique within a
+#    run. STRUCTURALLY ENFORCED via ``UniqueConstraint("run_id",
+#    "ingest_sequence")`` (line 234) plus the ``NOT NULL`` on the column.
+#
+# 3. Compound row identity ``(run_id, source_node_id, source_row_index)``
+#    is unique. STRUCTURALLY ENFORCED via ``UniqueConstraint`` at line 233.
+#    Two sources emitting the same ``source_row_index`` value produce
+#    distinct rows because ``source_node_id`` discriminates.
+#
+# Invariants NOT YET structurally enforced (gaps below the schema):
+#
+# A. ``source_row_index`` and ``ingest_sequence`` fabrication ban (G22).
+#    ``data_flow_repository.create_row`` raises ``AuditIntegrityError`` when
+#    these values are not explicitly provided ("Do not fabricate
+#    source_row_index or ingest_sequence from row_index"), but the
+#    prohibition lives in an exception string at one write boundary. The
+#    cache-replay write path (``write_repository.record_synthesised_run``)
+#    intentionally sets all three equal because there is exactly one source;
+#    a future contributor adding a multi-source synthesised-run path could
+#    silently drift. Tracked under filigree elspeth-92afea0d23 (elspeth-lints
+#    rule with the same enforcement status as ``trust_tier.tier_model``).
+#
+# B. Scheduler lease-ownership transitions (G29). ``token_work_items``
+#    carries the current lease state but not its transition history; a
+#    lease-expiry event during multi-worker execution leaves no per-worker
+#    audit attribution. Tracked under filigree elspeth-9030f34c32
+#    (``scheduler_events`` table).
 
 rows_table = Table(
     "rows",
@@ -199,11 +321,15 @@ rows_table = Table(
     Column("row_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
     Column("source_node_id", String(64), nullable=False),
-    Column("row_index", Integer, nullable=False),
+    Column("row_index", Integer),
+    Column("source_row_index", Integer, nullable=False),
+    Column("ingest_sequence", Integer, nullable=False),
     Column("source_data_hash", String(64), nullable=False),
     Column("source_data_ref", String(256)),
     Column("created_at", DateTime(timezone=True), nullable=False),
-    UniqueConstraint("run_id", "row_index"),
+    UniqueConstraint("row_id", "run_id"),
+    UniqueConstraint("run_id", "source_node_id", "source_row_index"),
+    UniqueConstraint("run_id", "ingest_sequence"),
     # Composite FK to nodes (node_id, run_id)
     ForeignKeyConstraint(["source_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
 )
@@ -278,6 +404,382 @@ Index(
     sqlite_where=(token_outcomes_table.c.completed == 1),
     postgresql_where=(token_outcomes_table.c.completed == 1),
 )
+
+token_work_items_table = Table(
+    "token_work_items",
+    metadata,
+    Column("work_item_id", String(64), primary_key=True),
+    Column("run_id", String(64), nullable=False, index=True),
+    Column("token_id", String(64), nullable=False),
+    Column("row_id", String(64), nullable=False),
+    Column("node_id", String(64)),
+    Column("step_index", Integer, nullable=False),
+    Column("ingest_sequence", Integer, nullable=False),
+    Column("row_payload_json", Text, nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("queue_key", String(128)),
+    Column("barrier_key", String(128)),
+    Column("on_success_sink", String(128)),
+    Column("pending_sink_name", String(128)),
+    Column("pending_outcome", String(32)),
+    Column("pending_path", String(64)),
+    Column("pending_error_hash", String(64)),
+    Column("pending_error_message", Text),
+    Column("branch_name", String(128)),
+    Column("fork_group_id", String(128)),
+    Column("join_group_id", String(128)),
+    Column("expand_group_id", String(128)),
+    Column("coalesce_node_id", String(NODE_ID_COLUMN_LENGTH)),
+    Column("coalesce_name", String(128)),
+    Column("attempt", Integer, nullable=False),
+    Column("lease_owner", String(128)),
+    Column("lease_expires_at", DateTime(timezone=True)),
+    Column("available_at", DateTime(timezone=True), nullable=False),
+    Column("barrier_blocked_at", DateTime(timezone=True), nullable=True),
+    # Epoch 21: adoption CAS marker (§C.4 row 6a) — set only by the fenced
+    # barrier-adoption verb (slice 3). NULL means intake-pending. Column lands
+    # at epoch 21 so the schema is stable across slices 2→3.
+    Column("barrier_adopted_epoch", Integer, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("run_id", "token_id", "node_id", "attempt"),
+    # ``status=leased`` must imply a non-empty ``lease_owner``. The
+    # ``recover_expired_leases`` sweep's OR-NULL predicate (elspeth-28aaa36a62)
+    # treats ``lease_owner=NULL`` as a recoverable wedge, so the CHECK closes
+    # the structural gap by preventing the wedge from being written in the
+    # first place (filigree elspeth-9990c81e14, embedded-database-reviewer).
+    # The literal MUST match ``TokenWorkStatus.LEASED.value`` exactly — the
+    # enum is a ``StrEnum`` whose ``.value`` is lowercase ``"leased"`` and
+    # every write site persists ``.value`` (e.g. ``scheduler_repository.py``
+    # ``status=TokenWorkStatus.LEASED.value``). A mismatched literal here
+    # would make both arms of the CHECK trivially satisfied for every row
+    # and silently nullify the Tier-1 invariant (elspeth-36d5635402).
+    # The constraint runs independently of ``PRAGMA foreign_keys`` in SQLite.
+    CheckConstraint(
+        "(status = 'leased' AND lease_owner IS NOT NULL AND length(lease_owner) > 0) OR status != 'leased'",
+        name="ck_token_work_items_lease_owner_required_when_leased",
+    ),
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
+    ForeignKeyConstraint(["row_id", "run_id"], ["rows.row_id", "rows.run_id"]),
+    ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+    ForeignKeyConstraint(["coalesce_node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+)
+Index("ix_token_work_items_ready", token_work_items_table.c.run_id, token_work_items_table.c.status, token_work_items_table.c.available_at)
+Index(
+    "ix_token_work_items_lease", token_work_items_table.c.run_id, token_work_items_table.c.status, token_work_items_table.c.lease_expires_at
+)
+# Covering index for the multi-worker drain ``recover_expired_leases`` sweep.
+# ``ix_token_work_items_lease`` covers ``(run_id, status, lease_expires_at)``
+# which served the pre-multi-worker predicate; the worker-skipping predicate
+# ``lease_owner != caller_owner`` (elspeth-28aaa36a62, elspeth-941f1508f5)
+# leaves SQLite to apply the inequality as a row filter against the existing
+# index. Bounded by run-LEASED rows today, but the RC6 multi-worker target
+# runs the sweep per-worker-per-iteration: O(workers²) per drain wave. The
+# wider index puts ``lease_owner`` into the seek key so the sweep is index-
+# only (filigree elspeth-9990c81e14, embedded-database-reviewer MED).
+Index(
+    "ix_token_work_items_recovery",
+    token_work_items_table.c.run_id,
+    token_work_items_table.c.status,
+    token_work_items_table.c.lease_owner,
+    token_work_items_table.c.lease_expires_at,
+)
+# Token-scoped lookup for the sink durability callback. Without this, SQLite
+# plans ``mark_pending_sink_terminal`` as a run/status scan for every token,
+# turning large sink batches into an O(n^2) post-write grind.
+Index(
+    "ix_token_work_items_pending_sink_token",
+    token_work_items_table.c.run_id,
+    token_work_items_table.c.token_id,
+    token_work_items_table.c.status,
+    token_work_items_table.c.pending_sink_name,
+)
+Index(
+    "uq_token_work_items_terminal_identity",
+    token_work_items_table.c.run_id,
+    token_work_items_table.c.token_id,
+    token_work_items_table.c.attempt,
+    unique=True,
+    sqlite_where=token_work_items_table.c.node_id.is_(None),
+    postgresql_where=token_work_items_table.c.node_id.is_(None),
+)
+
+
+def blocked_barrier_hold_clause() -> ColumnElement[bool]:
+    """Predicate selecting journal BLOCKED rows that are BARRIER holds.
+
+    BLOCKED rows are dual-use (F1 design D1): barrier holds carry a non-NULL
+    ``barrier_key`` (coalesce_name for coalesce, str(node_id) for
+    aggregation), while ADR-028 queue-holds carry only a ``queue_key``. The
+    ``barrier_key IS NOT NULL`` filter is what keeps queue-holds out of
+    barrier sweeps (restore, resume work-set exclusion, quiescence counting).
+
+    Single source of truth for the dual-use predicate — shared by
+    ``TokenSchedulerRepository.list_blocked_barrier_items`` and
+    ``RecoveryManager._get_buffered_journal_token_ids`` /
+    ``count_blocked_barrier_items``. The literal ``'blocked'`` MUST match
+    ``TokenWorkStatus.BLOCKED.value`` (a lowercase ``StrEnum``), consistent
+    with the status literals in this module's CHECK constraints.
+    """
+    return and_(
+        token_work_items_table.c.status == "blocked",
+        token_work_items_table.c.barrier_key.is_not(None),
+    )
+
+
+scheduler_events_table = Table(
+    "scheduler_events",
+    metadata,
+    Column("event_id", String(64), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("token_id", String(64), nullable=False),
+    # ``work_item_id`` is a forensic scheduler identity, not a foreign key:
+    # recover_expired_leases intentionally rotates token_work_items.work_item_id
+    # on attempt bump. A FK or ON UPDATE CASCADE would rewrite immutable
+    # history or reject the lease-loss event this table exists to preserve.
+    Column("work_item_id", String(64), nullable=False),
+    Column("node_id", String(NODE_ID_COLUMN_LENGTH)),
+    Column("event_type", String(64), nullable=False),
+    Column("from_status", String(32)),
+    Column("to_status", String(32), nullable=False),
+    Column("from_lease_owner", String(128)),
+    Column("to_lease_owner", String(128)),
+    Column("from_lease_expires_at", DateTime(timezone=True)),
+    Column("to_lease_expires_at", DateTime(timezone=True)),
+    Column("from_attempt", Integer),
+    Column("to_attempt", Integer, nullable=False),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    Column("caller_owner", String(128)),
+    Column("context_json", Text, nullable=False, server_default=text("'{}'")),
+    CheckConstraint(
+        "event_type IN ('enqueue', 'claim_ready', 'claim_pending_sink', "
+        "'recover_expired_lease', 'lease_lost', 'mark_blocked', "
+        "'mark_terminal', 'mark_failed', 'mark_pending_sink', 'mark_pending_sink_terminal', "
+        "'mark_blocked_barrier_terminal')",
+        name="ck_scheduler_events_event_type",
+    ),
+    CheckConstraint(
+        "from_status IS NULL OR from_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        name="ck_scheduler_events_from_status",
+    ),
+    CheckConstraint(
+        "to_status IN ('ready', 'leased', 'blocked', 'pending_sink', 'terminal', 'failed')",
+        name="ck_scheduler_events_to_status",
+    ),
+    CheckConstraint("from_attempt IS NULL OR from_attempt >= 0", name="ck_scheduler_events_from_attempt_non_negative"),
+    CheckConstraint("to_attempt >= 0", name="ck_scheduler_events_to_attempt_non_negative"),
+    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
+    ForeignKeyConstraint(["node_id", "run_id"], ["nodes.node_id", "nodes.run_id"]),
+)
+Index(
+    "ix_scheduler_events_run_token_time",
+    scheduler_events_table.c.run_id,
+    scheduler_events_table.c.token_id,
+    scheduler_events_table.c.recorded_at,
+    scheduler_events_table.c.event_id,
+)
+Index(
+    "ix_scheduler_events_work_item",
+    scheduler_events_table.c.run_id,
+    scheduler_events_table.c.work_item_id,
+    scheduler_events_table.c.recorded_at,
+)
+
+# === Multi-worker run coordination (epoch 21, ADR-030) ===
+
+run_coordination_table = Table(
+    "run_coordination",
+    metadata,
+    # Exactly one row per run, created by begin_run (uniformity rule: an N=1
+    # worker is leader of its own run at epoch 1).
+    Column("run_id", String(64), ForeignKey("runs.run_id"), primary_key=True),
+    Column("leader_worker_id", String(128)),  # NULL = vacant seat
+    # THE fencing token; monotonic, bumps on every acquisition CAS (§B.4).
+    Column("leader_epoch", Integer, nullable=False, server_default=text("0")),
+    Column("leader_heartbeat_expires_at", DateTime(timezone=True)),  # run-level leader liveness clock
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    # Vacant seat ⇔ no liveness clock; occupied seat ⇔ clock present.
+    CheckConstraint(
+        "(leader_worker_id IS NULL) = (leader_heartbeat_expires_at IS NULL)",
+        name="ck_run_coordination_seat_liveness_paired",
+    ),
+)
+
+run_workers_table = Table(
+    "run_workers",
+    metadata,
+    Column("worker_id", String(128), primary_key=True),  # 'worker:{run_id}:{uuid4().hex}'
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("role", String(16), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("registered_at", DateTime(timezone=True), nullable=False),
+    Column("heartbeat_expires_at", DateTime(timezone=True), nullable=False),  # run-level worker liveness clock
+    Column("departed_at", DateTime(timezone=True)),
+    Column("evicted_at", DateTime(timezone=True)),  # forensics (graft, Design 1)
+    Column("evicted_by_worker_id", String(128)),  # forensics: who ran the eviction CAS
+    # Forensic only — EXCEPT pid, surfaced by the BUSY-takeover diagnostic
+    # (§B.4 WriteLockHeldError carries registered pids).
+    Column("pid", Integer),
+    Column("hostname", String(255)),
+    Column("entry_point", String(255)),
+    CheckConstraint("role IN ('leader','follower')", name="ck_run_workers_role"),
+    CheckConstraint("status IN ('active','departed','evicted')", name="ck_run_workers_status"),
+    CheckConstraint("(status = 'evicted') = (evicted_at IS NOT NULL)", name="ck_run_workers_evicted_at_paired"),
+)
+# Serves both hot paths: the slice-4 EXISTS membership fence probes
+# (run_id, status='active', worker_id) — (run_id, status) prefix seek then
+# worker_id filter on a tiny table — and the liveness reap scans
+# (run_id, status, heartbeat_expires_at) index-only. Worker_id point lookups
+# (heartbeat CAS) use the PK.
+Index(
+    "ix_run_workers_liveness",
+    run_workers_table.c.run_id,
+    run_workers_table.c.status,
+    run_workers_table.c.heartbeat_expires_at,
+)
+
+run_coordination_events_table = Table(
+    "run_coordination_events",
+    metadata,
+    # Authoritative replay order. AUTOINCREMENT (not bare rowid) so seq values
+    # are never reused after deletion and are strictly monotonic for the life
+    # of the ledger — process-stamped recorded_at can invert commit order
+    # under busy_timeout stalls; seq cannot.
+    Column("seq", Integer, primary_key=True, autoincrement=True),
+    # sha256(canonical_json(identity)) — same dedup recipe as scheduler
+    # events (scheduler_repository.py:434-455).
+    Column("event_id", String(64), nullable=False),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("event_type", String(32), nullable=False),
+    Column("worker_id", String(128), nullable=False),
+    Column("leader_epoch", Integer),
+    Column("recorded_at", DateTime(timezone=True), nullable=False),  # forensic wall-clock; NOT the replay order
+    Column("context_json", Text, nullable=False, server_default=text("'{}'")),
+    # All 10 event types from the design DDL (§A.2), including the slice-4
+    # producers worker_stalled and heartbeat_degraded — pinned into the
+    # epoch-21 CHECK now so slice 4 needs no schema change.
+    CheckConstraint(
+        "event_type IN ('worker_register', 'worker_depart', 'worker_evict', 'worker_stalled', "
+        "'leader_acquire', 'leader_release', 'leadership_lost', "
+        "'fence_refusal', 'heartbeat_degraded', 'finalize')",
+        name="ck_run_coordination_events_event_type",
+    ),
+    # Mandatory: without the table kwarg, SQLAlchemy emits a bare INTEGER
+    # PRIMARY KEY (rowid alias, values reusable after delete); with it the DDL
+    # is `seq INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT`. Inert on Postgres
+    # (Integer PK becomes IDENTITY — also monotonic).
+    sqlite_autoincrement=True,
+)
+# event_id uniqueness is a named unique Index, not UniqueConstraint/unique=True,
+# deliberately: SQLAlchemy's SQLite inspector get_indexes() does not report
+# sqlite_autoindex_* indexes created by inline UNIQUE constraints, so a
+# UniqueConstraint cannot be verified by the _REQUIRED_INDEXES loop. Same
+# pattern as uq_token_work_items_terminal_identity above.
+Index(
+    "uq_run_coordination_events_event_id",
+    run_coordination_events_table.c.event_id,
+    unique=True,
+)
+Index(
+    "ix_run_coordination_events_run",
+    run_coordination_events_table.c.run_id,
+    run_coordination_events_table.c.seq,
+)
+
+coalesce_branch_losses_table = Table(
+    "coalesce_branch_losses",
+    metadata,
+    # §E.5: durable cross-worker branch-loss hand-off. Table only at epoch 21;
+    # record/replay verbs land in slice 3.
+    Column("loss_id", String(64), primary_key=True),
+    Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
+    Column("coalesce_name", String(128), nullable=False),
+    Column("row_id", String(64), nullable=False),
+    Column("branch_name", String(128), nullable=False),
+    Column("token_id", String(64), nullable=False),
+    Column("reason", String(64), nullable=False),  # failed / quarantined / error_routed / ...
+    Column("recorded_by", String(128), nullable=False),  # worker_id
+    Column("recorded_at", DateTime(timezone=True), nullable=False),
+    Column("adopted_epoch", Integer),  # NULL = not yet replayed into leader memory
+)
+# Natural-key idempotency (design §G: record_coalesce_branch_loss is
+# "idempotent on the natural key"). Named unique Index rather than a
+# UniqueConstraint for _REQUIRED_INDEXES verifiability; doubles as the hot
+# lookup index (replay scans by run_id + coalesce_name prefix).
+Index(
+    "uq_coalesce_branch_losses_natural",
+    coalesce_branch_losses_table.c.run_id,
+    coalesce_branch_losses_table.c.coalesce_name,
+    coalesce_branch_losses_table.c.row_id,
+    coalesce_branch_losses_table.c.branch_name,
+    unique=True,
+)
+
+
+def active_worker_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: ColumnElement[str] | str) -> ColumnElement[bool]:
+    """Membership fence: the acting worker holds an *active* run_workers row.
+
+    Single source of truth for the EXISTS predicate that slice 4 compiles
+    into enqueue_ready's INSERT guard (design §G verb table). Strict variant:
+    ABSENT worker → False (the caller explicitly supplied worker_id so absence
+    is a definite membership failure). Single-use identity doctrine:
+    'departed'/'evicted' rows never return to 'active', so a False result is
+    a permanent fence. The literal 'active' MUST match the worker-status
+    CHECK on run_workers.
+
+    For claim_ready / claim_pending_sink CAS UPDATEs use
+    ``claim_verb_fence_clause`` which adds the backward-compat OR-branch that
+    passes when the run has no registered workers at all (N=0 unit-test mode).
+    """
+    return (
+        select(run_workers_table.c.worker_id)
+        .where(
+            run_workers_table.c.worker_id == worker_id,
+            run_workers_table.c.run_id == run_id,
+            run_workers_table.c.status == "active",
+        )
+        .exists()
+    )
+
+
+def claim_verb_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: ColumnElement[str] | str) -> ColumnElement[bool]:
+    """Lenient membership fence for claim_ready / claim_pending_sink CAS UPDATEs.
+
+    Passes when the acting worker does NOT hold a non-active (evicted/departed)
+    run_workers row — expressed as:
+
+        NOT EXISTS (
+          SELECT 1 FROM run_workers
+          WHERE worker_id = :wid AND run_id = :rid AND status != 'active'
+        )
+
+    Semantics by case:
+    (a) ABSENT (no run_workers row for this worker): NOT EXISTS → True → pass.
+        Backward-compat for unit tests that call claim_ready with fictional
+        lease_owner IDs without populating run_workers.  In production, the
+        processor always registers before claiming, so this branch only fires
+        in unit tests.
+    (b) ACTIVE run_workers row: the evicted-row check is False → NOT EXISTS →
+        True → pass.
+    (c) EVICTED or DEPARTED row: the evicted-row check is True → NOT EXISTS →
+        False → UPDATE matches 0 rows → re-probe raises RunWorkerEvictedError.
+
+    This is strictly weaker than ``active_worker_fence_clause`` (strict):
+    ABSENT passes here but is refused there.  Use the strict variant for
+    ``enqueue_ready``'s explicit-worker_id guard where ABSENT is definitively
+    wrong (caller supplied worker_id, registration is mandatory).
+    """
+    this_worker_is_non_active = (
+        select(run_workers_table.c.worker_id)
+        .where(
+            run_workers_table.c.worker_id == worker_id,
+            run_workers_table.c.run_id == run_id,
+            run_workers_table.c.status != "active",
+        )
+        .exists()
+    )
+    return ~this_worker_is_non_active
+
 
 # === Token Parents (for multi-parent joins) ===
 
@@ -542,6 +1044,8 @@ Index("ix_batch_outputs_batch", batch_outputs_table.c.batch_id)
 Index("ix_nodes_run_id", nodes_table.c.run_id)
 Index("ix_edges_run_id", edges_table.c.run_id)
 Index("ix_rows_run_id", rows_table.c.run_id)
+Index("ix_rows_run_ingest_sequence", rows_table.c.run_id, rows_table.c.ingest_sequence)
+Index("ix_rows_run_source_row", rows_table.c.run_id, rows_table.c.source_node_id, rows_table.c.source_row_index)
 Index("ix_tokens_row_id", tokens_table.c.row_id)
 # Performance index for run-accounting API projections and session-list batch
 # reads. This is additive and intentionally does not advance the SQLite schema
@@ -637,28 +1141,25 @@ checkpoints_table = Table(
     metadata,
     Column("checkpoint_id", String(64), primary_key=True),
     Column("run_id", String(64), ForeignKey("runs.run_id"), nullable=False),
-    Column("token_id", String(64), nullable=False),
-    Column("node_id", String(64), nullable=False),  # Part of composite FK to nodes
     Column("sequence_number", Integer, nullable=False),  # Monotonic progress marker
-    Column("aggregation_state_json", Text),  # Serialized aggregation buffers (if any)
-    Column("coalesce_state_json", Text),  # Serialized pending coalesce state (if any)
     Column("created_at", DateTime(timezone=True), nullable=False),
-    # Topology validation (topological checkpoint compatibility)
-    Column("upstream_topology_hash", String(64), nullable=False),  # Hash of nodes + edges upstream of checkpoint
-    Column("checkpoint_node_config_hash", String(64), nullable=False),  # Hash of checkpoint node config only
+    # Topology validation (topological checkpoint compatibility). The full
+    # topology hash embeds every node's config hash, so no per-node anchor
+    # columns are needed for compatibility checking (epoch 19).
+    Column("upstream_topology_hash", String(64), nullable=False),  # Hash of ALL nodes + edges in the DAG
     # Format version for compatibility checking (replaces hardcoded date check)
     # Version 1: Pre-deterministic node IDs (legacy, rejected)
     # Version 2: Deterministic node IDs (2026-01-24+)
     # Version 3: Phase 2 traversal refactor checkpoint break
     # Version 4: Pending coalesce state persisted in checkpoints
+    # Version 5: F1 durability unification — buffered tokens live in journal
+    #            BLOCKED rows; the checkpoint carries only scalar barrier
+    #            metadata (barrier_scalars_json)
     Column("format_version", Integer, nullable=True),  # Nullable — populated on new runs, NULL for checkpoints created before this column
-    # Composite FK: enforces token_id and run_id belong together (prevents cross-run contamination)
-    ForeignKeyConstraint(["token_id", "run_id"], ["tokens.token_id", "tokens.run_id"]),
-    # Composite FK to nodes (node_id, run_id)
-    ForeignKeyConstraint(
-        ["node_id", "run_id"],
-        ["nodes.node_id", "nodes.run_id"],
-    ),
+    # Epoch 20: F1 durability unification — scalar barrier metadata replaces
+    # the dropped per-barrier buffer blob columns; buffered tokens live in
+    # token_work_items journal BLOCKED rows.
+    Column("barrier_scalars_json", Text, nullable=True),
 )
 
 Index("ix_checkpoints_run", checkpoints_table.c.run_id)

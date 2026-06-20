@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, get_args
 
 import pydantic
 import pytest
@@ -12,6 +12,7 @@ from elspeth.web.execution.schemas import (
     RUN_STATUS_ALL_VALUES,
     RUN_STATUS_NON_TERMINAL_VALUES,
     RUN_STATUS_TERMINAL_VALUES,
+    VALIDATION_CHECK_NAME_VALUES,
     CancelledData,
     CompletedData,
     DiscardSummary,
@@ -27,10 +28,12 @@ from elspeth.web.execution.schemas import (
     RunResultsResponse,
     RunStatusResponse,
     ValidationCheck,
+    ValidationCheckName,
     ValidationError,
     ValidationReadiness,
     ValidationReadinessBlocker,
     ValidationResult,
+    ValidationWarning,
 )
 
 
@@ -147,6 +150,26 @@ class TestValidationResult:
         with pytest.raises(pydantic.ValidationError):
             ValidationResult(is_valid=True, checks=[], errors=[], semantic_contracts=[])
 
+    def test_validation_result_accepts_structured_warnings(self) -> None:
+        result = ValidationResult(
+            is_valid=True,
+            checks=[],
+            errors=[],
+            warnings=[
+                ValidationWarning(
+                    component_id="transform_a",
+                    component_type="graph",
+                    message="DIVERT branch feeds a coalesce.",
+                    suggestion=None,
+                    warning_code="DIVERT_COALESCE_REQUIRE_ALL",
+                )
+            ],
+            readiness=_ready_readiness(),
+            semantic_contracts=[],
+        )
+
+        assert result.warnings[0].warning_code == "DIVERT_COALESCE_REQUIRE_ALL"
+
     def test_validation_readiness_accepts_pending_interpretation_blocker(self) -> None:
         result = ValidationResult(
             is_valid=False,
@@ -211,6 +234,19 @@ class TestValidationResult:
         )
 
         assert check.outcome_code is None
+
+    def test_unknown_validation_check_name_is_rejected(self) -> None:
+        with pytest.raises(pydantic.ValidationError):
+            ValidationCheck(
+                name="made_up_check",  # type: ignore[arg-type]
+                passed=True,
+                detail="OK",
+                affected_nodes=(),
+                outcome_code=None,
+            )
+
+    def test_validation_check_name_literal_matches_exported_values(self) -> None:
+        assert frozenset(get_args(ValidationCheckName)) == VALIDATION_CHECK_NAME_VALUES
 
     def test_unknown_check_outcome_code_is_rejected(self) -> None:
         with pytest.raises(pydantic.ValidationError):
@@ -844,7 +880,13 @@ class TestExtraFieldsRejected:
 
     def test_validation_result_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):
-            ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness(), warnings=[])  # type: ignore[call-arg]
+            ValidationResult(
+                is_valid=True,
+                checks=[],
+                errors=[],
+                readiness=_ready_readiness(),
+                invented_extra_field="nope",  # type: ignore[call-arg]
+            )
 
     def test_run_status_response_rejects_extra(self) -> None:
         with pytest.raises(pydantic.ValidationError, match="extra"):

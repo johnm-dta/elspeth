@@ -7,6 +7,7 @@ Bug fix covered:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Literal, cast
 from unittest.mock import MagicMock
 
@@ -55,10 +56,20 @@ class TestExplainFieldPrecedence:
 
         contract = _make_contract(field_a, field_x)
 
+        # ADR-025 §3 Decision 5 (G6): MCP layer resolves contracts through
+        # ``get_run_source_resume_records`` keyed by source_node_id; the
+        # deleted singleton ``get_run_contract`` is gone.
         db = MagicMock()
         factory = MagicMock()
         factory.run_lifecycle.get_run.return_value = MagicMock()
-        factory.run_lifecycle.get_run_contract.return_value = contract
+        factory.run_lifecycle.get_run_source_resume_records.return_value = {
+            "source-only": SimpleNamespace(
+                source_node_id="source-only",
+                source_name="primary",
+                source_schema_json="{}",
+                schema_contract=contract,
+            ),
+        }
 
         result = explain_field(db, factory, "run-123", "x")
         assert "error" not in result
@@ -80,10 +91,20 @@ class TestExplainFieldPrecedence:
 
         contract = _make_contract(field_a)
 
+        # ADR-025 §3 Decision 5 (G6): MCP layer resolves contracts through
+        # ``get_run_source_resume_records`` keyed by source_node_id; the
+        # deleted singleton ``get_run_contract`` is gone.
         db = MagicMock()
         factory = MagicMock()
         factory.run_lifecycle.get_run.return_value = MagicMock()
-        factory.run_lifecycle.get_run_contract.return_value = contract
+        factory.run_lifecycle.get_run_source_resume_records.return_value = {
+            "source-only": SimpleNamespace(
+                source_node_id="source-only",
+                source_name="primary",
+                source_schema_json="{}",
+                schema_contract=contract,
+            ),
+        }
 
         result = explain_field(db, factory, "run-123", "Original A")
         assert "error" not in result
@@ -103,10 +124,20 @@ class TestExplainFieldPrecedence:
 
         contract = _make_contract(field_a)
 
+        # ADR-025 §3 Decision 5 (G6): MCP layer resolves contracts through
+        # ``get_run_source_resume_records`` keyed by source_node_id; the
+        # deleted singleton ``get_run_contract`` is gone.
         db = MagicMock()
         factory = MagicMock()
         factory.run_lifecycle.get_run.return_value = MagicMock()
-        factory.run_lifecycle.get_run_contract.return_value = contract
+        factory.run_lifecycle.get_run_source_resume_records.return_value = {
+            "source-only": SimpleNamespace(
+                source_node_id="source-only",
+                source_name="primary",
+                source_schema_json="{}",
+                schema_contract=contract,
+            ),
+        }
 
         raw_result = explain_field(db, factory, "run-123", "nonexistent")
         result = cast(FieldNotFoundError, raw_result)

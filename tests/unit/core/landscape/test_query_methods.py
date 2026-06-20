@@ -8,6 +8,7 @@ import pytest
 from elspeth.contracts import (
     CallStatus,
     CallType,
+    NodeStateStatus,
     NodeType,
     RoutingMode,
     TerminalOutcome,
@@ -15,7 +16,7 @@ from elspeth.contracts import (
 )
 from elspeth.contracts.audit import TokenRef
 from elspeth.contracts.call_data import RawCallPayload
-from elspeth.contracts.errors import AuditIntegrityError
+from elspeth.contracts.errors import AuditIntegrityError, CoalesceFailureReason
 from elspeth.contracts.payload_store import IntegrityError as PayloadIntegrityError
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
@@ -51,7 +52,7 @@ def _setup_full(*, run_id: str = "run-1"):
     """Build a full environment with nodes, edge, row, token, state."""
     db, factory = _setup(run_id=run_id)
     factory.data_flow.register_edge(run_id, "source-0", "transform-1", "continue", RoutingMode.MOVE, edge_id="edge-1")
-    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     factory.data_flow.create_token("row-1", token_id="tok-1")
     factory.execution.begin_node_state("tok-1", "transform-1", run_id, 0, {"name": "test"}, state_id="state-1")
     return db, factory
@@ -73,15 +74,45 @@ class TestGetRows:
 
     def test_returns_rows_ordered_by_index(self):
         _db, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 2, {"c": 3}, row_id="row-c")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-a")
-        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-b")
+        factory.data_flow.create_row("run-1", "source-0", 2, {"c": 3}, row_id="row-c", source_row_index=2, ingest_sequence=2)
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-a", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-b", source_row_index=1, ingest_sequence=1)
 
         rows = factory.query.get_rows("run-1")
 
         assert len(rows) == 3
         assert [r.row_id for r in rows] == ["row-a", "row-b", "row-c"]
         assert [r.row_index for r in rows] == [0, 1, 2]
+
+    def test_exposes_source_local_and_ingest_row_identity(self) -> None:
+        """Read-side row contracts must distinguish source-local order from ingest order."""
+        _db, factory = _setup()
+        register_test_node(factory.data_flow, "run-1", "source-1", node_type=NodeType.SOURCE, plugin_name="csv")
+        factory.data_flow.create_row(
+            "run-1",
+            "source-0",
+            50,
+            {"order_id": "o-1"},
+            row_id="row-orders",
+            source_row_index=0,
+            ingest_sequence=1,
+        )
+        factory.data_flow.create_row(
+            "run-1",
+            "source-1",
+            99,
+            {"refund_id": "r-1"},
+            row_id="row-refunds",
+            source_row_index=0,
+            ingest_sequence=0,
+        )
+
+        rows = factory.query.get_rows("run-1")
+
+        assert [r.row_id for r in rows] == ["row-refunds", "row-orders"]
+        assert [r.source_node_id for r in rows] == ["source-1", "source-0"]
+        assert [r.source_row_index for r in rows] == [0, 0]
+        assert [r.ingest_sequence for r in rows] == [0, 1]
 
     def test_empty_for_unknown_run(self):
         _, factory = _setup()
@@ -92,7 +123,7 @@ class TestGetRows:
 
     def test_single_row(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         rows = factory.query.get_rows("run-1")
 
@@ -123,8 +154,8 @@ class TestGetRows:
             node_id="src-b",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1")
-        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1")
+        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1", source_row_index=0, ingest_sequence=0)
 
         rows_a = factory.query.get_rows("run-a")
         rows_b = factory.query.get_rows("run-b")
@@ -140,7 +171,7 @@ class TestGetTokens:
 
     def test_returns_tokens_for_row(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         factory.data_flow.create_token("row-1", token_id="tok-2")
 
@@ -159,7 +190,7 @@ class TestGetTokens:
 
     def test_single_token(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
 
         tokens = factory.query.get_tokens("row-1")
@@ -170,8 +201,8 @@ class TestGetTokens:
 
     def test_tokens_scoped_to_row(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-a")
-        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-b")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-a", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-b", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-a", token_id="tok-a")
         factory.data_flow.create_token("row-b", token_id="tok-b")
 
@@ -254,7 +285,7 @@ class TestGetRow:
 
     def test_roundtrip(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"field": "value"}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"field": "value"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         row = factory.query.get_row("row-1")
 
@@ -301,7 +332,7 @@ class TestGetRowData:
             node_id="source-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         # With no store, create_row produces no source_data_ref
         row = factory.query.get_row("row-1")
@@ -328,7 +359,7 @@ class TestGetRowData:
             node_id="source-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         # Query through a repo WITHOUT a payload store
         ops = DatabaseOps(db)
@@ -374,7 +405,7 @@ class TestGetRowDataReprFallback:
         register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
 
         # Create the row, then patch the source_data_ref to point to our sentinel
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         from sqlalchemy import update
 
@@ -417,7 +448,7 @@ class TestGetRowDataReprFallback:
         factory = RecorderFactory(db, payload_store=store)
         factory.run_lifecycle.begin_run(config={}, canonical_version="v1", run_id="run-1")
         register_test_node(factory.data_flow, "run-1", "source-0", node_type=NodeType.SOURCE, plugin_name="csv")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         from sqlalchemy import update
 
@@ -449,7 +480,7 @@ class TestGetToken:
 
     def test_roundtrip(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
 
         token = factory.query.get_token("tok-1")
@@ -471,7 +502,7 @@ class TestGetTokenParents:
 
     def test_empty_when_no_parents(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
 
         parents = factory.query.get_token_parents("tok-1")
@@ -643,7 +674,7 @@ class TestGetRoutingEventsForStates:
     def test_batch_query_returns_events(self):
         _, factory = _setup_full()
         # Create a second state
-        factory.data_flow.create_row("run-1", "source-0", 1, {"name": "test2"}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 1, {"name": "test2"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.execution.begin_node_state("tok-2", "transform-1", "run-1", 0, {"name": "test2"}, state_id="state-2")
         factory.execution.record_routing_event(
@@ -689,7 +720,7 @@ class TestGetCallsForStates:
 
     def test_batch_query_returns_calls(self):
         _, factory = _setup_full()
-        factory.data_flow.create_row("run-1", "source-0", 1, {"name": "test2"}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 1, {"name": "test2"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.execution.begin_node_state("tok-2", "transform-1", "run-1", 0, {"name": "test2"}, state_id="state-2")
         factory.execution.record_call(
@@ -747,8 +778,8 @@ class TestGetAllTokensForRun:
 
     def test_returns_all_tokens_across_rows(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1")
-        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         factory.data_flow.create_token("row-1", token_id="tok-2")
         factory.data_flow.create_token("row-2", token_id="tok-3")
@@ -789,9 +820,9 @@ class TestGetAllTokensForRun:
             node_id="src-b",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1")
+        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-a1", token_id="tok-a1")
-        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1")
+        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-b1", token_id="tok-b1")
 
         tokens_a = factory.query.get_all_tokens_for_run("run-a")
@@ -831,9 +862,9 @@ class TestGetAllTokensForRun:
             node_id="shared-source",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-a", "shared-source", 0, {"v": 1}, row_id="row-a1")
+        factory.data_flow.create_row("run-a", "shared-source", 0, {"v": 1}, row_id="row-a1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-a1", token_id="tok-a1")
-        factory.data_flow.create_row("run-b", "shared-source", 0, {"v": 2}, row_id="row-b1")
+        factory.data_flow.create_row("run-b", "shared-source", 0, {"v": 2}, row_id="row-b1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-b1", token_id="tok-b1")
 
         tokens_a = factory.query.get_all_tokens_for_run("run-a")
@@ -851,7 +882,7 @@ class TestGetAllNodeStatesForRun:
     def test_returns_all_states(self):
         _, factory = _setup_full()
         # state-1 already exists
-        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.execution.begin_node_state("tok-2", "transform-1", "run-1", 0, {"b": 2}, state_id="state-2")
 
@@ -891,7 +922,7 @@ class TestGetAllNodeStatesForRun:
             node_id="tx-a",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1")
+        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-a1", token_id="tok-a1")
         factory.execution.begin_node_state("tok-a1", "tx-a", "run-a", 0, {"v": 1}, state_id="state-a1")
 
@@ -914,7 +945,7 @@ class TestGetAllNodeStatesForRun:
             node_id="tx-b",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1")
+        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-b1", token_id="tok-b1")
         factory.execution.begin_node_state("tok-b1", "tx-b", "run-b", 0, {"v": 2}, state_id="state-b1")
 
@@ -954,7 +985,7 @@ class TestGetAllNodeStatesForRun:
             node_id="shared-tx",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-a", "shared-source", 0, {"v": 1}, row_id="row-a1")
+        factory.data_flow.create_row("run-a", "shared-source", 0, {"v": 1}, row_id="row-a1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-a1", token_id="tok-a1")
         factory.execution.begin_node_state("tok-a1", "shared-tx", "run-a", 0, {"v": 1}, state_id="state-a1")
 
@@ -977,7 +1008,7 @@ class TestGetAllNodeStatesForRun:
             node_id="shared-tx",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-b", "shared-source", 0, {"v": 2}, row_id="row-b1")
+        factory.data_flow.create_row("run-b", "shared-source", 0, {"v": 2}, row_id="row-b1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-b1", token_id="tok-b1")
         factory.execution.begin_node_state("tok-b1", "shared-tx", "run-b", 0, {"v": 2}, state_id="state-b1")
 
@@ -995,7 +1026,7 @@ class TestGetAllRoutingEventsForRun:
 
     def test_returns_all_events(self):
         _, factory = _setup_full()
-        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.execution.begin_node_state("tok-2", "transform-1", "run-1", 0, {"b": 2}, state_id="state-2")
         factory.execution.record_routing_event(
@@ -1035,7 +1066,7 @@ class TestGetAllCallsForRun:
 
     def test_returns_all_calls(self):
         _, factory = _setup_full()
-        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.execution.begin_node_state("tok-2", "transform-1", "run-1", 0, {"b": 2}, state_id="state-2")
         factory.execution.record_call(
@@ -1106,7 +1137,7 @@ class TestGetAllTokenParentsForRun:
 
     def test_empty_when_no_forks(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
 
         parents = factory.query.get_all_token_parents_for_run("run-1")
@@ -1138,7 +1169,7 @@ class TestExplainRow:
 
     def test_returns_row_lineage(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"field": "value"}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 12, {"field": "value"}, row_id="row-1", source_row_index=3, ingest_sequence=7)
 
         lineage = factory.query.explain_row("run-1", "row-1")
 
@@ -1146,7 +1177,9 @@ class TestExplainRow:
         assert lineage.row_id == "row-1"
         assert lineage.run_id == "run-1"
         assert lineage.source_node_id == "source-0"
-        assert lineage.row_index == 0
+        assert lineage.row_index == 12
+        assert lineage.source_row_index == 3
+        assert lineage.ingest_sequence == 7
 
     def test_none_for_unknown_row(self):
         _, factory = _setup()
@@ -1157,7 +1190,7 @@ class TestExplainRow:
 
     def test_raises_for_wrong_run_id(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         with pytest.raises(AuditIntegrityError, match="Row row-1 belongs to run run-1, not wrong-run"):
             factory.query.explain_row("wrong-run", "row-1")
@@ -1177,7 +1210,7 @@ class TestExplainRow:
             node_id="source-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         lineage = factory.query.explain_row("run-1", "row-1")
 
@@ -1186,7 +1219,7 @@ class TestExplainRow:
 
     def test_source_data_hash_present(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"key": "val"}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"key": "val"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         lineage = factory.query.explain_row("run-1", "row-1")
 
@@ -1197,7 +1230,7 @@ class TestExplainRow:
 
     def test_created_at_present(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         lineage = factory.query.explain_row("run-1", "row-1")
 
@@ -1219,7 +1252,7 @@ class TestExplainRow:
             node_id="source-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         lineage = factory.query.explain_row("run-1", "row-1")
 
@@ -1248,7 +1281,7 @@ class TestRoutingEventsOrderedByExecution:
         register_test_node(factory.data_flow, "run-1", "transform-2", plugin_name="t2")
         factory.data_flow.register_edge("run-1", "source-0", "transform-1", "continue", RoutingMode.MOVE, edge_id="edge-1")
         factory.data_flow.register_edge("run-1", "transform-1", "transform-2", "continue", RoutingMode.MOVE, edge_id="edge-2")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
 
         # State IDs chosen to sort OPPOSITE to execution order:
@@ -1304,7 +1337,7 @@ class TestCallsOrderedByExecution:
         register_test_node(factory.data_flow, "run-1", "transform-2", plugin_name="t2")
         factory.data_flow.register_edge("run-1", "source-0", "transform-1", "continue", RoutingMode.MOVE, edge_id="edge-1")
         factory.data_flow.register_edge("run-1", "transform-1", "transform-2", "continue", RoutingMode.MOVE, edge_id="edge-2")
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-1", token_id="tok-1")
 
         # Same strategy: state_ids sort opposite to execution order
@@ -1372,7 +1405,9 @@ class TestChunkedQueryMethods:
             row_id = f"row-chunk-{i}"
             token_id = f"tok-chunk-{i}"
             state_id = f"state-chunk-{i}"
-            factory.data_flow.create_row(run_id, "source-0", 100 + i, {"idx": i}, row_id=row_id)
+            factory.data_flow.create_row(
+                run_id, "source-0", 100 + i, {"idx": i}, row_id=row_id, source_row_index=100 + i, ingest_sequence=100 + i
+            )
             factory.data_flow.create_token(row_id, token_id=token_id)
             factory.execution.begin_node_state(token_id, "transform-1", run_id, 100 + i, {"idx": i}, state_id=state_id)
             state_ids.append(state_id)
@@ -1530,7 +1565,7 @@ class TestDirectQueryRepositoryConstruction:
             node_id="source-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         # Create a QueryRepository WITHOUT a payload store, same DB
         ops = DatabaseOps(db)
@@ -1566,7 +1601,7 @@ class TestDirectQueryRepositoryConstruction:
             node_id="source-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"key": "value"}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"key": "value"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         ops = DatabaseOps(db)
         repo = QueryRepository(
@@ -1613,7 +1648,7 @@ class TestGetRowDataErrorHandling:
             node_id="source-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         # QueryRepository with SAME mock store — so retrieval hits our mock
         ops = DatabaseOps(db)
         return QueryRepository(
@@ -1702,7 +1737,7 @@ class TestExplainRowErrorHandling:
             node_id="source-0",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         ops = DatabaseOps(db)
         return QueryRepository(
             ops,
@@ -1780,7 +1815,7 @@ class TestExplainRowErrorHandling:
         """H3: Cross-run mismatch is a caller bug, not a normal 'not found'."""
         mock_store = MagicMock()
         _db, repo, factory = _make_repo(payload_store=mock_store)
-        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"x": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
 
         with pytest.raises(AuditIntegrityError, match="Row row-1 belongs to run run-1, not wrong-run"):
             repo.explain_row("wrong-run", "row-1")
@@ -1801,8 +1836,8 @@ class TestGetAllTokenOutcomesForRun:
 
     def test_happy_path_multiple_outcomes(self):
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1")
-        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        factory.data_flow.create_row("run-1", "source-0", 1, {"b": 2}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         factory.data_flow.create_token("row-1", token_id="tok-1")
         factory.data_flow.create_token("row-2", token_id="tok-2")
         factory.data_flow.record_token_outcome(
@@ -1840,7 +1875,7 @@ class TestGetAllTokenOutcomesForRun:
             node_id="src-a",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1")
+        factory.data_flow.create_row("run-a", "src-a", 0, {"v": 1}, row_id="row-a1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-a1", token_id="tok-a1")
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id="tok-a1", run_id="run-a"),
@@ -1859,7 +1894,7 @@ class TestGetAllTokenOutcomesForRun:
             node_id="src-b",
             schema_config=_DYNAMIC_SCHEMA,
         )
-        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1")
+        factory.data_flow.create_row("run-b", "src-b", 0, {"v": 2}, row_id="row-b1", source_row_index=0, ingest_sequence=0)
         factory.data_flow.create_token("row-b1", token_id="tok-b1")
         factory.data_flow.record_token_outcome(
             ref=TokenRef(token_id="tok-b1", run_id="run-b"),
@@ -1886,7 +1921,7 @@ class TestGetAllTokenOutcomesForRun:
     def test_ordering_by_token_id_then_recorded_at(self):
         """Results must be ordered by (token_id, recorded_at)."""
         _, factory = _setup()
-        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1")
+        factory.data_flow.create_row("run-1", "source-0", 0, {"a": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
         # Create tokens with IDs that sort in known order
         factory.data_flow.create_token("row-1", token_id="tok-aaa")
         factory.data_flow.create_token("row-1", token_id="tok-zzz")
@@ -1926,3 +1961,99 @@ class TestGetAllTokenOutcomesForRun:
         assert outcomes[0].token_id == "tok-1"
         assert outcomes[0].outcome == TerminalOutcome.TRANSIENT
         assert outcomes[0].path == TerminalPath.FORK_PARENT
+
+
+def _coalesce_failure(reason: str = "quorum_not_met_at_timeout") -> CoalesceFailureReason:
+    return CoalesceFailureReason(
+        failure_reason=reason,
+        expected_branches=("branch_a", "branch_b"),
+        branches_arrived=("branch_a",),
+        merge_policy="nested",
+    )
+
+
+class TestCountFailedCoalesceBarrierRows:
+    """Pin the anchor for ``rows_coalesce_failed`` audit derivation (elspeth-7294de558e).
+
+    The counter is per failed BARRIER — one pending key ``(coalesce_name,
+    row_id)`` — reconstructed as DISTINCT ``(node_id, row_id)`` pairs over
+    FAILED node_states at nodes registered with ``node_type='coalesce'``
+    (the structural, indexed anchor), with the single
+    ``late_arrival_after_merge`` reason excluded (a straggler rejected after
+    the barrier resolved is not itself a barrier failure).
+    """
+
+    def _setup_coalesce(self, *, run_id: str = "run-1"):
+        db, factory = _setup(run_id=run_id)
+        register_test_node(factory.data_flow, run_id, "coalesce-1", node_type=NodeType.COALESCE, plugin_name="coalesce")
+        factory.data_flow.create_row(run_id, "source-0", 0, {"value": 1}, row_id="row-1", source_row_index=0, ingest_sequence=0)
+        return db, factory
+
+    def _fail_state(
+        self, factory, *, token_id: str, node_id: str, state_id: str, reason: str = "quorum_not_met_at_timeout", run_id: str = "run-1"
+    ) -> None:
+        factory.execution.begin_node_state(token_id, node_id, run_id, 0, {"value": 1}, state_id=state_id)
+        factory.execution.complete_node_state(
+            state_id=state_id,
+            status=NodeStateStatus.FAILED,
+            error=_coalesce_failure(reason),
+            duration_ms=0.0,
+        )
+
+    def test_granularity_one_barrier_per_node_row_pair_not_per_branch_token(self):
+        """A 2-branch barrier failure writes 2 FAILED states (one per arrived
+        branch token, same row) but counts as ONE failed barrier — the naive
+        per-state (or per-token-outcome) tally over-reports it as 2."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_token("row-1", token_id="tok-branch-a")
+        factory.data_flow.create_token("row-1", token_id="tok-branch-b")
+        self._fail_state(factory, token_id="tok-branch-a", node_id="coalesce-1", state_id="cs-a")
+        self._fail_state(factory, token_id="tok-branch-b", node_id="coalesce-1", state_id="cs-b")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 1
+
+    def test_attribution_failed_states_at_non_coalesce_nodes_do_not_count(self):
+        """The anchor is nodes.node_type='coalesce': an ordinary transform
+        failure must not register as a coalesce barrier failure."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_token("row-1", token_id="tok-1")
+        self._fail_state(factory, token_id="tok-1", node_id="transform-1", state_id="ts-1")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0
+
+    def test_distinct_rows_count_as_distinct_barriers(self):
+        """Two rows failing at the same coalesce node are two failed barriers."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_row("run-1", "source-0", 1, {"value": 2}, row_id="row-2", source_row_index=1, ingest_sequence=1)
+        factory.data_flow.create_token("row-1", token_id="tok-r1")
+        factory.data_flow.create_token("row-2", token_id="tok-r2")
+        self._fail_state(factory, token_id="tok-r1", node_id="coalesce-1", state_id="cs-r1")
+        self._fail_state(factory, token_id="tok-r2", node_id="coalesce-1", state_id="cs-r2")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 2
+
+    def test_late_arrival_after_merge_is_excluded(self):
+        """A straggler rejected AFTER the barrier resolved (e.g. after a
+        successful quorum merge) is not a barrier failure: counting it would
+        report a coalesce-failure for a row whose coalesce SUCCEEDED."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_token("row-1", token_id="tok-late")
+        self._fail_state(factory, token_id="tok-late", node_id="coalesce-1", state_id="cs-late", reason="late_arrival_after_merge")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0
+
+    def test_late_arrival_does_not_mask_a_real_barrier_failure_on_same_pair(self):
+        """A failed barrier followed by a late straggler still counts exactly
+        once — the DISTINCT pair collapse absorbs the straggler state."""
+        _db, factory = self._setup_coalesce()
+        factory.data_flow.create_token("row-1", token_id="tok-branch-a")
+        factory.data_flow.create_token("row-1", token_id="tok-late")
+        self._fail_state(factory, token_id="tok-branch-a", node_id="coalesce-1", state_id="cs-a")
+        self._fail_state(factory, token_id="tok-late", node_id="coalesce-1", state_id="cs-late", reason="late_arrival_after_merge")
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 1
+
+    def test_zero_when_no_coalesce_failures(self):
+        _db, factory = self._setup_coalesce()
+
+        assert factory.query.count_failed_coalesce_barrier_rows("run-1") == 0

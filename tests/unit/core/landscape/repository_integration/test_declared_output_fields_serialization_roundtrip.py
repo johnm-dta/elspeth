@@ -55,6 +55,8 @@ def _setup_landscape(*, run_id: str, row_id: str, token_id: str, node_id: str):
         row_index=0,
         data={"source": "v"},
         row_id=row_id,
+        source_row_index=0,
+        ingest_sequence=0,
     )
     setup.factory.data_flow.create_token(row_id=row.row_id, token_id=token_id)
     return setup

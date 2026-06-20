@@ -1,15 +1,16 @@
-source:
-  plugin: csv
-  on_success: outlier_in
-  options:
-    path: examples/statistical_batch_plugins/outlier_scores.csv
-    schema:
-      mode: fixed
-      fields:
-      - 'id: int'
-      - 'prompt_variant: str'
-      - 'latency_ms: float'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: outlier_in
+    options:
+      path: examples/statistical_batch_plugins/outlier_scores.csv
+      schema:
+        mode: fixed
+        fields:
+        - 'id: int'
+        - 'prompt_variant: str'
+        - 'latency_ms: float'
+      on_validation_failure: discard
 aggregations:
 - name: latency_outliers
   plugin: batch_outlier_annotator

@@ -5,6 +5,7 @@ Entry point for the elspeth CLI tool.
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -24,9 +25,12 @@ from elspeth.contracts import ExecutionResult, SecretResolutionInput
 from elspeth.contracts.errors import (
     CommencementGateFailedError,
     DependencyFailedError,
+    EmptyResumeStateError,
     GracefulShutdownError,
+    IncompleteSourceResumeError,
 )
 from elspeth.contracts.types import AggregationName
+from elspeth.core.checkpoint.recovery import NonResumableRunError
 from elspeth.core.config import ElspethSettings, SourceSettings, load_settings, resolve_config
 from elspeth.core.dag import ExecutionGraph, GraphValidationError
 from elspeth.core.dependency_config import PreflightResult
@@ -433,13 +437,14 @@ def run(
 
     try:
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=execution_sinks,
             aggregations=plugins.aggregations,
             gates=list(config.gates),
             coalesce_settings=list(config.coalesce) if config.coalesce else None,
+            queues=config.queues,
         )
         graph.validate()
     except GraphValidationError as e:
@@ -457,7 +462,7 @@ def run(
 
         if dry_run:
             typer.echo("Dry run mode - would execute:")
-            typer.echo(f"  Source: {config.source.plugin}")
+            typer.echo(f"  Sources: {', '.join(f'{name}={s.plugin}' for name, s in config.sources.items())}")
             typer.echo(f"  Transforms: {len(config.transforms)}")
             typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
             return
@@ -465,7 +470,7 @@ def run(
         # Safety check: require explicit --execute flag
         if not execute:
             typer.echo("Pipeline configuration valid.")
-            typer.echo(f"  Source: {config.source.plugin}")
+            typer.echo(f"  Sources: {', '.join(f'{name}={s.plugin}' for name, s in config.sources.items())}")
             typer.echo("")
             typer.echo("To execute, add --execute (or -x) flag:", err=True)
             typer.echo(f"  elspeth run -s {settings} --execute", err=True)
@@ -518,6 +523,8 @@ def run(
         raise typer.Exit(4) from e
 
     # Execute pipeline with pre-instantiated plugins
+    from elspeth.contracts.errors import RunWorkerEvictedError
+
     try:
         execution_result = _execute_pipeline_with_instances(
             config,
@@ -547,6 +554,25 @@ def run(
             typer.echo(f"\nPipeline interrupted after {e.rows_processed} rows.")
             typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
         raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
+    except RunWorkerEvictedError as e:
+        if output_format == "json":
+            import json as json_mod_evicted
+
+            typer.echo(
+                json_mod_evicted.dumps(
+                    {
+                        "event": "evicted",
+                        "run_id": e.run_id,
+                        "worker_id": e.worker_id,
+                        "message": str(e),
+                    }
+                ),
+                err=True,
+            )
+        else:
+            typer.echo(f"\nWorker evicted from run {e.run_id}.", err=True)
+            typer.echo("Worker identity is single-use. Re-admit under a fresh identity if appropriate.", err=True)
+        raise typer.Exit(3)  # noqa: B904 — eviction is an interrupted-style exit
     except contract_errors.TIER_1_ERRORS as e:
         # Tier 1 violations and framework bugs MUST be clearly distinguishable
         # from config errors. These indicate database corruption, tampering,
@@ -808,6 +834,9 @@ def explain(
         tui_app = ExplainApp(
             db=db,
             run_id=resolved_run_id,
+            token_id=token,
+            row_id=row,
+            sink=sink,
         )
         tui_app.run()
 
@@ -870,6 +899,25 @@ def _close_orchestrator_resources(
         raise teardown_error
 
 
+def _close_landscape_db(db: _Closeable, *, pending_exc: BaseException | None) -> None:
+    """Close LandscapeDB without masking an in-flight pipeline exception."""
+    import structlog
+
+    try:
+        db.close()
+    except contract_errors.TIER_1_ERRORS:
+        raise
+    except Exception as close_exc:
+        # db.close() failure must not mask the original pipeline exception.
+        if pending_exc is not None:
+            structlog.get_logger(__name__).warning(
+                "db.close() failed during exception cleanup — suppressed",
+                close_error=f"{type(close_exc).__name__}: {close_exc}",
+            )
+        else:
+            raise
+
+
 @contextmanager
 def _orchestrator_context(
     config: ElspethSettings,
@@ -922,7 +970,6 @@ def _orchestrator_context(
     from elspeth.telemetry import create_telemetry_manager
 
     # Unpack pre-instantiated plugins
-    source: SourceProtocol = plugins.source
     sinks: Mapping[str, SinkProtocol] = plugins.sinks
 
     # Build transforms list: row_plugins + aggregations (with node_id)
@@ -939,12 +986,13 @@ def _orchestrator_context(
 
     # Build PipelineConfig
     pipeline_config = _PipelineConfig(
-        source=source,
+        sources=plugins.sources,
         transforms=transforms,
         sinks=sinks,
         config=resolve_config(config),
         gates=list(config.gates),
         aggregation_settings=aggregation_settings,
+        coalesce_settings=(list(config.coalesce) if config.coalesce else []),
     )
 
     # EventBus + formatters. Programmatic dependency execution uses the
@@ -1098,7 +1146,9 @@ def _execute_pipeline_with_instances(
                 "rows_processed": result.rows_processed,
             }
     finally:
-        db.close()
+        import sys
+
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 def bootstrap_and_run(settings_path: Path) -> RunResult:
@@ -1121,12 +1171,13 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
 
     graph = ExecutionGraph.from_plugin_instances(
-        source=plugins.source,
-        source_settings=plugins.source_settings,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=execution_sinks,
         aggregations=plugins.aggregations,
         gates=list(config.gates),
+        queues=config.queues,
         coalesce_settings=list(config.coalesce) if config.coalesce else None,
     )
     graph.validate()
@@ -1190,22 +1241,7 @@ def bootstrap_and_run(settings_path: Path) -> RunResult:
     finally:
         import sys
 
-        import structlog
-
-        pending_exc = sys.exc_info()[1]
-        try:
-            db.close()
-        except contract_errors.TIER_1_ERRORS:
-            raise
-        except Exception as close_exc:
-            # db.close() failure must not mask the original pipeline exception.
-            if pending_exc is not None:
-                structlog.get_logger(__name__).warning(
-                    "db.close() failed during exception cleanup — suppressed",
-                    close_error=f"{type(close_exc).__name__}: {close_exc}",
-                )
-            else:
-                raise
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 def _format_validation_error(
@@ -1358,13 +1394,14 @@ def validate(
     execution_sinks = _execution_sinks_for_graph(config, plugins.sinks)
     try:
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=execution_sinks,
             aggregations=plugins.aggregations,
             gates=list(config.gates),
             coalesce_settings=list(config.coalesce) if config.coalesce else None,
+            queues=config.queues,
         )
         graph.validate()
     except GraphValidationError as e:
@@ -1384,7 +1421,7 @@ def validate(
         raise typer.Exit(1) from None
 
     typer.echo("✅ Pipeline configuration valid!")
-    typer.echo(f"  Source: {config.source.plugin}")
+    typer.echo(f"  Sources: {', '.join(f'{name}={s.plugin}' for name, s in config.sources.items())}")
     typer.echo(f"  Transforms: {len(config.transforms)}")
     typer.echo(f"  Aggregations: {len(config.aggregations)}")
     typer.echo(f"  Sinks: {', '.join(config.sinks.keys())}")
@@ -1728,45 +1765,95 @@ def _build_resume_graphs(
     Returns:
         Tuple of (validation_graph, execution_graph):
         - validation_graph: Uses original source for topology hash matching
-        - execution_graph: Uses NullSource since resume data comes from stored payloads
+        - execution_graph: Uses the same original topology/source IDs; runtime
+          plugin instances are swapped to NullSource later because resume data
+          comes from stored payloads
     """
-    from elspeth.plugins.sources.null_source import NullSource
-
     gate_settings = list(settings_config.gates)
     coalesce_settings = list(settings_config.coalesce) if settings_config.coalesce else None
 
-    # Validation graph uses the ORIGINAL source to match the topology hash
-    # computed during the original run
+    # Both resume graphs use the ORIGINAL source topology to match the topology
+    # hash and source node IDs computed during the original run. The runtime
+    # PluginBundle is swapped to NullSource separately before execution; graph
+    # identity must not change just because resume does not reopen sources.
     validation_graph = ExecutionGraph.from_plugin_instances(
-        source=plugins.source,
-        source_settings=plugins.source_settings,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=plugins.sinks,
         aggregations=plugins.aggregations,
         gates=gate_settings,
         coalesce_settings=coalesce_settings,
+        queues=settings_config.queues,
     )
     validation_graph.validate()
 
-    # Execution graph uses NullSource — resume data comes from stored payloads.
-    # NullSource inherits the original source's on_success (which may be a connection
-    # name or sink name — the DAG builder validates it during graph construction).
-    null_source_on_success = plugins.source.on_success
-    null_source = NullSource({})
-    null_source.on_success = null_source_on_success
-    null_source_settings = SourceSettings(plugin="null", on_success=null_source_on_success)
     execution_graph = ExecutionGraph.from_plugin_instances(
-        source=null_source,
-        source_settings=null_source_settings,
+        sources=plugins.sources,
+        source_settings_map=plugins.source_settings_map,
         transforms=plugins.transforms,
         sinks=plugins.sinks,
         aggregations=plugins.aggregations,
         gates=gate_settings,
         coalesce_settings=coalesce_settings,
+        queues=settings_config.queues,
     )
     execution_graph.validate()
 
     return validation_graph, execution_graph
+
+
+def _emit_not_resumable_event(
+    error: EmptyResumeStateError | IncompleteSourceResumeError | NonResumableRunError, output_format: str
+) -> None:
+    """Emit the operator-facing ``not_resumable`` event for a refused resume.
+
+    Shared by the ``resume`` command's outer and inner exception handlers so
+    the operator surface is identical regardless of where the clean refuse
+    originated (``can_resume()`` at recovery time vs. ``Orchestrator.resume()``
+    at execute time).
+
+    Per ADR-025 §3, empty-state resume is the interpretable "nothing to
+    resume, start fresh" outcome — distinct from the broader Tier-1
+    invariant traceback path. The caller must invoke this *before* the
+    broader ``TIER_1_ERRORS`` handler (when sharing a try block) because
+    :class:`EmptyResumeStateError` is a subclass of
+    ``OrchestrationInvariantError`` and would otherwise be swallowed by
+    the fatal-traceback path.
+
+    :class:`NonResumableRunError` is the ``resume()`` entry guard's
+    precondition refusal (run status not resumable — e.g. RUNNING). The
+    CLI's ``can_resume`` pre-flight catches the common case with a clean
+    exit 1; the guard raise is only reachable in the race window where the
+    run's status changes between pre-flight and ``--execute``, and it must
+    land on this same operator surface rather than the exit-4
+    framework-bug traceback path.
+    """
+    if isinstance(error, NonResumableRunError):
+        reason = "run_status_not_resumable"
+        # str(error) already carries the "Cannot resume run ..." prefix;
+        # use the bare reason so neither output path doubles it up.
+        message = error.reason
+    elif type(error) is IncompleteSourceResumeError:
+        reason = "source_not_exhausted"
+        message = str(error)
+    else:
+        reason = "no_recorded_work"
+        message = str(error)
+    if output_format == "json":
+        typer.echo(
+            json.dumps(
+                {
+                    "event": "not_resumable",
+                    "run_id": error.run_id,
+                    "reason": reason,
+                    "message": message,
+                }
+            ),
+            err=True,
+        )
+    else:
+        typer.echo(f"\nCannot resume run {error.run_id}: {message}", err=True)
 
 
 @app.command()
@@ -1862,7 +1949,10 @@ def resume(
     else:
         db_url = settings_config.landscape.url
         _validate_existing_sqlite_db_url(db_url, source="settings.yaml")
-        typer.echo(f"Using database from settings.yaml: {db_url}")
+        # Informational banner only — suppress in JSON mode so stdout stays a
+        # clean JSON/JSONL stream for programmatic callers.
+        if output_format != "json":
+            typer.echo(f"Using database from settings.yaml: {db_url}")
 
     # Resolve SQLCipher passphrase
     from elspeth.cli_helpers import resolve_audit_passphrase
@@ -1946,16 +2036,19 @@ def resume(
         # Get count of unprocessed rows
         unprocessed_row_ids = recovery_manager.get_unprocessed_rows(run_id)
 
+        # F1: buffered barrier tokens live in the scheduler journal, not the
+        # checkpoint — "what will be restored" is the journal's BLOCKED
+        # barrier rows plus the checkpoint's scalar barrier metadata.
+        blocked_barrier_rows = recovery_manager.count_blocked_barrier_items(run_id)
+
         # Display resume point information
         resume_info = {
             "run_id": run_id,
             "can_resume": True,
             "resume_point": {
-                "token_id": resume_point.token_id,
-                "node_id": resume_point.node_id,
                 "sequence_number": resume_point.sequence_number,
-                "has_aggregation_state": resume_point.aggregation_state is not None,
-                "has_coalesce_state": resume_point.coalesce_state is not None,
+                "has_barrier_scalars": resume_point.barrier_scalars is not None,
+                "blocked_barrier_rows": blocked_barrier_rows,
             },
             "unprocessed_rows": len(unprocessed_row_ids),
         }
@@ -1970,17 +2063,12 @@ def resume(
         if output_format != "json":
             typer.echo(f"Run {run_id} can be resumed.")
             typer.echo("\nResume point:")
-            typer.echo(f"  Token ID: {resume_point.token_id}")
-            typer.echo(f"  Node ID: {resume_point.node_id}")
             typer.echo(f"  Sequence number: {resume_point.sequence_number}")
-            if resume_point.aggregation_state is not None:
-                typer.echo("  Has aggregation state: Yes")
+            if resume_point.barrier_scalars is not None:
+                typer.echo("  Has barrier scalars: Yes")
             else:
-                typer.echo("  Has aggregation state: No")
-            if resume_point.coalesce_state is not None:
-                typer.echo("  Has coalesce state: Yes")
-            else:
-                typer.echo("  Has coalesce state: No")
+                typer.echo("  Has barrier scalars: No")
+            typer.echo(f"  Blocked barrier rows (journal): {blocked_barrier_rows}")
             typer.echo(f"  Unprocessed rows: {len(unprocessed_row_ids)}")
 
         if not execute:
@@ -2041,7 +2129,11 @@ def resume(
                 from elspeth.core.landscape.factory import RecorderFactory
 
                 factory = RecorderFactory(db)
-                field_resolution = factory.run_lifecycle.get_source_field_resolution(run_id)
+                try:
+                    field_resolution = factory.run_lifecycle.get_resume_field_resolution(run_id)
+                except contract_errors.AuditIntegrityError as e:
+                    typer.echo(f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). {e}", err=True)
+                    raise typer.Exit(1) from None
                 if field_resolution is None:
                     typer.echo(
                         f"Error: Cannot resume with sink '{sink_name}' (plugin: {sink.name}). "
@@ -2080,19 +2172,30 @@ def resume(
 
             resume_sinks[sink_name] = sink
 
-        # Override source with NullSource for resume (data comes from payloads)
+        # Override sources with NullSource for resume (data comes from payloads).
+        # Per ADR-025 §2 each named source becomes its own NullSource so the
+        # execution graph mirrors the original source-name set.
         from dataclasses import replace
 
-        null_source_on_success = plugins.source.on_success
-        null_source = NullSource({})
-        null_source.on_success = null_source_on_success
+        from elspeth.core.config import SourceSettings as _SourceSettings
+
+        null_resume_sources: dict[str, SourceProtocol] = {}
+        null_resume_settings: dict[str, SourceSettings] = {}
+        for source_name, original_source in plugins.sources.items():
+            null_source = NullSource({})
+            null_source.on_success = original_source.on_success
+            null_resume_sources[source_name] = null_source
+            null_resume_settings[source_name] = _SourceSettings(plugin="null", on_success=original_source.on_success)
         resume_plugins = replace(
             plugins,
-            source=null_source,
+            sources=null_resume_sources,
+            source_settings_map=null_resume_settings,
             sinks=resume_sinks,  # Use append-mode sinks
         )
 
         # Execute resume with execution graph (NullSource)
+        from elspeth.contracts.errors import RunWorkerEvictedError
+
         try:
             result = _execute_resume_with_instances(
                 config=settings_config,
@@ -2121,6 +2224,34 @@ def resume(
                 typer.echo(f"\nResume interrupted after {e.rows_processed} rows.")
                 typer.echo(f"Resume with: elspeth resume {e.run_id} --execute")
             raise typer.Exit(3)  # noqa: B904 -- distinct exit code: 0=success, 1=error, 3=interrupted
+        except (EmptyResumeStateError, IncompleteSourceResumeError, NonResumableRunError) as e:
+            # ADR-025 §3: this catch MUST precede the TIER_1_ERRORS
+            # handler because EmptyResumeStateError is a subclass of
+            # OrchestrationInvariantError. See _emit_not_resumable_event
+            # for the operator-facing contract. NonResumableRunError is
+            # the resume() entry guard's race-window refusal (status
+            # changed between the can_resume pre-flight and --execute).
+            _emit_not_resumable_event(e, output_format)
+            raise typer.Exit(1) from e
+        except RunWorkerEvictedError as e:
+            if output_format == "json":
+                import json as json_mod_evicted
+
+                typer.echo(
+                    json_mod_evicted.dumps(
+                        {
+                            "event": "evicted",
+                            "run_id": e.run_id,
+                            "worker_id": e.worker_id,
+                            "message": str(e),
+                        }
+                    ),
+                    err=True,
+                )
+            else:
+                typer.echo(f"\nWorker evicted from run {e.run_id}.", err=True)
+                typer.echo("Worker identity is single-use. Re-admit under a fresh identity if appropriate.", err=True)
+            raise typer.Exit(3)  # noqa: B904 — eviction is an interrupted-style exit
         except contract_errors.TIER_1_ERRORS as e:
             # Tier 1 violations and framework bugs MUST be clearly distinguishable
             # from config errors — same pattern as the `run` command handler.
@@ -2190,7 +2321,469 @@ def resume(
             typer.echo(f"  Rows failed: {result.rows_failed}")
             typer.echo(f"  Status: {result.status.value}")
 
+    except (EmptyResumeStateError, IncompleteSourceResumeError, NonResumableRunError) as e:
+        # ADR-025 §3: catches the empty-state raise from recovery's
+        # ``verify_contract_integrity()`` (reached via ``can_resume``
+        # at line 1780 — dry-run and pre-execute paths). The inner
+        # ``try`` at line 1955 catches the orchestrator-level raise
+        # during ``--execute``. Both deliver the identical
+        # operator-facing surface via ``_emit_not_resumable_event``;
+        # without this outer handler the recovery-time raise would
+        # bubble unhandled and the operator would see a Tier-1
+        # invariant traceback for a benign outcome
+        # (elspeth-241608388f).
+        _emit_not_resumable_event(e, output_format)
+        raise typer.Exit(1) from e
     finally:
+        db.close()
+
+
+@app.command()
+def join(
+    run_id: str = typer.Argument(..., help="Run ID to join as a follower worker."),
+    database: str | None = typer.Option(
+        None,
+        "--database",
+        "-d",
+        help="Path to Landscape database file (SQLite).",
+    ),
+    settings_file: str | None = typer.Option(
+        None,
+        "--settings",
+        "-s",
+        help="Path to settings YAML file (default: settings.yaml).",
+    ),
+    output_format: Literal["console", "json"] = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: 'console' (human-readable) or 'json' (structured JSON).",
+    ),
+) -> None:
+    """Attach to a running pipeline as a follower worker (ADR-030 §B.1).
+
+    The joining process uses the same settings file as the leader to verify
+    pipeline config-hash compatibility.  Settings are REQUIRED — a missing or
+    divergent settings file results in an admission refusal.
+
+    On clean departure (run completed) exits 0.  On refusal exits 1 with an
+    actionable message.  On SIGINT or leader-seat loss exits 3.
+
+    Examples:
+
+        # Attach as a follower (settings.yaml in cwd)
+        elspeth join run-abc123
+
+        # Attach with explicit settings and database
+        elspeth join run-abc123 --settings ./settings.yaml --database ./landscape.db
+    """
+    import traceback
+
+    from elspeth.contracts.errors import FollowerSeatDeadError, JoinRefusedError, RunWorkerEvictedError
+    from elspeth.core.landscape import LandscapeDB
+
+    # Settings are REQUIRED — the joiner must produce the same config_hash
+    # as the leader (stable_hash(resolve_config(settings))).
+    settings_path = Path(settings_file).expanduser() if settings_file else Path("settings.yaml")
+
+    if not settings_path.exists():
+        typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
+        typer.echo("Settings are required to validate pipeline config-hash compatibility.", err=True)
+        raise typer.Exit(1)
+
+    # Load settings with Key Vault secrets (same flow as 'run' and 'resume' commands).
+    try:
+        settings_config, _secret_resolutions = _load_settings_with_secrets(settings_path)
+    except FileNotFoundError:
+        typer.echo(f"Error: Settings file not found: {settings_path}", err=True)
+        raise typer.Exit(1) from None
+    except yaml.YAMLError as e:
+        typer.echo(f"YAML syntax error in {settings_path}: {e}", err=True)
+        raise typer.Exit(1) from None
+    except ValidationError as e:
+        typer.echo("Configuration errors:", err=True)
+        for error in e.errors():
+            loc = ".".join(str(x) for x in error["loc"])
+            typer.echo(f"  - {loc}: {error['msg']}", err=True)
+        raise typer.Exit(1) from None
+    except ValueError as e:
+        typer.echo(f"Configuration error: {e}", err=True)
+        raise typer.Exit(1) from None
+    except SecretLoadError as e:
+        typer.echo(f"Error loading secrets: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    # Resolve database URL.
+    if database:
+        db_path = Path(database).expanduser().resolve()
+        if not db_path.exists():
+            typer.echo(f"Error: Database file not found: {db_path}", err=True)
+            raise typer.Exit(1) from None
+        db_url = f"sqlite:///{db_path}"
+    else:
+        db_url = settings_config.landscape.url
+        _validate_existing_sqlite_db_url(db_url, source="settings.yaml")
+        # Informational banner only — suppress in JSON mode so stdout stays a
+        # clean JSON/JSONL stream for programmatic callers (the join command
+        # emits structured events on stdout in --format json).
+        if output_format != "json":
+            typer.echo(f"Using database from settings.yaml: {db_url}")
+
+    # Resolve SQLCipher passphrase.
+    from elspeth.cli_helpers import resolve_audit_passphrase
+
+    try:
+        passphrase = resolve_audit_passphrase(settings_config.landscape)
+    except RuntimeError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    # Open the database (create_tables=False — existing run must already have schema).
+    try:
+        db = LandscapeDB.from_url(db_url, passphrase=passphrase, create_tables=False)
+    except Exception as e:
+        typer.echo(f"Error connecting to database: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    # Verify the database has a Landscape schema (same guard as resume).
+    from sqlalchemy import inspect as sa_inspect
+
+    try:
+        inspector = sa_inspect(db.engine)
+        existing_tables = set(inspector.get_table_names())
+    except Exception as e:
+        typer.echo(f"Error inspecting database schema: {e}", err=True)
+        db.close()
+        raise typer.Exit(1) from None
+
+    required_tables = {"runs", "tokens", "node_states"}
+    missing_tables = required_tables - existing_tables
+    if missing_tables:
+        typer.echo(
+            f"Error: Database exists but is not a Landscape database "
+            f"(missing tables: {', '.join(sorted(missing_tables))}). "
+            f"Check the database path.",
+            err=True,
+        )
+        db.close()
+        raise typer.Exit(1) from None
+
+    follower_db: LandscapeDB | None = None
+    try:
+        # Admission: Orchestrator.join_run does the filesystem preflight and the
+        # atomic BEGIN IMMEDIATE admission transaction (§B.1 steps 0-2).
+        from elspeth.engine import Orchestrator
+
+        orchestrator = Orchestrator(db)
+
+        try:
+            worker_id = orchestrator.join_run(run_id, settings_config)
+        except JoinRefusedError as e:
+            if output_format == "json":
+                import json as json_mod
+
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "event": "join_refused",
+                            "run_id": run_id,
+                            "reason": e.reason,
+                        }
+                    ),
+                    err=True,
+                )
+            else:
+                typer.echo(f"Cannot join run {run_id}: {e.reason}", err=True)
+            raise typer.Exit(1) from None
+
+        # Derive the per-worker hex suffix from the minted worker_id
+        # (format: worker:{run_id}:{HEX}).
+        worker_hex = worker_id.split(":")[-1]
+
+        # Emit admission line.
+        if output_format == "json":
+            import json as json_mod
+
+            typer.echo(
+                json_mod.dumps(
+                    {
+                        "event": "joined",
+                        "run_id": run_id,
+                        "worker_id": worker_id,
+                    }
+                )
+            )
+        else:
+            typer.echo(f"Joined run {run_id} as follower {worker_id}")
+            typer.echo("Draining available work…")
+
+        # Build the execution graph for the follower (needed to recognise
+        # barrier / sink nodes for hand-off routing).
+        try:
+            from elspeth.plugins.infrastructure.runtime_factory import instantiate_plugins_from_config
+
+            plugins = instantiate_plugins_from_config(settings_config)
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            typer.echo(f"Error instantiating plugins: {e}", err=True)
+            raise typer.Exit(1) from None
+
+        try:
+            _validation_graph, execution_graph = _build_resume_graphs(settings_config, plugins)
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            typer.echo(f"Error building execution graph: {e}", err=True)
+            raise typer.Exit(1) from None
+
+        # Get payload store.
+        from elspeth.core.payload_store import FilesystemPayloadStore
+
+        if settings_config.payload_store.backend != "filesystem":
+            typer.echo(
+                f"Error: Unsupported payload store backend '{settings_config.payload_store.backend}'. "
+                f"Only 'filesystem' is currently supported.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        payload_path = settings_config.payload_store.base_path
+        if not payload_path.exists():
+            typer.echo(f"Error: Payload directory not found: {payload_path}", err=True)
+            raise typer.Exit(1)
+
+        payload_store = FilesystemPayloadStore(payload_path)
+
+        # Open a per-worker journal-enabled DB handle when JSONL journaling is
+        # configured.  We open a *second* handle (with the per-worker suffix) so
+        # the follower writes to its own distinct file alongside the leader.
+        if settings_config.landscape.dump_to_jsonl:
+            follower_db = LandscapeDB.from_url(
+                db_url,
+                passphrase=passphrase,
+                create_tables=False,
+                dump_to_jsonl=True,
+                dump_to_jsonl_path=settings_config.landscape.dump_to_jsonl_path,
+                dump_to_jsonl_fail_on_error=settings_config.landscape.dump_to_jsonl_fail_on_error,
+                dump_to_jsonl_include_payloads=settings_config.landscape.dump_to_jsonl_include_payloads,
+                dump_to_jsonl_payload_base_path=(
+                    str(settings_config.payload_store.base_path)
+                    if settings_config.landscape.dump_to_jsonl_payload_base_path is None
+                    else settings_config.landscape.dump_to_jsonl_payload_base_path
+                ),
+                dump_to_jsonl_worker_suffix=worker_hex,
+            )
+
+        active_db = follower_db if follower_db is not None else db
+
+        # Build and run the follower processor.
+        from elspeth.contracts.plugin_context import PluginContext
+        from elspeth.core.config import AggregationSettings as _AggregationSettings
+        from elspeth.core.landscape.factory import RecorderFactory
+        from elspeth.engine.orchestrator.follower import build_follower_processor
+        from elspeth.engine.orchestrator.types import PipelineConfig
+
+        factory = RecorderFactory(active_db, payload_store=payload_store)
+
+        # Build PipelineConfig from settings (same shape as _orchestrator_context).
+        # Extract raw TransformProtocol instances from WiredTransform wrappers.
+        follower_transforms: list[RowPlugin] = [wired.plugin for wired in plugins.transforms]
+
+        agg_id_map = execution_graph.get_aggregation_id_map()
+        follower_agg_settings: dict[str, _AggregationSettings] = {}
+        for agg_name, (agg_transform, agg_config) in plugins.aggregations.items():
+            from elspeth.contracts.types import AggregationName as _AggregationName
+
+            node_id = agg_id_map[_AggregationName(agg_name)]
+            follower_agg_settings[node_id] = agg_config
+            agg_transform.node_id = node_id
+            follower_transforms.append(agg_transform)
+
+        pipeline_config = PipelineConfig(
+            config=resolve_config(settings_config),
+            sources=plugins.sources,
+            transforms=follower_transforms,
+            sinks=plugins.sinks,
+            gates=list(settings_config.gates),
+            aggregation_settings=follower_agg_settings,
+            coalesce_settings=(list(settings_config.coalesce) if settings_config.coalesce else []),
+        )
+
+        follower_proc = build_follower_processor(
+            factory=factory,
+            run_id=run_id,
+            worker_id=worker_id,
+            graph=execution_graph,
+            config=pipeline_config,
+            payload_store=payload_store,
+        )
+
+        ctx = PluginContext(
+            run_id=run_id,
+            config=resolve_config(settings_config),
+            landscape=factory.plugin_audit_writer(),
+            payload_store=payload_store,
+        )
+
+        # Call on_start for all transforms and sinks — mirrors the leader's
+        # _build_run_context lifecycle.  Without this, plugins raise
+        # PluginContractViolation("Transform 'X' was called before on_start()")
+        # on the first process() call.
+        follower_run_entered = False
+        try:
+            for _follower_transform in follower_transforms:
+                _follower_transform.on_start(ctx)
+            for _follower_sink in plugins.sinks.values():
+                _follower_sink.on_start(ctx)
+
+            follower_run_entered = True
+            follower_proc.run(ctx)
+        except RunWorkerEvictedError as e:
+            if output_format == "json":
+                import json as json_mod
+
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "event": "evicted",
+                            "run_id": run_id,
+                            "worker_id": e.worker_id,
+                            "message": str(e),
+                        }
+                    ),
+                    err=True,
+                )
+            else:
+                typer.echo(f"\nFollower evicted from run {run_id}.", err=True)
+                typer.echo("Worker identity is single-use. Re-admit under a fresh identity if appropriate.", err=True)
+            raise typer.Exit(3)  # noqa: B904 — eviction is an interrupted-style exit
+        except FollowerSeatDeadError as e:
+            # Design §B.1 step 5: leader seat died mid-drain. The follower
+            # departed cleanly but the run is incomplete — operator must resume.
+            if output_format == "json":
+                import json as json_mod
+
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "event": "seat_dead",
+                            "run_id": run_id,
+                            "worker_id": e.worker_id,
+                            "message": str(e),
+                            "hint": f"elspeth resume {run_id}",
+                        }
+                    ),
+                    err=True,
+                )
+            else:
+                typer.echo(f"\nFollower {e.worker_id} detected no live leader for run {run_id}.", err=True)
+                typer.echo(f"The run is incomplete. Use `elspeth resume {run_id}` to take over.", err=True)
+            raise typer.Exit(2)  # noqa: B904 — seat-dead: run incomplete, resume required
+        except KeyboardInterrupt:
+            if output_format == "json":
+                import json as json_mod
+
+                typer.echo(
+                    json_mod.dumps(
+                        {
+                            "event": "interrupted",
+                            "run_id": run_id,
+                            "worker_id": worker_id,
+                        }
+                    )
+                )
+            else:
+                typer.echo(f"\nFollower {worker_id} interrupted (SIGINT). Departed from run {run_id}.")
+            raise typer.Exit(3)  # noqa: B904 — interrupted
+        finally:
+            if not follower_run_entered:
+                from datetime import UTC, datetime
+
+                from elspeth.engine._best_effort import best_effort
+
+                with best_effort("Follower depart after startup failure", run_id=run_id, worker_id=worker_id):
+                    factory.run_coordination.depart_worker(worker_id=worker_id, now=datetime.now(UTC))
+
+            # Mirror the leader's teardown via the canonical cleanup_plugins:
+            # on_complete then close, each hook individually guarded so one
+            # plugin's failure does not block the others — BUT TIER_1_ERRORS
+            # (AuditIntegrityError / FrameworkBugError) PROPAGATE (cleanup.py
+            # re-raises them before the broad catch), and every swallowed
+            # non-Tier-1 failure is LOGGED with plugin name + phase.  The bare
+            # `except Exception: pass` this replaces silently hid Tier-1
+            # audit-integrity corruption during follower teardown.
+            #
+            # include_source=False: the follower is a drain-only worker — it
+            # never opened/on_start'd sources (the on_start loop above covers
+            # only transforms + sinks), so source teardown must be skipped
+            # (mirrors the resume path's include_source=False).
+            from elspeth.engine.orchestrator.cleanup import cleanup_plugins as _cleanup_plugins
+
+            _cleanup_plugins(pipeline_config, ctx, include_source=False)
+
+        # Clean departure (run reached terminal state).
+        if output_format == "json":
+            import json as json_mod
+
+            typer.echo(
+                json_mod.dumps(
+                    {
+                        "event": "departed",
+                        "run_id": run_id,
+                        "worker_id": worker_id,
+                        "message": "run completed, departed cleanly",
+                    }
+                )
+            )
+        else:
+            typer.echo(f"\nJoined run {run_id} as follower {worker_id}, run completed, departed cleanly.")
+
+    except contract_errors.TIER_1_ERRORS as e:
+        if output_format == "json":
+            import json as json_mod
+
+            typer.echo(
+                json_mod.dumps(
+                    {
+                        "event": "fatal",
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "traceback": traceback.format_exc(),
+                    }
+                ),
+                err=True,
+            )
+        else:
+            typer.echo(f"\nFATAL — {type(e).__name__}: {e}", err=True)
+            typer.echo(traceback.format_exc(), err=True)
+        raise typer.Exit(4) from e  # Exit 4: audit integrity / framework bug
+    except typer.Exit:
+        # typer.Exit is a click.exceptions.Exit (subclass of Exception) — must be
+        # re-raised before the bare Exception handler catches and rewraps it as Exit 4.
+        raise
+    except Exception as e:
+        if output_format == "json":
+            import json as json_mod
+
+            typer.echo(
+                json_mod.dumps(
+                    {
+                        "event": "error",
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "traceback": traceback.format_exc(),
+                    }
+                ),
+                err=True,
+            )
+        else:
+            typer.echo(f"Error during join: {e}", err=True)
+            typer.echo(traceback.format_exc(), err=True)
+        raise typer.Exit(4) from e  # Exit 4: unknown errors are likely framework bugs
+    finally:
+        if follower_db is not None:
+            follower_db.close()
         db.close()
 
 

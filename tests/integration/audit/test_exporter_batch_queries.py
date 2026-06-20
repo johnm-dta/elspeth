@@ -68,7 +68,7 @@ def _run_linear_on_db(
     source, tx_list, sinks, graph = build_linear_pipeline(source_data, transforms=[PassTransform()])
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={"default": as_sink(sinks["default"])},
     )
@@ -96,7 +96,7 @@ def _run_fork_on_db(
     payload_store = FilesystemPayloadStore(payload_root)
     gate = GateSettings(
         name="router",
-        input="list_source_out",
+        input="primary_out",
         condition="row['value'] > 50",
         routes={"true": "high_sink", "false": "low_sink"},
     )
@@ -113,7 +113,7 @@ def _run_fork_on_db(
     )
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={name: as_sink(s) for name, s in all_sinks.items()},
         gates=[gate],
@@ -169,6 +169,8 @@ def _seed_exporter_isolation_records(db: LandscapeDB, run_id: str, label: str) -
         source_node_id,
         row_index=10_000,
         data={"seed": label},
+        source_row_index=10_000,
+        ingest_sequence=10_000,
         row_id=f"audit-extra-row-{label}",
     )
     parent_token = factory.data_flow.create_token(row.row_id, token_id=f"audit-extra-token-{label}")

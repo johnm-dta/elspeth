@@ -337,7 +337,9 @@ class TestReadOnlyConnectionDefenseInDepth:
         db.connection_string = "postgresql://user:pass@host/db"
         db._passphrase = None
         db._journal = None
-        db._engine = SimpleNamespace(begin=begin, dialect=SimpleNamespace(name="postgresql"))
+        # pool is a non-StaticPool so _maybe_serialize_shared_connection takes the
+        # per-thread-connection (no app-level lock) path, as the real postgresql QueuePool would.
+        db._engine = SimpleNamespace(begin=begin, dialect=SimpleNamespace(name="postgresql"), pool=object())
         db._require_existing_schema = False
 
         with db.read_only_connection():

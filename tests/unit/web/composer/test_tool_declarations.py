@@ -230,6 +230,10 @@ class TestSetSourceFromBlobMigration:
                 "type": "object",
                 "properties": {
                     "blob_id": {"type": "string", "description": "Blob ID to use as source."},
+                    "source_name": {
+                        "type": "string",
+                        "description": "Source root name to bind. Defaults to 'source' for legacy single-source pipelines.",
+                    },
                     "plugin": {
                         "type": "string",
                         "description": "Source plugin override (e.g. 'csv'). Inferred from MIME type if omitted.",
@@ -591,8 +595,14 @@ class TestStep3MutationTierMigration:
     def test_clear_source(self) -> None:
         assert self._get("clear_source") == {
             "name": "clear_source",
-            "description": "Remove the source from the pipeline composition state.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "description": "Remove a named source from the pipeline composition state.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "source_name": {"type": "string", "description": "Source root name to clear. Defaults to 'source'."},
+                },
+                "required": [],
+            },
         }
 
     def test_remove_node(self) -> None:
@@ -657,12 +667,13 @@ class TestStep3MutationTierMigration:
     def test_patch_source_options(self) -> None:
         assert self._get("patch_source_options") == {
             "name": "patch_source_options",
-            "description": "Apply a shallow merge-patch to the current source options. "
+            "description": "Apply a shallow merge-patch to a named source's options. "
             "Keys in the patch overwrite existing keys. "
             "Keys set to null are deleted. Missing keys are unchanged.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "source_name": {"type": "string", "description": "Source root name to patch. Defaults to 'source'."},
                     "patch": {
                         "type": "object",
                         "description": "Merge-patch to apply to source options.",
@@ -700,11 +711,15 @@ class TestStep3MutationTierMigration:
         assert on_vf["description"] == _SOURCE_VALIDATION_FAILURE_DESCRIPTION
 
     def test_set_pipeline_required_top_level(self) -> None:
-        """set_pipeline.required is exactly ['source', 'nodes', 'edges', 'outputs']."""
+        """set_pipeline.required is exactly ['nodes', 'edges', 'outputs'].
+
+        Multi-source: a caller may supply either the singular ``source`` or the
+        ``sources`` map (both are optional properties), so neither is required.
+        """
         defn = self._get("set_pipeline")
         params = defn["parameters"]
         assert isinstance(params, dict)
-        assert params["required"] == ["source", "nodes", "edges", "outputs"]
+        assert params["required"] == ["nodes", "edges", "outputs"]
 
     def test_upsert_node_required(self) -> None:
         defn = self._get("upsert_node")
@@ -843,7 +858,8 @@ class TestStep3BlobDiscoveryTierMigration:
                     "field_path": {
                         "type": "string",
                         "description": (
-                            "Canonical path: source.options.<field>, node:<node_id>.options.<field>, or output:<name>.options.<field>."
+                            "Canonical path: source.options.<field>, source:<name>.options.<field>, "
+                            "node:<node_id>.options.<field>, or output:<name>.options.<field>."
                         ),
                     },
                     "blob_id": {

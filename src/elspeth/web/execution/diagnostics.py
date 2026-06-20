@@ -118,6 +118,7 @@ def load_run_diagnostics_for_settings(
         landscape_url,
         passphrase=settings.landscape_passphrase,
         create_tables=False,
+        read_only=True,
     )
     try:
         return load_run_diagnostics_from_db(

@@ -78,12 +78,44 @@ class TestCatalogValueSource:
         )
         assert decl.applies_when == (("base_url", "https://openrouter.ai/api/v1"),)
 
+    def test_applies_when_freezes_mutable_predicate_pairs(self) -> None:
+        mutable_predicates = [["base_url", "https://openrouter.ai/api/v1"]]
+
+        decl = CatalogValueSource(
+            field_name="model",
+            catalog_id="openrouter",
+            applies_when=mutable_predicates,  # type: ignore[arg-type]
+        )
+
+        assert decl.applies_when == (("base_url", "https://openrouter.ai/api/v1"),)
+        assert isinstance(decl.applies_when, tuple)
+        assert isinstance(decl.applies_when[0], tuple)
+
+        mutable_predicates[0][1] = "https://example.invalid"
+        assert decl.applies_when == (("base_url", "https://openrouter.ai/api/v1"),)
+
     def test_applies_when_rejects_malformed_entry(self) -> None:
         with pytest.raises(ValueError, match=r"must be .* tuples"):
             CatalogValueSource(
                 field_name="model",
                 catalog_id="openrouter",
                 applies_when=(("base_url",),),  # type: ignore[arg-type]
+            )
+
+    def test_applies_when_rejects_string_entry(self) -> None:
+        with pytest.raises(ValueError, match=r"must be .* tuples"):
+            CatalogValueSource(
+                field_name="model",
+                catalog_id="openrouter",
+                applies_when=("ab",),  # type: ignore[arg-type]
+            )
+
+    def test_applies_when_rejects_non_string_values(self) -> None:
+        with pytest.raises(TypeError, match="expected_value must be str"):
+            CatalogValueSource(
+                field_name="model",
+                catalog_id="openrouter",
+                applies_when=(("base_url", 42),),  # type: ignore[arg-type]
             )
 
     def test_applies_when_rejects_empty_sibling_field(self) -> None:

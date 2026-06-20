@@ -309,7 +309,7 @@ class AzureBlobSink(BaseSink):
     name = "azure_blob"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:2612d1129f3cebdc"
+    source_file_hash: str | None = "sha256:f7d25a366d121488"
     config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 
@@ -623,8 +623,7 @@ class AzureBlobSink(BaseSink):
             # non-serializable object) is a per-row Tier-2/3 data fault, NOT a code
             # bug: divert that row (recorded + routed per on_write_failure) so one bad
             # value doesn't abort the whole blob upload. The blob upload stays
-            # all-or-nothing — but over the GOOD rows. CSV is unaffected (csv writes
-            # non-finite floats as text, so no serialization crash occurs there).
+            # all-or-nothing -- but over the GOOD rows.
             serializable_rows: list[dict[str, Any]] = []
             for i, output_row in enumerate(output_rows):
                 try:
@@ -634,6 +633,39 @@ class AzureBlobSink(BaseSink):
                     continue
                 serializable_rows.append(output_row)
             output_rows = serializable_rows
+        elif self._format == "csv":
+            # A row whose string representation cannot be encoded in the configured
+            # CSV codec (e.g. an emoji when encoding='cp1252') is a per-row Tier-2
+            # data fault. Trial-encode each incoming row individually so the offending
+            # row is diverted HERE before _serialize_rows encodes the whole batch in
+            # one shot. The blob upload stays all-or-nothing -- but over the GOOD rows.
+            # Per-row trial: serialize the row into a throwaway StringIO then encode.
+            # Mirrors the json.dumps trial above and the csv_sink._stage_rows_per_row pattern.
+            encodable_rows: list[dict[str, Any]] = []
+            # Use the SAME schema-aware fieldnames the real serializer computes
+            # (_serialize_csv -> _get_fieldnames_from_schema_or_rows), NOT just
+            # rows[0].keys(). The probe legitimately diverts a row whose fields fall
+            # outside the established set (fixed-mode column-lock violation -> per-row
+            # data fault, mirroring CSVSink / audit finding #6) via DictWriter's
+            # extrasaction='raise'. But rows[0].keys() under-counts the valid field
+            # set in flexible/observed mode, where a VALID extra field may first
+            # appear in a later row -- so that row was wrongly diverted before the
+            # serializer (which folds the extra in) ran. Computing fieldnames across
+            # all rows in schema order fixes the false divert while preserving the
+            # fixed-mode divert contract: in fixed mode the set is declared-only, so
+            # a genuine out-of-lock field still raises here and is diverted per-row.
+            trial_fieldnames = self._get_fieldnames_from_schema_or_rows(rows)
+            for i, row in enumerate(rows):
+                row_buf = io.StringIO()
+                trial_writer = csv.DictWriter(row_buf, fieldnames=trial_fieldnames)
+                try:
+                    trial_writer.writerow(row)
+                    row_buf.getvalue().encode(self._csv_options.encoding)
+                except (ValueError, csv.Error) as exc:
+                    self._divert_row(row, row_index=i, reason=f"CSV encoding ({self._csv_options.encoding}) failed: {exc}")
+                    continue
+                encodable_rows.append(row)
+            output_rows = encodable_rows
 
         # Render the blob path once per instance and reuse it across writes.
         rendered_path = self._get_or_init_blob_path(ctx)

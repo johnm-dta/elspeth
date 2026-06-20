@@ -1,19 +1,20 @@
-source:
-  plugin: csv
-  on_success: source_out
-  options:
-    path: examples/openrouter_multi_query_assessment/input.csv
-    schema:
-      mode: flexible
-      fields:
-      - 'user_id: str'
-      - 'cs1_background: str'
-      - 'cs1_symptoms: str'
-      - 'cs1_history: str'
-      - 'cs2_background: str'
-      - 'cs2_symptoms: str'
-      - 'cs2_history: str'
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: source_out
+    options:
+      path: examples/openrouter_multi_query_assessment/input.csv
+      schema:
+        mode: flexible
+        fields:
+        - 'user_id: str'
+        - 'cs1_background: str'
+        - 'cs1_symptoms: str'
+        - 'cs1_history: str'
+        - 'cs2_background: str'
+        - 'cs2_symptoms: str'
+        - 'cs2_history: str'
+      on_validation_failure: discard
 transforms:
 - plugin: llm
   name: assessment_multi_query

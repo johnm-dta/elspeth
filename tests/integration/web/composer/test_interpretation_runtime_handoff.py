@@ -303,6 +303,8 @@ async def test_runtime_handoff_cross_db_hash_anchored() -> None:
         source_node_id=source_node.node_id,
         row_index=0,
         data={"input": "demo"},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
     node_state = factory.execution.begin_node_state(
@@ -407,6 +409,8 @@ async def test_openrouter_hash_handoff_records_logical_llm_call_not_http_transpo
         source_node_id=source_node.node_id,
         row_index=0,
         data={"input": "demo"},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
     node_state = factory.execution.begin_node_state(
@@ -484,6 +488,8 @@ async def test_runtime_handoff_none_hash_records_null() -> None:
         source_node_id=source_node.node_id,
         row_index=0,
         data={"input": "demo"},
+        source_row_index=0,
+        ingest_sequence=0,
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
     node_state = factory.execution.begin_node_state(

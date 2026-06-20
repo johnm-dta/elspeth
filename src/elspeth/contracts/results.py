@@ -11,12 +11,14 @@ IMPORTANT:
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import parse_qs, urlparse
 
-from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl
 
 if TYPE_CHECKING:
@@ -46,6 +48,96 @@ def _require_pipeline_row(value: object, *, location: str) -> PipelineRow:
             "Build transform output with PipelineRow(data, contract) before returning it."
         )
     return value
+
+
+_ARTIFACT_TYPES = frozenset({"file", "database", "webhook"})
+_ARTIFACT_HASH_RE = re.compile(r"[0-9a-fA-F]+")
+_SENSITIVE_ARTIFACT_URI_PARAMS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "api_secret",
+        "apikey",
+        "auth",
+        "authorization",
+        "bearer",
+        "client_secret",
+        "credential",
+        "credentials",
+        "key",
+        "password",
+        "secret",
+        "sig",
+        "signature",
+        "token",
+        "x-api-key",
+    }
+)
+
+
+def _require_non_empty_str(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+    if not value.strip():
+        raise ValueError(f"{field_name} must be non-empty")
+    return value
+
+
+def _base_artifact_param_name(key: str) -> str:
+    bracket = key.find("[")
+    if bracket != -1:
+        key = key[:bracket]
+    dot = key.find(".")
+    if dot != -1:
+        key = key[:dot]
+    return key
+
+
+def _artifact_uri_candidates(path_or_uri: str) -> tuple[str, ...]:
+    candidates = [path_or_uri]
+    if path_or_uri.startswith("webhook://"):
+        candidates.append(path_or_uri.removeprefix("webhook://"))
+    if path_or_uri.startswith("db://"):
+        _, separator, nested_uri = path_or_uri.removeprefix("db://").partition("@")
+        if separator:
+            candidates.append(nested_uri)
+    return tuple(candidates)
+
+
+def _require_no_artifact_uri_credentials(path_or_uri: str) -> None:
+    for candidate in _artifact_uri_candidates(path_or_uri):
+        parsed = urlparse(candidate)
+        if parsed.password is not None:
+            raise ValueError("path_or_uri must not contain raw URL credentials")
+        if parsed.scheme in {"http", "https"} and parsed.username is not None:
+            raise ValueError("path_or_uri must not contain raw URL credentials")
+
+        for section_name, encoded_params in (("query", parsed.query), ("fragment", parsed.fragment)):
+            sensitive_keys = [
+                key
+                for key in parse_qs(encoded_params, keep_blank_values=True)
+                if _base_artifact_param_name(key.lower()) in _SENSITIVE_ARTIFACT_URI_PARAMS
+            ]
+            if sensitive_keys:
+                raise ValueError(f"path_or_uri must not contain sensitive {section_name} parameters: {sensitive_keys}")
+
+
+def _require_artifact_hash(content_hash: object) -> None:
+    value = _require_non_empty_str(content_hash, "content_hash")
+    if _ARTIFACT_HASH_RE.fullmatch(value) is None:
+        raise ValueError("content_hash must be a non-empty hex string")
+
+
+def _require_artifact_metadata(value: object, field_name: str = "metadata") -> None:
+    if value is None:
+        return
+    if not isinstance(value, MappingProxyType):
+        raise TypeError(f"{field_name} must be a frozen mapping, got {type(value).__name__}: {value!r}")
+    for key, item in value.items():
+        if type(key) is not str:
+            raise TypeError(f"{field_name} key must be str, got {type(key).__name__}: {key!r}")
+        if isinstance(item, MappingProxyType):
+            _require_artifact_metadata(item, f"{field_name}[{key!r}]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +241,8 @@ class TransformResult:
 
     def __post_init__(self) -> None:
         """Validate invariants - success and error results MUST satisfy their contracts."""
+        if self.status not in ("success", "error"):
+            raise ValueError("TransformResult status must be 'success' or 'error'.")
         if self.status == "success" and self.success_reason is None:
             raise ValueError(
                 "TransformResult with status='success' MUST provide success_reason. "
@@ -411,6 +505,8 @@ class RowResult:
         path: Provenance answer (always populated)
         sink_name: For paths that reach a sink, the destination sink name
         error: For ON_ERROR_ROUTED, type-safe error details for audit
+        scheduler_pending_sink: True only after the durable scheduler row for
+            this exact token has been transitioned to PENDING_SINK.
     """
 
     token: TokenInfo
@@ -419,8 +515,13 @@ class RowResult:
     path: TerminalPath
     sink_name: str | None = None
     error: FailureInfo | None = None
+    scheduler_pending_sink: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.scheduler_pending_sink) is not bool:
+            raise OrchestrationInvariantError(
+                f"RowResult.scheduler_pending_sink must be bool, got {type(self.scheduler_pending_sink).__name__}"
+            )
         if self.outcome is not None and (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
             raise OrchestrationInvariantError(f"RowResult: illegal (outcome, path) pair: ({self.outcome!r}, {self.path!r})")
         if self.outcome is None and self.path != TerminalPath.BUFFERED:
@@ -469,6 +570,14 @@ class ArtifactDescriptor:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "metadata")
+        artifact_type = _require_non_empty_str(self.artifact_type, "artifact_type")
+        if artifact_type not in _ARTIFACT_TYPES:
+            raise ValueError(f"artifact_type must be one of {sorted(_ARTIFACT_TYPES)}, got {artifact_type!r}")
+        path_or_uri = _require_non_empty_str(self.path_or_uri, "path_or_uri")
+        _require_no_artifact_uri_credentials(path_or_uri)
+        _require_artifact_hash(self.content_hash)
+        require_int(self.size_bytes, "size_bytes", min_value=0)
+        _require_artifact_metadata(self.metadata)
 
     @classmethod
     def for_file(
@@ -554,8 +663,8 @@ class SourceRow:
     """Result from source loading - either valid data or quarantined invalid data.
 
     ALL rows from sources MUST be wrapped in SourceRow:
-    - Valid rows: SourceRow.valid(row_dict, contract=contract)
-    - Invalid rows: SourceRow.quarantined(row_data, error, destination)
+    - Valid rows: SourceRow.valid(row_dict, contract=contract, source_row_index=index)
+    - Invalid rows: SourceRow.quarantined(row_data, error, destination, source_row_index=index)
 
     This makes source outcomes first-class engine concepts:
     - All rows get proper token_id for lineage
@@ -566,13 +675,18 @@ class SourceRow:
     Example usage in a source:
         try:
             validated = schema.model_validate(row)
-            yield SourceRow.valid(validated.to_row(), contract=contract)
+            yield SourceRow.valid(
+                validated.to_row(),
+                contract=contract,
+                source_row_index=source_row_index,
+            )
         except ValidationError as e:
             if on_validation_failure != "discard":
                 yield SourceRow.quarantined(
                     row=row,
                     error=str(e),
                     destination=on_validation_failure,
+                    source_row_index=source_row_index,
                 )
             # else: don't yield, row is intentionally discarded
     """
@@ -585,6 +699,7 @@ class SourceRow:
     quarantine_error: str | None = None
     quarantine_destination: str | None = None
     contract: SchemaContract | None = None
+    source_row_index: int | None = None
 
     def __post_init__(self) -> None:
         """Validate quarantine field invariants.
@@ -594,11 +709,17 @@ class SourceRow:
         accidental misuse where quarantine metadata is silently ignored).
         """
         if self.is_quarantined:
+            if self.source_row_index is None:
+                raise ValueError("Quarantined SourceRow must have source_row_index. Pass source_row_index= to SourceRow.quarantined().")
+            require_int(self.source_row_index, "SourceRow.source_row_index", min_value=0)
             if self.quarantine_error is None:
                 raise ValueError("Quarantined SourceRow must have quarantine_error")
             if self.quarantine_destination is None:
                 raise ValueError("Quarantined SourceRow must have quarantine_destination")
         else:
+            if self.source_row_index is None:
+                raise ValueError("Valid SourceRow must have source_row_index. Pass source_row_index= to SourceRow.valid().")
+            require_int(self.source_row_index, "SourceRow.source_row_index", min_value=0)
             if self.quarantine_error is not None:
                 raise ValueError(f"Non-quarantined SourceRow must not have quarantine_error, got: {self.quarantine_error!r}")
             if self.quarantine_destination is not None:
@@ -614,17 +735,19 @@ class SourceRow:
         row: dict[str, Any],
         *,
         contract: SchemaContract,
+        source_row_index: int,
     ) -> SourceRow:
         """Create a valid source row.
 
         Args:
             row: Validated row data
             contract: Schema contract for the row
+            source_row_index: Source-authored row position within its emission stream
 
         Returns:
             SourceRow with is_quarantined=False
         """
-        return cls(row=row, is_quarantined=False, contract=contract)
+        return cls(row=row, is_quarantined=False, contract=contract, source_row_index=source_row_index)
 
     @classmethod
     def quarantined(
@@ -632,6 +755,8 @@ class SourceRow:
         row: Any,
         error: str,
         destination: str,
+        *,
+        source_row_index: int,
     ) -> SourceRow:
         """Create a quarantined row result.
 
@@ -640,6 +765,8 @@ class SourceRow:
                  for malformed external data (e.g., JSON primitives).
             error: The validation error message
             destination: The sink name to route this row to
+            source_row_index: Source-authored row position for emitted
+                quarantined rows.
         """
         return cls(
             row=row,
@@ -647,6 +774,7 @@ class SourceRow:
             quarantine_error=error,
             quarantine_destination=destination,
             contract=None,  # Quarantined rows don't have contracts
+            source_row_index=source_row_index,
         )
 
     def to_pipeline_row(self) -> PipelineRow:

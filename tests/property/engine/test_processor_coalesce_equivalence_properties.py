@@ -54,7 +54,6 @@ def _make_processor(
     traversal = DAGTraversalContext(
         node_step_map=node_step_map,
         node_to_plugin={},
-        first_transform_node_id=node_ids[0],
         node_to_next=node_to_next,
         coalesce_node_map={coalesce_name: coalesce_node_id} if coalesce_name is not None and coalesce_node_id is not None else {},
     )
@@ -68,6 +67,7 @@ def _make_processor(
         source_on_success="default",
         traversal=traversal,
         coalesce_executor=coalesce_executor,
+        scheduler=factory.scheduler,
     )
 
     return processor, coalesce_executor if coalesce_executor is not None else Mock()
@@ -127,13 +127,29 @@ class TestCoalesceTriggerEquivalence:
         )
 
         legacy_should_handle = has_executor and has_branch and has_coalesce_name and current_step >= coalesce_step
-        node_should_handle = has_executor and has_branch and has_coalesce_name and current_step == coalesce_step
-        assert legacy_should_handle == node_should_handle
+        # ADR-030 §B (slice 5): a follower (no executor) arriving at the
+        # coalesce node is ALSO handled — it gets (True, None) → mark_blocked
+        # so the leader's intake adopts the arrival. The old predicate required
+        # has_executor; the new predicate does NOT gate on has_executor for the
+        # "at coalesce node" case (only for "before coalesce node" the executor
+        # check is irrelevant because current_step < coalesce_step returns early).
+        node_should_handle_with_executor = has_executor and has_branch and has_coalesce_name and current_step == coalesce_step
+        node_should_handle_without_executor = (not has_executor) and has_branch and has_coalesce_name and current_step == coalesce_step
+        node_should_handle = node_should_handle_with_executor or node_should_handle_without_executor
+        # Legacy (step-based) predicate is only compatible with the executor arm.
+        assert legacy_should_handle == node_should_handle_with_executor
         assert handled is node_should_handle
 
-        if node_should_handle:
-            coalesce_executor.accept.assert_called_once()
-            assert result is None
+        # Slice 3 re-pin (ADR-030 §E.2): acceptance is journal-first — the
+        # in-claim accept is gone for every arm. A handled token stashes its
+        # live barrier hold for the next drain iteration's intake instead.
+        # For the no-executor (follower) arm, the live_barrier_holds stash is
+        # SKIPPED — followers return early before the stash; mark_blocked is
+        # the only durable signal.
+        coalesce_executor.accept.assert_not_called()
+        assert result is None
+        if node_should_handle_with_executor:
+            hold = processor._live_barrier_holds["token-1"]
+            assert hold.barrier_key == "merge"
         else:
-            coalesce_executor.accept.assert_not_called()
-            assert result is None
+            assert "token-1" not in processor._live_barrier_holds

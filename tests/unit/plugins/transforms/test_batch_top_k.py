@@ -1,5 +1,6 @@
 """Tests for BatchTopK aggregation transform."""
 
+from decimal import Decimal
 from typing import Any
 
 import pytest
@@ -67,6 +68,26 @@ class TestBatchTopK:
             {"value": "a", "count": 3, "rate": 0.6},
             {"value": "b", "count": 1, "rate": 0.2},
         ]
+
+    @pytest.mark.parametrize("group_value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_group_key_returns_error_before_success(self, ctx: PluginContext, group_value: float) -> None:
+        """Non-finite group_by key must error before producing any output (B4.5-d)."""
+        from elspeth.plugins.transforms.batch_top_k import BatchTopK
+
+        transform = BatchTopK({"schema": DYNAMIC_SCHEMA, "field": "label", "group_by": "cohort", "k": 1})
+        rows = [
+            _make_row({"cohort": "A", "label": "x"}),
+            _make_row({"cohort": group_value, "label": "y"}),
+        ]
+
+        result = transform.process(rows, ctx)
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "validation_failed"
+        assert result.reason["cause"] == "non_finite_group_key"
+        assert result.reason["field"] == "cohort"
+        assert not result.retryable
 
     def test_group_by_emits_one_row_per_group(self, ctx: PluginContext) -> None:
         from elspeth.plugins.transforms.batch_top_k import BatchTopK
@@ -214,3 +235,19 @@ class TestBatchTopKConfig:
 
         with pytest.raises(PluginConfigError):
             BatchTopK({"schema": DYNAMIC_SCHEMA, **config})
+
+
+def test_non_finite_decimal_key_guarded() -> None:
+    """B4.5-d: a non-finite Decimal key is caught by the static guard (parity with batch_effect_size).
+
+    Decimal is not an allowed FieldContract type, so a Decimal key can only reach a
+    transform through an object-typed field; the guard must still reject it. Exercised at
+    the helper because the end-to-end path requires an object-typed key column.
+    """
+    from elspeth.plugins.transforms.batch_top_k import BatchTopK
+
+    guard = BatchTopK._is_non_finite_group_key
+    assert guard(Decimal("nan")) is True
+    assert guard(Decimal("inf")) is True
+    assert guard(Decimal("-inf")) is True
+    assert guard(Decimal("1")) is False

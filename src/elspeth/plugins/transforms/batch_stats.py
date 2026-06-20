@@ -8,20 +8,21 @@ will buffer rows and call process() with a list when the trigger fires.
 """
 
 import math
+from decimal import Decimal
 from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts.errors import TransformErrorReason
+from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
-from elspeth.plugins.transforms._scalar_buckets import same_scalar_bucket_value
+from elspeth.plugins.transforms._scalar_buckets import ScalarBucketKey, scalar_bucket_key
 
 type BatchStatsAggregateRow = dict[str, object]
 
@@ -70,7 +71,15 @@ class BatchStatsConfig(TransformDataConfig):
         """
         if self.group_by is None:
             return self
-        stat_fields = {"count", "sum", "batch_size", "skipped_non_finite", "skipped_non_finite_indices"}
+        stat_fields = {
+            "count",
+            "sum",
+            "batch_size",
+            "skipped_missing",
+            "skipped_missing_indices",
+            "skipped_non_finite",
+            "skipped_non_finite_indices",
+        }
         if self.compute_mean:
             stat_fields.add("mean")
         if self.group_by in stat_fields:
@@ -115,7 +124,7 @@ class BatchStats(BaseTransform):
     name = "batch_stats"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:7506d083ef17eb83"
+    source_file_hash: str | None = "sha256:1e2bb450d2ce2c35"
     config_model = BatchStatsConfig
     is_batch_aware = True  # CRITICAL: Engine buffers rows for batch processing
 
@@ -161,7 +170,15 @@ class BatchStats(BaseTransform):
             stat_fields.add("mean")
         # _all_possible_output_keys is stat fields + conditional fields (without group_by)
         # used at runtime for field-set operations.
-        self._all_possible_output_keys = frozenset(stat_fields | {"skipped_non_finite", "skipped_non_finite_indices"})
+        self._all_possible_output_keys = frozenset(
+            stat_fields
+            | {
+                "skipped_missing",
+                "skipped_missing_indices",
+                "skipped_non_finite",
+                "skipped_non_finite_indices",
+            }
+        )
 
         # group_by collision is now caught by BatchStatsConfig._reject_group_by_collision
         # model_validator — from_dict() above already enforced it.
@@ -244,21 +261,47 @@ class BatchStats(BaseTransform):
             )
         ]
 
+    @staticmethod
+    def _is_non_finite_group_key(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
+        return False
+
+    def _non_finite_group_key_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite group_by key (B4.5-d)."""
+        if self._group_by is None:
+            return None
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_group_key(row[self._group_by]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_group_key"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_group_key",
+            "field": self._group_by,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
+
     def _group_rows(self, rows: list[PipelineRow]) -> list[tuple[Any, list[tuple[int, PipelineRow]]]]:
         """Partition rows by group_by value while preserving first-seen order."""
         if self._group_by is None:
             return [(None, list(enumerate(rows)))]
 
-        groups: list[tuple[Any, list[tuple[int, PipelineRow]]]] = []
+        groups: dict[ScalarBucketKey, tuple[Any, list[tuple[int, PipelineRow]]]] = {}
         for row_index, row in enumerate(rows):
             group_value = row[self._group_by]
-            for existing_value, grouped_rows in groups:
-                if same_scalar_bucket_value(group_value, existing_value):
-                    grouped_rows.append((row_index, row))
-                    break
+            group_key = scalar_bucket_key(group_value)
+            grouped = groups.get(group_key)
+            if grouped is None:
+                groups[group_key] = (group_value, [(row_index, row)])
             else:
-                groups.append((group_value, [(row_index, row)]))
-        return groups
+                grouped[1].append((row_index, row))
+        return list(groups.values())
 
     def _aggregate_group(
         self,
@@ -267,10 +310,19 @@ class BatchStats(BaseTransform):
     ) -> tuple[BatchStatsAggregateRow, TransformResult | None]:
         """Aggregate one already-partitioned group."""
         values: list[int | float] = []
+        skipped_missing_indices: list[int] = []
         skipped_non_finite_indices: list[int] = []
         for row_index, row in grouped_rows:
             # Direct access - field must exist (KeyError = upstream bug)
             raw_value = row[self._value_field]
+
+            # None is a missing value, not a type error: skip-and-report it the
+            # same way every sibling batch transform does (batch_distribution_profile
+            # et al.). Raising here would abort the whole run on recoverable Tier-2/3
+            # data — the polarity bug this fix closes (plugins review C2).
+            if raw_value is None:
+                skipped_missing_indices.append(row_index)
+                continue
 
             # Contract enforcement: value_field must be numeric (int or float)
             # Tier 2 pipeline data - wrong types indicate upstream bug
@@ -295,10 +347,22 @@ class BatchStats(BaseTransform):
 
         count = len(values)
 
-        # All-non-finite is the same condition as empty batch — no real data to aggregate.
-        # Fabricating sum=0/count=0 would produce phantom statistics indistinguishable
-        # from a legitimate computation over zero-valued data.
-        if count == 0 and skipped_non_finite_indices:
+        # No aggregatable values is the same condition as an empty batch — no real
+        # data to aggregate. Fabricating sum=0/count=0 would produce phantom
+        # statistics indistinguishable from a legitimate computation over
+        # zero-valued data; an all-missing group would additionally hit mean=0/0
+        # (ZeroDivisionError) below. Return an audited error instead.
+        if count == 0 and (skipped_missing_indices or skipped_non_finite_indices):
+            # Missing values present: report each skipped row (sibling
+            # validation_failed shape). Pure non-finite preserves the historical
+            # all_non_finite reason its callers/tests already assert.
+            if skipped_missing_indices:
+                return {}, self._error_for_no_valid_values(
+                    grouped_rows,
+                    group_value,
+                    skipped_missing_indices,
+                    skipped_non_finite_indices,
+                )
             reason: TransformErrorReason = {
                 "reason": "all_non_finite",
                 "batch_size": len(grouped_rows),
@@ -351,6 +415,10 @@ class BatchStats(BaseTransform):
                     mean_error_reason["group_value"] = group_value
                 return {}, TransformResult.error(mean_error_reason, retryable=False)
 
+        if skipped_missing_indices:
+            result["skipped_missing"] = len(skipped_missing_indices)
+            result["skipped_missing_indices"] = skipped_missing_indices
+
         if skipped_non_finite_indices:
             result["skipped_non_finite"] = len(skipped_non_finite_indices)
             result["skipped_non_finite_indices"] = skipped_non_finite_indices
@@ -359,6 +427,37 @@ class BatchStats(BaseTransform):
             result[self._group_by] = group_value
 
         return result, None
+
+    def _error_for_no_valid_values(
+        self,
+        grouped_rows: list[tuple[int, PipelineRow]],
+        group_value: Any,
+        missing_indices: list[int],
+        non_finite_indices: list[int],
+    ) -> TransformResult:
+        """Audited error for a group with no aggregatable values.
+
+        Mirrors the sibling batch transforms' ``validation_failed`` shape so the
+        audit record names each skipped row instead of fabricating count=0/sum=0
+        or crashing on mean=0/0.
+        """
+        row_errors: list[RowErrorEntry] = []
+        for row_index in missing_indices:
+            row_errors.append({"row_index": row_index, "reason": "missing_value"})
+        for row_index in non_finite_indices:
+            row_errors.append({"row_index": row_index, "reason": "non_finite_value"})
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "no_valid_values",
+            "batch_size": len(grouped_rows),
+            "valid_count": 0,
+            "skipped_count": len(missing_indices) + len(non_finite_indices),
+            "row_errors": row_errors,
+        }
+        if self._group_by is not None:
+            reason["group_by"] = self._group_by
+            reason["group_value"] = group_value
+        return TransformResult.error(reason, retryable=False)
 
     def _output_contract_for(self, results: list[BatchStatsAggregateRow]) -> SchemaContract:
         """Build one shared output contract for aggregate result rows."""
@@ -399,6 +498,10 @@ class BatchStats(BaseTransform):
                 {"reason": "empty_batch"},
                 retryable=False,
             )
+
+        non_finite_error = self._non_finite_group_key_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
 
         results: list[BatchStatsAggregateRow] = []
         for group_value, grouped_rows in self._group_rows(rows):

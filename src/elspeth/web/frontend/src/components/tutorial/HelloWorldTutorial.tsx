@@ -107,7 +107,6 @@ export function HelloWorldTutorial(): JSX.Element {
           <TutorialTurn5AuditStory
             sessionId={state.sessionId}
             runId={state.runId}
-            sourceDataHash={state.sourceDataHash}
             onContinue={() => dispatch({ type: "continueToMode" })}
             onBack={goBack}
           />

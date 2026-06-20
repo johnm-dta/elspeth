@@ -112,6 +112,10 @@ function shouldApplyExecutionResult(
   );
 }
 
+function shouldApplyRunListResult(sessionId: string): boolean {
+  return useSessionStore.getState().activeSessionId === sessionId;
+}
+
 function assertNever(value: never): never {
   throw new Error(`Unhandled interpretation kind: ${String(value)}`);
 }
@@ -469,50 +473,78 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   connectWebSocket(runId: string) {
     // Close any existing WebSocket connection
     wsConnection?.close();
+    set({ wsDisconnected: false });
 
     // Open a WebSocket for live progress, passing JWT as query parameter
     const token = useAuthStore.getState().token ?? "";
+    function applyActiveRunEvent(event: RunEvent): boolean {
+      let applied = false;
+      set((state) => {
+        if (event.run_id !== runId || state.activeRunId !== runId) {
+          return {};
+        }
+        applied = true;
+        return applyRunEvent(state, event);
+      });
+      return applied;
+    }
+
+    function refreshTerminalProjections(): void {
+      const sessionId = useSessionStore.getState().activeSessionId;
+      if (sessionId) {
+        void get().loadRuns(sessionId);
+        void useBlobStore.getState().loadBlobs(sessionId);
+      }
+    }
+
     wsConnection = connectToRun(runId, token, {
+      onConnected() {
+        set({ wsDisconnected: false });
+      },
+      onDisconnected() {
+        set({ wsDisconnected: true });
+      },
       onProgress(event: RunEvent, _data: RunEventProgress) {
-        set((state) => applyRunEvent(state, event));
+        applyActiveRunEvent(event);
       },
       onError(event: RunEvent, _data: RunEventError) {
         // Non-terminal: per-row exception. Accumulate into progress.
-        set((state) => applyRunEvent(state, event));
+        applyActiveRunEvent(event);
       },
       onComplete(event: RunEvent, _data: RunEventCompleted) {
-        set((state) => applyRunEvent(state, event));
+        const applied = applyActiveRunEvent(event);
         // Refresh terminal route projections: run rows carry discard summaries,
         // and blob rows carry finalized output inventory.
-        const sessionId = useSessionStore.getState().activeSessionId;
-        if (sessionId) {
-          void get().loadRuns(sessionId);
-          void useBlobStore.getState().loadBlobs(sessionId);
+        if (applied) {
+          refreshTerminalProjections();
         }
       },
       onCancelled(event: RunEvent, _data: RunEventCancelled) {
-        set((state) => applyRunEvent(state, event));
+        const applied = applyActiveRunEvent(event);
         // Refresh terminal route projections: run rows carry discard summaries,
         // and blob rows may carry partial outputs after cancellation.
-        const sessionId = useSessionStore.getState().activeSessionId;
-        if (sessionId) {
-          void get().loadRuns(sessionId);
-          void useBlobStore.getState().loadBlobs(sessionId);
+        if (applied) {
+          refreshTerminalProjections();
         }
       },
       onFailed(event: RunEvent, _data: RunEventFailed) {
-        set((state) => applyRunEvent(state, event));
+        const applied = applyActiveRunEvent(event);
         // Refresh terminal route projections: run rows carry discard summaries,
         // and blob rows may carry partial outputs after failure.
-        const sessionId = useSessionStore.getState().activeSessionId;
-        if (sessionId) {
-          void get().loadRuns(sessionId);
-          void useBlobStore.getState().loadBlobs(sessionId);
+        if (applied) {
+          refreshTerminalProjections();
         }
       },
       onAuthFailure() {
         // Close code 4001 -- do not reconnect, trigger logout
         useAuthStore.getState().logout();
+      },
+      onRunUnavailable() {
+        // Close code 4004 -- run not found or not owned.
+        set({
+          wsDisconnected: false,
+          error: "Run is unavailable or you do not have access.",
+        });
       },
     });
   },
@@ -549,6 +581,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
   async loadRuns(sessionId: string) {
     try {
       const runs = await api.fetchRuns(sessionId);
+      if (!shouldApplyRunListResult(sessionId)) return;
       set({ runs });
     } catch {
       // Non-critical -- runs list can be stale temporarily

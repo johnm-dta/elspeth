@@ -59,7 +59,7 @@ class TestConfigGateToConfigGate:
         high_sink = CollectSink(name="high")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[gate1, gate2],
@@ -103,7 +103,7 @@ class TestConfigGateToConfigGate:
         high_sink = CollectSink(name="high")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[gate1, gate2, gate3],
@@ -168,7 +168,7 @@ class TestGateToGateWithDownstreamTransform:
         transform = TagTransform()
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[gate1, gate2],
@@ -204,7 +204,7 @@ class TestGateRouteToTransformChain:
         high_sink = CollectSink(name="high")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "high": as_sink(high_sink)},
             gates=[gate],

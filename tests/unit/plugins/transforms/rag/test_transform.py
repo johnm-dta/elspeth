@@ -313,6 +313,31 @@ class TestProcessFlow:
         assert result.status == "error"
         assert result.reason["reason"] == "retrieval_failed"
 
+    def test_missing_query_field_diverts_with_audit_record(self):
+        """A row lacking query_field must divert with audit record, not crash.
+
+        B3.8: QueryBuilder.build() had a bare dict subscript that raises
+        KeyError when query_field is absent. In the engine pipeline ADR-013
+        pre-empts this (DeclaredRequiredFieldsContract fires before process()),
+        but direct callers and any bypass path must also receive a typed error
+        result and an incremented quarantine_count audit surface rather than an
+        unhandled exception that crashes the row/run.
+        """
+        transform, _ = _setup_transform_with_mock_provider()
+        quarantine_before = transform._quarantine_count
+        # Row deliberately omits 'question' (the query_field)
+        row = _make_row({"other_field": "value"})
+        ctx = _mock_ctx()
+
+        result = transform.process(row, ctx)
+
+        assert result.status == "error", "Missing query_field must divert, not crash"
+        assert result.reason["reason"] == "missing_field"
+        assert result.reason["field"] == "question"
+        assert transform._quarantine_count == quarantine_before + 1, (
+            "quarantine_count must be incremented so the audit record reflects the divert"
+        )
+
 
 class TestOnComplete:
     def test_emits_telemetry(self):

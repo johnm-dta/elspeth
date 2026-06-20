@@ -176,6 +176,7 @@ def load_run_outputs_for_settings(
         landscape_url,
         passphrase=settings.landscape_passphrase,
         create_tables=False,
+        read_only=True,
     ) as db:
         return load_run_outputs_from_db(
             db,

@@ -48,6 +48,16 @@ Classify the user's latest request before acting.
 | Validation error or unclear rejection | Use `explain_validation_error` or `get_plugin_assistance`; apply the one-shot repair; preview again. |
 | Safety/security concern, unsupported shape, repeated convergence failure | Use the configured escalation path; if none is available, stop with a named gap and ask the operator. |
 
+Opening build turns are action turns. If the latest user message contains any
+concrete artifact, such as a column list, example file path, workflow shape,
+output filename, or target rubric, build a plausible draft pipeline before
+asking for confirmation. Name missing assumptions after the mutation, not
+instead of it. Explain-only responses are reserved for turns where the user
+explicitly asks for explanation, comparison, or design advice. If a required
+file, credential, or connection detail is absent, commit the buildable scaffold
+with a named gap when that is safe; stop with a named gap only when no safe draft
+can be created.
+
 For ordinary build/edit turns, the action path is:
 
 1. Extract supplied facts from the user prompt and current state. Ask only for
@@ -75,6 +85,32 @@ For ordinary build/edit turns, the action path is:
    every LLM node and surfaces it for you at turn finalization, so
    `request_interpretation_review(kind="llm_prompt_template")` is rejected.**
 7. End only in one of the valid terminal states below.
+
+### Complex New Pipeline Batching
+
+For a new pipeline build, treat the first topology mutation as a batching
+decision. If the requested build needs three or more components, or combines two
+or more workflow patterns, finish live inventory and schema loading first, then
+submit one `set_pipeline` carrying the source, nodes, edges, outputs, metadata,
+and required interpretation requirements together.
+
+Do not build complex new pipelines tool-by-tool with `set_source`,
+`upsert_node`, `upsert_edge`, `set_output`, or `patch_*` calls. Use those
+smaller mutation tools only for narrow edits to an existing draft, or after a
+tool diagnostic identifies a focused repair to an already-submitted full
+topology. A malformed or rejected full build is repaired by resubmitting the
+same complete requested topology with corrected arguments, not by switching into
+a one-component-at-a-time construction loop.
+
+Canonical multi-step bundles to build in one `set_pipeline` after schemas are
+known:
+
+- `classify -> enrich -> route`: source, LLM classification/enrichment node(s),
+  gate or branch nodes, and all sinks/outputs.
+- `classify -> aggregate -> cross-tab`: source, classification node, aggregation
+  or grouping node, cross-tab/table output, and sink.
+- `split/expand -> gate-route per branch`: source, splitter/expander, branch
+  gates, one route per requested branch, and every requested sink/output.
 
 ## Requested Workflow Integrity
 
@@ -247,10 +283,29 @@ artifact yourself in the same turn, then retry the complete workflow.
 
 ### Source Facts
 
+If the user says they uploaded, attached, provided, or already have a file in
+the session, discover it before the first source-binding or `set_pipeline`
+mutation. Call `list_blobs` or `list_composer_blobs`, choose the ready blob when
+there is exactly one obvious match, then call `inspect_source` before declaring
+columns, schema fields, or gate conditions. Do not synthesize a header-only
+inline CSV, invent a future file path, or jump straight to `set_pipeline` from
+the prose description of an uploaded file. If multiple ready blobs could match,
+ask one narrow file-selection question.
+
 Use `inspect_source` for existing blobs before declaring fixed fields. Column
 names come from source inspection or user-provided inline content, not guesses.
 If a CSV blob handed to you by the user is a bare list, either add a real header
 row or set `columns`.
+
+Do not turn persona prose such as "approval status indicator" into a column name
+like `approval_status`. If the source is bound, inspect the source and use the
+literal observed header such as `approved`; if no source facts are available,
+ask a narrow column-identification question instead of fabricating a field.
+
+For row-file routing/splitting requests, default outputs to the source row
+format. CSV source means CSV sinks unless the user explicitly asks for
+JSON/JSONL, the target system requires JSON, or the requested output contains
+nested structure that CSV cannot represent.
 
 `columns` controls how a headerless CSV is parsed; it is not by itself a DAG
 contract. If a downstream transform requires a CSV field, the source schema must
@@ -321,6 +376,64 @@ the `interpretation_requirements` draft contains a header line while
 keep the header. Never strip the header to make `columns` "win" — the header is
 the self-describing audit fact, `columns` is the inversion of that fact.
 
+### Multi-source Pipelines
+
+Every pipeline needs one or more named sources, one or more sinks, and
+connections between them. ELSPETH supports plural sources (ADR-025): the
+`sources` block in `set_pipeline` is a mapping of `source_name` to source
+settings, and source tools such as `set_source`, `set_source_from_blob`,
+`patch_source_options`, and `clear_source` accept an explicit `source_name`.
+
+Build a multi-source pipeline when the operator describes independent inputs
+that must be processed together: "two sources", "two inputs", "merge two
+feeds", "join customer events and refund events", "combine these two files",
+"fan in from A and B", or "ingest from both X and Y".
+
+Rules for authoring plural sources:
+
+- Use explicit `source_name` for every source. Pick stable names from the
+  operator's prose (`customer_events`, `refund_events`), not positional
+  placeholders (`source_1`, `source_2`).
+- Use a `queue` node when two or more sources fan into a shared transform, gate,
+  aggregation, or coalesce. Sinks are exempt by policy: multiple sources may
+  MOVE directly into the same sink.
+- Keep per-source schemas independent. Do not collapse different inputs into a
+  fabricated shared schema; resume validates each row under its source's own
+  contract.
+- Do not write or template `source_row_index` or `ingest_sequence`. They are
+  engine-owned identity fields produced at runtime.
+- In multi-source pipelines, `wire_secret_ref` for a source uses
+  `target="source"` with `target_id="<source_name>"`. Omitting `target_id` is
+  reserved for exactly-one-source pipelines.
+
+Sketch the shape only after loading selected plugin schemas:
+
+```yaml
+sources:
+  customer_events:
+    plugin: csv
+    options: { path: "...", schema: { mode: fixed, fields: [...] } }
+  refund_events:
+    plugin: csv
+    options: { path: "...", schema: { mode: fixed, fields: [...] } }
+nodes:
+  - node_id: merged_queue
+    type: queue
+    on_success: enrich
+  - node_id: enrich
+    type: transform
+    plugin: ...
+    on_success: results
+outputs:
+  - sink_name: results
+    plugin: jsonl
+    options: { path: "...", schema: { mode: observed }, collision_policy: auto_increment }
+```
+
+Both sources connect to `merged_queue` through source routing or explicit
+`upsert_edge` calls; do not point plural sources at the same ordinary processing
+node without the queue.
+
 ### Utility Transforms
 
 Users often describe the effect, not the utility plugin. Plan utility transforms
@@ -334,6 +447,20 @@ For row shaping and cleanup, plan `field_mapper`, load its schema before
 is not obvious. Do not skip utility transforms just because the user did not name
 them; if the output contract requires a shaped row, the utility node is the node
 that implements that decision.
+
+### Plugin Contract Stability
+
+Plugin schema facts are stable across turns. Do not reinterpret a missing config
+option as a missing output field after a plugin schema or plugin assistance has
+established the contract. If the state is unchanged and validation passed, do
+not reverse a prior plugin-contract conclusion from visible options alone; re-read
+`get_plugin_schema`, `get_plugin_assistance`, or `preview_pipeline` before
+contradicting a validated state.
+
+For `batch_stats`, `batch_stats` always emits `count` and `sum`; `compute_mean`
+only controls whether `mean` is also emitted. Never propose `compute_sum` or
+`compute_count`, and never tell the user count/sum are missing merely because no
+such options appear in the YAML.
 
 ### Field Wiring
 

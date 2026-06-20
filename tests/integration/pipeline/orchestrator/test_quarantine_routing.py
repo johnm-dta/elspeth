@@ -40,6 +40,7 @@ from elspeth.core.landscape.schema import (
     edges_table,
     node_states_table,
     routing_events_table,
+    rows_table,
     token_outcomes_table,
     tokens_table,
 )
@@ -97,7 +98,7 @@ class QuarantineSource(_TestSourceBase):
         from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
         # Yield valid rows first
-        for row in self._valid_rows:
+        for source_row_index, row in enumerate(self._valid_rows):
             fields = tuple(
                 FieldContract(
                     normalized_name=key,
@@ -111,14 +112,15 @@ class QuarantineSource(_TestSourceBase):
             contract = SchemaContract(mode="OBSERVED", fields=fields, locked=True)
             if self._schema_contract is None:
                 self._schema_contract = contract
-            yield SourceRow.valid(row, contract=contract)
+            yield SourceRow.valid(row, contract=contract, source_row_index=source_row_index)
 
         # Yield quarantined rows
-        for row_data, error_msg in self._quarantine_rows:
+        for quarantine_index, (row_data, error_msg) in enumerate(self._quarantine_rows, start=len(self._valid_rows)):
             yield SourceRow.quarantined(
                 row=row_data,
                 error=error_msg,
                 destination=self._quarantine_destination,
+                source_row_index=quarantine_index,
             )
 
 
@@ -140,6 +142,7 @@ class MissingDestinationSource(_TestSourceBase):
             is_quarantined=True,
             quarantine_error="validation failed",
             quarantine_destination="",  # Empty string — falsy
+            source_row_index=0,
         )
 
 
@@ -159,6 +162,7 @@ class InvalidDestinationSource(_TestSourceBase):
             row={"bad": "data"},
             error="validation failed",
             destination="nonexistent_sink",
+            source_row_index=0,
         )
 
 
@@ -178,7 +182,7 @@ class TestQuarantineRouteValidation:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -203,7 +207,7 @@ class TestQuarantineRouteValidation:
         default_sink = CollectSink("default")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink)},
         )
@@ -240,6 +244,7 @@ class TestQuarantineRouteValidation:
                     row={"bad": True},
                     error="validation error",
                     destination="wrong_sink",
+                    source_row_index=0,
                 )
 
         source = MismatchDestSource()
@@ -247,7 +252,7 @@ class TestQuarantineRouteValidation:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -274,7 +279,7 @@ class TestQuarantineRouteValidation:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -308,7 +313,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -348,7 +353,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -395,7 +400,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -416,11 +421,13 @@ class TestQuarantineHappyPath:
         # Query token outcomes
         with db.engine.connect() as conn:
             outcomes = conn.execute(select(token_outcomes_table).where(token_outcomes_table.c.run_id == result.run_id)).fetchall()
+            rows = conn.execute(select(rows_table.c.source_row_index).where(rows_table.c.run_id == result.run_id)).scalars().all()
 
         quarantined_outcomes = [
             o for o in outcomes if (o.outcome, o.path) == (TerminalOutcome.FAILURE.value, TerminalPath.QUARANTINED_AT_SOURCE.value)
         ]
         assert len(quarantined_outcomes) == 1, f"Expected 1 QUARANTINED outcome, got {len(quarantined_outcomes)}"
+        assert rows == [0]
 
         outcome = quarantined_outcomes[0]
         assert outcome.completed == 1, "QUARANTINED must be a terminal outcome"
@@ -443,7 +450,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -503,6 +510,59 @@ class TestQuarantineHappyPath:
         for co in completed_outcomes:
             assert co.sink_name == "default"
 
+    def test_quarantined_rows_preserve_source_authored_row_indexes(self, payload_store) -> None:
+        """Quarantined rows persist the source-authored source_row_index, not loop position."""
+        db = make_landscape_db()
+
+        class SparseQuarantineSource(_TestSourceBase):
+            name = "sparse_quarantine_source"
+            output_schema = _TestSchema
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.on_success = "default"
+                self._on_validation_failure = "quarantine"
+
+            def load(self, ctx: Any) -> Iterator[SourceRow]:
+                yield SourceRow.quarantined(
+                    row={"bad": "first"},
+                    error="first bad row",
+                    destination="quarantine",
+                    source_row_index=10,
+                )
+                yield SourceRow.quarantined(
+                    row={"bad": "second"},
+                    error="second bad row",
+                    destination="quarantine",
+                    source_row_index=42,
+                )
+
+        source = SparseQuarantineSource()
+        default_sink = CollectSink("default")
+        quarantine_sink = CollectSink("quarantine")
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[],
+            sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
+        )
+
+        result = Orchestrator(db).run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        # All rows quarantined = a clean determination on every row, so the
+        # terminal verdict is COMPLETED_WITH_FAILURES, not FAILED (see
+        # derive_terminal_run_status in contracts/run_result.py).
+        assert result.status == RunStatus.COMPLETED_WITH_FAILURES
+        assert result.rows_quarantined == 2
+        with db.engine.connect() as conn:
+            source_row_indexes = (
+                conn.execute(
+                    select(rows_table.c.source_row_index).where(rows_table.c.run_id == result.run_id).order_by(rows_table.c.ingest_sequence)
+                )
+                .scalars()
+                .all()
+            )
+        assert source_row_indexes == [10, 42]
+
     def test_quarantine_non_dict_row_data(self, payload_store) -> None:
         """Quarantined rows with non-dict data (e.g., JSON primitives) route correctly."""
         db = make_landscape_db()
@@ -520,7 +580,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -557,7 +617,7 @@ class TestQuarantineHappyPath:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -598,7 +658,7 @@ class TestQuarantineNonCanonicalData:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -628,7 +688,7 @@ class TestQuarantineNonCanonicalData:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -662,7 +722,7 @@ class TestQuarantineNonCanonicalData:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )
@@ -705,7 +765,7 @@ class TestQuarantineNonCanonicalData:
         quarantine_sink = CollectSink("quarantine")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
         )

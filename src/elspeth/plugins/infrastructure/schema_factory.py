@@ -11,6 +11,7 @@ CRITICAL: The `allow_coercion` parameter enforces the three-tier trust model:
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import numpy as np
@@ -26,19 +27,21 @@ ExtraMode = Literal["allow", "forbid"]
 
 def _find_non_finite_value_path(value: Any, path: str = "$") -> str | None:
     """Find the first path containing a non-finite float value."""
-    value_type = type(value)
-
-    if value_type is float and not math.isfinite(value):
+    # isinstance (not exact-type) so container/scalar subclasses cannot fail open:
+    # a NaN nested in an OrderedDict/Mapping subclass or a namedtuple (tuple
+    # subclass) must still be caught at the source boundary. bool is excluded
+    # (subclass of int, not float); str/bytes are excluded from the Sequence arm.
+    if isinstance(value, float) and not math.isfinite(value):
         return path
 
-    if value_type is dict:
+    if isinstance(value, Mapping):
         for key, nested in value.items():
             nested_path = _find_non_finite_value_path(nested, f"{path}.{key!s}")
             if nested_path is not None:
                 return nested_path
         return None
 
-    if value_type in {list, tuple}:
+    if isinstance(value, (list, tuple)):
         for idx, nested in enumerate(value):
             nested_path = _find_non_finite_value_path(nested, f"{path}[{idx}]")
             if nested_path is not None:
@@ -57,7 +60,7 @@ def _find_non_finite_value_path(value: Any, path: str = "$") -> str | None:
     # harbour the NaN/Infinity floats this scanner reports, so they are skipped.
     # (Complex arrays were never reported by the prior float-only element check
     # either; np.floating preserves that — np.number would wrongly include them.)
-    if value_type is np.ndarray and value.size > 0 and np.issubdtype(value.dtype, np.floating) and np.any(~np.isfinite(value)):
+    if isinstance(value, np.ndarray) and value.size > 0 and np.issubdtype(value.dtype, np.floating) and np.any(~np.isfinite(value)):
         for idx, elem in enumerate(value.flat):
             if not np.isfinite(elem):
                 indices = np.unravel_index(idx, value.shape)

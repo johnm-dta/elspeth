@@ -25,9 +25,22 @@ chaosllm serve --port 8199 --config examples/chaosllm_endurance/chaos_config.yam
 # Using the convenience script (starts ChaosLLM + runs pipeline)
 ./examples/chaosllm_endurance/run.sh
 
+# Bounded dogfood smoke: 20 rows = 200 mock LLM calls
+CHAOSLLM_ENDURANCE_ROWS=20 ./examples/chaosllm_endurance/run.sh
+
 # Or manually
 elspeth run --settings examples/chaosllm_endurance/settings.yaml --execute
 ```
+
+Bounded smoke runs write a separate `input.<rows>.csv` and export
+`CHAOSLLM_ENDURANCE_INPUT_PATH` for the pipeline, so they do not replace the
+default `input.csv`. The script also regenerates whichever input file it is
+about to use when the on-disk row count does not match `CHAOSLLM_ENDURANCE_ROWS`.
+
+The full default run is an endurance workload: 10,000 rows expand to 100,000
+mock LLM calls before retries. Do not use the full run as an ordinary examples
+dogfood gate. For release dogfood, run the bounded smoke form above or capture a
+few minutes of clean interruption/retry behavior against the ChaosLLM server.
 
 ## Output
 

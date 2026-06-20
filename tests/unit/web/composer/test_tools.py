@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -73,6 +74,20 @@ def _empty_state() -> CompositionState:
         metadata=PipelineMetadata(),
         version=1,
     )
+
+
+def _default_source(state: CompositionState) -> SourceSpec | None:
+    return state.sources.get("source")
+
+
+def _pipeline_state_default_source(data: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    sources = data["sources"]
+    if not isinstance(sources, Mapping):
+        raise AssertionError("get_pipeline_state data['sources'] must be a mapping")
+    source = sources.get("source")
+    if source is not None and not isinstance(source, Mapping):
+        raise AssertionError("get_pipeline_state data['sources']['source'] must be a mapping")
+    return source
 
 
 def _mock_catalog() -> MagicMock:
@@ -411,10 +426,86 @@ class TestSetSource:
             catalog,
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "csv"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "csv"
         assert result.updated_state.version == 2
         assert "source" in result.affected_nodes
+
+    def test_set_source_with_source_name_adds_named_source(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        first = execute_tool(
+            "set_source",
+            {
+                "source_name": "customers",
+                "plugin": "csv",
+                "on_success": "customer_rows",
+                "options": {"path": "/data/customers.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        second = execute_tool(
+            "set_source",
+            {
+                "source_name": "orders",
+                "plugin": "json",
+                "on_success": "order_rows",
+                "options": {"path": "/data/orders.json", "schema": {"mode": "observed"}},
+                "on_validation_failure": "bad_orders",
+            },
+            first.updated_state,
+            catalog,
+        )
+
+        assert second.success is True
+        assert tuple(second.updated_state.sources) == ("customers", "orders")
+        assert second.updated_state.sources["orders"].plugin == "json"
+        assert "source:orders" in second.affected_nodes
+
+    def test_named_source_patch_and_clear_target_only_selected_source(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        customers = execute_tool(
+            "set_source",
+            {
+                "source_name": "customers",
+                "plugin": "csv",
+                "on_success": "customer_rows",
+                "options": {"path": "/data/customers.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            state,
+            catalog,
+        ).updated_state
+        both = execute_tool(
+            "set_source",
+            {
+                "source_name": "orders",
+                "plugin": "json",
+                "on_success": "order_rows",
+                "options": {"path": "/data/orders.json", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            customers,
+            catalog,
+        ).updated_state
+
+        patched = execute_tool(
+            "patch_source_options",
+            {"source_name": "orders", "patch": {"path": "/data/orders-patched.json"}},
+            both,
+            catalog,
+        )
+        cleared = execute_tool("clear_source", {"source_name": "customers"}, patched.updated_state, catalog)
+
+        assert patched.success is True
+        assert patched.updated_state.sources["orders"].options["path"] == "/data/orders-patched.json"
+        assert patched.updated_state.sources["customers"].options["path"] == "/data/customers.csv"
+        assert cleared.success is True
+        assert tuple(cleared.updated_state.sources) == ("orders",)
 
     def test_on_validation_failure_accepts_sink_name(self) -> None:
         """on_validation_failure can be a sink name — not just 'discard'/'quarantine'.
@@ -438,8 +529,8 @@ class TestSetSource:
             catalog,
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.on_validation_failure == "bad_rows_sink"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).on_validation_failure == "bad_rows_sink"
 
     def test_unknown_plugin_fails(self) -> None:
         state = _empty_state()
@@ -457,7 +548,7 @@ class TestSetSource:
             catalog,
         )
         assert result.success is False
-        assert result.updated_state.source is None  # unchanged
+        assert _default_source(result.updated_state) is None  # unchanged
         assert result.updated_state.version == 1
         assert result.data is not None
         assert "foobar" in result.data["error"].lower()
@@ -501,7 +592,7 @@ class TestSetSource:
             catalog,
         )
         assert result.success is False
-        assert result.updated_state.source is None
+        assert _default_source(result.updated_state) is None
         assert "set_source_from_blob" in result.data["error"]
 
     def test_set_source_rejects_manual_source_authoring_in_options(self) -> None:
@@ -530,7 +621,7 @@ class TestSetSource:
         )
 
         assert result.success is False
-        assert result.updated_state.source is None
+        assert "source" not in result.updated_state.sources
         assert SOURCE_AUTHORING_KEY in result.data["error"]
 
 
@@ -779,7 +870,7 @@ class TestUpsertNode:
                 "on_success": None,
                 "options": {},
                 "condition": "row['x'] > 0",
-                "routes": {"high": "s1", "low": "s2"},
+                "routes": {"true": "s1", "false": "s2"},
             },
             state,
             catalog,
@@ -852,6 +943,60 @@ class TestUpsertNode:
         )
         assert result.success is False
         assert "Invalid gate condition syntax" in result.data["error"]
+        assert result.updated_state.version == 1
+
+    def test_gate_boolean_condition_custom_labels_rejected(self) -> None:
+        """upsert_node rejects a boolean gate condition with non-true/false labels.
+
+        Mirrors GateSettings.validate_boolean_routes at the tool boundary so the
+        composer does not green-light a pipeline runtime config later rejects.
+        Regression for elspeth-08e17b9253.
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "g1",
+                "node_type": "gate",
+                "plugin": None,
+                "input": "in",
+                "on_success": None,
+                "options": {},
+                "condition": "row['x'] > 0",
+                "routes": {"high": "s1", "low": "s2"},
+            },
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "boolean condition" in result.data["error"]
+        assert result.updated_state.version == 1
+
+    def test_gate_numeric_condition_rejected(self) -> None:
+        """upsert_node rejects a provably-numeric gate condition (never a route label).
+
+        Regression for elspeth-08e17b9253.
+        """
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "g1",
+                "node_type": "gate",
+                "plugin": None,
+                "input": "in",
+                "on_success": None,
+                "options": {},
+                "condition": "row['x'] + 1",
+                "routes": {"a": "s1"},
+            },
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "numeric value" in result.data["error"]
         assert result.updated_state.version == 1
 
     def test_gate_eval_call_rejected(self) -> None:
@@ -1325,8 +1470,8 @@ class TestUpsertEdge:
             catalog,
         )
         assert r3.success is True
-        assert r3.updated_state.source is not None
-        assert r3.updated_state.source.on_success == "main"
+        assert _default_source(r3.updated_state) is not None
+        assert _default_source(r3.updated_state).on_success == "main"
 
     def test_edge_to_node_does_not_sync(self) -> None:
         """Edge from node to another node does NOT change connection fields."""
@@ -2700,8 +2845,8 @@ class TestGetPipelineState:
 
         # Use to_dict() for structural checks — result.data is frozen by ToolResult.__post_init__
         data = result.to_dict()["data"]
-        assert data["source"] is not None
-        assert data["source"]["plugin"] == "csv"
+        assert _pipeline_state_default_source(data) is not None
+        assert _pipeline_state_default_source(data)["plugin"] == "csv"
         assert len(data["nodes"]) == 1
         assert data["nodes"][0]["id"] == "t1"
         assert len(data["outputs"]) == 1
@@ -2721,7 +2866,7 @@ class TestGetPipelineState:
         data = result.to_dict()["data"]
         assert data["inspection"]["resolved_component"] == "full"
         assert "full" in data["inspection"]["accepted_full_state_aliases"]
-        assert data["source"] is not None
+        assert _pipeline_state_default_source(data) is not None
         assert data["nodes"][0]["id"] == "t1"
         assert data["outputs"][0]["sink_name"] == "out"
         assert data["edges"][0]["id"] == "e1"
@@ -2749,7 +2894,7 @@ class TestGetPipelineState:
 
         # to_dict() runs deep_thaw on result.data — options must be plain dicts
         data = result.to_dict()["data"]
-        source_opts = data["source"]["options"]
+        source_opts = _pipeline_state_default_source(data)["options"]
         assert isinstance(source_opts, dict)
         assert isinstance(source_opts.get("schema"), dict)
 
@@ -2764,8 +2909,8 @@ class TestGetPipelineState:
         result = execute_tool("get_pipeline_state", {"component": "source"}, state, catalog)
         assert result.success is True
         data = result.to_dict()["data"]
-        assert "source" in data
-        assert data["source"]["plugin"] == "csv"
+        assert "sources" in data
+        assert _pipeline_state_default_source(data)["plugin"] == "csv"
         # Should not contain nodes/outputs/edges
         assert "nodes" not in data
         assert "outputs" not in data
@@ -2778,7 +2923,7 @@ class TestGetPipelineState:
         result = execute_tool("get_pipeline_state", {"component": "source"}, state, catalog)
         assert result.success is True
         data = result.to_dict()["data"]
-        assert data["source"] is None
+        assert _pipeline_state_default_source(data) is None
 
     def test_component_node_by_id(self) -> None:
         """component=<node_id> returns that node's details."""
@@ -2849,7 +2994,7 @@ class TestGetPipelineState:
         result = execute_tool("get_pipeline_state", {}, state, catalog)
         assert result.success is True
         data = result.to_dict()["data"]
-        assert data["source"] is None
+        assert _pipeline_state_default_source(data) is None
         assert data["nodes"] == []
         assert data["outputs"] == []
         assert data["edges"] == []
@@ -2885,8 +3030,8 @@ class TestGetPipelineState:
         data = result.to_dict()["data"]
         # path key remains visible so the LLM can tell the source is configured,
         # but the internal storage value itself is not exposed.
-        assert data["source"]["options"]["path"] == EXPECTED_REDACTED_BLOB_SOURCE_PATH
-        assert data["source"]["options"]["blob_ref"] == "abc123"
+        assert _pipeline_state_default_source(data)["options"]["path"] == EXPECTED_REDACTED_BLOB_SOURCE_PATH
+        assert _pipeline_state_default_source(data)["options"]["blob_ref"] == "abc123"
         assert "/internal/blobs/abc123.csv" not in str(data)
 
 
@@ -3097,9 +3242,32 @@ class TestBlobTools:
             **_verbatim_blob_context(self.engine, self.session_id, "post,run\n1,1"),
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "csv"
-        assert result.updated_state.source.on_validation_failure == "discard"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "csv"
+        assert _default_source(result.updated_state).on_validation_failure == "discard"
+
+    def test_set_source_from_blob_wires_named_source(self) -> None:
+        """Blob-backed sources must be reachable as explicit named roots."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "set_source_from_blob",
+            {
+                "blob_id": self.blob_id,
+                "source_name": "orders",
+                "on_success": "orders_rows",
+                "options": {"schema": {"mode": "observed"}},
+            },
+            state,
+            catalog,
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        assert result.updated_state.sources["orders"].plugin == "csv"
+        assert result.updated_state.sources["orders"].options["blob_ref"] == self.blob_id
+        assert result.affected_nodes == ("source:orders",)
 
     def test_set_source_from_plain_text_blob_uses_text_source(self) -> None:
         """text/plain blob should auto-resolve to the 'text' source plugin."""
@@ -3122,8 +3290,8 @@ class TestBlobTools:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "text"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "text"
 
     def test_set_source_from_jsonl_blob_uses_json_plugin_with_format(self) -> None:
         """Regression: JSONL MIME types must resolve to 'json' plugin with format='jsonl'."""
@@ -3146,9 +3314,9 @@ class TestBlobTools:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "json"
-        assert result.updated_state.source.options["format"] == "jsonl"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "json"
+        assert _default_source(result.updated_state).options["format"] == "jsonl"
 
     def test_set_source_from_blob_merges_caller_options(self) -> None:
         """Caller-provided options are merged with blob-derived options.
@@ -3183,14 +3351,14 @@ class TestBlobTools:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.plugin == "text"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).plugin == "text"
         # Caller options merged in
-        assert result.updated_state.source.options["column"] == "line"
-        assert result.updated_state.source.options["schema"] == {"mode": "observed"}
+        assert _default_source(result.updated_state).options["column"] == "line"
+        assert _default_source(result.updated_state).options["schema"] == {"mode": "observed"}
         # Blob-derived options still present (path is internal, blob_ref is visible)
-        assert "blob_ref" in result.updated_state.source.options
-        assert result.updated_state.source.options["blob_ref"] == self.blob_id
+        assert "blob_ref" in _default_source(result.updated_state).options
+        assert _default_source(result.updated_state).options["blob_ref"] == self.blob_id
 
     def test_set_source_from_blob_blob_options_override_caller(self) -> None:
         """Blob-derived path and blob_ref cannot be overridden by caller.
@@ -3220,10 +3388,10 @@ class TestBlobTools:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
+        assert _default_source(result.updated_state) is not None
         # Blob's path and ref take precedence — caller cannot override
-        assert result.updated_state.source.options["blob_ref"] == self.blob_id
-        assert result.updated_state.source.options["path"] != "/etc/passwd"
+        assert _default_source(result.updated_state).options["blob_ref"] == self.blob_id
+        assert _default_source(result.updated_state).options["path"] != "/etc/passwd"
 
     def test_set_source_from_blob_gets_prior_validation(self) -> None:
         """Blob mutation tools must populate prior_validation for validation delta."""
@@ -4729,6 +4897,43 @@ class TestSecretTools:
         for item in result.data:
             assert "value" not in item
 
+    def test_list_secret_refs_returns_unavailability_reason(self) -> None:
+        """Unavailable secret refs expose structural reasons, never values."""
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        svc = MagicMock()
+        svc.list_refs.return_value = [
+            SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="server",
+                available=False,
+                source_kind="env",
+                reason="fingerprint_resolver_not_configured",
+            )
+        ]
+
+        result = execute_tool(
+            "list_secret_refs",
+            {},
+            state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is True
+        assert len(result.data) == 1
+        assert dict(result.data[0]) == {
+            "name": "OPENROUTER_API_KEY",
+            "scope": "server",
+            "available": False,
+            "source_kind": "env",
+            "reason": "fingerprint_resolver_not_configured",
+        }
+        assert "value" not in repr(result.to_dict())
+
     def test_validate_secret_ref_returns_availability(self) -> None:
         """validate_secret_ref returns name and availability status."""
         state = _empty_state()
@@ -4745,6 +4950,42 @@ class TestSecretTools:
         assert result.success is True
         assert result.data["name"] == "OPENROUTER_API_KEY"
         assert result.data["available"] is True
+
+    def test_validate_secret_ref_returns_unavailability_reason(self) -> None:
+        """Known but unavailable secret refs carry the inventory reason."""
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        svc = MagicMock()
+        svc.has_ref.return_value = False
+        svc.list_refs.return_value = [
+            SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="server",
+                available=False,
+                source_kind="env",
+                reason="fingerprint_resolver_not_configured",
+            )
+        ]
+
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": "OPENROUTER_API_KEY"},
+            state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        assert result.success is True
+        assert dict(result.data) == {
+            "name": "OPENROUTER_API_KEY",
+            "available": False,
+            "scope": "server",
+            "source_kind": "env",
+            "reason": "fingerprint_resolver_not_configured",
+        }
 
     def test_validate_secret_ref_without_service_returns_failure(self) -> None:
         state = _empty_state()
@@ -4789,9 +5030,9 @@ class TestSecretTools:
             user_id="test-user",
         )
         assert r2.success is True
-        assert r2.updated_state.source is not None
+        assert _default_source(r2.updated_state) is not None
 
-        opts = deep_thaw(r2.updated_state.source.options)
+        opts = deep_thaw(_default_source(r2.updated_state).options)
         assert opts["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
         # Original options preserved
         assert opts["path"] == "/data/in.csv"
@@ -5259,9 +5500,9 @@ class TestPatchSourceOptions:
             catalog,
         )
         assert result.success is True
-        assert result.updated_state.source is not None
+        assert _default_source(result.updated_state) is not None
 
-        opts = deep_thaw(result.updated_state.source.options)
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert opts["path"] == "/b"
 
     def test_patch_source_options_adds_key(self) -> None:
@@ -5275,8 +5516,8 @@ class TestPatchSourceOptions:
         )
         assert result.success is True
 
-        assert result.updated_state.source is not None
-        opts = deep_thaw(result.updated_state.source.options)
+        assert _default_source(result.updated_state) is not None
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert opts["path"] == "/a"
         assert opts["encoding"] == "utf-8"
 
@@ -5310,8 +5551,8 @@ class TestPatchSourceOptions:
         )
         assert result.success is True
 
-        assert result.updated_state.source is not None
-        opts = deep_thaw(result.updated_state.source.options)
+        assert _default_source(result.updated_state) is not None
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert opts["path"] == "/a"
         assert "encoding" not in opts
 
@@ -5384,10 +5625,23 @@ class TestPatchSourceOptions:
         )
         assert result.success is False
         assert "blob-backed source" in result.data["error"]
-        # Source unchanged
-        assert result.updated_state.source is not None
-        opts = deep_thaw(result.updated_state.source.options)
-        assert opts["path"] == "/canon/abc123_x.csv"
+
+    def test_patch_source_options_rejects_blob_ref_patch_on_plain_source(self) -> None:
+        """Manual blob identity injection is rejected even before a source is blob-backed."""
+        state = self._state_with_source({"path": "/a.csv"})
+        catalog = _mock_catalog()
+        result = execute_tool(
+            "patch_source_options",
+            {"patch": {"blob_ref": "def456"}},
+            state,
+            catalog,
+        )
+        assert result.success is False
+        assert "Cannot patch 'blob_ref'" in result.data["error"]
+        assert _default_source(result.updated_state) is not None
+        opts = deep_thaw(_default_source(result.updated_state).options)
+        assert "blob_ref" not in opts
+        assert opts["path"] == "/a.csv"
 
     def test_patch_source_options_rejects_blob_ref_patch_on_blob_backed_source(self) -> None:
         """Closes elspeth-07089fbaa3 (write defense, blob_ref re-bind via patch).
@@ -5406,7 +5660,7 @@ class TestPatchSourceOptions:
             catalog,
         )
         assert result.success is False
-        assert "blob-backed source" in result.data["error"]
+        assert "Cannot patch 'blob_ref'" in result.data["error"]
 
     def test_patch_source_options_allows_unrelated_keys_on_blob_backed_source(self) -> None:
         """Closes elspeth-07089fbaa3 (write defense — narrow rejection).
@@ -5425,8 +5679,8 @@ class TestPatchSourceOptions:
             catalog,
         )
         assert result.success is True
-        assert result.updated_state.source is not None
-        opts = deep_thaw(result.updated_state.source.options)
+        assert _default_source(result.updated_state) is not None
+        opts = deep_thaw(_default_source(result.updated_state).options)
         assert opts["encoding"] == "utf-8"
         assert opts["path"] == "/canon/abc123_x.csv"
         assert opts["blob_ref"] == "abc123"
@@ -6203,6 +6457,50 @@ class TestSetPipeline:
         assert result.validation.is_valid is True
         assert result.updated_state.version == 2  # incremented from 1
 
+    def test_set_pipeline_accepts_named_sources_mapping(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args.pop("source")
+        args["sources"] = {
+            "customers": {
+                "plugin": "csv",
+                "on_success": "customer_rows",
+                "options": {"path": "/data/customers.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            "orders": {
+                "plugin": "json",
+                "on_success": "order_rows",
+                "options": {"path": "/data/orders.json", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+        }
+        args["nodes"] = []
+        args["edges"] = []
+        args["outputs"] = [
+            {
+                "sink_name": "customer_rows",
+                "plugin": "csv",
+                "options": {"path": "/data/customer_rows.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            {
+                "sink_name": "order_rows",
+                "plugin": "json",
+                "options": {"path": "/data/order_rows.json", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+        ]
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert tuple(result.updated_state.sources) == ("customers", "orders")
+        assert result.updated_state.sources["customers"].plugin == "csv"
+        assert "source:customers" in result.affected_nodes
+        assert "source:orders" in result.affected_nodes
+
     def test_set_pipeline_source_defaults_validation_failures_to_discard(self) -> None:
         """Omitting on_validation_failure must not synthesize an absent quarantine sink."""
         state = _empty_state()
@@ -6213,8 +6511,8 @@ class TestSetPipeline:
         result = execute_tool("set_pipeline", args, state, catalog)
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        assert result.updated_state.source.on_validation_failure == "discard"
+        assert _default_source(result.updated_state) is not None
+        assert _default_source(result.updated_state).on_validation_failure == "discard"
         assert result.data is None
 
     def test_set_pipeline_missing_json_output_options_returns_exact_repair_hint(self) -> None:
@@ -6544,7 +6842,7 @@ class TestSetPipeline:
         result = execute_tool("set_pipeline", args, state, catalog)
 
         assert result.success is False
-        assert result.updated_state.source is None
+        assert _default_source(result.updated_state) is None
         assert result.updated_state.version == 1
         assert "set_source_from_blob" in result.data["error"]
         assert "source.inline_blob" in result.data["error"]
@@ -6627,8 +6925,8 @@ class TestSetPipeline:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        source_options = result.updated_state.source.options
+        assert _default_source(result.updated_state) is not None
+        source_options = _default_source(result.updated_state).options
         assert source_options["blob_ref"] == uploaded_id
         assert source_options["path"] == str(uploaded_path)
         assert source_options["path"] != str(header_only_path)
@@ -6692,7 +6990,7 @@ class TestSetPipeline:
         )
 
         assert result.success is False
-        assert result.updated_state.source is None
+        assert _default_source(result.updated_state) is None
         assert "header-only inline CSV" in result.data["error"]
         assert uploaded_id in result.data["error"]
 
@@ -6852,6 +7150,89 @@ class TestSetPipeline:
         # The orphan node has no reachable input — validation should flag it
         assert result.validation.is_valid is False
         assert len(result.validation.errors) > 0
+
+    def test_set_pipeline_surfaces_fixed_schema_edge_contract_mismatch(self) -> None:
+        """LLM fixed-schema requirements must reject source rows before runtime."""
+        state = _empty_state()
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="llm",
+                description="LLM transform",
+                plugin_type="transform",
+                config_fields=[],
+            ),
+        ]
+        args = {
+            "source": {
+                "plugin": "text",
+                "on_success": "rate_in",
+                "options": {
+                    "path": "/data/colors.txt",
+                    "column": "color",
+                    "schema": {"mode": "fixed", "fields": ["color: str"]},
+                },
+                "on_validation_failure": "discard",
+            },
+            "nodes": [
+                {
+                    "id": "transform_rate_teal_pairing",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "rate_in",
+                    "on_success": "results",
+                    "on_error": "discard",
+                    "options": {
+                        "provider": "openrouter",
+                        "model": "openai/gpt-4o-mini",
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "prompt_template": "Rate {{ row.color }} for teal pairing.",
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["color: str", "teal_pairing_rating: str"],
+                        },
+                    },
+                }
+            ],
+            "edges": [
+                {
+                    "id": "e1",
+                    "from_node": "source",
+                    "to_node": "transform_rate_teal_pairing",
+                    "edge_type": "on_success",
+                    "label": None,
+                },
+                {
+                    "id": "e2",
+                    "from_node": "transform_rate_teal_pairing",
+                    "to_node": "results",
+                    "edge_type": "on_success",
+                    "label": None,
+                },
+            ],
+            "outputs": [
+                {
+                    "sink_name": "results",
+                    "plugin": "csv",
+                    "options": {"path": "/data/results.csv", "schema": {"mode": "observed"}},
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is True
+        assert result.validation is not None
+        assert result.validation.is_valid is False
+        assert any("teal_pairing_rating" in error.message for error in result.validation.errors)
+        contract = next(ec for ec in result.validation.edge_contracts if ec.to_id == "transform_rate_teal_pairing")
+        assert contract.from_id == "source"
+        assert contract.consumer_requires == ("color", "teal_pairing_rating")
+        assert contract.producer_guarantees == ("color",)
+        assert contract.missing_fields == ("teal_pairing_rating",)
+        assert contract.satisfied is False
 
     def test_set_pipeline_unknown_node_type_invalidates_state(self) -> None:
         """set_pipeline keeps enum parsing recoverable but Stage 1 must reject unknown node types."""
@@ -7023,8 +7404,8 @@ class TestSetPipeline:
         )
 
         assert result.success is True
-        assert result.updated_state.source is not None
-        source_options = result.updated_state.source.options
+        assert _default_source(result.updated_state) is not None
+        source_options = _default_source(result.updated_state).options
         assert source_options["column"] == "text"
         assert source_options["blob_ref"] == result.data["inline_blob"]["blob_id"]
         assert "hello" not in str(result.to_dict())
@@ -7125,11 +7506,11 @@ class TestClearSource:
             state,
             catalog,
         )
-        assert r1.updated_state.source is not None
+        assert _default_source(r1.updated_state) is not None
         # Now clear it
         r2 = execute_tool("clear_source", {}, r1.updated_state, catalog)
         assert r2.success is True
-        assert r2.updated_state.source is None
+        assert _default_source(r2.updated_state) is None
         assert r2.updated_state.version == 3
 
     def test_clear_source_no_source_fails(self) -> None:
@@ -7791,7 +8172,7 @@ class TestGetPluginAssistance:
         assert "url_field" in hints
         assert "Unknown source plugin: web_scrape" in hints
         assert "surface prompt-injection shielding as an important recommendation" in hints
-        assert "recommendation is not permission to add a node" in hints
+        assert "Recommendation is not permission to add a node" in hints
         assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints
         assert "do not substitute azure_content_safety" in hints
         assert "do not insert it automatically" in hints
@@ -7965,7 +8346,7 @@ class TestPreviewPipeline:
         result = execute_tool("preview_pipeline", {}, state, catalog)
         assert result.success is True
         assert result.data["is_valid"] is False
-        assert result.data["source"] is None
+        assert _pipeline_state_default_source(result.data) is None
         assert result.data["node_count"] == 0
 
     def test_preview_valid_pipeline(self) -> None:
@@ -8004,8 +8385,8 @@ class TestPreviewPipeline:
         )
         result = execute_tool("preview_pipeline", {}, r3.updated_state, catalog)
         assert result.success is True
-        assert result.data["source"]["plugin"] == "csv"
-        assert result.data["source"]["has_schema_config"] is True
+        assert _pipeline_state_default_source(result.data)["plugin"] == "csv"
+        assert _pipeline_state_default_source(result.data)["has_schema_config"] is True
         assert result.data["node_count"] == 1
         assert result.data["output_count"] == 1
 
@@ -8181,8 +8562,8 @@ class TestPreviewPipeline:
         result = execute_tool("preview_pipeline", {}, state, catalog)
 
         assert result.success is True
-        assert result.data["source"]["plugin"] == "csv"
-        assert result.data["source"]["has_schema_config"] is True
+        assert _pipeline_state_default_source(result.data)["plugin"] == "csv"
+        assert _pipeline_state_default_source(result.data)["has_schema_config"] is True
 
     def test_preview_pipeline_surfaces_runtime_preflight_failure(self) -> None:
         state = (
@@ -10172,59 +10553,22 @@ class TestInspectSourceTool:
                 session_id=self.session_id,
             )
 
-    def test_non_uuid_blob_id_surfaces_warning_fact(self, tmp_path: Path) -> None:
-        """A blob row whose id is not a parseable UUID must surface a
-        ``blob_id_not_uuid:`` warning to the audit trail, never silently
-        dropping the identifier."""
-        from datetime import UTC, datetime
-
-        from elspeth.web.blobs.service import content_hash as _content_hash
-        from elspeth.web.sessions.models import blobs_table
-
-        non_uuid_id = "not-a-uuid-but-a-real-row"
-        body = b"a,b,c\n1,2,3\n"
-        storage_dir = tmp_path / "blobs" / self.session_id
-        storage_dir.mkdir(parents=True, exist_ok=True)
-        non_uuid_path = storage_dir / f"{non_uuid_id}_x.csv"
-        non_uuid_path.write_bytes(body)
-        now = datetime.now(UTC)
-
-        with self.engine.begin() as conn:
-            conn.execute(
-                blobs_table.insert().values(
-                    id=non_uuid_id,
-                    session_id=self.session_id,
-                    filename="x.csv",
-                    mime_type="text/csv",
-                    size_bytes=len(body),
-                    content_hash=_content_hash(body),
-                    storage_path=str(non_uuid_path),
-                    created_at=now,
-                    created_by="user",
-                    source_description=None,
-                    status="ready",
-                )
-            )
-
-        state = _empty_state()
-        catalog = _mock_catalog()
+    def test_non_uuid_blob_id_rejected_before_lookup(self) -> None:
+        """LLM placeholder identifiers must fail at the blob-id boundary."""
         result = execute_tool(
             "inspect_source",
-            {"blob_id": non_uuid_id},
-            state,
-            catalog,
+            {"blob_id": "__missing__"},
+            _empty_state(),
+            _mock_catalog(),
             session_engine=self.engine,
             session_id=self.session_id,
         )
 
-        assert result.success is True
-        warnings = tuple(result.data["warnings"])
-        matched = [w for w in warnings if w.startswith("blob_id_not_uuid:")]
-        assert len(matched) == 1, f"expected exactly one blob_id_not_uuid warning, got {warnings!r}"
-        assert non_uuid_id in matched[0]
-        identity = result.data["redacted_identity"]
-        assert "blob_id" not in identity
-        assert "content_hash_prefix" in identity
+        assert result.success is False
+        assert "not a valid UUID" in result.data["error"]
+        assert "upload" in result.data["error"]
+        assert "list_blobs" in result.data["error"]
+        assert "not found" not in result.data["error"].lower()
 
 
 # ---------------------------------------------------------------------------
@@ -10468,6 +10812,36 @@ class TestPreviewProofStep:
         result = execute_tool("preview_pipeline", {}, state, _mock_catalog())
         assert result.success is True
         assert result.data["proof_diagnostics"] == ()
+
+    def test_proof_inspects_named_sources_beyond_compatibility_source(self) -> None:
+        """A non-first named source must not bypass proof diagnostics."""
+        state = self._state_with_csv_source(schema_mode="observed").with_named_source(
+            "url_source",
+            SourceSpec(
+                plugin="text",
+                on_success="content",
+                options={
+                    "blob_ref": self.url_blob_id,
+                    "column": "url",
+                    "schema": {"mode": "fixed", "fields": ["url: str"]},
+                },
+                on_validation_failure="discard",
+            ),
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        matching = [d for d in diagnostics if d["code"] == "text_source_url_without_web_scrape"]
+        assert matching
+        assert matching[0]["evidence_locator"]["source_name"] == "url_source"
 
     # -- csv_fixed_schema_omits_observed_columns ----------------------------
 
@@ -10959,8 +11333,9 @@ class TestPreviewProofStep:
         import dataclasses
 
         state = self._state_with_csv_source(schema_mode="observed")
-        assert state.source is not None
-        tampered = dataclasses.replace(state.source, options=options)
+        source = _default_source(state)
+        assert source is not None
+        tampered = dataclasses.replace(source, options=options)
         return state.with_source(tampered)
 
     def test_proof_malformed_schema_block_yields_blocking_diagnostic(self) -> None:

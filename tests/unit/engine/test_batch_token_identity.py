@@ -29,7 +29,7 @@ from elspeth.plugins.infrastructure.base import BaseTransform
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.testing import make_field, make_pipeline_row
 from tests.fixtures.factories import make_context
-from tests.fixtures.landscape import make_recorder_with_run, register_test_node
+from tests.fixtures.landscape import leader_coordination_token, make_recorder_with_run, register_test_node
 from tests.unit.engine.conftest import _TestSchema
 
 # ---------------------------------------------------------------------------
@@ -90,12 +90,11 @@ def _assert_output_token_distinct_from_inputs(
     )
 
 
-def _single_node_traversal(node_id: NodeID, plugin: BaseTransform) -> DAGTraversalContext:
+def _single_node_traversal(source_node_id: NodeID, node_id: NodeID, plugin: BaseTransform) -> DAGTraversalContext:
     return DAGTraversalContext(
-        node_step_map={node_id: 1},
+        node_step_map={source_node_id: 0, node_id: 1},
         node_to_plugin={node_id: plugin},
-        first_transform_node_id=node_id,
-        node_to_next={node_id: None},
+        node_to_next={source_node_id: node_id, node_id: None},
         coalesce_node_map={},
     )
 
@@ -161,8 +160,12 @@ class TestBatchTokenIdentity:
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
             source_on_success="default",
-            traversal=_single_node_traversal(NodeID(agg_node_id), transform),
+            traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
+            scheduler=setup.factory.scheduler,
+            # Slice 3 (ADR-030 §E.2): journal-first barrier intake — the
+            # fenced adoption verbs require the run's leader token.
+            coordination_token=leader_coordination_token(setup.factory, run_id),
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
@@ -177,12 +180,14 @@ class TestBatchTokenIdentity:
         }
         for i in range(3):
             pipeline_row = make_pipeline_row({"value": (i + 1) * 10})  # 10, 20, 30
-            source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract)
+            source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract, source_row_index=i)
             results = processor.process_row(
                 row_index=i,
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             all_results.extend(results)
             for r in results:
@@ -244,19 +249,25 @@ class TestBatchTokenIdentity:
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
             source_on_success="default",
-            traversal=_single_node_traversal(NodeID(agg_node_id), transform),
+            traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
+            scheduler=setup.factory.scheduler,
+            # Slice 3 (ADR-030 §E.2): journal-first barrier intake — the
+            # fenced adoption verbs require the run's leader token.
+            coordination_token=leader_coordination_token(setup.factory, run_id),
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
         # Process row 0 - buffered, returns BUFFERED (T26: non-terminal at buffer time)
         pipeline_row_0 = make_pipeline_row({"value": 10})
-        source_row_0 = SourceRow.valid(pipeline_row_0.to_dict(), contract=pipeline_row_0.contract)
+        source_row_0 = SourceRow.valid(pipeline_row_0.to_dict(), contract=pipeline_row_0.contract, source_row_index=0)
         results_0 = processor.process_row(
             row_index=0,
             source_row=source_row_0,
             transforms=[transform],
             ctx=ctx,
+            source_row_index=0,
+            ingest_sequence=0,
         )
         assert len(results_0) == 1
         assert results_0[0].outcome is None
@@ -265,22 +276,27 @@ class TestBatchTokenIdentity:
 
         # Process row 1 - triggers flush
         pipeline_row_1 = make_pipeline_row({"value": 20})
-        source_row_1 = SourceRow.valid(pipeline_row_1.to_dict(), contract=pipeline_row_1.contract)
+        source_row_1 = SourceRow.valid(pipeline_row_1.to_dict(), contract=pipeline_row_1.contract, source_row_index=1)
         results_1 = processor.process_row(
             row_index=1,
             source_row=source_row_1,
             transforms=[transform],
             ctx=ctx,
+            source_row_index=1,
+            ingest_sequence=1,
         )
 
-        # Should have: CONSUMED_IN_BATCH (triggering token) + COMPLETED (output)
-        consumed = [r for r in results_1 if (r.outcome, r.path) == (TerminalOutcome.TRANSIENT, TerminalPath.BATCH_CONSUMED)]
+        # Slice 3 re-pin (ADR-030 §E.2): the trigger arrival returns a real
+        # BUFFERED RowResult and the flush fires from the next intake step in
+        # the out-of-claim shape — no CONSUMED_IN_BATCH RowResult is emitted
+        # for the trigger member (its consumption lives in the audit trail).
+        buffered = [r for r in results_1 if (r.outcome, r.path) == (None, TerminalPath.BUFFERED)]
         completed = [r for r in results_1 if (r.outcome, r.path) == (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW)]
 
-        assert len(consumed) == 1, "Triggering token must be CONSUMED_IN_BATCH"
+        assert len(buffered) == 1, "Triggering arrival must surface as BUFFERED"
         assert len(completed) == 1, "Must have exactly 1 COMPLETED output"
 
-        triggering_token_id = consumed[0].token.token_id
+        triggering_token_id = buffered[0].token.token_id
         output_token_id = completed[0].token.token_id
 
         # THE BUG: In the old code, output_token_id == triggering_token_id
@@ -325,8 +341,12 @@ class TestBatchTokenIdentity:
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
             source_on_success="default",
-            traversal=_single_node_traversal(NodeID(agg_node_id), transform),
+            traversal=_single_node_traversal(NodeID(source_node_id), NodeID(agg_node_id), transform),
             aggregation_settings=aggregation_settings,
+            scheduler=setup.factory.scheduler,
+            # Slice 3 (ADR-030 §E.2): journal-first barrier intake — the
+            # fenced adoption verbs require the run's leader token.
+            coordination_token=leader_coordination_token(setup.factory, run_id),
         )
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
 
@@ -341,20 +361,26 @@ class TestBatchTokenIdentity:
         }
         for i in range(3):
             pipeline_row = make_pipeline_row({"value": (i + 1) * 10})
-            source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract)
+            source_row = SourceRow.valid(pipeline_row.to_dict(), contract=pipeline_row.contract, source_row_index=i)
             results = processor.process_row(
                 row_index=i,
                 source_row=source_row,
                 transforms=[transform],
                 ctx=ctx,
+                source_row_index=i,
+                ingest_sequence=i,
             )
             all_results.extend(results)
             for r in results:
                 if (r.outcome, r.path) in _batch_outcomes:
                     input_token_ids.append(r.token.token_id)
 
-        # Verify we got all 3 batch member tokens
-        assert len(input_token_ids) == 3, f"Expected 3 batch member tokens, got {len(input_token_ids)}"
+        # Verify we got all 3 batch member tokens. F1 rows_buffered unification:
+        # the triggering token emits BOTH a synthetic BUFFERED result (live
+        # counter == audit value N) and its BATCH_CONSUMED result, so the raw
+        # list can carry it twice — membership is about UNIQUE tokens.
+        unique_input_token_ids = set(input_token_ids)
+        assert len(unique_input_token_ids) == 3, f"Expected 3 unique batch member tokens, got {len(unique_input_token_ids)}"
 
         # Verify batch_members table records all input tokens
         from sqlalchemy import select

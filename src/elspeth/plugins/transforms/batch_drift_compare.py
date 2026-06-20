@@ -5,13 +5,14 @@ from __future__ import annotations
 import math
 from collections import Counter
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Literal, cast
 
 from pydantic import Field, field_validator, model_validator
 
 from elspeth.contracts import Determinism
 from elspeth.contracts.contexts import TransformContext
-from elspeth.contracts.errors import TransformErrorReason
+from elspeth.contracts.errors import RowErrorEntry, TransformErrorReason
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
@@ -20,7 +21,6 @@ from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.transforms._scalar_buckets import (
     ScalarBucketKey,
-    append_unique_bucket_value,
     same_scalar_bucket_value,
     scalar_bucket_key,
 )
@@ -64,6 +64,7 @@ _CATEGORICAL_OUTPUT_FIELDS = _COMMON_OUTPUT_FIELDS | frozenset(
         "total_variation",
     }
 )
+_MAX_BATCH_ROWS = 4096
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +128,7 @@ class BatchDriftCompare(BaseTransform):
     name = "batch_drift_compare"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:b96cdf96069ddb27"
+    source_file_hash: str | None = "sha256:4d34e4ed27a76ddf"
     config_model = BatchDriftCompareConfig
     is_batch_aware = True
 
@@ -204,6 +205,30 @@ class BatchDriftCompare(BaseTransform):
         current = self._augment_invariant_probe_row(probe, field_name=self._cohort_field, value="current")
         current = self._augment_invariant_probe_row(current, field_name=self._value_field, value=2.0)
         return [baseline, current]
+
+    @staticmethod
+    def _is_non_finite_group_key(value: object) -> bool:
+        if type(value) is float:
+            return not math.isfinite(value)
+        if type(value) is Decimal:
+            return not value.is_finite()
+        return False
+
+    def _non_finite_group_key_error(self, rows: list[PipelineRow]) -> TransformResult | None:
+        """Return an error if any row carries a non-finite cohort key (B4.5-d)."""
+        row_errors: list[RowErrorEntry] = []
+        for row_index, row in enumerate(rows):
+            if self._is_non_finite_group_key(row[self._cohort_field]):
+                row_errors.append({"row_index": row_index, "reason": "non_finite_group_key"})
+        if not row_errors:
+            return None
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "non_finite_group_key",
+            "field": self._cohort_field,
+            "row_errors": row_errors,
+        }
+        return TransformResult.error(reason, retryable=False)
 
     def _collect_cohorts(self, rows: list[PipelineRow]) -> list[tuple[Any, list[PipelineRow]]]:
         cohorts: list[tuple[Any, list[PipelineRow]]] = []
@@ -289,6 +314,16 @@ class BatchDriftCompare(BaseTransform):
         return TransformResult.error(reason, retryable=False)
 
     @staticmethod
+    def _error_for_batch_too_large(*, batch_size: int) -> TransformResult:
+        reason: TransformErrorReason = {
+            "reason": "validation_failed",
+            "cause": "batch_too_large",
+            "batch_size": batch_size,
+            "expected": f"at most {_MAX_BATCH_ROWS} rows",
+        }
+        return TransformResult.error(reason, retryable=False)
+
+    @staticmethod
     def _require_finite(value: float, *, operation: str) -> float:
         if not math.isfinite(value):
             raise OverflowError(operation)
@@ -300,9 +335,17 @@ class BatchDriftCompare(BaseTransform):
         right_values = sorted(float(value) for value in right)
         thresholds = sorted(set(left_values + right_values))
         max_distance = 0.0
+        left_index = 0
+        right_index = 0
+        left_count = len(left_values)
+        right_count = len(right_values)
         for threshold in thresholds:
-            left_cdf = sum(1 for value in left_values if value <= threshold) / len(left_values)
-            right_cdf = sum(1 for value in right_values if value <= threshold) / len(right_values)
+            while left_index < left_count and left_values[left_index] <= threshold:
+                left_index += 1
+            while right_index < right_count and right_values[right_index] <= threshold:
+                right_index += 1
+            left_cdf = left_index / left_count
+            right_cdf = right_index / right_count
             max_distance = max(max_distance, abs(left_cdf - right_cdf))
         return max_distance
 
@@ -310,9 +353,10 @@ class BatchDriftCompare(BaseTransform):
     def _categorical_shifts(baseline: _CohortValues, cohort: _CohortValues) -> tuple[list[dict[str, object]], float, float, list[object]]:
         baseline_counts: Counter[ScalarBucketKey] = Counter(scalar_bucket_key(value) for value in baseline.values)
         cohort_counts: Counter[ScalarBucketKey] = Counter(scalar_bucket_key(value) for value in cohort.values)
-        values: list[object] = []
+        values_by_key: dict[ScalarBucketKey, object] = {}
         for value in baseline.values + cohort.values:
-            append_unique_bucket_value(values, value)
+            values_by_key.setdefault(scalar_bucket_key(value), value)
+        values = list(values_by_key.values())
 
         shifts: list[dict[str, object]] = []
         total_variation_sum = 0.0
@@ -445,6 +489,12 @@ class BatchDriftCompare(BaseTransform):
         """Compare baseline and current cohort distributions over a batch."""
         if not rows:
             return TransformResult.error({"reason": "empty_batch"}, retryable=False)
+        if len(rows) > _MAX_BATCH_ROWS:
+            return self._error_for_batch_too_large(batch_size=len(rows))
+
+        non_finite_error = self._non_finite_group_key_error(rows)
+        if non_finite_error is not None:
+            return non_finite_error
 
         grouped = self._collect_cohorts(rows)
         cohort_values = [(cohort, self._values_for(cohort, cohort_rows)) for cohort, cohort_rows in grouped]

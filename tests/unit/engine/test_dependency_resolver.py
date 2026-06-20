@@ -342,6 +342,12 @@ class TestHashSettingsFile:
         settings = tmp_path / "pipeline.yaml"
         settings.write_text("plugins:\n  source:\n    path: data.csv\n")
         result = _hash_settings_file(settings)
+        # _hash_settings_file is a byte-integrity hash over the canonical JSON of
+        # the dependency file AS WRITTEN — it does NOT load/normalise the config
+        # model, so the singular `source:` key is hashed verbatim. Normalising
+        # singular→plural before hashing would make the audit trail assert the
+        # file contained `sources: {primary}` when it literally said `source:`
+        # (fabrication). The expected payload must mirror the raw YAML.
         expected_payload = {
             "plugins": {
                 "source": {

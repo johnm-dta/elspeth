@@ -57,17 +57,19 @@ class TestDeaggregationPipeline:
         output_dir.mkdir()
 
         config = {
-            "source": {
-                "plugin": "json",
-                "on_success": "explode_input",
-                "options": {
-                    "path": str(input_data),
-                    "schema": {
-                        "mode": "fixed",
-                        "fields": ["order_id: int", "items: any"],
+            "sources": {
+                "primary": {
+                    "plugin": "json",
+                    "on_success": "explode_input",
+                    "options": {
+                        "path": str(input_data),
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["order_id: int", "items: any"],
+                        },
+                        "on_validation_failure": "discard",
                     },
-                    "on_validation_failure": "discard",
-                },
+                }
             },
             "transforms": [
                 {
@@ -190,17 +192,19 @@ class TestDeaggregationAuditTrail:
 
         # Build config programmatically for test
         config_dict = {
-            "source": {
-                "plugin": "json",
-                "on_success": "explode_input",
-                "options": {
-                    "path": str(input_data),
-                    "schema": {
-                        "mode": "fixed",
-                        "fields": ["order_id: int", "items: any"],
+            "sources": {
+                "primary": {
+                    "plugin": "json",
+                    "on_success": "explode_input",
+                    "options": {
+                        "path": str(input_data),
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["order_id: int", "items: any"],
+                        },
+                        "on_validation_failure": "discard",
                     },
-                    "on_validation_failure": "discard",
-                },
+                }
             },
             "transforms": [
                 {
@@ -244,8 +248,8 @@ class TestDeaggregationAuditTrail:
 
         plugins = instantiate_plugins_from_config(settings)
         graph = ExecutionGraph.from_plugin_instances(
-            source=plugins.source,
-            source_settings=plugins.source_settings,
+            sources=plugins.sources,
+            source_settings_map=plugins.source_settings_map,
             transforms=plugins.transforms,
             sinks=plugins.sinks,
             aggregations=plugins.aggregations,
@@ -255,7 +259,7 @@ class TestDeaggregationAuditTrail:
         # Build pipeline config using the SAME plugin instances as the graph
         # This ensures the test exercises the production code path
         pipeline_config = PipelineConfig(
-            source=plugins.source,
+            sources=plugins.sources,
             transforms=[wired.plugin for wired in plugins.transforms],
             sinks=plugins.sinks,
             config=resolve_config(settings),
@@ -359,18 +363,20 @@ class TestSourceSchemaValidation:
         output_dir.mkdir()
 
         config = {
-            "source": {
-                "plugin": "json",
-                "on_success": "explode_input",
-                "options": {
-                    "path": str(valid_and_invalid_input),
-                    "schema": {
-                        "mode": "fixed",
-                        "fields": ["order_id: int", "items: any"],
+            "sources": {
+                "primary": {
+                    "plugin": "json",
+                    "on_success": "explode_input",
+                    "options": {
+                        "path": str(valid_and_invalid_input),
+                        "schema": {
+                            "mode": "fixed",
+                            "fields": ["order_id: int", "items: any"],
+                        },
+                        # Use discard so invalid row is dropped, not routed
+                        "on_validation_failure": "discard",
                     },
-                    # Use discard so invalid row is dropped, not routed
-                    "on_validation_failure": "discard",
-                },
+                }
             },
             "transforms": [
                 {

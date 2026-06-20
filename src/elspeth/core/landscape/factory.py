@@ -40,6 +40,7 @@ from elspeth.core.landscape.model_loaders import (
     RoutingEventLoader,
     RowLoader,
     RunLoader,
+    SchedulerEventLoader,
     TokenLoader,
     TokenOutcomeLoader,
     TokenParentLoader,
@@ -47,7 +48,9 @@ from elspeth.core.landscape.model_loaders import (
     ValidationErrorLoader,
 )
 from elspeth.core.landscape.query_repository import QueryRepository
+from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 
 if TYPE_CHECKING:
     from elspeth.contracts.payload_store import PayloadStore
@@ -291,6 +294,7 @@ class RecorderFactory:
         validation_error_loader = ValidationErrorLoader()
         transform_error_loader = TransformErrorLoader()
         token_outcome_loader = TokenOutcomeLoader()
+        scheduler_event_loader = SchedulerEventLoader()
         artifact_loader = ArtifactLoader()
         batch_member_loader = BatchMemberLoader()
 
@@ -334,8 +338,20 @@ class RecorderFactory:
             routing_event_loader=routing_event_loader,
             call_loader=call_loader,
             token_outcome_loader=token_outcome_loader,
+            scheduler_event_loader=scheduler_event_loader,
             payload_store=payload_store,
         )
+        # The scheduler repository is a pure write surface (its constructor
+        # runs a Tier-1 WAL probe that writer engines must satisfy).  On a
+        # read-only handle — MCP analyzer, web read surfaces, immutable
+        # snapshot opens whose journal_mode legitimately reads ``delete`` —
+        # there is nothing it could ever do, so skip construction entirely
+        # and fail loudly on access instead.
+        self._scheduler: TokenSchedulerRepository | None = None if db.is_read_only else TokenSchedulerRepository(db.engine)
+        # Same posture for the coordination substrate (epoch 21, ADR-030): a
+        # pure write/arbitration surface whose constructor runs the same
+        # Tier-1 PRAGMA probe — nothing it could do on a read-only handle.
+        self._run_coordination: RunCoordinationRepository | None = None if db.is_read_only else RunCoordinationRepository(db.engine)
 
     @property
     def run_lifecycle(self) -> RunLifecycleRepository:
@@ -356,6 +372,18 @@ class RecorderFactory:
     @property
     def query(self) -> QueryRepository:
         return self._query
+
+    @property
+    def scheduler(self) -> TokenSchedulerRepository:
+        if self._scheduler is None:
+            raise RuntimeError("scheduler repository is not available on a read-only LandscapeDB handle")
+        return self._scheduler
+
+    @property
+    def run_coordination(self) -> RunCoordinationRepository:
+        if self._run_coordination is None:
+            raise RuntimeError("run coordination repository is not available on a read-only LandscapeDB handle")
+        return self._run_coordination
 
     @property
     def payload_store(self) -> PayloadStore | None:

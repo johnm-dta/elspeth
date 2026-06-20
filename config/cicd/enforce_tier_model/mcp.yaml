@@ -94,3 +94,62 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[34]/body[6]/body[4]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:08e491fbe5f54a49315450dcd9bb5e530edb939ccded7bd825a86acede14408e'
+- key: mcp/analyzers/queries.py:R5:_is_collision_value_fingerprint:fp=632a27456b3ee484
+  owner: john
+  reason: |-
+    `mcp/analyzers/queries.py:739-741` passes `e[1]` from persisted coalesce collision metadata into `_collision_value_fingerprint()` before MCP response construction: `"Legacy rows may still contain raw values; those are fingerprinted"` at `mcp/analyzers/queries.py:728-730`. The reported `isinstance(value, Mapping)` at `mcp/analyzers/queries.py:613` is not hiding a missing Tier-1 audit invariant; it is the discriminator for a versioned redaction format. It only accepts the already-redacted form when the value is exactly `{"value_hash", "value_type"}` and `value_hash` is a 64-char lowercase hex digest (`mcp/analyzers/queries.py:613-618`); otherwise `mcp/analyzers/queries.py:628` fingerprints the raw legacy value before comparison or egress. This suppression is valid only for this collision-value redaction discriminator; if the accepted shape, key set, regex, or fallback-to-`_fingerprint_collision_value(value)` changes, this rationale no longer applies.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:14:42.155093+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The value being inspected is persisted collision metadata read back from the audit store whose contents may be either legacy raw values or the newer redacted fingerprint shape — a versioned-format discriminator at a Tier-3 re-read boundary (persisted data, mutable store, schema drift across versions). The isinstance(Mapping) plus key-set plus hex-regex check is precisely the boundary validation that decides whether the stored shape is the already-redacted form to pass through, or a legacy raw value that must be fingerprinted by _fingerprint_collision_value before egress. The rationale plainly names the discriminator role, the accepted shape, and the fallback path, and the visible code at 613-628 corroborates it; this is not hiding a Tier-1 invariant break.
+  judge_signature_version: 2
+  scope_fingerprint: fe3c65ad0894e33ad8914002ba6c31bbb35705bd8f0f71c0f470287a0e491cb1
+  judge_transport: openrouter
+  ast_path: 'body[27]/body[1]/value/values[0]'
+  judge_metadata_signature: 'hmac-sha256:v2:47ca8e836f81be6e8ab2f2fcb7153d3fa2d607aeab466842d99bdbc76e5c4754'
+- key: mcp/analyzers/queries.py:R5:_is_collision_value_fingerprint:fp=bf2075d3edfe3aee
+  owner: john
+  reason: |-
+    This `isinstance()` is a site-specific discriminator at the MCP collision-report redaction boundary, not a Tier-1 audit-data repair. In `src/elspeth/mcp/analyzers/queries.py:728-731`, `list_collisions()` reads `union_field_collision_values` from stored coalesce context where the code explicitly says legacy rows may contain raw values: `"Legacy rows may still contain raw values; those are fingerprinted before comparison or response construction."` The helper at `src/elspeth/mcp/analyzers/queries.py:610-618` only treats a value as already-redacted metadata when the whole shape matches exactly: `isinstance(value, Mapping)`, `set(value) == {"value_hash", "value_type"}`, `isinstance(value.get("value_hash"), str)`, a 64-hex `_VALUE_HASH_RE`, and `isinstance(value.get("value_type"), str)`. Otherwise, `src/elspeth/mcp/analyzers/queries.py:621-628` deliberately sends the value to `_fingerprint_collision_value(value)`, so arbitrary legacy raw user values, including dicts that happen to use `value_hash` / `value_type` keys, are not exposed and are not misread as trusted audit fingerprints. Future drift that removes the legacy-raw-value path or changes `union_field_collision_values` into a guaranteed typed DTO would invalidate this suppression; at that point malformed fingerprint metadata should be reified or allowed to crash instead of being pattern-matched.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:14:51.075723+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.82
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM at a Tier-3 boundary. The value being inspected is `union_field_collision_values` read from stored coalesce context where legacy rows may carry raw user-authored values — i.e. persisted external-origin data re-read from our DB, which the policy explicitly treats as Tier-3 at the read site. The function is a discriminator that distinguishes already-fingerprinted metadata from legacy raw values before fingerprinting; the isinstance checks form an exact-shape match (Mapping + exact key set + str + 64-hex regex + str) and the non-matching path is sent to `_fingerprint_collision_value`, so the guard validates rather than swallows. Rationale is site-specific, names the data flow, and acknowledges the conditions under which the suppression would need to be revisited.
+  judge_signature_version: 2
+  scope_fingerprint: fe3c65ad0894e33ad8914002ba6c31bbb35705bd8f0f71c0f470287a0e491cb1
+  judge_transport: openrouter
+  ast_path: 'body[27]/body[1]/value/values[2]'
+  judge_metadata_signature: 'hmac-sha256:v2:e78570bba1038a0088906c1f6dde849da09c87925fe7062a3cf88af65c328d56'
+- key: mcp/analyzers/queries.py:R5:_is_collision_value_fingerprint:fp=72539d5f6423bbca
+  owner: john
+  reason: |-
+    This is a legitimate boundary/redaction-shape discriminator, not a Tier-1 audit-data suppression. In `src/elspeth/mcp/analyzers/queries.py:725-731`, the analyzer reads persisted `context_after_json` and then extracts `union_field_collision_values`; the adjacent comment says legacy rows may still contain raw values. At `src/elspeth/mcp/analyzers/queries.py:739-740`, each stored entry value is sent to `_collision_value_fingerprint(e[1])`, whose contract at `src/elspeth/mcp/analyzers/queries.py:621-628` is to either pass through already-redacted metadata or fingerprint raw legacy values before response construction.
+    
+    The flagged `isinstance(value.get("value_type"), str)` at `src/elspeth/mcp/analyzers/queries.py:617` is part of `_is_collision_value_fingerprint`, which accepts `value: Any` and only returns true for the exact audit-safe fingerprint envelope: `isinstance(value, Mapping)`, `set(value) == {"value_hash", "value_type"}`, a string `value_hash` matching `^[0-9a-f]{64}$`, and a string `value_type`. If this predicate drifts away from checking the exact fingerprint envelope before pass-through, the suppression is no longer valid. Here, malformed or raw legacy values are not trusted or emitted; they fall through to `_fingerprint_collision_value(value)` at line 628.
+  safety: |-
+    Suppression gated by cicd-judge; see judge_rationale below.
+  expires: '2026-09-15'
+  judge_verdict: ACCEPTED
+  judge_recorded_at: '2026-06-17T16:14:58.256607+00:00'
+  judge_model: anthropic/claude-4.7-opus-20260416
+  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
+  judge_confidence: 0.85
+  judge_rationale: |-
+    RULE MISFIRES / PRESCRIBED FORM. The function `_is_collision_value_fingerprint` is a discriminator on persisted external-origin data (`context_after_json` re-read from the DB, with legacy rows that may contain raw values). It takes `value: Any` and must determine whether the stored shape is already the audit-safe fingerprint envelope or a raw legacy value needing fingerprinting — exactly the Tier-3 boundary shape-validation case. The `isinstance(value.get('value_type'), str)` check is part of a tight envelope predicate (Mapping + exact key set + hash regex + value_type str) and on negative result falls through to `_fingerprint_collision_value`, not to silent recovery or fabrication. The rationale plainly identifies the data origin, the discriminator's contract, and the consequence of a false positive.
+  judge_signature_version: 2
+  scope_fingerprint: fe3c65ad0894e33ad8914002ba6c31bbb35705bd8f0f71c0f470287a0e491cb1
+  judge_transport: openrouter
+  ast_path: 'body[27]/body[1]/value/values[4]'
+  judge_metadata_signature: 'hmac-sha256:v2:25e5d68315ea731e232ed912bf4ac8c1e3decc39c597886244e36a92b38f3464'

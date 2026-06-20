@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import cast
 
@@ -43,6 +44,8 @@ ALL_RULE_ROOTS: tuple[tuple[str, str], ...] = (
     ("audit_evidence.tier_1_decoration", "src/elspeth"),
     ("composer.catch_order", "src/elspeth"),
     ("composer.exception_channel", "src/elspeth"),
+    ("contract_invariants.session_engine_factory", "."),
+    ("contract_invariants.validation_theatre", "src/elspeth"),
     ("immutability.freeze_guards", "src/elspeth"),
     ("immutability.frozen_annotations", "src/elspeth"),
     ("manifest.contract_manifest", "src/elspeth"),
@@ -58,7 +61,7 @@ ALL_RULE_IDS: tuple[str, ...] = tuple(rid for rid, _ in ALL_RULE_ROOTS)
 RAW_FINGERPRINT_RULES: frozenset[str] = frozenset({"trust_tier.tier_model"})
 
 
-def _run_rule(rule_id: str, root: str, *, allowlist_dir: Path) -> list[dict[str, object]]:
+def _run_rule(rule_id: str, root: str, *, allowlist_dir: Path | None = None) -> list[dict[str, object]]:
     """Run a single rule against ``root`` and return parsed JSON findings.
 
     ``root`` is interpreted relative to ``REPO_ROOT`` (the CLI honours both
@@ -72,21 +75,29 @@ def _run_rule(rule_id: str, root: str, *, allowlist_dir: Path) -> list[dict[str,
     """
     env = {**os.environ, "PYTHONPATH": str(ELSPETH_LINTS_SRC)}
     resolved_root = root if Path(root).is_absolute() else str(REPO_ROOT / root)
-    allowlist_args = ["--allowlist-dir", str(allowlist_dir)] if rule_id in RAW_FINGERPRINT_RULES else []
+    command = [
+        str(PYTHON),
+        "-m",
+        "elspeth_lints.core.cli",
+        "check",
+        "--rules",
+        rule_id,
+        "--format",
+        "json",
+        "--root",
+        resolved_root,
+    ]
+    if rule_id in RAW_FINGERPRINT_RULES:
+        if allowlist_dir is None:
+            with tempfile.TemporaryDirectory() as empty_allowlist:
+                return _run_rule_command(rule_id, [*command, "--allowlist-dir", empty_allowlist], env)
+        command = [*command, "--allowlist-dir", str(allowlist_dir)]
+    return _run_rule_command(rule_id, command, env)
+
+
+def _run_rule_command(rule_id: str, command: list[str], env: dict[str, str]) -> list[dict[str, object]]:
     result = subprocess.run(
-        [
-            str(PYTHON),
-            "-m",
-            "elspeth_lints.core.cli",
-            "check",
-            "--rules",
-            rule_id,
-            *allowlist_args,
-            "--format",
-            "json",
-            "--root",
-            resolved_root,
-        ],
+        command,
         capture_output=True,
         text=True,
         check=False,
@@ -101,7 +112,7 @@ def _run_rule(rule_id: str, root: str, *, allowlist_dir: Path) -> list[dict[str,
     return parsed
 
 
-def capture_all(*, allowlist_dir: Path) -> dict[str, list[dict[str, str]]]:
+def capture_all(*, allowlist_dir: Path | None = None) -> dict[str, list[dict[str, str]]]:
     """Run every shipped rule, project to ``{file_path, fingerprint}``, sort deterministically.
 
     ``file_path`` and ``fingerprint`` are always strings in the CLI's JSON

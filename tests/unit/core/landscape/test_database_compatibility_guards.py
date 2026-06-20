@@ -9,10 +9,12 @@ from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.schema import CreateIndex
 
 import elspeth.core.landscape.database as database_module
 from elspeth.core.landscape.database import LandscapeDB, SchemaCompatibilityError
-from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
+from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata, token_work_items_table
 
 
 def _make_instance(url: str) -> LandscapeDB:
@@ -150,6 +152,387 @@ class TestSchemaCompatibilityGuards:
     def test_checkpoint_sequence_uniqueness_is_required_schema_contract(self) -> None:
         """Per-run checkpoint ordering must be mechanically unique in fresh and stale DBs."""
         assert ("checkpoints", "ix_checkpoints_run_sequence_unique") in database_module._REQUIRED_INDEXES
+
+    def test_run_sources_source_node_fk_is_required_schema_contract(self) -> None:
+        """Per-source resume metadata must point at a registered source node in the same run."""
+        assert (
+            "run_sources",
+            ("source_node_id", "run_id"),
+            "nodes",
+            ("node_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+
+    def test_token_work_items_run_scoped_fks_are_required_schema_contract(self) -> None:
+        """Scheduler resume rows must point at token/node cursors owned by the same run."""
+        assert (
+            "token_work_items",
+            ("token_id", "run_id"),
+            "tokens",
+            ("token_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+        assert (
+            "token_work_items",
+            ("row_id", "run_id"),
+            "rows",
+            ("row_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+        assert (
+            "token_work_items",
+            ("node_id", "run_id"),
+            "nodes",
+            ("node_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+        assert (
+            "token_work_items",
+            ("coalesce_node_id", "run_id"),
+            "nodes",
+            ("node_id", "run_id"),
+        ) in database_module._REQUIRED_COMPOSITE_FOREIGN_KEYS
+
+    def test_token_work_items_resume_identity_columns_are_required_schema_contract(self) -> None:
+        """Scheduler resume fields must participate in stale-DB detection."""
+        required_token_work_columns = {column for table, column in database_module._REQUIRED_COLUMNS if table == "token_work_items"}
+        assert {
+            "run_id",
+            "token_id",
+            "row_id",
+            "node_id",
+            "step_index",
+            "ingest_sequence",
+            "queue_key",
+            "barrier_key",
+            "on_success_sink",
+            "pending_sink_name",
+            "pending_outcome",
+            "pending_path",
+            "pending_error_hash",
+            "pending_error_message",
+            "branch_name",
+            "fork_group_id",
+            "join_group_id",
+            "expand_group_id",
+            "coalesce_node_id",
+            "coalesce_name",
+            "attempt",
+            "lease_owner",
+            "lease_expires_at",
+            "created_at",
+            "updated_at",
+        } <= required_token_work_columns
+        assert {
+            ("token_work_items", "ix_token_work_items_ready"),
+            ("token_work_items", "ix_token_work_items_lease"),
+            ("token_work_items", "ix_token_work_items_recovery"),
+            ("token_work_items", "ix_token_work_items_pending_sink_token"),
+            ("token_work_items", "uq_token_work_items_terminal_identity"),
+        } <= set(database_module._REQUIRED_INDEXES)
+        assert (
+            "token_work_items",
+            "ck_token_work_items_lease_owner_required_when_leased",
+        ) in database_module._REQUIRED_CHECK_CONSTRAINTS
+
+    def test_pending_sink_terminalization_index_covers_token_callback_lookup(self) -> None:
+        """Sink callback terminalization must be token-scoped, not run-scan shaped."""
+        index = next(index for index in token_work_items_table.indexes if index.name == "ix_token_work_items_pending_sink_token")
+
+        assert [column.name for column in index.columns] == [
+            "run_id",
+            "token_id",
+            "status",
+            "pending_sink_name",
+        ]
+
+    def test_terminal_scheduler_identity_index_is_partial_on_sqlite_and_postgresql(self) -> None:
+        """Terminal identity uniqueness must not constrain ordinary node work."""
+        index = next(index for index in token_work_items_table.indexes if index.name == "uq_token_work_items_terminal_identity")
+
+        sqlite_ddl = str(CreateIndex(index).compile(dialect=sqlite.dialect()))
+        postgres_ddl = str(CreateIndex(index).compile(dialect=postgresql.dialect()))
+
+        assert "WHERE node_id IS NULL" in sqlite_ddl
+        assert "WHERE node_id IS NULL" in postgres_ddl
+        assert "node_id" not in [column.name for column in index.columns]
+
+    def test_validate_schema_rejects_missing_scheduler_resume_identity_column(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Epoch-12 scheduler resume identity columns must fail stale DBs early."""
+        db_path = tmp_path / "missing_scheduler_resume_identity.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE token_work_items (
+                        work_item_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        available_at TEXT NOT NULL,
+                        row_payload_json TEXT NOT NULL,
+                        on_success_sink TEXT
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(database_module, "metadata", SimpleNamespace(tables={"token_work_items": object()}))
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_work_items.branch_name" in msg
+        assert "Landscape database schema is outdated" in msg
+        assert "To fix this, either:" in msg
+        instance.close()
+
+    @pytest.mark.parametrize("column_name", ["token_id", "row_id", "ingest_sequence", "attempt"])
+    def test_validate_schema_rejects_missing_scheduler_core_column(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        column_name: str,
+    ) -> None:
+        """Scheduler identity and ordering fields are part of the durable schema contract."""
+        db_path = tmp_path / f"missing_scheduler_{column_name}.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP TABLE token_work_items"))
+            columns = [
+                "work_item_id TEXT PRIMARY KEY",
+                "run_id TEXT NOT NULL",
+                "token_id TEXT NOT NULL",
+                "row_id TEXT NOT NULL",
+                "node_id TEXT",
+                "step_index INTEGER NOT NULL",
+                "ingest_sequence INTEGER NOT NULL",
+                "row_payload_json TEXT NOT NULL",
+                "status TEXT NOT NULL",
+                "queue_key TEXT",
+                "barrier_key TEXT",
+                "on_success_sink TEXT",
+                "branch_name TEXT",
+                "fork_group_id TEXT",
+                "join_group_id TEXT",
+                "expand_group_id TEXT",
+                "coalesce_node_id TEXT",
+                "coalesce_name TEXT",
+                "attempt INTEGER NOT NULL",
+                "lease_owner TEXT",
+                "lease_expires_at TEXT",
+                "available_at TEXT NOT NULL",
+                "created_at TEXT NOT NULL",
+                "updated_at TEXT NOT NULL",
+            ]
+            conn.execute(text(f"CREATE TABLE token_work_items ({', '.join(c for c in columns if not c.startswith(column_name + ' '))})"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        assert f"token_work_items.{column_name}" in str(exc_info.value)
+        instance.close()
+
+    def test_validate_schema_rejects_missing_terminal_scheduler_uniqueness_index(self, tmp_path: Path) -> None:
+        """Terminal scheduler identity uniqueness must fail stale DBs early."""
+        db_path = tmp_path / "missing_terminal_scheduler_identity_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP INDEX uq_token_work_items_terminal_identity"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_work_items.uq_token_work_items_terminal_identity" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_missing_scheduler_recovery_index(self, tmp_path: Path) -> None:
+        """Scheduler recovery index is required for stale-DB compatibility checks."""
+        db_path = tmp_path / "missing_scheduler_recovery_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP INDEX ix_token_work_items_recovery"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "token_work_items.ix_token_work_items_recovery" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
+
+    def test_run_coordination_substrate_is_required_schema_contract(self) -> None:
+        """Epoch-21 coordination tables must participate in stale-DB detection (ADR-030)."""
+        assert ("token_work_items", "barrier_adopted_epoch") in database_module._REQUIRED_COLUMNS
+        required_fks = set(database_module._REQUIRED_FOREIGN_KEYS)
+        assert {
+            ("run_coordination", "run_id", "runs"),
+            ("run_workers", "run_id", "runs"),
+            ("run_coordination_events", "run_id", "runs"),
+            ("coalesce_branch_losses", "run_id", "runs"),
+        } <= required_fks
+        required_checks = set(database_module._REQUIRED_CHECK_CONSTRAINTS)
+        assert {
+            ("run_coordination", "ck_run_coordination_seat_liveness_paired"),
+            ("run_workers", "ck_run_workers_role"),
+            ("run_workers", "ck_run_workers_status"),
+            ("run_workers", "ck_run_workers_evicted_at_paired"),
+            ("run_coordination_events", "ck_run_coordination_events_event_type"),
+        } <= required_checks
+        required_indexes = set(database_module._REQUIRED_INDEXES)
+        assert {
+            ("run_workers", "ix_run_workers_liveness"),
+            ("run_coordination_events", "uq_run_coordination_events_event_id"),
+            ("run_coordination_events", "ix_run_coordination_events_run"),
+            ("coalesce_branch_losses", "uq_coalesce_branch_losses_natural"),
+        } <= required_indexes
+        # Coordination tables are mandatory, never tolerated-as-absent.
+        assert not {"run_coordination", "run_workers", "run_coordination_events", "coalesce_branch_losses"} & set(
+            database_module._ADDITIVE_TABLE_NAMES
+        )
+
+    def test_validate_schema_rejects_token_work_items_missing_barrier_adopted_epoch(self, tmp_path: Path) -> None:
+        """Epoch-21 adoption CAS marker must fail stale DBs early."""
+        db_path = tmp_path / "missing_barrier_adopted_epoch.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.exec_driver_sql("ALTER TABLE token_work_items DROP COLUMN barrier_adopted_epoch")
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        assert "token_work_items.barrier_adopted_epoch" in str(exc_info.value)
+        instance.close()
+
+    def test_validate_schema_rejects_missing_run_workers_liveness_index(self, tmp_path: Path) -> None:
+        """The run_workers liveness/membership index must fail stale DBs early."""
+        db_path = tmp_path / "missing_run_workers_liveness_index.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP INDEX ix_run_workers_liveness"))
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "run_workers.ix_run_workers_liveness" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_run_coordination_missing_seat_liveness_check(self, tmp_path: Path) -> None:
+        """The vacant-seat ⇔ no-liveness-clock pairing CHECK must fail stale DBs early."""
+        db_path = tmp_path / "missing_seat_liveness_check.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP TABLE run_coordination"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE run_coordination (
+                        run_id TEXT PRIMARY KEY REFERENCES runs(run_id),
+                        leader_worker_id TEXT,
+                        leader_epoch INTEGER NOT NULL DEFAULT 0,
+                        leader_heartbeat_expires_at TIMESTAMP,
+                        updated_at TIMESTAMP NOT NULL
+                    )
+                    """
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "run_coordination.ck_run_coordination_seat_liveness_paired" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
+
+    def test_validate_schema_rejects_coalesce_branch_losses_missing_run_fk(self, tmp_path: Path) -> None:
+        """The branch-loss ledger must point at its owning run in stale DBs too."""
+        db_path = tmp_path / "missing_branch_losses_run_fk.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        metadata.create_all(engine)
+        with engine.begin() as conn:
+            conn.exec_driver_sql(f"PRAGMA user_version = {SQLITE_SCHEMA_EPOCH}")
+            conn.execute(text("DROP TABLE coalesce_branch_losses"))
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE coalesce_branch_losses (
+                        loss_id TEXT PRIMARY KEY,
+                        run_id TEXT NOT NULL,
+                        coalesce_name TEXT NOT NULL,
+                        row_id TEXT NOT NULL,
+                        branch_name TEXT NOT NULL,
+                        token_id TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        recorded_by TEXT NOT NULL,
+                        recorded_at TIMESTAMP NOT NULL,
+                        adopted_epoch INTEGER
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX uq_coalesce_branch_losses_natural "
+                    "ON coalesce_branch_losses (run_id, coalesce_name, row_id, branch_name)"
+                )
+            )
+        engine.dispose()
+
+        instance = _make_instance(f"sqlite:///{db_path}")
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "coalesce_branch_losses.run_id → runs" in msg
+        assert "Landscape database schema is outdated" in msg
+        instance.close()
 
     def test_validate_schema_rejects_incompatible_schema_epoch(self, tmp_path: Path) -> None:
         """Stamped SQLite schema epochs provide an explicit future migration seam."""
@@ -528,7 +911,7 @@ class TestSchemaCompatibilityGuards:
                     "runtime_val_manifest_json TEXT)"
                 )
             )
-            conn.execute(text("CREATE TABLE checkpoints (checkpoint_id TEXT PRIMARY KEY, coalesce_state_json TEXT)"))
+            conn.execute(text("CREATE TABLE checkpoints (checkpoint_id TEXT PRIMARY KEY, barrier_scalars_json TEXT)"))
         engine.dispose()
 
         instance = _make_instance(f"sqlite:///{db_path}")

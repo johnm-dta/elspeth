@@ -224,7 +224,7 @@ def _is_abstract_method(method: ast.FunctionDef) -> bool:
 
 
 def _method_raises_audit_integrity_error(method: ast.FunctionDef) -> bool:
-    for node in ast.walk(method):
+    for node in _iter_method_body_without_nested_scopes(method):
         if not isinstance(node, ast.Raise) or node.exc is None:
             continue
         exc = node.exc
@@ -236,6 +236,21 @@ def _method_raises_audit_integrity_error(method: ast.FunctionDef) -> bool:
         if isinstance(func, ast.Attribute) and func.attr == "AuditIntegrityError":
             return True
     return False
+
+
+def _iter_method_body_without_nested_scopes(method: ast.FunctionDef) -> list[ast.AST]:
+    """Return nodes in a method body without entering nested local scopes."""
+    nodes: list[ast.AST] = []
+    stack: list[ast.AST] = []
+    stack.extend(method.body)
+    stack.reverse()
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(reversed(list(ast.iter_child_nodes(node))))
+    return nodes
 
 
 def _allowlist_match(allowlist: Allowlist, finding: Finding) -> object | None:

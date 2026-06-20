@@ -167,7 +167,7 @@ def _ideal_state_for(scenario: dict[str, Any]) -> dict[str, Any]:
 
     state: dict[str, Any] = {
         "is_valid": True,
-        "source": {"plugin": "csv", "options": {"schema": schema}},
+        "sources": {"primary": {"plugin": "csv", "options": {"schema": schema}}},
         "nodes": nodes,
         "outputs": outputs,
     }

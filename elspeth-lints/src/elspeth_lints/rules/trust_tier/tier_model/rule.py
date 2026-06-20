@@ -386,6 +386,16 @@ class TierModelVisitor(ast.NodeVisitor):
         }
     )
     _R1_QUEUE_CONSTRUCTORS: ClassVar[frozenset[str]] = frozenset({"asyncio.Queue"})
+    # starlette multidict Mapping types: ``.get()`` here is the canonical
+    # case-insensitive / multi-value accessor API (Mapping.get), NOT
+    # dict-key-hiding. Receivers constructed from these are non-dict .get.
+    _R1_MAPPING_CONSTRUCTORS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "starlette.datastructures.Headers",
+            "starlette.datastructures.MutableHeaders",
+            "starlette.datastructures.QueryParams",
+        }
+    )
     # CLOSED LIST: audited R5b boundary-normalization helpers from
     # docs/audit/2026-05-19-cicd-allowlist-audit.md and findings/fp-analyst.md.
     # Do not replace this with a broad ``web/**`` or ``plugins/**`` glob; new
@@ -1018,7 +1028,11 @@ class TierModelVisitor(ast.NodeVisitor):
         constructor = self._qualified_import_name(call.func)
         if constructor is None:
             return False
-        return constructor in self._R1_HTTP_CLIENT_CONSTRUCTORS or constructor in self._R1_QUEUE_CONSTRUCTORS
+        return (
+            constructor in self._R1_HTTP_CLIENT_CONSTRUCTORS
+            or constructor in self._R1_QUEUE_CONSTRUCTORS
+            or constructor in self._R1_MAPPING_CONSTRUCTORS
+        )
 
     def _target_matches_receiver(self, target: ast.expr, receiver: ast.expr) -> bool:
         if isinstance(target, ast.Name) and isinstance(receiver, ast.Name):

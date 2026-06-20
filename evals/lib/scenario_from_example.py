@@ -46,7 +46,6 @@ from __future__ import annotations
 
 import json
 import pathlib
-import re
 import sys
 from typing import Any
 
@@ -168,11 +167,13 @@ def _extract_transforms(yaml_doc: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(t, dict):
             continue
         plugin = t.get("plugin")
-        out.append({
-            "name": t.get("name"),
-            "plugin": plugin,
-            "shape_token": _shape_token(plugin),
-        })
+        out.append(
+            {
+                "name": t.get("name"),
+                "plugin": plugin,
+                "shape_token": _shape_token(plugin),
+            }
+        )
     return out
 
 
@@ -184,13 +185,15 @@ def _extract_gates(yaml_doc: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(g, dict):
             continue
         forks_to = g.get("fork_to") or []
-        out.append({
-            "name": g.get("name"),
-            "condition": g.get("condition"),
-            "is_fork": bool(forks_to),
-            "fork_paths": list(forks_to) if isinstance(forks_to, list) else [],
-            "routes": dict(g.get("routes") or {}),
-        })
+        out.append(
+            {
+                "name": g.get("name"),
+                "condition": g.get("condition"),
+                "is_fork": bool(forks_to),
+                "fork_paths": list(forks_to) if isinstance(forks_to, list) else [],
+                "routes": dict(g.get("routes") or {}),
+            }
+        )
     return out
 
 
@@ -202,11 +205,13 @@ def _extract_aggregations(yaml_doc: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(a, dict):
             continue
         plugin = a.get("plugin")
-        out.append({
-            "name": a.get("name"),
-            "plugin": plugin,
-            "shape_token": _shape_token(plugin),
-        })
+        out.append(
+            {
+                "name": a.get("name"),
+                "plugin": plugin,
+                "shape_token": _shape_token(plugin),
+            }
+        )
     return out
 
 
@@ -237,11 +242,13 @@ def _extract_sinks(yaml_doc: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(body, dict):
             continue
         plugin = body.get("plugin")
-        out.append({
-            "name": name,
-            "plugin": plugin,
-            "shape_token": _shape_token(plugin),
-        })
+        out.append(
+            {
+                "name": name,
+                "plugin": plugin,
+                "shape_token": _shape_token(plugin),
+            }
+        )
     return out
 
 
@@ -390,6 +397,11 @@ def build_criteria_from_target(target: dict[str, Any]) -> dict[str, Any]:
         # single-token chain is uninformative.
         green["must_have_node_chain_in_order"] = chain
 
+    output_plugins = [s.get("shape_token") or s.get("plugin") for s in target["sinks"]]
+    output_plugins = [plugin for plugin in output_plugins if isinstance(plugin, str) and plugin]
+    if output_plugins:
+        green["must_have_output_plugins"] = output_plugins
+
     columns = target["source"].get("columns") or []
     if columns:
         green["must_include_observed_columns"] = columns
@@ -432,9 +444,7 @@ def build_criteria_from_example(
 
 def _main(argv: list[str]) -> int:
     if len(argv) < 2 or argv[1] in {"-h", "--help"}:
-        sys.stderr.write(
-            "usage: python -m evals.lib.scenario_from_example <example_dir> [--variant <name>]\n"
-        )
+        sys.stderr.write("usage: python -m evals.lib.scenario_from_example <example_dir> [--variant <name>]\n")
         return 64
     example_dir = pathlib.Path(argv[1])
     if not example_dir.is_dir():
@@ -448,7 +458,7 @@ def _main(argv: list[str]) -> int:
     except (FileNotFoundError, ValueError) as exc:
         sys.stderr.write(f"extraction failed: {exc}\n")
         return 67
-    print(json.dumps(out, indent=2))
+    sys.stdout.write(json.dumps(out, indent=2) + "\n")
     return 0
 
 

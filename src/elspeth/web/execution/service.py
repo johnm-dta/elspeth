@@ -71,6 +71,7 @@ from elspeth.web.execution.errors import (
     MalformedBlobRefError,
     PathAllowlistViolationError,
     PipelineValidationError,
+    RunSessionIntegrityError,
     SemanticContractViolationError,
     UnresolvedInterpretationPlaceholderError,
 )
@@ -81,7 +82,7 @@ from elspeth.web.execution.fanout_guard import (
     evaluate_execution_fanout_guard,
 )
 from elspeth.web.execution.preflight import build_validated_runtime_graph, resolve_runtime_yaml_paths
-from elspeth.web.execution.progress import ProgressBroadcaster
+from elspeth.web.execution.progress import BroadcastResult, ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError, YamlGenerator
 from elspeth.web.execution.schemas import (
     CancelledData,
@@ -104,6 +105,7 @@ from elspeth.web.sessions.protocol import (
     IllegalRunTransitionError,
     RunAlreadyActiveError,
     RunRecord,
+    SessionNotFoundError,
     SessionRunStatus,
     SessionServiceProtocol,
 )  # B1: canonical definition
@@ -378,6 +380,10 @@ class ExecutionServiceImpl:
         """
         self._session_locks.pop(session_id, None)
 
+    def get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """Return the per-session lock shared by execute() and deletion."""
+        return self._session_locks.setdefault(session_id, asyncio.Lock())
+
     async def shutdown(self) -> None:
         """Shut down the thread pool without blocking the event loop.
 
@@ -424,7 +430,7 @@ class ExecutionServiceImpl:
         # get_active_run → create_run window so two concurrent execute()
         # calls cannot both pass the check before either creates a run.
         session_key = str(session_id)
-        lock = self._session_locks.setdefault(session_key, asyncio.Lock())
+        lock = self.get_session_lock(session_key)
         async with lock:
             return await self._execute_locked(
                 session_id,
@@ -525,16 +531,19 @@ class ExecutionServiceImpl:
         # checks this, but /execute does not require /validate first. An
         # authenticated user could skip validation and execute a state that
         # reads files outside the allowed directories.
-        if composition_state.source is not None:
+        if composition_state.sources:
             from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 
             allowed_dirs = allowed_source_directories(str(self._settings.data_dir))
-            for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
-                value = composition_state.source.options.get(key)
-                if value is not None:
-                    resolved = resolve_data_path(value, str(self._settings.data_dir))
-                    if not any(resolved.is_relative_to(d) for d in allowed_dirs):
-                        raise PathAllowlistViolationError(f"Source {key}='{value}' resolves outside allowed directories")
+            for source_name, source in composition_state.sources.items():
+                for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+                    value = source.options.get(key)
+                    if value is not None:
+                        resolved = resolve_data_path(value, str(self._settings.data_dir))
+                        if not any(resolved.is_relative_to(d) for d in allowed_dirs):
+                            raise PathAllowlistViolationError(
+                                f"Source '{source_name}' {key}='{value}' resolves outside allowed directories"
+                            )
 
         # Sink path allowlist — prevents arbitrary file writes via sink options.
         # Without this, a client can set sink options.path to any absolute or
@@ -568,7 +577,9 @@ class ExecutionServiceImpl:
             for node in composition_state.nodes:
                 if node.node_type != "transform":
                     continue
-                provider_config = node.options.get("provider_config")
+                if "provider_config" not in node.options:
+                    continue
+                provider_config = node.options["provider_config"]
                 if not isinstance(provider_config, Mapping):
                     continue
                 for key in NESTED_LOCAL_PATH_OPTION_KEYS:
@@ -622,14 +633,19 @@ class ExecutionServiceImpl:
         # DB ownership record. Without this, a crafted composition state
         # could reference another session's blob path (which would pass the
         # shared-root path allowlist above).
-        parsed_blob_id: UUID | None = None
-        if composition_state.source is not None and self._blob_service is not None:
-            blob_ref = composition_state.source.options.get("blob_ref")
-            if blob_ref is not None:
+        parsed_blob_ids: list[UUID] = []
+        if composition_state.sources and self._blob_service is not None:
+            for source_name, source in composition_state.sources.items():
+                if "blob_ref" not in source.options:
+                    continue
+                blob_ref = source.options["blob_ref"]
+                if blob_ref is None:
+                    continue
                 try:
                     parsed_blob_id = UUID(blob_ref)
                 except ValueError as exc:
-                    raise MalformedBlobRefError("blob_ref must be a UUID") from exc
+                    raise MalformedBlobRefError(f"sources.{source_name}.blob_ref must be a UUID") from exc
+                parsed_blob_ids.append(parsed_blob_id)
                 # IDOR contract (mirrors the state_id branch above): the
                 # nonexistent-blob and cross-session-blob cases MUST be
                 # indistinguishable from the client's perspective.  Both
@@ -646,7 +662,7 @@ class ExecutionServiceImpl:
                 if blob_record.session_id != session_id:
                     raise BlobNotFoundError(blob_ref)
 
-                # Tier 1 read guard: composition_states.source.options.path
+                # Tier 1 read guard: composition_states source options path
                 # is our own audit data and must equal the canonical blob
                 # storage_path.  A mismatch (or absence on a blob-backed
                 # source) indicates a bug in composer persistence — crash
@@ -656,7 +672,7 @@ class ExecutionServiceImpl:
                 # indexing instead of .get() so the absence case raises
                 # the structured BlobSourcePathMismatchError rather than
                 # an opaque KeyError.  See elspeth-07089fbaa3.
-                source_options = composition_state.source.options
+                source_options = source.options
                 canonical_path = blob_record.storage_path
                 stored_path = source_options["path"] if "path" in source_options else None
                 if stored_path != canonical_path:
@@ -696,12 +712,13 @@ class ExecutionServiceImpl:
 
         try:
             # Record blob-to-run linkage for input blobs
-            if parsed_blob_id is not None and self._blob_service is not None:
-                await self._blob_service.link_blob_to_run(
-                    blob_id=parsed_blob_id,
-                    run_id=run_id,
-                    direction="input",
-                )
+            if parsed_blob_ids and self._blob_service is not None:
+                for parsed_blob_id in parsed_blob_ids:
+                    await self._blob_service.link_blob_to_run(
+                        blob_id=parsed_blob_id,
+                        run_id=run_id,
+                        direction="input",
+                    )
 
             # Submit to thread pool
             future = self._executor.submit(
@@ -892,8 +909,22 @@ class ExecutionServiceImpl:
         user_id and auth_provider_type to prevent cross-provider access
         when user_id namespaces overlap between providers.
         """
+        # Tier-3 boundary: ``UUID(run_id)`` raises ValueError on a malformed
+        # run id, and ``get_run`` raises a bare ValueError when no run row
+        # matches. Both are legitimate external not-found cases — the caller
+        # maps them to an IDOR-safe 4004 close.
         run = await self._session_service.get_run(UUID(run_id))
-        session = await self._session_service.get_session(run.session_id)
+        # Tier-1 invariant: an existing run's ``session_id`` FK MUST resolve to
+        # a sessions row. If it does not, that is referential corruption of our
+        # own sessions DB, not hostile client input. ``get_session`` signals
+        # this as ``SessionNotFoundError`` (a ValueError subclass); we re-raise
+        # it as a non-ValueError integrity error so the ownership-check caller's
+        # broad ``except ValueError`` cannot silently collapse Tier-1 corruption
+        # into a benign "Run not found" response.
+        try:
+            session = await self._session_service.get_session(run.session_id)
+        except SessionNotFoundError as exc:
+            raise RunSessionIntegrityError(run_id=run_id, session_id=str(run.session_id)) from exc
         return session.user_id == user.user_id and session.auth_provider_type == self._settings.auth_provider
 
     async def cancel(self, run_id: UUID) -> None:
@@ -951,7 +982,7 @@ class ExecutionServiceImpl:
             if shutdown_event.is_set():
                 self._finalize_output_blobs(run_id, success=False)
                 self._call_async(self._session_service.update_run_status(run_uuid, status="cancelled"))
-                self._broadcaster.broadcast(
+                self._persist_and_broadcast_run_event(
                     run_id,
                     RunEvent(
                         run_id=run_id,
@@ -979,7 +1010,7 @@ class ExecutionServiceImpl:
                 current = self._call_async(self._session_service.get_run(run_uuid))
                 if current.status == "cancelled":
                     self._finalize_output_blobs(run_id, success=False)
-                    self._broadcaster.broadcast(
+                    self._persist_and_broadcast_run_event(
                         run_id,
                         RunEvent(
                             run_id=run_id,
@@ -1098,9 +1129,29 @@ class ExecutionServiceImpl:
                         )
 
                     try:
+                        # IDOR contract (mirrors the source blob_ref path at
+                        # lines 645-647 and the /validate _blob_get_metadata
+                        # path at 862-871): inline-content markers carry a
+                        # caller-supplied blob_id, so the cross-session and the
+                        # genuinely-missing cases MUST be indistinguishable.
+                        # ``get_blob`` is global (not session-scoped), so we
+                        # resolve the run's owning session once and treat any
+                        # blob owned by another session exactly as missing —
+                        # raising ``BlobNotFoundError`` BEFORE any status / hash
+                        # / size comparison in ``_enforce_blob_content_ref_metadata``
+                        # or any ``link_blob_to_run`` / ``read_blob_content``
+                        # access, so no metadata of another session's blob is
+                        # ever observable.
+                        owning_session_id = self._call_async(self._session_service.get_run(run_uuid)).session_id
+
+                        async def _get_blob_scoped(blob_id: UUID) -> BlobRecord:
+                            record = await blob_service.get_blob(blob_id)
+                            if record.session_id != owning_session_id:
+                                raise BlobNotFoundError(str(blob_id))
+                            return record
 
                         async def _gather_inline_blob_metadata() -> list[Any]:
-                            return await asyncio.gather(*(blob_service.get_blob(blob_id) for blob_id in unique_blob_ids))
+                            return await asyncio.gather(*(_get_blob_scoped(blob_id) for blob_id in unique_blob_ids))
 
                         metadata_records = self._call_async(_gather_inline_blob_metadata())
                         records_by_blob_id: dict[UUID, BlobRecord] = {
@@ -1159,7 +1210,7 @@ class ExecutionServiceImpl:
             # errors before any rows flow, with a cleaner error surface, and
             # closes the composer/runtime parity gap (issue elspeth-127de6865a).
             pipeline_config = assemble_and_validate_pipeline_config(
-                source=bundle.source,
+                sources=bundle.sources,
                 transforms=bundle.transforms,
                 sinks=bundle.sinks,
                 aggregations=bundle.aggregations,
@@ -1335,7 +1386,7 @@ class ExecutionServiceImpl:
                         rows_failed=result.rows_failed,
                     )
                     self._finalize_output_blobs(run_id, success=False)
-                    self._broadcaster.broadcast(
+                    self._persist_and_broadcast_run_event(
                         run_id,
                         RunEvent(
                             run_id=run_id,
@@ -1382,7 +1433,7 @@ class ExecutionServiceImpl:
                 assert session_error is not None, (
                     "Tier-1 invariant: session_error must be populated when result.status == RunStatus.FAILED (see the FAILED branch above)"
                 )
-                self._broadcaster.broadcast(
+                self._persist_and_broadcast_run_event(
                     run_id,
                     RunEvent(
                         run_id=run_id,
@@ -1398,7 +1449,7 @@ class ExecutionServiceImpl:
                 if landscape_db is None:
                     raise RuntimeError("Tier-1 invariant: completed run has no open LandscapeDB for accounting projection")
                 accounting = load_run_accounting_from_db(landscape_db, landscape_run_id=result.run_id)
-                self._broadcaster.broadcast(
+                self._persist_and_broadcast_run_event(
                     run_id,
                     RunEvent(
                         run_id=run_id,
@@ -1445,7 +1496,7 @@ class ExecutionServiceImpl:
                     rows_quarantined=gse.rows_quarantined,
                 )
             )
-            self._broadcaster.broadcast(
+            self._persist_and_broadcast_run_event(
                 run_id,
                 RunEvent(
                     run_id=run_id,
@@ -1643,7 +1694,7 @@ class ExecutionServiceImpl:
             # Re-emitting the *correct* terminal SSE event for consumer
             # continuity is a separate UX improvement.
             if not run_already_terminal:
-                self._broadcaster.broadcast(
+                self._persist_and_broadcast_run_event(
                     run_id,
                     RunEvent(
                         run_id=run_id,
@@ -1745,13 +1796,32 @@ class ExecutionServiceImpl:
 
     def _broadcast_progress_event(self, run_id: str, progress: ProgressEvent) -> None:
         run_event = self._to_run_event(run_id, progress)
-        broadcast_result = self._broadcaster.broadcast(run_id, run_event)
+        broadcast_result = self._persist_and_broadcast_run_event(run_id, run_event)
         if broadcast_result.dropped_count > 0:
             assert broadcast_result.drop_reason is not None, "BroadcastResult with drops must carry a drop_reason"
             self._telemetry.progress_broadcast_dropped_total.add(
                 broadcast_result.dropped_count,
                 attributes={"reason": broadcast_result.drop_reason},
             )
+
+    def _persist_and_broadcast_run_event(self, run_id: str, run_event: RunEvent) -> BroadcastResult:
+        try:
+            self._call_async(
+                self._session_service.append_run_event(
+                    run_id=UUID(run_id),
+                    timestamp=run_event.timestamp,
+                    event_type=run_event.event_type,
+                    data=run_event.data.model_dump(mode="json"),
+                )
+            )
+        except (OSError, SQLAlchemyError) as exc:
+            slog.error(
+                "run_event_persist_failed",
+                run_id=run_id,
+                event_type=run_event.event_type,
+                exc_class=type(exc).__name__,
+            )
+        return self._broadcaster.broadcast(run_id, run_event)
 
     # Exceptions that can escape finalize_run_output_blobs itself
     # (not per-blob errors, which are captured in the result).

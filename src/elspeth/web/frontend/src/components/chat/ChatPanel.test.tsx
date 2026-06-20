@@ -84,16 +84,19 @@ vi.mock("./ChatInput", () => ({
     placeholder,
     onSend,
     disabled,
+    maxLength,
   }: {
     placeholder?: string;
     onSend?: (content: string) => void;
     disabled?: boolean;
+    maxLength?: number;
   }) => (
     <button
       type="button"
       data-testid="chat-input"
       data-placeholder={placeholder ?? ""}
       data-disabled={disabled ? "true" : "false"}
+      data-max-length={maxLength ?? ""}
       onClick={() => onSend?.("test-chat-message")}
     >
       {placeholder ?? ""}
@@ -653,6 +656,20 @@ describe("ChatPanel mode discriminator", () => {
     });
   });
 
+  it("passes the backend guided-chat message limit to the guided ChatInput", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.maxLength).toBe("4096");
+  });
+
   it("disables the guided ChatInput while guidedChatPending=true", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -1088,7 +1105,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
 // ── Inline-source projection (Phase 5a Task 3) ────────────────────────────────
 //
 // These tests cover the wiring that derives an InlineSourceSummary from
-// `compositionState.source.options["blob_ref"]` and the corresponding session
+// `compositionState.sources[*].options["blob_ref"]` and the corresponding session
 // blob's metadata + preview, then surfaces the InlineSourceCreatedTurn widget
 // in the message stream.
 //
@@ -1121,7 +1138,7 @@ describe("ChatPanel inline-source projection", () => {
       size_bytes: 42,
       content_hash: twoRowInlineSourceHash,
       created_at: "2026-05-18T10:00:01Z",
-      created_by: "user",
+      created_by: "assistant",
       source_description: null,
       status: "ready",
       creation_modality: "llm_generated",
@@ -1149,7 +1166,7 @@ describe("ChatPanel inline-source projection", () => {
     });
   });
 
-  it("renders the widget when compositionState.source.options['blob_ref'] resolves to a session blob", async () => {
+  it("renders the widget when a composition source blob_ref resolves to a session blob", async () => {
     (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
       makeBlobMetadata(),
     );
@@ -1158,9 +1175,11 @@ describe("ChatPanel inline-source projection", () => {
     ).mockResolvedValue(twoRowInlineSourceText);
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -1188,9 +1207,93 @@ describe("ChatPanel inline-source projection", () => {
     ).toBeInTheDocument();
   });
 
+  it("renders the widget when a named inline source carries the blob_ref", async () => {
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeBlobMetadata(),
+    );
+    (
+      apiClient.previewBlobContent as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(twoRowInlineSourceText);
+
+    const composition = makeComposition(1, {
+      sources: {
+        created: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(apiClient.getBlobMetadata).toHaveBeenCalledWith(
+        "session-inline",
+        "blob-inline-1",
+      );
+      expect(
+        screen.getByRole("region", { name: /source created/i }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("does NOT fetch content for an uploaded source blob_ref", async () => {
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeBlobMetadata({
+        created_by: "user",
+        source_description: "uploaded",
+        creation_modality: "verbatim",
+        created_from_message_id: null,
+        creating_model_identifier: null,
+        creating_model_version: null,
+        creating_provider: null,
+        creating_composer_skill_hash: null,
+        creating_arguments_hash: null,
+        size_bytes: 250_000_000,
+      }),
+    );
+
+    const composition = makeComposition(1, {
+      sources: {
+        source: {
+          plugin: "csv_file",
+          options: { blob_ref: "blob-inline-1", path: "/data/upload.csv" },
+        },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(apiClient.getBlobMetadata).toHaveBeenCalledWith(
+        "session-inline",
+        "blob-inline-1",
+      );
+    });
+
+    expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("region", { name: /source created/i }),
+    ).toBeNull();
+  });
+
   it("does NOT render the widget when compositionState has no inline source", () => {
     const composition = makeComposition(1, {
-      source: { plugin: "csv_file", options: { path: "data.csv" } },
+      sources: { source: { plugin: "csv_file", options: { path: "data.csv" } } },
     });
 
     useSessionStore.setState({
@@ -1210,8 +1313,49 @@ describe("ChatPanel inline-source projection", () => {
     expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
   });
 
-  it("does NOT render the widget when compositionState.source is null", () => {
-    const composition = makeComposition(1, { source: null });
+  it("clears a stale inline-source summary when the active blob is not inline", async () => {
+    useInlineSourceStore.getState().setSummary("session-inline", {
+      blobId: "old-inline",
+      filename: "old.csv",
+      mimeType: "text/csv",
+      contentPreview: "url\nhttps://old.gov.au",
+      rowCount: 2,
+      contentHash: twoRowInlineSourceHash,
+      provenance: "llm-generated",
+    });
+    (apiClient.getBlobMetadata as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeBlobMetadata({
+        id: "uploaded-blob",
+        created_by: "user",
+        created_from_message_id: null,
+      }),
+    );
+    const composition = makeComposition(1, {
+      sources: {
+        source: {
+          plugin: "csv_file",
+          options: { blob_ref: "uploaded-blob" },
+        },
+      },
+    });
+
+    useSessionStore.setState({
+      activeSessionId: "session-inline",
+      sessions: [sessionFixture],
+      messages: [],
+      compositionState: composition,
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(useInlineSourceStore.getState().getSummary("session-inline")).toBeNull();
+    });
+    expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
+  });
+
+  it("does NOT render the widget when compositionState has no sources", () => {
+    const composition = makeComposition(1, { sources: {} });
 
     useSessionStore.setState({
       activeSessionId: "session-inline",
@@ -1253,9 +1397,11 @@ describe("ChatPanel inline-source projection", () => {
       .mockImplementation(() => {});
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -1295,9 +1441,11 @@ describe("ChatPanel inline-source projection", () => {
       .mockImplementation(() => {});
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -1341,9 +1489,11 @@ describe("ChatPanel inline-source projection", () => {
       .mockImplementation(() => {});
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -1391,9 +1541,11 @@ describe("ChatPanel inline-source projection", () => {
       .mockImplementation(() => {});
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-inline-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-inline-1" },
+        },
       },
     });
 
@@ -2334,7 +2486,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       content_hash:
         "bb34d52cc97aefb5ce4513edda086520863c513bd8f3bd9165404000347d1081",
       created_at: "2026-05-18T10:00:01Z",
-      created_by: "user",
+      created_by: "assistant",
       source_description: null,
       status: "ready",
       // Provenance is llm_generated (not interpretation-related).  The
@@ -2354,9 +2506,11 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     ).mockResolvedValue("a\nb\nc\nd\ne\nf");
 
     const composition = makeComposition(1, {
-      source: {
-        plugin: "inline_blob",
-        options: { blob_ref: "blob-routing-1" },
+      sources: {
+        source: {
+          plugin: "inline_blob",
+          options: { blob_ref: "blob-routing-1" },
+        },
       },
     });
     useSessionStore.setState({

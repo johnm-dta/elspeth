@@ -392,7 +392,8 @@ class TestElspethSettingsAlignment:
 
     # Pipeline definition fields (core pipeline config)
     PIPELINE_FIELDS: ClassVar[set[str]] = {
-        "source",  # Required - source plugin config
+        "sources",  # Canonical named source plugin configs
+        "queues",  # Optional scheduler pass-through/fan-in nodes
         "transforms",  # Optional - transform chain
         "sinks",  # Required - named sink configs
         "gates",  # Optional - config-driven routing

@@ -7,8 +7,10 @@ import contextlib
 import gc
 import sys
 import weakref
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -18,6 +20,10 @@ from starlette.requests import Request
 from starlette.responses import Response as StarletteResponse
 from structlog.testing import capture_logs
 
+import elspeth.web.app as app_module
+from elspeth.contracts import RunStatus
+from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.web.app import (
     _JSON_COLLECTION_FIELDS,
     _BodySizeLimitMiddleware,
@@ -30,6 +36,8 @@ from elspeth.web.auth.audit import AuthAuditRecorder
 from elspeth.web.composer.boot_probe import ComposerBootConfigError
 from elspeth.web.config import WebSettings
 from elspeth.web.dependencies import get_settings
+from elspeth.web.sessions.protocol import CompositionStateData, RunRecord
+from elspeth.web.sessions.telemetry import _FakeCounter, build_sessions_telemetry, observed_value
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -141,15 +149,14 @@ class TestCreateApp:
         )
         assert len(list(cache_dir.glob("*.json"))) == 1
 
-    def test_loopback_default_secret_key_allowed_without_pytest_module(self, tmp_path, monkeypatch) -> None:
-        """Loopback startup must follow the WebSettings contract outside pytest too."""
+    def test_loopback_default_secret_key_rejected_without_pytest_module(self, tmp_path, monkeypatch) -> None:
+        """Loopback bind is not proof the service is unreachable behind a proxy."""
         settings = _settings(tmp_path, host="127.0.0.1")
         monkeypatch.delitem(sys.modules, "pytest", raising=False)
         monkeypatch.delenv("ELSPETH_ENV", raising=False)
 
-        app = create_app(settings)
-
-        assert app is not None
+        with pytest.raises(SystemExit, match="secret_key is set to the default value"):
+            create_app(settings)
 
     def test_abandoned_app_disposes_session_engine(self, tmp_path, monkeypatch) -> None:
         """Unit tests often instantiate ``create_app`` without running lifespan."""
@@ -659,6 +666,46 @@ class TestLifespanShutdown:
         assert called is False
 
     @pytest.mark.asyncio
+    async def test_lifespan_startup_orphan_cleanup_terminalizes_landscape_run(self, tmp_path) -> None:
+        app = create_app(
+            _settings(
+                tmp_path,
+                composer_boot_probe_enabled=False,
+                orphan_run_check_interval_seconds=3600,
+            )
+        )
+        session_service = app.state.session_service
+        session = await session_service.create_session("alice", "Pipeline", "local")
+        state = await session_service.save_composition_state(session.id, CompositionStateData(is_valid=True), provenance="session_seed")
+        web_run = await session_service.create_run(session.id, state.id)
+        landscape_run_id = "lscp-startup-orphan"
+        await session_service.update_run_status(web_run.id, "running", landscape_run_id=landscape_run_id)
+
+        with LandscapeDB.from_url(app.state.settings.get_landscape_url()) as db:
+            RecorderFactory(db).run_lifecycle.begin_run(
+                config={},
+                canonical_version="v1",
+                run_id=landscape_run_id,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+
+        with patch("httpx.AsyncClient", return_value=_StaticAsyncClient([])):
+            async with lifespan(app):
+                pass
+
+        updated_web_run = await session_service.get_run(web_run.id)
+        assert updated_web_run.status == "cancelled"
+        assert updated_web_run.finished_at is not None
+
+        with LandscapeDB.from_url(app.state.settings.get_landscape_url()) as db:
+            landscape_run = RecorderFactory(db).run_lifecycle.get_run(landscape_run_id)
+
+        assert landscape_run is not None
+        assert landscape_run.status == RunStatus.INTERRUPTED
+        assert landscape_run.completed_at is not None
+
+    @pytest.mark.asyncio
     async def test_lifespan_emits_composer_boot_config_attributes(self, monkeypatch, tmp_path) -> None:
         app = create_app(
             _settings(
@@ -898,6 +945,12 @@ class TestSettingsFromEnv:
         assert settings.port == 9090
         assert isinstance(settings.port, int)
 
+    def test_unknown_env_setting_rejected_with_original_name(self, monkeypatch) -> None:
+        monkeypatch.setenv("ELSPETH_WEB__COMPOSER_EXPOSE_PROVDER_ERRORS", "true")
+
+        with pytest.raises(RuntimeError, match="ELSPETH_WEB__COMPOSER_EXPOSE_PROVDER_ERRORS"):
+            _settings_from_env()
+
 
 class TestJsonCollectionFieldsSync:
     """Structural test: _JSON_COLLECTION_FIELDS must stay in sync with WebSettings."""
@@ -945,7 +998,8 @@ class TestPeriodicOrphanCleanup:
         mock_exec = MagicMock()
         mock_exec.get_live_run_ids.return_value = frozenset()
 
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=0, max_age_seconds=900))
+        telemetry = build_sessions_telemetry()
+        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=900))
         try:
             await asyncio.wait_for(called.wait(), timeout=5.0)
         finally:
@@ -958,6 +1012,36 @@ class TestPeriodicOrphanCleanup:
             exclude_run_ids=frozenset(),
             reason="Orphaned by periodic cleanup — no active executor thread",
         )
+        assert observed_value(telemetry.orphaned_runs_cancelled_total) == 0
+
+    @pytest.mark.asyncio
+    async def test_periodic_cleanup_emits_cancelled_count_to_telemetry(self) -> None:
+        cleanup_called = asyncio.Event()
+
+        async def signal_called(**_: object) -> int:
+            cleanup_called.set()
+            return 3
+
+        mock_service = AsyncMock()
+        mock_service.cancel_all_orphaned_runs.side_effect = signal_called
+        mock_exec = MagicMock()
+        mock_exec.get_live_run_ids.return_value = frozenset({"run-live"})
+        telemetry = build_sessions_telemetry()
+
+        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=900))
+        try:
+            await asyncio.wait_for(cleanup_called.wait(), timeout=5.0)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        assert observed_value(telemetry.orphaned_runs_cancelled_total) == 3
+        counter = telemetry.orphaned_runs_cancelled_total
+        assert isinstance(counter, _FakeCounter)
+        amount, attrs, _context = counter.calls[0]
+        assert amount == 3
+        assert attrs == {"source": "periodic", "excluded_live_runs": 1}
 
     @pytest.mark.asyncio
     async def test_continues_after_exception(self) -> None:
@@ -1001,7 +1085,10 @@ class TestPeriodicOrphanCleanup:
         mock_exec.get_live_run_ids.return_value = frozenset()
 
         with capture_logs() as cap_logs:
-            task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=0, max_age_seconds=3600))
+            telemetry = build_sessions_telemetry()
+            task = asyncio.create_task(
+                _periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600)
+            )
             try:
                 await asyncio.wait_for(recovered.wait(), timeout=5.0)
             finally:
@@ -1032,7 +1119,8 @@ class TestPeriodicOrphanCleanup:
         mock_exec = MagicMock()
         mock_exec.get_live_run_ids.return_value = frozenset()
 
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=10, max_age_seconds=3600))
+        telemetry = build_sessions_telemetry()
+        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=10, max_age_seconds=3600))
         await asyncio.sleep(0.01)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1064,7 +1152,10 @@ class TestPeriodicOrphanCleanup:
         mock_exec.get_live_run_ids.side_effect = AttributeError("ExecutionServiceImpl has no attribute '_shutdown_events'")
 
         with capture_logs() as cap_logs:
-            task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=0, max_age_seconds=3600))
+            telemetry = build_sessions_telemetry()
+            task = asyncio.create_task(
+                _periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600)
+            )
             # Task must terminate on its own with the AttributeError.
             # ``asyncio.wait_for`` provides the deterministic wait: if the
             # narrow-catch regresses to ``except Exception``, the task
@@ -1103,7 +1194,8 @@ class TestPeriodicOrphanCleanup:
         live_ids = frozenset({"run-1", "run-2"})
         mock_exec.get_live_run_ids.return_value = live_ids
 
-        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, interval_seconds=0, max_age_seconds=3600))
+        telemetry = build_sessions_telemetry()
+        task = asyncio.create_task(_periodic_orphan_cleanup(mock_service, mock_exec, telemetry, interval_seconds=0, max_age_seconds=3600))
         await asyncio.wait_for(cleanup_called.wait(), timeout=5.0)
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -1115,6 +1207,52 @@ class TestPeriodicOrphanCleanup:
             exclude_run_ids=live_ids,
             reason="Orphaned by periodic cleanup — no active executor thread",
         )
+
+
+class TestOrphanLandscapeReconciliation:
+    """Cross-DB orphan cleanup reconciliation."""
+
+    def test_terminalizes_landscape_run_rows_for_cancelled_session_runs(self, tmp_path: Path) -> None:
+        settings = _settings(tmp_path)
+        settings.data_dir.mkdir(parents=True, exist_ok=True)
+        (settings.data_dir / "runs").mkdir(exist_ok=True)
+        landscape_url = settings.get_landscape_url()
+        landscape_run_id = "lscp-orphan-1"
+        with LandscapeDB.from_url(landscape_url) as db:
+            RecorderFactory(db).run_lifecycle.begin_run(
+                config={},
+                canonical_version="v1",
+                run_id=landscape_run_id,
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+
+        cancelled_run = RunRecord(
+            id=uuid4(),
+            session_id=uuid4(),
+            state_id=uuid4(),
+            status="cancelled",
+            started_at=datetime.now(tz=UTC),
+            finished_at=datetime.now(tz=UTC),
+            rows_processed=0,
+            rows_succeeded=0,
+            rows_failed=0,
+            rows_routed_success=0,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            error="Orphaned by server restart - no active process",
+            landscape_run_id=landscape_run_id,
+            pipeline_yaml=None,
+        )
+
+        app_module._finalize_orphaned_landscape_runs(landscape_url, [cancelled_run])
+
+        with LandscapeDB.from_url(landscape_url) as db:
+            run = RecorderFactory(db).run_lifecycle.get_run(landscape_run_id)
+
+        assert run is not None
+        assert run.status == RunStatus.INTERRUPTED
+        assert run.completed_at is not None
 
 
 class TestDataDirCreation:
@@ -1271,6 +1409,35 @@ class TestSecretsExceptionHandlers:
         # Correlation id must be present and echoed on the response header.
         assert body["request_id"]
         assert resp.headers["X-Request-ID"] == body["request_id"]
+
+    def test_validate_secret_rejects_invalid_path_name_before_service_access(self, tmp_path, monkeypatch) -> None:
+        """Invalid path names must fail at the HTTP boundary without probing stores."""
+        client = self._authed_client(tmp_path)
+
+        def fail_if_called(*_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("secret service must not be called for invalid path names")
+
+        monkeypatch.setattr(client.app.state.secret_service, "check_user_ref_resolvable", fail_if_called)
+
+        resp = client.post("/api/secrets/1bad/validate")
+
+        assert resp.status_code == 422
+        assert "1bad" not in resp.text
+
+    def test_delete_secret_rejects_oversized_path_name_before_service_access(self, tmp_path, monkeypatch) -> None:
+        """Oversized path names must fail closed without echoing the attacker-controlled name."""
+        client = self._authed_client(tmp_path)
+        oversized_name = "A" * 300
+
+        def fail_if_called(*_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("secret service must not be called for invalid path names")
+
+        monkeypatch.setattr(client.app.state.secret_service, "delete_user_secret", fail_if_called)
+
+        resp = client.delete(f"/api/secrets/{oversized_name}")
+
+        assert resp.status_code == 422
+        assert oversized_name not in resp.text
 
     # -- SecretDecryptionError → 409 ------------------------------------------
 

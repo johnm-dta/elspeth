@@ -19,10 +19,16 @@ busy_timeout + synchronous=NORMAL settings.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from types import MethodType
 from typing import Any
 
 from sqlalchemy import Engine, create_engine, event, text
+from sqlalchemy.engine import Connection
 from sqlalchemy.engine.interfaces import DBAPIConnection
+
+_SESSION_WRITE_INTENT_OPTION = "elspeth_session_write_intent"
 
 
 def create_session_engine(url: str, **kwargs: Any) -> Engine:
@@ -79,6 +85,33 @@ def create_session_engine(url: str, **kwargs: Any) -> Engine:
             cursor.execute("PRAGMA busy_timeout=5000")
         finally:
             cursor.close()
+        # Take manual control of transaction starts so SQLAlchemy's begin
+        # event below is the only BEGIN source. Without this pysqlite can emit
+        # its own deferred BEGIN before the first DML statement, preserving the
+        # read-then-write lock-upgrade race this engine is meant to close.
+        dbapi_conn.isolation_level = None
+
+    @event.listens_for(engine, "begin")
+    def _begin_immediate(conn: Connection) -> None:
+        if conn.dialect.name != "sqlite":
+            return
+        if conn.get_execution_options().get(_SESSION_WRITE_INTENT_OPTION, False):
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
+        else:
+            conn.exec_driver_sql("BEGIN")
+
+    @contextmanager
+    def _begin_session_write(self: Engine) -> Iterator[Connection]:
+        # SQLAlchemy's begin event does not distinguish explicit
+        # engine.begin() from autobegin on a plain engine.connect().execute().
+        # Mark only the explicit session write transaction as IMMEDIATE so
+        # bare read connections keep the lock-free deferred BEGIN path.
+        with self.connect() as conn:
+            write_conn = conn.execution_options(**{_SESSION_WRITE_INTENT_OPTION: True})
+            with write_conn.begin():
+                yield write_conn
+
+    engine.begin = MethodType(_begin_session_write, engine)  # type: ignore[method-assign]
 
     # Startup probe. On QueuePool this connection is a fresh checkout
     # whose ``connect`` listener just ran, so reading the PRAGMAs here

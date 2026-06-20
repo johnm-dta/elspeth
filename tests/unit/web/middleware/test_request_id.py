@@ -38,6 +38,17 @@ def _make_app() -> FastAPI:
     return app
 
 
+def _make_boom_app() -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+
+    @app.get("/_boom")
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
+    return app
+
+
 class TestRequestIdAssignment:
     """Every request must carry a request_id on request.state and in the response header."""
 
@@ -72,6 +83,17 @@ class TestRequestIdAssignment:
         client = TestClient(app)
         ids = {client.get("/_echo").json()["request_id"] for _ in range(10)}
         assert len(ids) == 10
+
+    def test_unhandled_500_response_still_echoes_request_id(self) -> None:
+        """Generic 500 responses still need the correlation header."""
+        app = _make_boom_app()
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/_boom")
+
+        assert resp.status_code == 500
+        rid = resp.headers[REQUEST_ID_HEADER]
+        assert uuid.UUID(rid).version == 4
 
 
 class TestRequestIdHardening:

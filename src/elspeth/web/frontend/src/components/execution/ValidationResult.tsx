@@ -21,6 +21,8 @@ interface ValidationResultProps {
   result: ValidationResultType;
   /** Nodes from CompositionState for mapping component_id to display name */
   nodes?: NodeSpec[];
+  /** All graph components from CompositionState keyed by navigable component_id */
+  componentNames?: Record<string, string>;
   /** Callback when user clicks an error/warning to navigate to that component */
   onComponentClick?: (componentId: string) => void;
 }
@@ -32,16 +34,39 @@ interface ValidationResultProps {
 function resolveComponentName(
   componentId: string | null,
   nodes: NodeSpec[] | undefined,
+  componentNames: Record<string, string> | undefined,
 ): string {
   if (!componentId) return "unknown";
+  if (
+    componentNames &&
+    Object.prototype.hasOwnProperty.call(componentNames, componentId)
+  ) {
+    return componentNames[componentId];
+  }
   if (!nodes) return componentId;
   const node = nodes.find((n) => n.id === componentId);
   return node ? `${node.node_type}:${node.id}` : componentId;
 }
 
+function isNavigableComponent(
+  componentId: string | null,
+  nodes: NodeSpec[] | undefined,
+  componentNames: Record<string, string> | undefined,
+): componentId is string {
+  if (!componentId) return false;
+  if (
+    componentNames &&
+    Object.prototype.hasOwnProperty.call(componentNames, componentId)
+  ) {
+    return true;
+  }
+  return nodes?.some((n) => n.id === componentId) ?? false;
+}
+
 export function ValidationResultBanner({
   result,
   nodes,
+  componentNames,
   onComponentClick,
 }: ValidationResultProps) {
   if (result.is_valid) {
@@ -75,13 +100,18 @@ export function ValidationResultBanner({
             </div>
             <ul className="validation-banner-warnings-list">
               {result.warnings.map((warn: ValidationWarning, i: number) => {
-                const isNode = nodes?.some((n) => n.id === warn.component_id);
-                const isClickable = warn.component_id && onComponentClick && isNode;
+                const isClickable =
+                  Boolean(onComponentClick) &&
+                  isNavigableComponent(warn.component_id, nodes, componentNames);
                 const content = (
                   <>
                     <strong>
                       [{warn.component_type ?? "unknown"}]{" "}
-                      {resolveComponentName(warn.component_id, nodes)}:
+                      {resolveComponentName(
+                        warn.component_id,
+                        nodes,
+                        componentNames,
+                      )}:
                     </strong>{" "}
                     {warn.message}
                     {warn.suggestion && (
@@ -96,7 +126,11 @@ export function ValidationResultBanner({
                   <li key={i} className="validation-banner-warn-item">
                     {isClickable ? (
                       <button
-                        onClick={() => onComponentClick(warn.component_id!)}
+                        onClick={() => {
+                          if (warn.component_id) {
+                            onComponentClick?.(warn.component_id);
+                          }
+                        }}
                         className="validation-banner-component-btn validation-banner-component-btn--warning"
                         title={`Click to select ${warn.component_id} in the pipeline view`}
                       >
@@ -125,13 +159,14 @@ export function ValidationResultBanner({
       </div>
       <ul className="validation-banner-fail-list">
         {result.errors.map((err, i) => {
-          const isNode = nodes?.some((n) => n.id === err.component_id);
-          const isClickable = err.component_id && onComponentClick && isNode;
+          const isClickable =
+            Boolean(onComponentClick) &&
+            isNavigableComponent(err.component_id, nodes, componentNames);
           const content = (
             <>
               <strong>
                 [{err.component_type ?? "unknown"}]{" "}
-                {resolveComponentName(err.component_id, nodes)}:
+                {resolveComponentName(err.component_id, nodes, componentNames)}:
               </strong>{" "}
               {err.message}
               {err.suggestion && (
@@ -146,7 +181,11 @@ export function ValidationResultBanner({
             <li key={i} className="validation-banner-error-item">
               {isClickable ? (
                 <button
-                  onClick={() => onComponentClick(err.component_id!)}
+                  onClick={() => {
+                    if (err.component_id) {
+                      onComponentClick?.(err.component_id);
+                    }
+                  }}
                   className="validation-banner-component-btn validation-banner-component-btn--error"
                   title={`Click to select ${err.component_id} in the pipeline view`}
                 >

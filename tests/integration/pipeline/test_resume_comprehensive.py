@@ -14,8 +14,10 @@ database checkpoint records. Using from_plugin_instances() would generate new
 UUIDs that wouldn't match stored checkpoints, breaking the resume flow.
 """
 
+import json
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import select
@@ -33,7 +35,9 @@ from elspeth.core.landscape.schema import (
     edges_table,
     nodes_table,
     rows_table,
+    run_sources_table,
     runs_table,
+    token_work_items_table,
     tokens_table,
 )
 from elspeth.core.payload_store import FilesystemPayloadStore
@@ -42,8 +46,9 @@ from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sinks.json_sink import JSONSink
 from elspeth.plugins.sources.null_source import NullSource
 from elspeth.plugins.transforms.passthrough import PassThrough
+from elspeth.testing import make_contract, make_row
 from tests.fixtures.base_classes import inject_write_failure
-from tests.fixtures.landscape import make_factory
+from tests.fixtures.landscape import insert_crashed_leader_seat, make_factory
 
 
 def _null_source(on_success: str = "default") -> NullSource:
@@ -57,6 +62,201 @@ def _runtime_val_manifest_json() -> str:
     """Mirror the run-header manifest production begin_run() stores."""
     prepare_for_run()
     return canonical_json(build_runtime_val_manifest())
+
+
+def _make_fixed_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
+    """Build a FIXED SchemaContract; return (audit_record_json, version_hash)."""
+    from elspeth.contracts.contract_records import ContractAuditRecord
+    from elspeth.contracts.schema_contract import FieldContract, SchemaContract
+
+    field_contracts = tuple(
+        FieldContract(
+            normalized_name=name,
+            original_name=name,
+            python_type=py_type,
+            required=True,
+            source="declared",
+        )
+        for name, py_type in fields
+    )
+    contract = SchemaContract(mode="FIXED", fields=field_contracts, locked=True)
+    audit_record = ContractAuditRecord.from_contract(contract)
+    return audit_record.to_json(), contract.version_hash()
+
+
+def _build_two_source_failed_run(
+    db: LandscapeDB,
+    payload_store: Any,
+    checkpoint_mgr: Any,
+    *,
+    run_id: str,
+) -> tuple[ExecutionGraph, str, str, dict[str, Any]]:
+    """Insert a 2-source FAILED run wired for resume through the PUBLIC API.
+
+    The persisted shape mirrors what a real multi-source run leaves behind
+    after a crash: a FAILED run header, two source nodes with per-source
+    ``run_sources`` records (disjoint FIXED contracts + schemas), one row
+    per source with full provenance (source_node_id, source_row_index,
+    ingest_sequence), payloads in the payload store, and a checkpoint.
+
+    The orders payload stores ``order_id`` as the STRING "101" while the
+    orders schema declares it integer — type restoration through the
+    orders source schema is therefore observable in sink output (101, not
+    "101"). The contracts are disjoint FIXED contracts, so validating a
+    row under the wrong source's contract cannot succeed silently.
+
+    Returns:
+        (graph, orders_contract_hash, refunds_contract_hash, row_payloads)
+    """
+    now = datetime.now(UTC)
+    orders_schema_json = json.dumps({"properties": {"order_id": {"type": "integer"}}, "required": ["order_id"]})
+    refunds_schema_json = json.dumps({"properties": {"refund_id": {"type": "string"}}, "required": ["refund_id"]})
+    orders_contract_json, orders_contract_hash = _make_fixed_contract([("order_id", int)])
+    refunds_contract_json, refunds_contract_hash = _make_fixed_contract([("refund_id", str)])
+
+    graph = ExecutionGraph()
+    graph.add_node(
+        "source-orders",
+        node_type=NodeType.SOURCE,
+        plugin_name="null",
+        config={"source_name": "orders"},
+    )
+    graph.add_node(
+        "source-refunds",
+        node_type=NodeType.SOURCE,
+        plugin_name="null",
+        config={"source_name": "refunds"},
+    )
+    graph.add_node(
+        "sink",
+        node_type=NodeType.SINK,
+        plugin_name="json",
+        config={"schema": {"mode": "observed"}},
+    )
+    graph.add_edge("source-orders", "sink", label="continue")
+    graph.add_edge("source-refunds", "sink", label="continue")
+    graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+    graph.set_transform_id_map({})
+
+    with db.engine.begin() as conn:
+        conn.execute(
+            runs_table.insert().values(
+                run_id=run_id,
+                started_at=now,
+                config_hash="test",
+                settings_json="{}",
+                canonical_version="v1",
+                status=RunStatus.FAILED,
+                source_schema_json=json.dumps({"properties": {}, "required": []}),
+                runtime_val_manifest_json=_runtime_val_manifest_json(),
+                openrouter_catalog_sha256="0" * 64,
+                openrouter_catalog_source="bundled",
+            )
+        )
+        # Epoch 21 (ADR-030): the crashed-run image includes the expired
+        # leader seat begin_run would have minted atomically with the run.
+        insert_crashed_leader_seat(conn, run_id=run_id)
+        for node_id, plugin_name, node_type in [
+            ("source-orders", "null", NodeType.SOURCE),
+            ("source-refunds", "null", NodeType.SOURCE),
+            ("sink", "json", NodeType.SINK),
+        ]:
+            conn.execute(
+                nodes_table.insert().values(
+                    node_id=node_id,
+                    run_id=run_id,
+                    plugin_name=plugin_name,
+                    node_type=node_type,
+                    plugin_version="1.0.0",
+                    determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
+                    config_hash="test",
+                    config_json="{}",
+                    registered_at=now,
+                )
+            )
+        for source_node_id, source_name, schema_json, contract_json, contract_hash in [
+            ("source-orders", "orders", orders_schema_json, orders_contract_json, orders_contract_hash),
+            ("source-refunds", "refunds", refunds_schema_json, refunds_contract_json, refunds_contract_hash),
+        ]:
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    source_name=source_name,
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=schema_json,
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    recorded_at=now,
+                )
+            )
+        for edge_id, from_node in [("e-orders", "source-orders"), ("e-refunds", "source-refunds")]:
+            conn.execute(
+                edges_table.insert().values(
+                    edge_id=edge_id,
+                    run_id=run_id,
+                    from_node_id=from_node,
+                    to_node_id="sink",
+                    label="continue",
+                    default_mode=RoutingMode.MOVE,
+                    created_at=now,
+                )
+            )
+        row_payloads: dict[str, Any] = {}
+        for row_id, source_node_id, row_index, source_row_index, ingest_sequence, row_data in [
+            ("row-orders", "source-orders", 0, 0, 0, {"order_id": "101"}),
+            ("row-refunds", "source-refunds", 1, 0, 1, {"refund_id": "r-7"}),
+        ]:
+            ref = payload_store.store(json.dumps(row_data).encode())
+            row_payloads[row_id] = row_data
+            conn.execute(
+                rows_table.insert().values(
+                    row_id=row_id,
+                    run_id=run_id,
+                    source_node_id=source_node_id,
+                    row_index=row_index,
+                    source_row_index=source_row_index,
+                    ingest_sequence=ingest_sequence,
+                    source_data_hash=f"h-{row_id}",
+                    source_data_ref=ref,
+                    created_at=now,
+                )
+            )
+        conn.execute(
+            tokens_table.insert().values(
+                token_id="tok-multi-source",
+                row_id="row-orders",
+                run_id=run_id,
+                created_at=now,
+            )
+        )
+
+    checkpoint_mgr.create_checkpoint(
+        run_id=run_id,
+        sequence_number=1,
+        barrier_scalars=None,
+        graph=graph,
+    )
+    return graph, orders_contract_hash, refunds_contract_hash, row_payloads
+
+
+def _two_source_resume_pipeline(tmp_path: Any, name: str) -> tuple[PipelineConfig, Any]:
+    """PipelineConfig matching _build_two_source_failed_run's graph shape.
+
+    Two NullSources keyed by the graph's source_name values ("orders",
+    "refunds") and a JSONL sink so heterogeneous per-source rows can be
+    asserted with type fidelity (JSON distinguishes 101 from "101").
+    """
+    output_path = tmp_path / f"{name}.jsonl"
+    sink = JSONSink({"path": str(output_path), "schema": {"mode": "observed"}, "format": "jsonl"})
+    config = PipelineConfig(
+        sources={"orders": _null_source("default"), "refunds": _null_source("default")},
+        transforms=[],
+        sinks={"default": inject_write_failure(sink)},
+    )
+    return config, output_path
 
 
 class TestResumeComprehensive:
@@ -121,7 +321,7 @@ class TestResumeComprehensive:
         now = datetime.now(UTC)
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -172,13 +372,14 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -217,6 +418,33 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3: record run_sources for the single source node.
+            # Production code (Orchestrator._run_main_processing_loop ->
+            # _emit_source_loading) writes a run_sources row BEFORE the
+            # first ingested row is persisted, so a real failed run will
+            # always have at least one run_sources record present even if
+            # zero rows were committed. Reproducing that shape in the
+            # fixture lets the RC6 resume path key the schema contract
+            # under the actual ``source_node_id`` and avoids triggering
+            # ``EmptyResumeStateError`` for tests that legitimately
+            # exercise the early-exit path (all rows already processed)
+            # rather than the refuse path (no work ever persisted).
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with payloads
             for i in range(num_rows):
                 row_data = {"id": i, "value": f"row-{i}"}
@@ -227,6 +455,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -289,9 +519,8 @@ class TestResumeComprehensive:
         # Create checkpoint at row 2
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t2",
-            node_id="xform",
             sequence_number=2,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -312,7 +541,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": strict_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
@@ -320,7 +549,7 @@ class TestResumeComprehensive:
         # Build graph manually
         resume_graph = ExecutionGraph()
         schema_config = {"schema": strict_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -356,6 +585,139 @@ class TestResumeComprehensive:
         with db.engine.connect() as conn:
             checkpoints_after = conn.execute(select(checkpoints_table).where(checkpoints_table.c.run_id == run_id)).fetchall()
         assert len(checkpoints_after) == 0, "Checkpoints should be deleted after successful completion"
+
+    def test_resume_drains_real_scheduler_work_before_recovered_row_replay(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Durable scheduler work takes precedence over replaying the same recovered row."""
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-real-scheduler-work-test"
+        output_path = tmp_path / "scheduler_resume_output.csv"
+        run_id, graph = self._setup_failed_run(db, payload_store, run_id, num_rows=1, checkpoint_at=0)
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            sequence_number=0,
+            barrier_scalars=None,
+            graph=graph,
+        )
+        factory = make_factory(db)
+        scheduled_row = make_row(
+            {"id": 0, "value": "row-0"},
+            contract=make_contract(fields={"id": int, "value": str}, mode="FIXED"),
+        )
+        factory.scheduler.enqueue_ready(
+            run_id=run_id,
+            token_id="t0",
+            row_id="r0",
+            node_id="xform",
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(scheduled_row),
+            available_at=datetime.now(UTC),
+        )
+
+        output_path.write_text("id,value\n")
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        strict_schema = {"mode": "fixed", "fields": ["id: int", "value: str"]}
+        passthrough = PassThrough({"schema": strict_schema})
+        passthrough.on_error = "discard"
+        config = PipelineConfig(
+            sources={"source": _null_source("default")},
+            transforms=[passthrough],
+            sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
+        )
+        resume_graph = ExecutionGraph()
+        schema_config = {"schema": strict_schema}
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
+        resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
+        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
+        resume_graph.add_edge("src", "xform", label="continue")
+        resume_graph.add_edge("xform", "sink", label="continue")
+        resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        resume_graph.set_transform_id_map({0: NodeID("xform")})
+
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=resume_graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 1
+        assert result.rows_succeeded == 1
+        lines = output_path.read_text().strip().split("\n")
+        assert lines == ["id,value", "0,row-0"]
+        with db.connection() as conn:
+            work_statuses = (
+                conn.execute(select(token_work_items_table.c.status).where(token_work_items_table.c.run_id == run_id)).scalars().all()
+            )
+        assert work_statuses == ["terminal"]
+
+    def test_resume_restores_multi_source_rows_with_source_scoped_schemas(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Public resume restores each row's types via its ORIGIN source's schema.
+
+        Invariant proven: ``Orchestrator.resume`` (the production path —
+        no private reconstruction seam) restores every recovered row
+        through the ``run_sources`` schema recorded for that row's
+        ``source_node_id``. The orders payload persisted ``order_id`` as
+        the STRING "101"; only the orders schema (order_id: integer) can
+        coerce it back to ``101``. The refunds schema would reject the
+        orders row outright (missing required ``refund_id``), so typed
+        sink output for BOTH rows is end-to-end proof of source-scoped
+        schema dispatch.
+        """
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-multi-source-schema-test"
+        graph, _orders_hash, _refunds_hash, _payloads = _build_two_source_failed_run(db, payload_store, checkpoint_mgr, run_id=run_id)
+        config, output_path = _two_source_resume_pipeline(tmp_path, "multi_source_schema_output")
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 2
+        assert result.rows_succeeded == 2
+
+        written = [json.loads(line) for line in output_path.read_text().splitlines()]
+        assert len(written) == 2
+        by_key = {next(iter(row)): row for row in written}
+        # Orders row restored through the orders schema: "101" -> 101 (int).
+        assert by_key["order_id"]["order_id"] == 101
+        assert isinstance(by_key["order_id"]["order_id"], int)
+        # Refunds row restored through the refunds schema: stays a string.
+        assert by_key["refund_id"]["refund_id"] == "r-7"
 
     def test_resume_early_exit_path_no_remaining_rows(
         self,
@@ -403,9 +765,8 @@ class TestResumeComprehensive:
         # Create checkpoint
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t2",
-            node_id="xform",
             sequence_number=2,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -426,14 +787,14 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": strict_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
 
         resume_graph = ExecutionGraph()
         schema_config = {"schema": strict_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -523,7 +884,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -540,13 +901,14 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -585,6 +947,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with datetime payloads
             for i in range(3):
                 row_data = {
@@ -598,6 +977,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -624,9 +1005,8 @@ class TestResumeComprehensive:
         # Create checkpoint at row 0 (last completed row)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -653,14 +1033,16 @@ class TestResumeComprehensive:
         passthrough = DatetimeAssertingPassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": resume_schema, "mode": "append"}))},
         )
 
         resume_graph = ExecutionGraph()
         resume_schema_config: dict[str, Any] = {"schema": resume_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
+        )
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=resume_schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -745,7 +1127,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -762,13 +1144,14 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -807,6 +1190,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with Decimal payloads (high precision value)
             for i in range(2):
                 row_data = {
@@ -820,6 +1220,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -846,9 +1248,8 @@ class TestResumeComprehensive:
         # Create checkpoint at row 0 (last completed row)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -865,14 +1266,16 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": resume_schema, "mode": "append"}))},
         )
 
         resume_graph = ExecutionGraph()
         resume_schema_config: dict[str, Any] = {"schema": resume_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
+        )
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=resume_schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=resume_schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -952,7 +1355,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -969,13 +1372,14 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -1014,6 +1418,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with array payloads
             for i in range(2):
                 row_data = {
@@ -1027,6 +1448,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -1053,9 +1476,8 @@ class TestResumeComprehensive:
         # Create checkpoint at row 0 (last completed row)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1069,7 +1491,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": {"mode": "observed"}})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -1082,7 +1504,7 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -1161,7 +1583,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -1178,13 +1600,14 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -1223,6 +1646,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create rows with nested object payloads
             for i in range(2):
                 row_data = {
@@ -1236,6 +1676,8 @@ class TestResumeComprehensive:
                         run_id=run_id,
                         source_node_id="src",
                         row_index=i,
+                        source_row_index=i,
+                        ingest_sequence=i,
                         source_data_hash=f"h{i}",
                         source_data_ref=ref,
                         created_at=now,
@@ -1262,9 +1704,8 @@ class TestResumeComprehensive:
         # Create checkpoint at row 0 (last completed row)
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1278,7 +1719,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": {"mode": "observed"}})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -1291,7 +1732,7 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -1360,7 +1801,7 @@ class TestResumeComprehensive:
         # Create graph
         graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         graph.add_edge("src", "xform", label="continue")
@@ -1380,13 +1821,14 @@ class TestResumeComprehensive:
                     canonical_version="v1",
                     status=RunStatus.FAILED,
                     source_schema_json=source_schema_json,
-                    schema_contract_json=schema_contract_json,
-                    schema_contract_hash=schema_contract_hash,
                     runtime_val_manifest_json=_runtime_val_manifest_json(),
                     openrouter_catalog_sha256="0" * 64,
                     openrouter_catalog_source="bundled",
                 )
             )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
 
             # Create nodes
             for node_id, plugin_name, node_type in [
@@ -1425,6 +1867,23 @@ class TestResumeComprehensive:
                     )
                 )
 
+            # ADR-025 §3 Decision 5: per-source contract lives on run_sources.
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="src",
+                    source_name="src",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=schema_contract_json,
+                    schema_contract_hash=schema_contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+
             # Create a dummy row (won't be processed - resume will fail during schema reconstruction)
             row_data = {"id": 0, "location": "some-location"}
             ref = payload_store.store(json.dumps(row_data).encode())
@@ -1434,6 +1893,8 @@ class TestResumeComprehensive:
                     run_id=run_id,
                     source_node_id="src",
                     row_index=0,
+                    source_row_index=0,
+                    ingest_sequence=0,
                     source_data_hash="h0",
                     source_data_ref=ref,
                     created_at=now,
@@ -1451,9 +1912,8 @@ class TestResumeComprehensive:
         # Create checkpoint
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t0",
-            node_id="xform",
             sequence_number=0,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1467,7 +1927,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": {"mode": "observed"}})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -1478,7 +1938,7 @@ class TestResumeComprehensive:
 
         resume_graph = ExecutionGraph()
         schema_config = {"schema": {"mode": "observed"}}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=schema_config)
+        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
@@ -1563,9 +2023,8 @@ class TestResumeComprehensive:
         # exercised even though no rows remain to process.
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t4",
-            node_id="xform",
             sequence_number=4,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1587,7 +2046,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -1603,7 +2062,9 @@ class TestResumeComprehensive:
         )
         resume_graph = ExecutionGraph()
         resume_schema_config: dict[str, Any] = {"schema": resume_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
+        )
         resume_graph.add_node(
             "xform",
             node_type=NodeType.TRANSFORM,
@@ -1746,9 +2207,8 @@ class TestResumeComprehensive:
         # gate-MOVE test setup.
         checkpoint_mgr.create_checkpoint(
             run_id=run_id,
-            token_id="t4",
-            node_id="xform",
             sequence_number=4,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -1766,7 +2226,7 @@ class TestResumeComprehensive:
         passthrough = PassThrough({"schema": resume_schema})
         passthrough.on_error = "discard"
         config = PipelineConfig(
-            source=_null_source("default"),
+            sources={"source": _null_source("default")},
             transforms=[passthrough],
             sinks={
                 "default": inject_write_failure(
@@ -1782,7 +2242,9 @@ class TestResumeComprehensive:
         )
         resume_graph = ExecutionGraph()
         resume_schema_config: dict[str, Any] = {"schema": resume_schema}
-        resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config=resume_schema_config)
+        resume_graph.add_node(
+            "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
+        )
         resume_graph.add_node(
             "xform",
             node_type=NodeType.TRANSFORM,
@@ -1851,3 +2313,411 @@ class TestResumeComprehensive:
         # destination).  This pins the audit-distinguishability invariant
         # at the resume layer.
         assert all(o.sink_name == "error_sink" for o in routed_on_error_outcomes)
+
+
+class TestMultiSourceResumeContractDispatch:
+    """Regression coverage for G2 / elspeth-01942858c3 and the
+    test plan in the consolidated G2-companion ticket
+    elspeth-d5f0194fc8.
+
+    Before ADR-025, resume reconstruction collapsed the per-source
+    contract map by calling
+    ``next(iter(schema_contracts_by_source.values()))`` and dropping
+    the result on ``ResumeState.schema_contract``. Two sources whose
+    schemas legitimately differ (e.g., a fan-in pipeline merging
+    ``orders`` and ``refunds``) were validated under whichever
+    contract happened to be returned first by the SQL query — a
+    Tier-1 audit-integrity violation per CLAUDE.md.
+
+    These tests pin the post-ADR-025 behaviour through the PUBLIC
+    resume path (``RecoveryManager.get_resume_point`` +
+    ``Orchestrator.resume``; private coordinator seams are
+    deliberately not touched):
+
+    1. Each row is validated under the contract recovered via the
+       row's ``source_node_id``, not an arbitrary pick.
+    2. A row whose ``source_node_id`` is not present in
+       ``schema_contracts_by_source`` crashes with
+       ``OrchestrationInvariantError`` rather than silently picking
+       a default.
+    3. Single-source resume still works after the structural change
+       (no regression on the legitimate-single case).
+    4. The ``ResumeState`` dataclass has no singular
+       ``schema_contract`` field (introspected via
+       ``dataclasses.fields``, not ``hasattr`` — ``hasattr`` is
+       banned per CLAUDE.md).
+    """
+
+    @staticmethod
+    def _create_schema_contract(fields: list[tuple[str, type]]) -> tuple[str, str]:
+        """Build a fixed SchemaContract for test setup (identity helper)."""
+        return _make_fixed_contract(fields)
+
+    def test_resume_picks_correct_contract_per_source(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Public multi-source resume dispatches each row's ORIGIN contract.
+
+        Invariant proven: ``Orchestrator.resume`` validates every
+        recovered row under the contract recorded in ``run_sources``
+        for that row's ``source_node_id`` (ADR-025 §3 G2). The two
+        FIXED contracts are disjoint (order_id: int vs refund_id: str)
+        with distinct version hashes, so an arbitrary-pick regression
+        cannot complete: whichever row lost the pick would fail FIXED
+        validation instead of reaching the sink. Also pins:
+
+        - combined sink output respects ingest_sequence order
+          (orders row, ingest_sequence 0, before refunds row, 1);
+        - per-row source attribution survives the roundtrip — every
+          original row keeps its source_node_id and every token minted
+          by the resumed run joins back to a source-attributed row
+          (elspeth-e51eaed773 leg b);
+        - both rows reach SUCCESS terminal outcomes in token_outcomes.
+        """
+        from elspeth.core.landscape.schema import token_outcomes_table
+
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-multi-source-per-row-contract"
+        graph, orders_hash, refunds_hash, _payloads = _build_two_source_failed_run(db, payload_store, checkpoint_mgr, run_id=run_id)
+        assert orders_hash != refunds_hash, "test setup error: contracts must differ"
+        config, output_path = _two_source_resume_pipeline(tmp_path, "per_row_contract_output")
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        # The resumed run completes with both rows succeeding — possible
+        # only if each row validated under its own source's contract.
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 2
+        assert result.rows_succeeded == 2
+        assert result.rows_failed == 0
+        assert result.rows_quarantined == 0
+
+        # Combined output respects ingest_sequence: orders (0) then refunds (1).
+        written = [json.loads(line) for line in output_path.read_text().splitlines()]
+        assert written == [{"order_id": 101}, {"refund_id": "r-7"}]
+
+        # Audit-trail cross-check: original rows keep their origin
+        # source_node_id, and the resumed run's SUCCESS outcomes attribute
+        # (via token -> row) one row to EACH source.
+        with db.engine.connect() as conn:
+            row_sources = dict(
+                conn.execute(select(rows_table.c.row_id, rows_table.c.source_node_id).where(rows_table.c.run_id == run_id)).all()
+            )
+            outcome_rows = conn.execute(
+                select(
+                    tokens_table.c.row_id,
+                    token_outcomes_table.c.outcome,
+                    token_outcomes_table.c.sink_name,
+                )
+                .join(tokens_table, token_outcomes_table.c.token_id == tokens_table.c.token_id)
+                .where(token_outcomes_table.c.run_id == run_id)
+            ).fetchall()
+            persisted_contract_hashes = dict(
+                conn.execute(
+                    select(run_sources_table.c.source_node_id, run_sources_table.c.schema_contract_hash).where(
+                        run_sources_table.c.run_id == run_id
+                    )
+                ).all()
+            )
+        assert row_sources == {"row-orders": "source-orders", "row-refunds": "source-refunds"}
+        success_rows = {row.row_id for row in outcome_rows if row.outcome == TerminalOutcome.SUCCESS.value}
+        assert success_rows == {"row-orders", "row-refunds"}
+        assert all(row.sink_name == "default" for row in outcome_rows)
+        success_sources = {row_sources[row_id] for row_id in success_rows}
+        assert success_sources == {"source-orders", "source-refunds"}
+
+        # The per-source contracts the rows were validated under remain
+        # durably distinct in run_sources — no arbitrary-pick collapse.
+        assert persisted_contract_hashes == {
+            "source-orders": orders_hash,
+            "source-refunds": refunds_hash,
+        }
+
+    def test_resume_rejects_missing_contract(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Looking up a row whose source_node_id has no contract crashes.
+
+        ADR-025 §3 requires resume to refuse rather than pick a default
+        when the audit trail has a row whose source's schema contract
+        is missing. This test calls the resume loop directly with a
+        crafted ``schema_contracts_by_source`` that omits one row's
+        ``source_node_id`` and asserts the offensive-programming crash.
+        """
+        from elspeth.contracts import ResumedRow
+        from elspeth.contracts.errors import OrchestrationInvariantError
+        from elspeth.engine.orchestrator.resume import run_resume_processing_loop
+        from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext
+
+        processor = MagicMock()
+        processor.has_scheduled_work.return_value = False
+        processor.process_existing_row.return_value = []
+
+        config = PipelineConfig(
+            sources={"orders": MagicMock(), "refunds": MagicMock()},
+            transforms=(),
+            sinks={"default": MagicMock()},
+        )
+        loop_ctx = LoopContext(
+            counters=ExecutionCounters(),
+            pending_tokens={"default": []},
+            processor=processor,
+            ctx=MagicMock(),
+            config=config,
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+
+        orders_contract = MagicMock(name="orders-contract")
+        rows = (
+            ResumedRow(
+                row_id="row-orders",
+                row_index=0,
+                source_node_id=NodeID("source-orders"),
+                row_data={"order_id": 1},
+            ),
+            ResumedRow(
+                row_id="row-refunds",
+                row_index=1,
+                source_node_id=NodeID("source-refunds"),
+                row_data={"refund_id": "r1"},
+            ),
+        )
+
+        # ``schema_contracts_by_source`` deliberately omits source-refunds.
+        # The loop must crash on the refunds row rather than reuse
+        # the orders contract or pick a default.
+        with pytest.raises(OrchestrationInvariantError, match="source-refunds"):
+            run_resume_processing_loop(
+                loop_ctx,
+                rows,
+                incomplete_by_row={},
+                recovery_manager=MagicMock(),
+                payload_store=MagicMock(),
+                run_id="run-missing-source-contract",
+                resume_checkpoint_id="checkpoint-missing-source-contract",
+                schema_contracts_by_source={NodeID("source-orders"): orders_contract},
+                source_on_success_by_source={
+                    NodeID("source-orders"): "default",
+                    NodeID("source-refunds"): "default",
+                },
+            )
+
+    def test_resume_single_source_round_trip(
+        self,
+        resume_test_env: dict[str, Any],
+    ) -> None:
+        """Single-source resume still works after the singleton deletion.
+
+        Regression guard: ADR-025 §3 Decision 5 (G6) deletes the run-level
+        singleton contract columns; schema contracts now live exclusively
+        in ``run_sources``. Invariant proven through the public path: a
+        legitimate single-source FAILED run (one ``run_sources`` row, one
+        recovered row) resumes to COMPLETED with the row validated under
+        its source's contract (``"42"`` coerced to ``42`` per the
+        ``id: int`` schema/contract), its source attribution intact, and
+        checkpoints deleted on completion.
+        """
+        db = resume_test_env["db"]
+        checkpoint_mgr = resume_test_env["checkpoint_manager"]
+        recovery_mgr = resume_test_env["recovery_manager"]
+        payload_store = resume_test_env["payload_store"]
+        checkpoint_config = resume_test_env["checkpoint_config"]
+        tmp_path = resume_test_env["tmp_path"]
+
+        run_id = "resume-single-source-round-trip"
+        contract_json, contract_hash = self._create_schema_contract([("id", int)])
+        now = datetime.now(UTC)
+        source_node_id = NodeID("source-only")
+
+        graph = ExecutionGraph()
+        graph.add_node(
+            "source-only",
+            node_type=NodeType.SOURCE,
+            plugin_name="null",
+            config={"source_name": "source"},
+        )
+        graph.add_node(
+            "sink",
+            node_type=NodeType.SINK,
+            plugin_name="json",
+            config={"schema": {"mode": "observed"}},
+        )
+        graph.add_edge("source-only", "sink", label="continue")
+        graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
+        graph.set_transform_id_map({})
+
+        source_schema_json = json.dumps({"properties": {"id": {"type": "integer"}}, "required": ["id"]})
+
+        with db.engine.begin() as conn:
+            conn.execute(
+                runs_table.insert().values(
+                    run_id=run_id,
+                    started_at=now,
+                    config_hash="test",
+                    settings_json="{}",
+                    canonical_version="v1",
+                    status=RunStatus.FAILED,
+                    source_schema_json=source_schema_json,
+                    runtime_val_manifest_json=_runtime_val_manifest_json(),
+                    openrouter_catalog_sha256="0" * 64,
+                    openrouter_catalog_source="bundled",
+                )
+            )
+            # Epoch 21 (ADR-030): the crashed-run image includes the expired
+            # leader seat begin_run would have minted atomically with the run.
+            insert_crashed_leader_seat(conn, run_id=run_id)
+            for node_id, plugin_name, node_type in [
+                ("source-only", "null", NodeType.SOURCE),
+                ("sink", "json", NodeType.SINK),
+            ]:
+                conn.execute(
+                    nodes_table.insert().values(
+                        node_id=node_id,
+                        run_id=run_id,
+                        plugin_name=plugin_name,
+                        node_type=node_type,
+                        plugin_version="1.0.0",
+                        determinism=Determinism.DETERMINISTIC if node_type != NodeType.SINK else Determinism.IO_WRITE,
+                        config_hash="test",
+                        config_json="{}",
+                        registered_at=now,
+                    )
+                )
+            conn.execute(
+                run_sources_table.insert().values(
+                    run_id=run_id,
+                    source_node_id="source-only",
+                    source_name="source",
+                    plugin_name="null",
+                    lifecycle_state="loaded",
+                    config_hash="test",
+                    schema_json=source_schema_json,
+                    schema_contract_json=contract_json,
+                    schema_contract_hash=contract_hash,
+                    field_resolution_json=None,
+                    recorded_at=now,
+                )
+            )
+            conn.execute(
+                edges_table.insert().values(
+                    edge_id="e-only",
+                    run_id=run_id,
+                    from_node_id="source-only",
+                    to_node_id="sink",
+                    label="continue",
+                    default_mode=RoutingMode.MOVE,
+                    created_at=now,
+                )
+            )
+            ref = payload_store.store(json.dumps({"id": "42"}).encode())
+            conn.execute(
+                rows_table.insert().values(
+                    row_id="row-single",
+                    run_id=run_id,
+                    source_node_id="source-only",
+                    row_index=0,
+                    source_row_index=0,
+                    ingest_sequence=0,
+                    source_data_hash="h-single",
+                    source_data_ref=ref,
+                    created_at=now,
+                )
+            )
+            conn.execute(
+                tokens_table.insert().values(
+                    token_id="tok-single",
+                    row_id="row-single",
+                    run_id=run_id,
+                    created_at=now,
+                )
+            )
+
+        checkpoint_mgr.create_checkpoint(
+            run_id=run_id,
+            sequence_number=1,
+            barrier_scalars=None,
+            graph=graph,
+        )
+
+        output_path = tmp_path / "single_source_round_trip.jsonl"
+        config = PipelineConfig(
+            sources={"source": _null_source("default")},
+            transforms=[],
+            sinks={
+                "default": inject_write_failure(JSONSink({"path": str(output_path), "schema": {"mode": "observed"}, "format": "jsonl"}))
+            },
+        )
+
+        assert recovery_mgr.can_resume(run_id, graph).can_resume
+        resume_point = recovery_mgr.get_resume_point(run_id, graph)
+        assert resume_point is not None
+
+        orchestrator = Orchestrator(db, checkpoint_manager=checkpoint_mgr, checkpoint_config=checkpoint_config)
+        result = orchestrator.resume(
+            resume_point=resume_point,
+            config=config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert result.rows_processed == 1
+        assert result.rows_succeeded == 1
+
+        # Row validated under the single run_sources contract: "42" -> 42.
+        written = [json.loads(line) for line in output_path.read_text().splitlines()]
+        assert written == [{"id": 42}]
+
+        # Source attribution + per-source contract survived the roundtrip;
+        # checkpoints are deleted on successful completion.
+        with db.engine.connect() as conn:
+            row_source = conn.execute(select(rows_table.c.source_node_id).where(rows_table.c.run_id == run_id)).scalar_one()
+            persisted_hash = conn.execute(
+                select(run_sources_table.c.schema_contract_hash).where(run_sources_table.c.run_id == run_id)
+            ).scalar_one()
+            checkpoints_after = conn.execute(select(checkpoints_table).where(checkpoints_table.c.run_id == run_id)).fetchall()
+        assert row_source == source_node_id
+        assert persisted_hash == contract_hash
+        assert checkpoints_after == []
+
+    def test_resume_state_has_no_singular_schema_contract_field(self) -> None:
+        """``ResumeState.schema_contract`` is deleted by ADR-025 §3.
+
+        Future-proof against typo-restorations: introspect the dataclass
+        fields directly via ``dataclasses.fields`` rather than
+        ``hasattr`` (which is banned per CLAUDE.md because it swallows
+        @property exceptions). A regression that re-adds a singular
+        field will be visible immediately.
+        """
+        import dataclasses
+
+        from elspeth.engine.orchestrator.types import ResumeState
+
+        field_names = {f.name for f in dataclasses.fields(ResumeState)}
+        assert "schema_contract" not in field_names, (
+            "ResumeState.schema_contract was deleted by ADR-025 §3; a regression "
+            "has reintroduced the singular field. Per-row contract dispatch must go "
+            "through schema_contracts_by_source[row.source_node_id], not a "
+            "next(iter(...)) arbitrary pick."
+        )
+        assert "schema_contracts_by_source" in field_names

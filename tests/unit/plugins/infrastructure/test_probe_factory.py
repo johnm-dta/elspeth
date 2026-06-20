@@ -230,3 +230,71 @@ class TestChromaCollectionProbeCrashThrough:
         """Missing config keys now fail at construction (ValueError), not at probe() (KeyError)."""
         with pytest.raises(ValueError, match="persist_directory is required"):
             ChromaCollectionProbe("test", {"mode": "persistent"})
+
+
+class TestChromaProbeWidenedExceptSet:
+    """B3.5 -- ValueError and httpx.HTTPError must report reachable=False, not escape.
+
+    chromadb 1.5.5 raises a plain ValueError when the HTTP server is unreachable;
+    httpx transport errors inherit only from Exception (not ChromaError/ConnectionError/OSError).
+    The probe's outer except at line 81 had only (ChromaError, ConnectionError, OSError),
+    so both classes escaped as raw tracebacks, aborting the commencement gate run instead
+    of feeding reachable=False.
+    """
+
+    def test_value_error_reports_unreachable(self) -> None:
+        """ValueError from chromadb 1.5.5 on unreachable server must report reachable=False."""
+
+        probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
+
+        mock_client = MagicMock()
+        mock_client.get_collection.side_effect = ValueError("Could not connect to a Chroma server")
+
+        with patch("chromadb.PersistentClient", return_value=mock_client):
+            result = probe.probe()
+
+        assert result.reachable is False
+        assert "ValueError" in result.message
+
+    def test_httpx_transport_error_reports_unreachable(self) -> None:
+        """httpx.ConnectError (not in ChromaError hierarchy) must report reachable=False."""
+        import httpx
+
+        probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
+
+        mock_client = MagicMock()
+        mock_client.get_collection.side_effect = httpx.ConnectError("connection refused")
+
+        with patch("chromadb.PersistentClient", return_value=mock_client):
+            result = probe.probe()
+
+        assert result.reachable is False
+        assert "ConnectError" in result.message
+
+    def test_client_is_closed_after_successful_probe(self) -> None:
+        """The httpx client must be closed after a successful probe (leaked-client fix)."""
+        probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
+
+        mock_collection = MagicMock()
+        mock_collection.count.return_value = 3
+        mock_client = MagicMock()
+        mock_client.get_collection.return_value = mock_collection
+
+        with patch("chromadb.PersistentClient", return_value=mock_client):
+            result = probe.probe()
+
+        assert result.reachable is True
+        mock_client.close.assert_called_once()
+
+    def test_client_is_closed_after_unreachable_probe(self) -> None:
+        """The httpx client must be closed even when the probe reports reachable=False."""
+        probe = ChromaCollectionProbe("test", {"mode": "persistent", "persist_directory": "./data"})
+
+        mock_client = MagicMock()
+        mock_client.get_collection.side_effect = ConnectionError("refused")
+
+        with patch("chromadb.PersistentClient", return_value=mock_client):
+            result = probe.probe()
+
+        assert result.reachable is False
+        mock_client.close.assert_called_once()

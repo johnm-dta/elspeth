@@ -27,6 +27,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine._best_effort import best_effort
 
 if TYPE_CHECKING:
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.events import TelemetryEvent
     from elspeth.core.events import EventBusProtocol
     from elspeth.engine.orchestrator.types import TelemetryManagerProtocol
@@ -135,15 +136,27 @@ class RunCeremony:
         factory: RecorderFactory,
         shutdown_exc: GracefulShutdownError,
         start_time: float,
+        *,
+        token: CoordinationToken | None = None,
     ) -> None:
         """Emit telemetry and EventBus events for a gracefully interrupted run.
 
         Shared between run() and resume() — the interrupted ceremony is identical
         in both paths: finalize as INTERRUPTED, emit RunFinished, emit RunSummary.
+
+        ``token`` (ADR-030) is threaded into the finalize, whose epoch fence
+        refuses a deposed leader's ceremony — "the run is no longer its to
+        fail" (§C.4 row 4). Every ceremony call site wraps this in
+        ``best_effort``, which logs-and-suppresses: a deposed leader's
+        ``RunLeadershipLostError`` is swallowed and the process exits WITHOUT
+        stamping INTERRUPTED over the new leader's progress. That is the
+        designed semantics; the ``fence_refusal`` event (written by the
+        fenced verb before the raise propagates into ``best_effort``) is the
+        audit trace.
         """
 
         total_duration = time.perf_counter() - start_time
-        factory.run_lifecycle.finalize_run(run_id, status=RunStatus.INTERRUPTED)
+        factory.run_lifecycle.finalize_run(run_id, status=RunStatus.INTERRUPTED, token=token)
 
         self.emit_telemetry(
             RunFinished(
@@ -177,12 +190,23 @@ class RunCeremony:
         factory: RecorderFactory,
         start_time: float,
         result: RunResult | None = None,
+        *,
+        token: CoordinationToken | None = None,
     ) -> None:
         """Emit telemetry and EventBus events for a failed run.
 
         Finalizes the run as FAILED, emits RunFinished telemetry and RunSummary
         with the best available metrics. Shared between run() (when
         run_completed=False) and resume().
+
+        ``token`` (ADR-030) is threaded into the finalize, whose epoch fence
+        refuses a deposed leader's ceremony — "the run is no longer its to
+        fail" (§C.4 row 4). Every ceremony call site wraps this in
+        ``best_effort``, which logs-and-suppresses: a deposed leader's
+        ``RunLeadershipLostError`` is swallowed and the process exits WITHOUT
+        stamping FAILED over the new leader's progress. That is the designed
+        semantics; the ``fence_refusal`` event (written by the fenced verb
+        before the raise propagates into ``best_effort``) is the audit trace.
         """
 
         failed_result = result or RunResult(
@@ -203,7 +227,7 @@ class RunCeremony:
             routed_destinations={},
         )
         total_duration = time.perf_counter() - start_time
-        factory.run_lifecycle.finalize_run(run_id, status=RunStatus.FAILED)
+        factory.run_lifecycle.finalize_run(run_id, status=RunStatus.FAILED, token=token)
 
         self.emit_telemetry(
             RunFinished(

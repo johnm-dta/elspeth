@@ -6,6 +6,7 @@ Tests that require LandscapeDB, Orchestrator, or real file I/O with
 verify_audit_trail are deferred to integration tier.
 """
 
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -61,12 +62,13 @@ class TestTildeExpansion:
 
         # Create a settings file
         settings_content = """
-source:
-  plugin: csv
-  options:
-    path: input.csv
-    on_validation_failure: discard
-    on_success: default
+sources:
+  primary:
+    plugin: csv
+    options:
+      path: input.csv
+      on_validation_failure: discard
+      on_success: default
 sinks:
   default:
     plugin: json
@@ -96,12 +98,13 @@ sinks:
         from elspeth.cli import app
 
         settings_content = """
-source:
-  plugin: csv
-  options:
-    path: input.csv
-    on_validation_failure: discard
-    on_success: default
+sources:
+  primary:
+    plugin: csv
+    options:
+      path: input.csv
+      on_validation_failure: discard
+      on_success: default
 sinks:
   default:
     plugin: json
@@ -140,12 +143,13 @@ class TestResumeDbValidation:
         # Create a settings file whose landscape.url points to a non-existent DB
         nonexistent_db = tmp_path / "does_not_exist.db"
         settings_content = f"""
-source:
-  plugin: csv
-  on_success: default
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: default
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   default:
     plugin: json
@@ -183,12 +187,13 @@ landscape:
         conn.close()
 
         settings_content = f"""
-source:
-  plugin: csv
-  on_success: default
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    on_success: default
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   default:
     plugin: json
@@ -365,15 +370,17 @@ class TestBuildResumeGraphs:
         )
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="source_out",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="source_out",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             transforms=[
                 TransformSettings(
                     name="processor",
@@ -399,6 +406,7 @@ class TestBuildResumeGraphs:
         # Both graphs should build successfully
         assert validation_graph.node_count > 0
         assert execution_graph.node_count > 0
+        assert execution_graph.get_sources() == validation_graph.get_sources()
 
     def test_sink_valued_on_success_still_accepted(self, plugin_manager) -> None:
         """_build_resume_graphs still works when source.on_success is a sink name."""
@@ -407,15 +415,17 @@ class TestBuildResumeGraphs:
         from elspeth.core.config import ElspethSettings, SinkSettings, SourceSettings
 
         config = ElspethSettings(
-            source=SourceSettings(
-                plugin="csv",
-                on_success="output",
-                options={
-                    "path": "test.csv",
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
-            ),
+            sources={
+                "primary": SourceSettings(
+                    plugin="csv",
+                    on_success="output",
+                    options={
+                        "path": "test.csv",
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                )
+            },
             sinks={
                 "output": SinkSettings(
                     plugin="json",
@@ -430,6 +440,7 @@ class TestBuildResumeGraphs:
 
         assert validation_graph.node_count > 0
         assert execution_graph.node_count > 0
+        assert execution_graph.get_sources() == validation_graph.get_sources()
 
 
 class TestHealthCommand:
@@ -1000,14 +1011,15 @@ class TestResumeErrorPaths:
         db.close()
 
         settings_content = f"""
-source:
-  plugin: csv
-  on_success: default
-  options:
-    path: input.csv
-    on_validation_failure: discard
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: default
+    options:
+      path: input.csv
+      on_validation_failure: discard
+      schema:
+        mode: observed
 sinks:
   default:
     plugin: json
@@ -1083,12 +1095,13 @@ payload_store:
 
         # Create settings with invalid config (missing required field)
         settings_content = """
-source:
-  plugin: csv
-  # Missing on_success
-  options:
-    path: input.csv
-    on_validation_failure: discard
+sources:
+  primary:
+    plugin: csv
+    # Missing on_success
+    options:
+      path: input.csv
+      on_validation_failure: discard
 sinks:
   default:
     plugin: json
@@ -1135,6 +1148,105 @@ sinks:
         assert "Cannot resume run" in result.output
         assert "already completed" in result.output
         assert "Traceback" not in result.output
+
+    def test_resume_emits_not_resumable_event_when_can_resume_raises_empty_state(self, tmp_path: Path) -> None:
+        """Regression test for elspeth-241608388f — CLI-side handler.
+
+        When ``recovery_manager.can_resume()`` raises
+        :class:`EmptyResumeStateError` (the recovery-side fix: empty
+        ``run_sources`` rows means "nothing to resume, start fresh"),
+        the CLI's outer ``try`` block must catch the typed exception
+        and emit the operator-facing JSON event:
+
+            {"event": "not_resumable",
+             "run_id": "...",
+             "reason": "no_recorded_work",
+             "message": "..."}
+
+        Previously the recovery side raised ``CheckpointCorruptionError``
+        and the CLI's outer try (with only a ``finally:`` clause)
+        bubbled the unhandled traceback to the operator, falsely
+        suggesting audit corruption for a benign outcome. The fix
+        added a typed handler at the outer level and changed the
+        recovery side to raise the typed ``EmptyResumeStateError``.
+
+        Companion test: the recovery-side fix is covered by
+        ``test_unit/core/checkpoint/test_recovery.py::test_verify_contract_integrity_raises_empty_resume_state_when_no_sources_recorded``.
+        """
+        from unittest.mock import patch
+
+        from elspeth.cli import app
+        from elspeth.contracts.errors import EmptyResumeStateError
+
+        settings_file, _db_path = self._make_settings_with_landscape_db(tmp_path)
+        run_id = "run-no-sources-241608388f"
+
+        with patch("elspeth.core.checkpoint.RecoveryManager") as MockRecovery:
+            MockRecovery.return_value.can_resume.side_effect = EmptyResumeStateError(run_id=run_id)
+            result = runner.invoke(app, ["resume", run_id, "-s", str(settings_file), "--format", "json"])
+
+        assert result.exit_code == 1, f"Expected exit 1, got {result.exit_code}; output={result.output!r}; exception={result.exception!r}"
+        assert "Traceback" not in result.output
+
+        # CliRunner combines stdout+stderr in result.output by default.
+        event_lines = [line for line in result.output.splitlines() if '"event"' in line]
+        assert event_lines, f"Expected a JSON event with 'event' key in output; got {result.output!r}"
+        event = json.loads(event_lines[0])
+        assert event["event"] == "not_resumable"
+        assert event["run_id"] == run_id
+        assert event["reason"] == "no_recorded_work"
+        assert "message" in event
+        assert run_id in event["message"]
+
+    def test_resume_emits_not_resumable_event_when_source_was_not_exhausted(self, tmp_path: Path) -> None:
+        """Interrupted source exhaustion failures get a clean JSON refuse event.
+
+        ``IncompleteSourceResumeError`` is raised from the execute-time
+        orchestrator path after topology validation has already succeeded. The
+        CLI must keep it out of the Tier-1 fatal-traceback path and give
+        operators the precise "source was not exhausted" reason.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from elspeth.cli import app
+        from elspeth.contracts.checkpoint import ResumeCheck, ResumePoint
+        from elspeth.contracts.errors import IncompleteSourceResumeError
+
+        settings_file, _db_path = self._make_settings_with_landscape_db(tmp_path)
+        settings_file.write_text(settings_file.read_text().replace("output.json", "output.jsonl"))
+        (tmp_path / "payloads").mkdir()
+
+        run_id = "run-source-not-exhausted-50cec0a02a"
+        mock_resume_point = MagicMock(spec=ResumePoint)
+        mock_resume_point.token_id = "tok-1"
+        mock_resume_point.node_id = "node-1"
+        mock_resume_point.sequence_number = 0
+        mock_resume_point.aggregation_state = None
+        mock_resume_point.coalesce_state = None
+
+        with (
+            patch("elspeth.core.checkpoint.RecoveryManager") as MockRecovery,
+            patch(
+                "elspeth.cli._execute_resume_with_instances",
+                side_effect=IncompleteSourceResumeError(run_id, {"refunds": "interrupted"}),
+            ),
+        ):
+            MockRecovery.return_value.can_resume.return_value = ResumeCheck(can_resume=True)
+            MockRecovery.return_value.get_resume_point.return_value = mock_resume_point
+            MockRecovery.return_value.get_unprocessed_rows.return_value = []
+
+            result = runner.invoke(app, ["resume", run_id, "-s", str(settings_file), "--execute", "--format", "json"])
+
+        assert result.exit_code == 1, f"Expected exit 1, got {result.exit_code}; output={result.output!r}; exception={result.exception!r}"
+        assert "Traceback" not in result.output
+
+        event_lines = [line for line in result.output.splitlines() if '"event"' in line]
+        assert event_lines, f"Expected a JSON event with 'event' key in output; got {result.output!r}"
+        event = json.loads(event_lines[0])
+        assert event["event"] == "not_resumable"
+        assert event["run_id"] == run_id
+        assert event["reason"] == "source_not_exhausted"
+        assert "refunds=interrupted" in event["message"]
 
     def test_resume_rejects_missing_payload_directory(self, tmp_path: Path) -> None:
         """resume --execute exits cleanly when payload directory doesn't exist.
@@ -1183,14 +1295,15 @@ sinks:
         # Create settings with unsupported backend
         db_path = tmp_path / "audit.db"
         settings_content = f"""
-source:
-  plugin: csv
-  on_success: default
-  options:
-    path: input.csv
-    on_validation_failure: discard
-    schema:
-      mode: observed
+sources:
+  primary:
+    plugin: csv
+    on_success: default
+    options:
+      path: input.csv
+      on_validation_failure: discard
+      schema:
+        mode: observed
 sinks:
   default:
     plugin: json

@@ -861,11 +861,19 @@ class TestSchemaContractCheckpoint:
         assert c1.version_hash() != c2.version_hash()
 
 
-# --- Merge Tests for Coalesce ---
+# --- Batch Merge Tests ---
 
 
-class TestSchemaContractMerge:
-    """Test contract merging for fork/join coalesce."""
+class TestSchemaContractMergeForBatch:
+    """Test merge_for_batch: describing a heterogeneous batch of sibling contracts.
+
+    merge_for_batch produces a single contract that truthfully describes N
+    sibling row contracts bound for one sink (possibly from different pipeline
+    branches/paths). AND-required and exclusive-field forcing are the correct
+    intersection semantics here: nothing guarantees which siblings appear in a
+    batch. Coalesce union merges use the policy-aware merge_union_contracts
+    instead.
+    """
 
     def test_merge_same_field_same_type(self) -> None:
         """Same field, same type merges successfully."""
@@ -881,7 +889,7 @@ class TestSchemaContractMerge:
             fields=(make_field("x", int, original_name="X", required=True, source="declared"),),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         assert len(merged.fields) == 1
         assert merged.fields[0].python_type is int
@@ -901,7 +909,7 @@ class TestSchemaContractMerge:
             locked=True,
         )
         with pytest.raises(ContractMergeError, match="conflicting types"):
-            c1.merge(c2)
+            c1.merge_for_batch(c2)
 
     def test_merge_field_only_in_one_path_becomes_optional(self) -> None:
         """Field in only one path becomes optional (required=False)."""
@@ -918,21 +926,21 @@ class TestSchemaContractMerge:
             fields=(make_field("x", int, original_name="X", required=True, source="declared"),),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         # y is only in c1, so becomes optional in merged
         y_field = next(f for f in merged.fields if f.normalized_name == "y")
         assert y_field.required is False
 
     def test_merge_branch_exclusive_field_forced_nullable(self) -> None:
-        """Branch-exclusive fields must be forced nullable (D3 fix).
+        """Member-exclusive fields must be forced nullable (D3 fix).
 
-        When a field exists only in one branch, the source branch may not arrive
-        (e.g., timeout under best_effort policy). The merged row would then have
-        None for that field. The contract must reflect this by setting nullable=True,
-        regardless of the source field's nullable status.
+        When a field exists only in one member's contract, the other members'
+        rows lack that field (rendered as missing/None at the sink). The batch
+        contract must reflect this by setting nullable=True, regardless of the
+        source field's nullable status.
         """
-        # Branch A has y (non-nullable), Branch B doesn't
+        # Member A has y (non-nullable), Member B doesn't
         c1 = SchemaContract(
             mode="OBSERVED",
             fields=(
@@ -949,7 +957,7 @@ class TestSchemaContractMerge:
             ),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         # y is only in c1, z is only in c2 — both become nullable
         y_field = next(f for f in merged.fields if f.normalized_name == "y")
@@ -968,24 +976,24 @@ class TestSchemaContractMerge:
         flexible = SchemaContract(mode="FLEXIBLE", fields=(), locked=True)
         observed = SchemaContract(mode="OBSERVED", fields=(), locked=True)
 
-        assert fixed.merge(observed).mode == "FIXED"
-        assert observed.merge(fixed).mode == "FIXED"
-        assert flexible.merge(observed).mode == "FLEXIBLE"
+        assert fixed.merge_for_batch(observed).mode == "FIXED"
+        assert observed.merge_for_batch(fixed).mode == "FIXED"
+        assert flexible.merge_for_batch(observed).mode == "FLEXIBLE"
 
     def test_merge_locked_if_either_locked(self) -> None:
         """Merged contract is locked if either input is locked."""
         locked = SchemaContract(mode="OBSERVED", fields=(), locked=True)
         unlocked = SchemaContract(mode="OBSERVED", fields=(), locked=False)
 
-        assert locked.merge(unlocked).locked is True
-        assert unlocked.merge(locked).locked is True
+        assert locked.merge_for_batch(unlocked).locked is True
+        assert unlocked.merge_for_batch(locked).locked is True
 
     def test_merge_required_only_if_both_required(self) -> None:
-        """Field is required only if required in BOTH paths (AND semantics).
+        """Field is required only if required in BOTH members (AND semantics).
 
-        Why AND: For best_effort/quorum coalesces, a branch that guarantees
-        field X might be lost. The merged output can only guarantee X if ALL
-        branches that produce X guarantee it.
+        Why AND: a field that any member's contract does not require cannot be
+        promised for every row in the batch, so the batch-level description
+        can only require what ALL members require.
         """
         c1 = SchemaContract(
             mode="FLEXIBLE",
@@ -997,7 +1005,7 @@ class TestSchemaContractMerge:
             fields=(make_field("x", int, original_name="X", required=False, source="inferred"),),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         assert merged.fields[0].required is False
 
@@ -1013,7 +1021,7 @@ class TestSchemaContractMerge:
             fields=(make_field("x", int, original_name="X", required=True, source="declared"),),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         assert merged.fields[0].required is True
 
@@ -1029,7 +1037,7 @@ class TestSchemaContractMerge:
             fields=(make_field("x", int, original_name="X", required=True, source="inferred"),),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         assert merged.fields[0].source == "declared"
 
@@ -1037,7 +1045,7 @@ class TestSchemaContractMerge:
         """Merging empty contracts works."""
         c1 = SchemaContract(mode="OBSERVED", fields=(), locked=True)
         c2 = SchemaContract(mode="OBSERVED", fields=(), locked=True)
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         assert len(merged.fields) == 0
 
@@ -1060,7 +1068,7 @@ class TestSchemaContractMerge:
             locked=True,
         )
 
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         assert [field.normalized_name for field in merged.fields] == [
             "alpha",
@@ -1068,22 +1076,22 @@ class TestSchemaContractMerge:
             "yankee",
             "zeta",
         ]
-        # All four fields are branch-exclusive (none appears in both contracts).
-        # Under AND semantics, branch-exclusive fields must be marked optional
+        # All four fields are member-exclusive (none appears in both contracts).
+        # Under AND semantics, member-exclusive fields must be marked optional
         # in the merged output. Asserting this here catches any regression to
         # OR semantics that the ordering check alone would miss.
         assert all(not field.required for field in merged.fields), (
-            "Branch-exclusive fields must be marked required=False after AND-semantics merge"
+            "Member-exclusive fields must be marked required=False after AND-semantics merge"
         )
 
     def test_merge_shared_field_nullable_or_propagation(self) -> None:
         """Shared field nullable uses OR semantics: True if EITHER is nullable.
 
-        When branch A has x:int (non-nullable) and branch B has x:int? (nullable),
-        the merged x must be nullable because branch B can produce None via
-        last_wins collision resolution. This is the D7 fix.
+        When member A has x:int (non-nullable) and member B has x:int? (nullable),
+        the merged x must be nullable because member B's rows can carry None.
+        This is the D7 fix.
 
-        The merge() rule (line 502): nullable=self_fc.nullable or other_fc.nullable
+        merge_for_batch rule: nullable is OR across all members.
         """
         c1 = SchemaContract(
             mode="FLEXIBLE",
@@ -1095,13 +1103,13 @@ class TestSchemaContractMerge:
             fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=True),),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         x_field = merged.fields[0]
         assert x_field.nullable is True, "Shared field nullable via OR: True if EITHER nullable"
 
     def test_merge_shared_field_nullable_or_commutative(self) -> None:
-        """Nullable OR is commutative: A.merge(B).nullable == B.merge(A).nullable.
+        """Nullable OR is commutative: A.merge_for_batch(B).nullable == B.merge_for_batch(A).nullable.
 
         Order of merge must not affect nullable outcome for shared fields.
         """
@@ -1116,8 +1124,8 @@ class TestSchemaContractMerge:
             locked=True,
         )
 
-        ab = c1.merge(c2)
-        ba = c2.merge(c1)
+        ab = c1.merge_for_batch(c2)
+        ba = c2.merge_for_batch(c1)
 
         assert ab.fields[0].nullable == ba.fields[0].nullable, "Nullable OR must be commutative"
         assert ab.fields[0].nullable is True
@@ -1137,7 +1145,7 @@ class TestSchemaContractMerge:
             fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=False),),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         assert merged.fields[0].nullable is False, "Both non-nullable: merged stays non-nullable"
 
@@ -1156,7 +1164,7 @@ class TestSchemaContractMerge:
             fields=(make_field("x", int, original_name="X", required=True, source="declared", nullable=True),),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         assert merged.fields[0].nullable is True, "Both nullable: merged is nullable"
 
@@ -1183,7 +1191,7 @@ class TestSchemaContractMerge:
             ),
             locked=True,
         )
-        merged = c1.merge(c2)
+        merged = c1.merge_for_batch(c2)
 
         a_field = next(f for f in merged.fields if f.normalized_name == "a")
         b_field = next(f for f in merged.fields if f.normalized_name == "b")

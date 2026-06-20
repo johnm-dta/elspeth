@@ -1,0 +1,12 @@
+[
+  {
+    "column": 1,
+    "file_path": "bad.py",
+    "fingerprint": "623528dad329e72c",
+    "line": 6,
+    "message": "@trust_boundary(non_raising=True) on 'extract' declares it never raises on source_param='arguments', but the raise at line 21 is guarded by a check on source_param-derived data \u2014 the boundary does raise on malformed input.",
+    "rule_id": "R_TB_NONRAISING_RAISES",
+    "severity": "error",
+    "suggestion": "This @trust_boundary(non_raising=True) declares it never raises on source_param, but a raise in the body is guarded by a check on source_param-derived data \u2014 so it DOES raise on malformed input. Either remove non_raising=True and add a real test_ref proving the raising behaviour, or restructure so the boundary returns a sentinel on bad input instead of raising."
+  }
+]

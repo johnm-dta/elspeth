@@ -283,6 +283,7 @@ class TestSourceRow:
             row={"id": 1, "value": "bad"},
             error="validation failed: value must be int",
             destination="quarantine_sink",
+            source_row_index=0,
         )
         assert result.is_quarantined is True
         assert result.row == {"id": 1, "value": "bad"}
@@ -298,6 +299,7 @@ class TestSourceRow:
             row=original,
             error="score must be int",
             destination="bad_data",
+            source_row_index=0,
         )
         # Original value preserved for audit/debugging
         assert result.row["score"] == "not-a-number"
@@ -321,35 +323,35 @@ class TestSourceRow:
         from elspeth.contracts import SourceRow
 
         with pytest.raises(ValueError, match="quarantine_error"):
-            SourceRow(row={"x": 1}, is_quarantined=True, quarantine_destination="bad_sink")
+            SourceRow(row={"x": 1}, is_quarantined=True, quarantine_destination="bad_sink", source_row_index=0)
 
     def test_quarantined_without_destination_raises(self) -> None:
         """Quarantined row without destination violates invariant."""
         from elspeth.contracts import SourceRow
 
         with pytest.raises(ValueError, match="quarantine_destination"):
-            SourceRow(row={"x": 1}, is_quarantined=True, quarantine_error="bad data")
+            SourceRow(row={"x": 1}, is_quarantined=True, quarantine_error="bad data", source_row_index=0)
 
     def test_non_quarantined_with_error_raises(self) -> None:
         """Non-quarantined row with quarantine_error set violates invariant."""
         from elspeth.contracts import SourceRow
 
         with pytest.raises(ValueError, match="quarantine_error"):
-            SourceRow(row={"x": 1}, is_quarantined=False, quarantine_error="stale error")
+            SourceRow(row={"x": 1}, is_quarantined=False, quarantine_error="stale error", source_row_index=0)
 
     def test_non_quarantined_with_destination_raises(self) -> None:
         """Non-quarantined row with quarantine_destination set violates invariant."""
         from elspeth.contracts import SourceRow
 
         with pytest.raises(ValueError, match="quarantine_destination"):
-            SourceRow(row={"x": 1}, is_quarantined=False, quarantine_destination="stale_sink")
+            SourceRow(row={"x": 1}, is_quarantined=False, quarantine_destination="stale_sink", source_row_index=0)
 
     def test_valid_factory_passes_post_init(self) -> None:
         """SourceRow.valid() produces a row that passes __post_init__ validation."""
         from elspeth.contracts import SourceRow
         from elspeth.testing import make_contract
 
-        row = SourceRow.valid({"a": 1}, contract=make_contract({"a": 1}))
+        row = SourceRow.valid({"a": 1}, contract=make_contract({"a": 1}), source_row_index=0)
         assert not row.is_quarantined
         assert row.quarantine_error is None
         assert row.quarantine_destination is None
@@ -358,7 +360,7 @@ class TestSourceRow:
         """SourceRow.quarantined() produces a row that passes __post_init__ validation."""
         from elspeth.contracts import SourceRow
 
-        row = SourceRow.quarantined(row={"a": "bad"}, error="bad val", destination="quarantine")
+        row = SourceRow.quarantined(row={"a": "bad"}, error="bad val", destination="quarantine", source_row_index=0)
         assert row.is_quarantined
         assert row.quarantine_error == "bad val"
         assert row.quarantine_destination == "quarantine"

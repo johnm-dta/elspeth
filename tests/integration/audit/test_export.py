@@ -44,14 +44,16 @@ class TestLandscapeExport:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(input_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(input_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -167,14 +169,16 @@ class TestLandscapeExport:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(input_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(input_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -274,6 +278,8 @@ class TestSignedExportDeterminism:
                 source_node_id="node_0",
                 row_index=i,
                 data={"value": i * 10},
+                source_row_index=i,
+                ingest_sequence=i,
             )
             token = factory.data_flow.create_token(row_id=row.row_id)
             state = factory.execution.begin_node_state(
@@ -317,14 +323,16 @@ class TestSignedExportDeterminism:
         db_path = tmp_path / "audit.db"
 
         config = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(input_csv),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(input_csv),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -392,14 +400,16 @@ class TestSignedExportDeterminism:
             db_path = tmp_path / f"audit_{i}.db"
 
             config = {
-                "source": {
-                    "plugin": "csv",
-                    "on_success": "output",
-                    "options": {
-                        "path": str(input_csv),
-                        "on_validation_failure": "discard",
-                        "schema": {"mode": "observed"},
-                    },
+                "sources": {
+                    "primary": {
+                        "plugin": "csv",
+                        "on_success": "output",
+                        "options": {
+                            "path": str(input_csv),
+                            "on_validation_failure": "discard",
+                            "schema": {"mode": "observed"},
+                        },
+                    }
                 },
                 "sinks": {
                     "output": {

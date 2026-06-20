@@ -80,10 +80,12 @@ class TestYamlParsingErrors:
         """Duplicate YAML keys show helpful error."""
         config_file = tmp_path / "duplicate_keys.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
-source:
-  plugin: json
+sources:
+  primary:
+    plugin: csv
+sources:
+  primary:
+    plugin: json
 """)
 
         result = runner.invoke(app, ["run", "-s", str(config_file)])
@@ -176,14 +178,16 @@ class TestDatabaseConnectionErrors:
         readonly_dir.mkdir()
 
         settings = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(csv_file),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(csv_file),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -235,14 +239,16 @@ class TestDatabaseConnectionErrors:
         db_file.chmod(stat.S_IRUSR)
 
         settings = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(csv_file),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(csv_file),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -280,14 +286,16 @@ class TestSourceFileErrors:
         missing_file = tmp_path / "nonexistent_data.csv"
 
         settings = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(missing_file),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(missing_file),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -323,14 +331,16 @@ class TestSourceFileErrors:
         csv_file.chmod(0)  # No permissions
 
         settings = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(csv_file),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(csv_file),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -368,14 +378,16 @@ class TestExitCodeConsistency:
         csv_file.write_text("id,value\n1,100\n")
 
         settings = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(csv_file),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(csv_file),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -420,14 +432,16 @@ sinks:
         """Unknown runtime error during execution returns exit code 4 (framework bug)."""
         # Reference a missing source file to cause execution error
         settings = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(tmp_path / "missing.csv"),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(tmp_path / "missing.csv"),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -475,14 +489,16 @@ class TestJsonModeErrors:
         """
         # Use missing source file to trigger execution error
         settings = {
-            "source": {
-                "plugin": "csv",
-                "on_success": "output",
-                "options": {
-                    "path": str(tmp_path / "missing.csv"),
-                    "on_validation_failure": "discard",
-                    "schema": {"mode": "observed"},
-                },
+            "sources": {
+                "primary": {
+                    "plugin": "csv",
+                    "on_success": "output",
+                    "options": {
+                        "path": str(tmp_path / "missing.csv"),
+                        "on_validation_failure": "discard",
+                        "schema": {"mode": "observed"},
+                    },
+                }
             },
             "sinks": {
                 "output": {
@@ -532,8 +548,9 @@ class TestValidateCommandErrorBoundaries:
         """Pydantic validation errors show field paths clearly."""
         config_file = tmp_path / "invalid.yaml"
         config_file.write_text("""
-source:
-  plugin: csv
+sources:
+  primary:
+    plugin: csv
 sinks:
   output:
     plugin: json

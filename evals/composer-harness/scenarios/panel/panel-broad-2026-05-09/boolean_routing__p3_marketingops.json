@@ -83,6 +83,10 @@
       "gate",
       "csv"
     ],
+    "must_have_output_plugins": [
+      "csv",
+      "csv"
+    ],
     "must_include_observed_columns": [
       "id",
       "message",

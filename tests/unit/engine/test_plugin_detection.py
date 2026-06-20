@@ -7,7 +7,7 @@ with the base class hierarchy (BaseTransform).
 
 from typing import Any
 
-from elspeth.contracts import SourceRow
+from elspeth.contracts import NodeType, SourceRow
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.types import NodeID
 from elspeth.engine.processor import DAGTraversalContext
@@ -17,13 +17,12 @@ from tests.fixtures.base_classes import create_observed_contract
 from tests.fixtures.factories import make_context
 
 
-def _single_node_traversal(node_id: NodeID, plugin: Any) -> DAGTraversalContext:
+def _single_node_traversal(source_node_id: NodeID, node_id: NodeID, plugin: Any) -> DAGTraversalContext:
     """Build explicit traversal context for a one-node pipeline."""
     return DAGTraversalContext(
-        node_step_map={node_id: 1},
+        node_step_map={source_node_id: 0, node_id: 1},
         node_to_plugin={node_id: plugin},
-        first_transform_node_id=node_id,
-        node_to_next={node_id: None},
+        node_to_next={source_node_id: node_id, node_id: None},
         coalesce_node_map={},
     )
 
@@ -90,7 +89,7 @@ class TestProcessorRejectsDuckTypedPlugins:
         from elspeth.contracts.types import NodeID
         from elspeth.engine.processor import RowProcessor
         from elspeth.engine.spans import SpanFactory
-        from tests.fixtures.landscape import make_recorder_with_run
+        from tests.fixtures.landscape import make_recorder_with_run, register_test_node
 
         class DuckTypedTransform:
             """Looks like a transform but doesn't inherit from BaseTransform."""
@@ -109,7 +108,15 @@ class TestProcessorRejectsDuckTypedPlugins:
         assert hasattr(duck, "process"), "Duck type has process method"
         # Runtime check that duck is not a BaseTransform - mypy knows these are incompatible
         assert not isinstance(duck, BaseTransform), "But is not a BaseTransform"  # type: ignore[unreachable]
-        duck_node_id = NodeID(duck.node_id)
+        duck_node_id = NodeID(
+            register_test_node(
+                setup.data_flow,
+                run_id,
+                duck.node_id,
+                node_type=NodeType.TRANSFORM,
+                plugin_name="duck",
+            )
+        )
 
         processor = RowProcessor(
             setup.execution,
@@ -118,7 +125,8 @@ class TestProcessorRejectsDuckTypedPlugins:
             run_id=run_id,
             source_node_id=NodeID(source_node_id),
             source_on_success="default",
-            traversal=_single_node_traversal(duck_node_id, duck),
+            traversal=_single_node_traversal(NodeID(source_node_id), duck_node_id, duck),
+            scheduler=setup.factory.scheduler,
         )
 
         ctx = make_context(run_id=run_id, landscape=factory.plugin_audit_writer())
@@ -126,7 +134,9 @@ class TestProcessorRejectsDuckTypedPlugins:
         with pytest.raises(TypeError, match="Unknown transform type"):
             processor.process_row(
                 row_index=0,
-                source_row=SourceRow.valid({"value": 1}, contract=create_observed_contract({"value": 1})),
+                source_row=SourceRow.valid({"value": 1}, contract=create_observed_contract({"value": 1}), source_row_index=0),
                 transforms=[duck],
                 ctx=ctx,
+                source_row_index=0,
+                ingest_sequence=0,
             )

@@ -9,10 +9,11 @@ values or dropping unknown fields.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, ClassVar, Final, Literal, Self, get_args
+from typing import Annotated, Any, ClassVar, Final, Literal, Self, TypeAliasType, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from elspeth.contracts import NodeStateStatus, Operation, TerminalOutcome
 from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
     SessionRunStatus,
@@ -28,6 +29,67 @@ from elspeth.web.sessions.protocol import (
 # comment block at ``audit_access_log_table`` for the same posture.
 RunEventType = Literal["progress", "error", "completed", "cancelled", "failed"]
 RUN_EVENT_TYPE_VALUES: frozenset[str] = frozenset(get_args(RunEventType))
+
+ValidationCheckName = Literal[
+    "path_allowlist",
+    "web_scrape_network_policy",
+    "secret_refs",
+    "semantic_contracts",
+    "batch_transform_options",
+    "interpretation_review",
+    "blob_inline_refs",
+    "settings_load",
+    "plugin_instantiation",
+    "value_source_compliance",
+    "graph_structure",
+    "route_target_resolution",
+    "schema_compatibility",
+    "identity_node_advisory",
+    "state_exists",
+    "advisor_signoff",
+]
+VALIDATION_CHECK_NAME_VALUES: frozenset[str] = frozenset(get_args(ValidationCheckName))
+
+CHECK_PATH_ALLOWLIST: Final[ValidationCheckName] = "path_allowlist"
+CHECK_WEB_SCRAPE_NETWORK_POLICY: Final[ValidationCheckName] = "web_scrape_network_policy"
+CHECK_SECRET_REFS: Final[ValidationCheckName] = "secret_refs"
+CHECK_SEMANTIC_CONTRACTS: Final[ValidationCheckName] = "semantic_contracts"
+CHECK_BATCH_TRANSFORM_OPTIONS: Final[ValidationCheckName] = "batch_transform_options"
+CHECK_INTERPRETATION_REVIEW: Final[ValidationCheckName] = "interpretation_review"
+CHECK_BLOB_INLINE_REFS: Final[ValidationCheckName] = "blob_inline_refs"
+CHECK_SETTINGS: Final[ValidationCheckName] = "settings_load"
+RUNTIME_CHECK_PLUGIN_INSTANTIATION: Final[ValidationCheckName] = "plugin_instantiation"
+CHECK_VALUE_SOURCE_COMPLIANCE: Final[ValidationCheckName] = "value_source_compliance"
+RUNTIME_CHECK_GRAPH_STRUCTURE: Final[ValidationCheckName] = "graph_structure"
+CHECK_ROUTE_TARGETS: Final[ValidationCheckName] = "route_target_resolution"
+RUNTIME_CHECK_SCHEMA_COMPATIBILITY: Final[ValidationCheckName] = "schema_compatibility"
+CHECK_IDENTITY_NODE_ADVISORY: Final[ValidationCheckName] = "identity_node_advisory"
+CHECK_STATE_EXISTS: Final[ValidationCheckName] = "state_exists"
+CHECK_ADVISOR_SIGNOFF: Final[ValidationCheckName] = "advisor_signoff"
+
+VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
+    CHECK_PATH_ALLOWLIST,
+    CHECK_WEB_SCRAPE_NETWORK_POLICY,
+    CHECK_SECRET_REFS,
+    CHECK_SEMANTIC_CONTRACTS,
+    CHECK_BATCH_TRANSFORM_OPTIONS,
+    CHECK_INTERPRETATION_REVIEW,
+    CHECK_BLOB_INLINE_REFS,
+    CHECK_SETTINGS,
+    RUNTIME_CHECK_PLUGIN_INSTANTIATION,
+    CHECK_VALUE_SOURCE_COMPLIANCE,
+    RUNTIME_CHECK_GRAPH_STRUCTURE,
+    CHECK_ROUTE_TARGETS,
+    RUNTIME_CHECK_SCHEMA_COMPATIBILITY,
+    CHECK_STATE_EXISTS,
+    CHECK_ADVISOR_SIGNOFF,
+)
+VALIDATION_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
+    *VALIDATION_BLOCKING_CHECK_NAMES,
+    CHECK_IDENTITY_NODE_ADVISORY,
+)
+if frozenset(VALIDATION_CHECK_NAMES) != VALIDATION_CHECK_NAME_VALUES:
+    raise AssertionError("VALIDATION_CHECK_NAMES must match ValidationCheckName Literal values")
 
 ValidationCheckOutcomeCode = Literal[
     "secret_refs.no_refs",
@@ -65,7 +127,7 @@ class _StrictResponse(BaseModel):
 class ValidationCheck(_StrictResponse):
     """Individual check result from dry-run validation."""
 
-    _SECRET_REFS_CHECK_NAME: ClassVar[str] = "secret_refs"
+    _SECRET_REFS_CHECK_NAME: ClassVar[ValidationCheckName] = CHECK_SECRET_REFS
     _SECRET_REFS_OUTCOME_CODES: ClassVar[frozenset[str]] = frozenset(
         {
             CHECK_OUTCOME_SECRET_REFS_NO_REFS,
@@ -76,7 +138,7 @@ class ValidationCheck(_StrictResponse):
         }
     )
 
-    name: str
+    name: ValidationCheckName
     passed: bool
     detail: str
     # Structured field: node ids affected by this check (e.g. identity-node
@@ -108,6 +170,16 @@ class ValidationError(_StrictResponse):
     # construction site — no compat-shim default per CLAUDE.md No-Legacy
     # policy. Sites that have no semantic code pass None explicitly.
     error_code: str | None
+
+
+class ValidationWarning(_StrictResponse):
+    """Non-blocking validation warning with per-component attribution."""
+
+    component_id: str | None
+    component_type: str | None
+    message: str
+    suggestion: str | None
+    warning_code: str
 
 
 class SemanticEdgeContractResponse(_StrictResponse):
@@ -155,6 +227,7 @@ class ValidationResult(_StrictResponse):
     is_valid: bool
     checks: list[ValidationCheck]
     errors: list[ValidationError]
+    warnings: list[ValidationWarning] = []
     # Required: every producer must state which contract failed or passed.
     # This prevents callers from reconstructing readiness heuristically from
     # prose errors or parser side effects.
@@ -267,12 +340,22 @@ class RunAccounting(_StrictResponse):
     """Explicit run accounting split by unit of account."""
 
     source: RunAccountingSource
+    sources: dict[str, RunAccountingSource] = Field(default_factory=dict)
     tokens: RunAccountingTokens
     routing: RunAccountingRouting
     integrity: RunAccountingIntegrity
 
     @model_validator(mode="after")
     def _check_integrity_contract(self) -> Self:
+        if not self.sources:
+            object.__setattr__(self, "sources", {"source": self.source})
+        else:
+            source_total = sum(source.rows_processed for source in self.sources.values())
+            if source_total != self.source.rows_processed:
+                raise ValueError(
+                    "source.rows_processed must equal the sum of per-source rows "
+                    f"(got source.rows_processed={self.source.rows_processed}, per_source_total={source_total})"
+                )
         if self.routing.routed_success > self.tokens.succeeded:
             raise ValueError(
                 "routing.routed_success must be a subset of tokens.succeeded "
@@ -570,6 +653,44 @@ class DiscardSummary(_StrictResponse):
         return self
 
 
+type RunDiagnosticNodeStateStatus = Literal["open", "pending", "completed", "failed"]
+type RunDiagnosticTerminalOutcome = Literal["success", "failure", "transient"]
+type RunDiagnosticOperationType = Literal["source_load", "sink_write", "runtime_preflight"]
+type RunDiagnosticOperationStatus = Literal["open", "completed", "failed", "pending"]
+type RunDiagnosticDurationMs = Annotated[float, Field(ge=0, allow_inf_nan=False)]
+type RunDiagnosticCount = Annotated[int, Field(ge=0)]
+
+
+def _type_alias_literal_values(alias: TypeAliasType) -> frozenset[str]:
+    return frozenset(get_args(alias.__value__))
+
+
+RUN_DIAGNOSTIC_NODE_STATE_STATUS_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticNodeStateStatus)
+RUN_DIAGNOSTIC_TERMINAL_OUTCOME_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticTerminalOutcome)
+RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticOperationType)
+RUN_DIAGNOSTIC_OPERATION_STATUS_VALUES: frozenset[str] = _type_alias_literal_values(RunDiagnosticOperationStatus)
+
+if frozenset(status.value for status in NodeStateStatus) != RUN_DIAGNOSTIC_NODE_STATE_STATUS_VALUES:
+    raise AssertionError(
+        f"RunDiagnosticNodeState.status Literal values must mirror NodeStateStatus values; got {RUN_DIAGNOSTIC_NODE_STATE_STATUS_VALUES}"
+    )
+if frozenset(outcome.value for outcome in TerminalOutcome) != RUN_DIAGNOSTIC_TERMINAL_OUTCOME_VALUES:
+    raise AssertionError(
+        "RunDiagnosticToken.terminal_outcome Literal values must mirror "
+        f"TerminalOutcome values; got {RUN_DIAGNOSTIC_TERMINAL_OUTCOME_VALUES}"
+    )
+if RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES != Operation._ALLOWED_OPERATION_TYPES:
+    raise AssertionError(
+        "RunDiagnosticOperation.operation_type Literal values must mirror "
+        f"Operation._ALLOWED_OPERATION_TYPES; got {RUN_DIAGNOSTIC_OPERATION_TYPE_VALUES}"
+    )
+if RUN_DIAGNOSTIC_OPERATION_STATUS_VALUES != Operation._ALLOWED_STATUSES:
+    raise AssertionError(
+        "RunDiagnosticOperation.status Literal values must mirror "
+        f"Operation._ALLOWED_STATUSES; got {RUN_DIAGNOSTIC_OPERATION_STATUS_VALUES}"
+    )
+
+
 class RunDiagnosticNodeState(_StrictResponse):
     """Bounded node-state projection for run diagnostics.
 
@@ -582,8 +703,8 @@ class RunDiagnosticNodeState(_StrictResponse):
     node_id: str
     step_index: int = Field(ge=0)
     attempt: int = Field(ge=0)
-    status: str
-    duration_ms: float | None
+    status: RunDiagnosticNodeStateStatus
+    duration_ms: RunDiagnosticDurationMs | None
     started_at: datetime
     completed_at: datetime | None
     error: Any | None = None
@@ -595,14 +716,14 @@ class RunDiagnosticToken(_StrictResponse):
 
     token_id: str
     row_id: str
-    row_index: int | None
+    row_index: int | None = Field(ge=0)
     branch_name: str | None
     fork_group_id: str | None
     join_group_id: str | None
     expand_group_id: str | None
-    step_in_pipeline: int | None
+    step_in_pipeline: int | None = Field(ge=0)
     created_at: datetime
-    terminal_outcome: str | None
+    terminal_outcome: RunDiagnosticTerminalOutcome | None
     states: list[RunDiagnosticNodeState]
 
 
@@ -611,9 +732,9 @@ class RunDiagnosticOperation(_StrictResponse):
 
     operation_id: str
     node_id: str
-    operation_type: str
-    status: str
-    duration_ms: float | None
+    operation_type: RunDiagnosticOperationType
+    status: RunDiagnosticOperationStatus
+    duration_ms: RunDiagnosticDurationMs | None
     started_at: datetime
     completed_at: datetime | None
     error_message: str | None
@@ -703,8 +824,8 @@ class RunDiagnosticSummary(_StrictResponse):
     token_count: int = Field(ge=0)
     preview_limit: int = Field(ge=1, le=100)
     preview_truncated: bool
-    state_counts: dict[str, int]
-    operation_counts: dict[str, int]
+    state_counts: dict[RunDiagnosticNodeStateStatus, RunDiagnosticCount]
+    operation_counts: dict[RunDiagnosticOperationType, RunDiagnosticCount]
     latest_activity_at: datetime | None
 
 
@@ -724,7 +845,7 @@ class RunDiagnosticFailureDetail(_StrictResponse):
 
     operation_id: str
     node_id: str
-    operation_type: str
+    operation_type: RunDiagnosticOperationType
     error_message: str = Field(min_length=1)
     failed_at: datetime
 

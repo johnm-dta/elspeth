@@ -144,6 +144,8 @@ class RowExportRecord(TypedDict):
     run_id: str
     row_id: str
     row_index: int
+    source_row_index: int
+    ingest_sequence: int
     source_node_id: str
     source_data_hash: str | None
     source_data_ref: str | None
@@ -188,6 +190,27 @@ class TokenOutcomeExportRecord(TypedDict):
     error_hash: str | None
     context_json: str | None
     expected_branches_json: str | None
+
+
+class SchedulerEventExportRecord(TypedDict):
+    record_type: Literal["scheduler_event"]
+    run_id: str
+    event_id: str
+    token_id: str
+    work_item_id: str
+    node_id: str | None
+    event_type: str
+    from_status: str | None
+    to_status: str
+    from_lease_owner: str | None
+    to_lease_owner: str | None
+    from_lease_expires_at: str | None
+    to_lease_expires_at: str | None
+    from_attempt: int | None
+    to_attempt: int
+    recorded_at: str
+    caller_owner: str | None
+    context_json: str
 
 
 class NodeStateExportRecord(TypedDict):
@@ -279,6 +302,7 @@ ExportRecord = (
     | TokenExportRecord
     | TokenParentExportRecord
     | TokenOutcomeExportRecord
+    | SchedulerEventExportRecord
     | NodeStateExportRecord
     | RoutingEventExportRecord
     | BatchExportRecord

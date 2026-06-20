@@ -32,6 +32,8 @@ These run immediately with no setup:
 | `fork_coalesce` | 5 | Parallel path fork/join DAG pattern |
 | `json_explode` | 3 | JSON source with array expansion (3→6 output) |
 | `landscape_journal` | 2 | JSON source, audit journal |
+| `multi_flow` | 4 | Two independent named source flows in one run |
+| `multi_source_queue` | 3 | Multiple named sources fan into a queue |
 | `large_scale_test` | 50,000 | Performance test — takes ~7 minutes |
 | `retention_purge` | 5 | Payload retention policy demo |
 | `schema_contracts_demo` | 5 | Schema validation contracts |
@@ -62,6 +64,18 @@ elspeth run --settings examples/chaosllm_sentiment/settings.yaml --execute
 elspeth run --settings examples/rate_limited_llm/settings.yaml --execute
 elspeth run --settings examples/chaosllm_endurance/settings.yaml --execute  # 10K rows, slow
 ```
+
+Do not gate dogfood completion on the full `chaosllm_endurance` workload. It
+expands 10,000 rows into 100,000 mock LLM calls before retries. For ordinary
+examples dogfood, use a bounded smoke input such as:
+
+```bash
+CHAOSLLM_ENDURANCE_ROWS=20 ./examples/chaosllm_endurance/run.sh
+```
+
+Alternatively, a few minutes of successful retry/quarantine/interruption
+behavior against the ChaosLLM server is enough evidence for this endurance
+category.
 
 **Known issue:** The `realistic` preset sets `workers: 4` but errorworks 0.1.1 passes the app as a Python object to uvicorn, which only supports `workers=1` in that mode. Always pass `--workers=1` explicitly. See `docs/bugs/errorworks-workers-bug.md`.
 
@@ -134,3 +148,27 @@ If a pipeline is interrupted, resume with the command shown in the output.
 - **OpenRouter timeout:** Use `timeout <seconds>` wrapper, then `elspeth resume <run_id> --execute`
 - **Permission denied on `/app/`:** You're running a container example outside Docker
 - **Missing errorworks commands:** Run `uv pip install --force-reinstall errorworks` to regenerate entry points
+
+### 0.6.0 — Multi-Worker & Concurrent Scheduling
+
+`concurrent_scheduler` is pure-data (no server). `multi_worker` and
+`multi_worker_showcase` start their own ChaosLLM server inside `run.sh` (with
+`--workers 1`) and orchestrate a leader + `elspeth join` follower(s); run them
+via their `run.sh`, not a bare `elspeth run`. (`elspeth join` takes no
+`--execute` flag — only `elspeth run` does.)
+
+```bash
+.venv/bin/elspeth run --settings examples/concurrent_scheduler/settings.yaml --execute
+./examples/multi_worker/run.sh                      # leader + 1 follower (self-verifying)
+WORKERS=3 ./examples/multi_worker_showcase/run.sh   # 1 leader + 3 followers = 4-way (demo only)
+```
+
+Do not gate dogfood completion on `multi_worker_showcase` (~200 rows × 4
+workers — the heaviest of the three). For a bounded smoke, run `multi_worker`
+(leader + 1 follower) instead.
+
+| Example | Rows / Work units | Notes |
+|---------|-------------------|-------|
+| `concurrent_scheduler` | 6 (2×3 CSV rows) | Count-6 rendezvous; proves concurrent scheduling; `elspeth run` only |
+| `multi_worker` | ~600 (1 JSONL row → 600 exploded items) | `elspeth join` leader+follower; asserts ≥2 workers shared rows; `WORKERS` env |
+| `multi_worker_showcase` | ~200 (2×100 CSV rows) | 4-worker swarm + stats card; demonstrative only; NOT for dogfood gate |

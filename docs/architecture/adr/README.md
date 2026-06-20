@@ -45,7 +45,12 @@ We use a modified version of Michael Nygard's ADR template. See `000-template.md
 | [023](023-custom-python-ci-analyzer.md) | Custom Python Static Analyzer for ELSPETH-Specific CI Invariants (the `elspeth-lints` Package) | 2026-05-19 | **Accepted** |
 | [024](024-delivery-governance-for-single-maintainer-mode.md) | Delivery Governance for Single-Maintainer Mode | 2026-05-19 | **Accepted** |
 | [025](025-audited-inline-blob-content.md) | Audited Inline Blob Content | 2026-05-24 | **Accepted** |
+| [025](025-multi-source-ingestion.md) | Multi-Source Ingestion — Source Surface Is Plural | 2026-05-23 | **Accepted** |
 | [026](026-audit-hash-raw-vs-stored-asymmetry.md) | Audit Hashes Fingerprint What Arrived vs What Was Stored — the Raw/Sanitized Asymmetry Is Deliberate | 2026-05-30 | **Accepted** |
+| [026](026-durable-token-scheduler.md) | Durable Token Scheduler | 2026-05-23 | **Accepted** (with stated preconditions) |
+| [027](027-composer-operator-set-sampling.md) | Composer Sampling Is Operator-Set Configuration | 2026-06-04 | **Accepted** |
+| [028](028-queue-vs-coalesce-not-duplicates.md) | QUEUE and COALESCE Are Not Duplicates — Leave Them Separate | 2026-06-11 | **Accepted** |
+| [029](029-journal-is-barrier-buffer-truth.md) | Scheduler Journal Is the Single Source of Barrier-Buffer Truth | 2026-06-11 | **Accepted** |
 
 ## Status Definitions
 

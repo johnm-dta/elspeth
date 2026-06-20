@@ -10,6 +10,9 @@
 
 import type { CompositionState } from "./index";
 
+/** Mirrors GuidedChatRequest.message max_length in src/elspeth/web/sessions/schemas.py. */
+export const GUIDED_CHAT_MESSAGE_MAX_LENGTH = 4096;
+
 // ── Enums ────────────────────────────────────────────────────────────────────
 
 export type TurnType =

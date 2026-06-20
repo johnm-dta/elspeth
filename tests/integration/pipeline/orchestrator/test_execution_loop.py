@@ -13,7 +13,8 @@ from typing import Any
 
 import pytest
 
-from elspeth.contracts import Determinism, PipelineRow, RunStatus
+from elspeth.contracts import Determinism, PipelineRow, RunStatus, SourceRow
+from elspeth.contracts.enums import OutputMode
 from elspeth.contracts.errors import GracefulShutdownError, OrchestrationInvariantError
 from elspeth.contracts.events import (
     PhaseCompleted,
@@ -24,6 +25,9 @@ from elspeth.contracts.events import (
     RunFinished,
     RunSummary,
 )
+from elspeth.contracts.types import AggregationName
+from elspeth.core.config import AggregationSettings, SourceSettings, TriggerConfig
+from elspeth.core.dag import ExecutionGraph
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import Orchestrator, PipelineConfig
@@ -94,7 +98,7 @@ def _run_pipeline_with_event_capture(
     sink = sinks["default"]
 
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(t) for t in tx_list],
         sinks={"default": as_sink(sink)},
     )
@@ -175,6 +179,80 @@ class FailOnSecondRowTransform(BaseTransform):
         )
 
 
+class IdleBlockingSource(_TestSourceBase):
+    """Source that requires an aggregation timeout while waiting for row two."""
+
+    name = "idle_blocking_source"
+    output_schema = _TestSchema
+    idle_flush_wait_seconds = 2.0
+
+    def __init__(self, flush_seen: threading.Event) -> None:
+        super().__init__()
+        self.on_success = "agg_in"
+        self._flush_seen = flush_seen
+
+    def load(self, ctx: Any) -> Any:
+        rows = list(self.wrap_rows([{"value": 1}]))
+        yield rows[0]
+        if not self._flush_seen.wait(timeout=self.idle_flush_wait_seconds):
+            raise RuntimeError(f"aggregation timeout did not fire while source was idle within {self.idle_flush_wait_seconds:.1f}s")
+        yield SourceRow.valid(
+            {"value": 2},
+            contract=rows[0].contract,
+            source_row_index=1,
+        )
+
+
+class ThreadAffinitySource(_TestSourceBase):
+    """Source that proves timeout polling does not move iterator execution threads."""
+
+    name = "thread_affinity_source"
+    output_schema = _TestSchema
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_success = "agg_in"
+        self.load_thread_id: int | None = None
+        self.next_thread_ids: list[int] = []
+
+    def load(self, ctx: Any) -> Any:
+        self.load_thread_id = threading.get_ident()
+        rows = list(self.wrap_rows([{"value": 1}, {"value": 2}]))
+
+        self.next_thread_ids.append(threading.get_ident())
+        yield rows[0]
+
+        self.next_thread_ids.append(threading.get_ident())
+        if self.next_thread_ids[-1] != self.load_thread_id:
+            raise RuntimeError("source iterator advanced on a different thread from load()")
+        yield rows[1]
+
+
+class IdleFlushSignalingBatchTransform(BaseTransform):
+    """Batch transform that records when timeout flushing occurs."""
+
+    name = "idle_flush_signaler"
+    determinism = Determinism.DETERMINISTIC
+    input_schema = _TestSchema
+    output_schema = _TestSchema
+    is_batch_aware = True
+    on_success = "output"
+    on_error = "discard"
+
+    def __init__(self, flush_seen: threading.Event) -> None:
+        super().__init__({"schema": {"mode": "observed"}})
+        self._flush_seen = flush_seen
+
+    def process(  # type: ignore[override]
+        self, rows: list[PipelineRow], ctx: Any
+    ) -> TransformResult:
+        self._flush_seen.set()
+        return TransformResult.success(
+            make_pipeline_row({"flushed_count": len(rows)}),
+            success_reason={"action": "idle_timeout_flushed"},
+        )
+
+
 # ===========================================================================
 # Test classes
 # ===========================================================================
@@ -221,7 +299,7 @@ class TestExecutionLoopPhaseEvents:
         source = PreYieldFailureSource()
         sink = CollectSink(name="default")
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -275,6 +353,108 @@ class TestExecutionLoopRowProcessing:
         assert isinstance(result.run_id, str)
         assert len(result.run_id) > 0
 
+    def test_timeout_aggregation_flushes_while_source_is_idle(self, payload_store) -> None:
+        """Aggregation timeout must fire without waiting for another source row."""
+        flush_seen = threading.Event()
+        source = IdleBlockingSource(flush_seen)
+        transform = IdleFlushSignalingBatchTransform(flush_seen)
+        sink = CollectSink("output")
+
+        agg_settings = AggregationSettings(
+            name="idle_flush",
+            plugin=transform.name,
+            input="agg_in",
+            on_success="output",
+            on_error="discard",
+            trigger=TriggerConfig(timeout_seconds=0.05),
+            output_mode=OutputMode.TRANSFORM,
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": as_source(source)},
+            source_settings_map={
+                "primary": SourceSettings(
+                    plugin=source.name,
+                    on_success="agg_in",
+                    options={},
+                ),
+            },
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+            aggregations={"idle_flush": (as_transform(transform), agg_settings)},
+            gates=[],
+        )
+        agg_node_id = graph.get_aggregation_id_map()[AggregationName("idle_flush")]
+        transform.node_id = agg_node_id
+
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[as_transform(transform)],
+            sinks={"output": as_sink(sink)},
+            aggregation_settings={agg_node_id: agg_settings},
+        )
+
+        result = Orchestrator(LandscapeDB.in_memory()).run(
+            config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert flush_seen.is_set()
+        assert sink.results[0]["flushed_count"] == 1
+
+    def test_timeout_aggregation_polls_source_iterator_on_load_thread(self, payload_store) -> None:
+        """Timeout-enabled aggregation must not advance source iterators on worker threads."""
+        source = ThreadAffinitySource()
+        flush_seen = threading.Event()
+        transform = IdleFlushSignalingBatchTransform(flush_seen)
+        sink = CollectSink("output")
+
+        agg_settings = AggregationSettings(
+            name="thread_affinity_agg",
+            plugin=transform.name,
+            input="agg_in",
+            on_success="output",
+            on_error="discard",
+            trigger=TriggerConfig(count=2, timeout_seconds=30),
+            output_mode=OutputMode.TRANSFORM,
+        )
+        graph = ExecutionGraph.from_plugin_instances(
+            sources={"primary": as_source(source)},
+            source_settings_map={
+                "primary": SourceSettings(
+                    plugin=source.name,
+                    on_success="agg_in",
+                    options={},
+                ),
+            },
+            transforms=[],
+            sinks={"output": as_sink(sink)},
+            aggregations={"thread_affinity_agg": (as_transform(transform), agg_settings)},
+            gates=[],
+        )
+        agg_node_id = graph.get_aggregation_id_map()[AggregationName("thread_affinity_agg")]
+        transform.node_id = agg_node_id
+
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[as_transform(transform)],
+            sinks={"output": as_sink(sink)},
+            aggregation_settings={agg_node_id: agg_settings},
+        )
+
+        result = Orchestrator(LandscapeDB.in_memory()).run(
+            config,
+            graph=graph,
+            payload_store=payload_store,
+        )
+
+        assert result.status == RunStatus.COMPLETED
+        assert source.load_thread_id is not None
+        assert source.next_thread_ids == [source.load_thread_id, source.load_thread_id]
+        assert flush_seen.is_set()
+        assert sink.results[0]["flushed_count"] == 2
+
 
 class TestDatabaseInitialization:
     """Guards on required orchestrator inputs."""
@@ -286,7 +466,7 @@ class TestDatabaseInitialization:
         sink = CollectSink()
 
         config = PipelineConfig(
-            source=as_source(ListSource([])),
+            sources={"primary": as_source(ListSource([]))},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -303,7 +483,7 @@ class TestDatabaseInitialization:
         sink = sinks["default"]
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"default": as_sink(sink)},
         )
@@ -321,7 +501,7 @@ class TestDatabaseInitialization:
         sink = sinks["default"]
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(t) for t in tx_list],
             sinks={"default": as_sink(sink)},
         )
@@ -375,7 +555,7 @@ class TestRunSummaryEmission:
         source, _tx, sinks, graph = build_linear_pipeline([{"value": 1}, {"value": 2}], transforms=[transform])
         sink = sinks["default"]
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"default": as_sink(sink)},
         )
@@ -423,7 +603,7 @@ class TestGracefulShutdownIntegration:
         sink = sinks["default"]
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(t) for t in [transform]],
             sinks={"default": as_sink(sink)},
         )

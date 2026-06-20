@@ -65,7 +65,7 @@ class AuditStoryService:
             run_id=public_run_id,
             session_id=session_id,
             llm_call_count=run.llm_call_count,
-            output_file_hash=source_data_hash,
+            source_data_hash=source_data_hash,
             started_at=run.started_at,
             plugin_versions={row.plugin_name: row.plugin_version for row in node_rows},
             seeded_from_cache=seeded_from_cache,

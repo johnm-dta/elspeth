@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from typing import Any, Literal, Self, TypedDict
 
@@ -30,7 +30,14 @@ from elspeth.contracts.schema import (
     raw_options_have_schema,
 )
 from elspeth.contracts.wire_visible_identity import is_wire_visible_placeholder
-from elspeth.core.config import TriggerConfig
+from elspeth.core.config import (
+    _MAX_NODE_NAME_LENGTH,
+    _RESERVED_EDGE_LABELS,
+    _VALID_NODE_NAME_RE,
+    TriggerConfig,
+    _validate_max_length,
+    _validate_node_name_chars,
+)
 from elspeth.core.dag.coalesce_merge import merge_guaranteed_fields
 from elspeth.engine.orchestrator.validation import (
     _ALLOWED_FAILSINK_PLUGINS,
@@ -53,6 +60,40 @@ _DISCARD_ROUTE_TARGET = "discard"
 # advertises plugins that don't exist (false positive). Enforced by
 # tests/unit/web/composer/test_skill_drift.py::test_file_sinks_subset_of_registered_sinks.
 _FILE_SINK_PLUGINS: frozenset[str] = frozenset({"csv", "json"})
+
+
+def validate_composer_source_name(source_name: str) -> None:
+    """Validate a composer source name against runtime settings constraints."""
+    if not source_name or not source_name.strip():
+        raise ValueError("source_name must be a non-empty string.")
+    if source_name != source_name.lower():
+        raise ValueError(f"Source name '{source_name}' must be lowercase. Suggested fix: '{source_name.lower()}'.")
+    _validate_max_length(source_name, field_label="Source name", max_length=_MAX_NODE_NAME_LENGTH)
+    _validate_node_name_chars(source_name, field_label="Source name")
+    if source_name in _RESERVED_EDGE_LABELS:
+        raise ValueError(f"Source name '{source_name}' is reserved. Reserved source/edge labels: {sorted(_RESERVED_EDGE_LABELS)}")
+    if source_name.startswith("__"):
+        raise ValueError(f"Source name '{source_name}' starts with '__', which is reserved for system edges")
+
+
+def _composer_source_name_validation_message(source_name: str) -> str | None:
+    """Return the runtime-equivalent source-name validation error, if any."""
+    if not source_name or not source_name.strip():
+        return "source_name must be a non-empty string."
+    if source_name != source_name.lower():
+        return f"Source name '{source_name}' must be lowercase. Suggested fix: '{source_name.lower()}'."
+    if len(source_name) > _MAX_NODE_NAME_LENGTH:
+        return f"Source name exceeds max length {_MAX_NODE_NAME_LENGTH} (got {len(source_name)})"
+    if not _VALID_NODE_NAME_RE.match(source_name):
+        return (
+            f"Source name '{source_name}' contains invalid characters. "
+            "Node names must start with a letter and contain only letters, digits, underscores, and hyphens."
+        )
+    if source_name in _RESERVED_EDGE_LABELS:
+        return f"Source name '{source_name}' is reserved. Reserved source/edge labels: {sorted(_RESERVED_EDGE_LABELS)}"
+    if source_name.startswith("__"):
+        return f"Source name '{source_name}' starts with '__', which is reserved for system edges"
+    return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,7 +509,8 @@ def _producer_declared_field_type(
     field_name: str,
 ) -> str | None:
     """Return a declared schema field type for a producer, or None when unknown."""
-    owner = "source" if producer_id == "source" else f"node:{producer_id}"
+    is_source_producer = producer_id == "source" or producer_id.startswith("source:")
+    owner = producer_id if is_source_producer else f"node:{producer_id}"
     raw_schema = get_raw_schema_config(options, owner=owner)
     if raw_schema is not None and raw_schema.fields is not None:
         for field in raw_schema.fields:
@@ -476,7 +518,7 @@ def _producer_declared_field_type(
                 return field.field_type
         return None
 
-    if producer_id == "source":
+    if is_source_producer:
         return None
 
     if producer_id not in node_by_id:
@@ -521,7 +563,7 @@ def _is_static_contract_probe_exception(exc: Exception) -> bool:
 
 
 def _batch_distribution_profile_value_field_entries(
-    source: SourceSpec | None,
+    sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
 ) -> tuple[tuple[ValidationEntry, ...], tuple[ValidationEntry, ...]]:
     """Validate numeric-only batch_distribution_profile value_field contracts."""
@@ -531,7 +573,8 @@ def _batch_distribution_profile_value_field_entries(
     warnings: list[ValidationEntry] = []
     node_by_id = {node.id: node for node in nodes}
     resolver = ProducerResolver.build(
-        source=source,
+        source=None,
+        sources=sources,
         nodes=nodes,
         sink_names=frozenset(),
     )
@@ -603,7 +646,7 @@ def _batch_distribution_profile_value_field_entries(
 
 
 def _runtime_connection_targets(
-    source: SourceSpec | None,
+    sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
 ) -> set[str]:
     """Collect runtime routing targets from connection fields.
@@ -613,7 +656,7 @@ def _runtime_connection_targets(
     non-sink UI edges are advisory/editor state.
     """
     targets: set[str] = set()
-    if source is not None:
+    for source in sources.values():
         targets.add(source.on_success)
     for node in nodes:
         if node.node_type == "coalesce" and node.on_success is None:
@@ -639,7 +682,7 @@ def _runtime_consumer_connections(nodes: tuple[NodeSpec, ...]) -> set[str]:
 
 
 def _validate_runtime_route_destinations(
-    source: SourceSpec | None,
+    sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
     outputs: tuple[OutputSpec, ...],
 ) -> tuple[ValidationEntry, ...]:
@@ -649,13 +692,19 @@ def _validate_runtime_route_destinations(
     consumer_connections = _runtime_consumer_connections(nodes)
     _err = ValidationEntry
 
-    if source is not None:
+    for source_name, source in sources.items():
         target = source.on_success
         if target not in output_names and target not in consumer_connections:
+            component = "source" if source_name == "source" else f"source:{source_name}"
+            message = (
+                f"Source on_success '{target}' is neither a sink nor a known connection."
+                if source_name == "source"
+                else f"Source '{source_name}' on_success '{target}' is neither a sink nor a known connection."
+            )
             errors.append(
                 _err(
-                    "source",
-                    f"Source on_success '{target}' is neither a sink nor a known connection.",
+                    component,
+                    message,
                     "high",
                 )
             )
@@ -736,6 +785,54 @@ def _validate_gate_expression(condition: str) -> str | None:
         return f"Invalid gate condition syntax: {e}"
     except ExpressionSecurityError as e:
         return f"Forbidden construct in gate condition: {e}"
+    return None
+
+
+def _validate_gate_route_parity(condition: str, routes: Mapping[str, str] | None) -> str | None:
+    """Validate gate route labels match the condition's static return type.
+
+    Composition-time mirror of the runtime contract
+    ``GateSettings.validate_boolean_routes`` (core/config.py): a boolean-typed
+    condition (comparison, and/or/not, literal ``True``/``False``) must use route
+    labels exactly ``{"true", "false"}``, and a provably-numeric condition can
+    never produce a route label. Without this, ``CompositionState.validate()``
+    would green-light a pipeline that runtime ``GateSettings`` construction later
+    rejects.
+
+    This is a deliberate second copy of the runtime predicate built on the same
+    shared ``ExpressionParser`` substrate that ``_validate_gate_expression``
+    already uses (durable unification is deferred to follow-up
+    elspeth-f584eb820c). It must mirror ``validate_boolean_routes`` faithfully:
+    same predicates, same ``boolean … elif non_routable`` precedence.
+
+    Returns an error message when the route labels are inconsistent with the
+    condition, or None when consistent (notably for string-returning conditions,
+    which are routable by any label). The caller must only invoke this after the
+    syntax/security check passed, so ``ExpressionParser(condition)`` does not
+    re-raise here.
+    """
+    from elspeth.core.expression_parser import ExpressionParser
+
+    parser = ExpressionParser(condition)
+    if parser.is_boolean_expression():
+        route_labels = set(routes or {})
+        expected_labels = {"true", "false"}
+        if route_labels != expected_labels:
+            missing = expected_labels - route_labels
+            extra = route_labels - expected_labels
+            msg_parts = [f"Gate has a boolean condition ({condition!r}) but route labels don't match."]
+            if extra:
+                msg_parts.append(f"Found labels {sorted(extra)!r} but boolean expressions evaluate to True/False, not these values.")
+            if missing:
+                msg_parts.append(f"Missing required labels: {sorted(missing)!r}.")
+            msg_parts.append('Use routes: {"true": <destination>, "false": <destination>}')
+            return " ".join(msg_parts)
+    elif parser.is_provably_non_routable():
+        return (
+            f"Gate condition ({condition!r}) statically returns a numeric value, "
+            f"which can never be a route label. Gate conditions must evaluate to a boolean "
+            f'(routes "true"/"false") or to a string route label.'
+        )
     return None
 
 
@@ -892,7 +989,7 @@ def _sink_locked_input_set(output: OutputSpec) -> frozenset[str] | None:
 
 
 def _check_schema_contracts(
-    source: SourceSpec | None,
+    sources: Mapping[str, SourceSpec],
     nodes: tuple[NodeSpec, ...],
     outputs: tuple[OutputSpec, ...],
 ) -> tuple[
@@ -901,7 +998,7 @@ def _check_schema_contracts(
     tuple[EdgeContract, ...],
 ]:
     """Validate producer/consumer schema contracts across declarative routing."""
-    from elspeth.web.composer._producer_resolver import ProducerEntry, ProducerResolver
+    from elspeth.web.composer._producer_resolver import ProducerEntry, ProducerResolver, is_source_producer_id, source_producer_id
 
     errors: list[ValidationEntry] = []
     contract_warnings: list[ValidationEntry] = []
@@ -911,6 +1008,7 @@ def _check_schema_contracts(
     sink_names = {output.name for output in outputs}
     sink_names_frozen = frozenset(sink_names)
     internal_connection_names: set[str] = set()
+    source_map = sources
 
     _err = ValidationEntry
     _warn = ValidationEntry
@@ -929,7 +1027,8 @@ def _check_schema_contracts(
     # source-as-source-sentinel and same-node carve-out semantics), and
     # reports which connections have multiple distinct producers.
     resolver = ProducerResolver.build(
-        source=source,
+        source=None,
+        sources=source_map,
         nodes=nodes,
         sink_names=sink_names_frozen,
     )
@@ -965,16 +1064,18 @@ def _check_schema_contracts(
             direct_sink_producers[sink_name] = []
         direct_sink_producers[sink_name].append(ProducerEntry(producer_id=producer_id, plugin_name=plugin_name, options=options))
 
-    if source is not None:
+    for source_name, source in source_map.items():
+        producer_id = source_producer_id(source_name)
         if source.on_success in sink_names:
             _record_direct_sink(
                 source.on_success,
-                "source",
+                producer_id,
                 source.plugin,
                 source.options,
             )
         else:
-            _record_description(source.on_success, f"source '{source.plugin}'")
+            source_desc = f"source '{source.plugin}'" if source_name == "source" else f"source '{source_name}' ({source.plugin})"
+            _record_description(source.on_success, source_desc)
 
     for node in nodes:
         if node.node_type == "coalesce" and node.on_success is None:
@@ -1086,7 +1187,7 @@ def _check_schema_contracts(
         visited_connections: set[str] = set()
         current_producer = producer
         while True:
-            if current_producer.producer_id == "source":
+            if is_source_producer_id(current_producer.producer_id):
                 return current_producer
 
             producer_node = resolver.get_node(current_producer.producer_id)
@@ -1143,7 +1244,7 @@ def _check_schema_contracts(
         )
 
     def _producer_owner(producer: ProducerEntry) -> str:
-        return "source" if producer.producer_id == "source" else f"node:{producer.producer_id}"
+        return producer.producer_id if is_source_producer_id(producer.producer_id) else f"node:{producer.producer_id}"
 
     def _producer_label(producer: ProducerEntry) -> str:
         if producer.plugin_name is not None:
@@ -1212,7 +1313,7 @@ def _check_schema_contracts(
             # observed-mode schema itself abstains.
             raw_participates = True
 
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return raw_participates, raw_guaranteed
 
         producer_node = node_by_id[producer.producer_id]
@@ -1309,7 +1410,7 @@ def _check_schema_contracts(
         if producer is None:
             return False, frozenset()
 
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return _effective_producer_vote(producer)
 
         producer_node = node_by_id[producer.producer_id]
@@ -1391,7 +1492,7 @@ def _check_schema_contracts(
         the declared set — those are the cases where we don't have a separate
         emission inference, and the declared/raw set is the best signal.
         """
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return _effective_producer_guarantees(producer)
 
         if producer.producer_id not in node_by_id:
@@ -1480,18 +1581,82 @@ def _check_schema_contracts(
         except ValueError as exc:
             return None, _err(_producer_owner(producer), f"Invalid contract config: {exc}", "high")
 
+    def _consumer_effective_required_set(node: NodeSpec) -> frozenset[str]:
+        """Return the consumer's EFFECTIVE required-input fields.
+
+        Unlike ``get_raw_node_required_fields`` (explicit ``required_fields``
+        only — what runtime Phase-1 name-requirement checking consumes), this
+        folds in a fixed/flexible schema's *implicitly* required declared
+        fields via ``SchemaConfig.get_effective_required_fields``. Runtime
+        marks those declared fields as required on the generated input Pydantic
+        model, so Phase-2 type validation rejects a typed producer that does
+        not guarantee one. This helper mirrors that, honouring the aggregation
+        contract-options alias the rest of the contract pipeline uses.
+        """
+        contract_options = node.options
+        contract_owner = f"node:{node.id}"
+        if node.node_type == "aggregation":
+            contract_options, contract_owner = get_aggregation_contract_options(node.options, owner=contract_owner)
+        schema_config = get_raw_schema_config(contract_options, owner=contract_owner)
+        if schema_config is None:
+            return frozenset()
+        return schema_config.get_effective_required_fields()
+
+    def _parse_consumer_effective_required(
+        node: NodeSpec,
+    ) -> tuple[frozenset[str] | None, ValidationEntry | None]:
+        try:
+            return _consumer_effective_required_set(node), None
+        except ValueError as exc:
+            return None, _err(f"node:{node.id}", f"Invalid contract config: {exc}", "high")
+
+    def _producer_is_typed_source(producer: ProducerEntry) -> bool:
+        """Return whether the producer presents a TYPED (non-observed) schema.
+
+        Mirrors the runtime Phase-2 bypass (``graph.py:1392-1403``): type
+        validation fires only when the effective producer schema is a typed
+        Pydantic model. A fixed/flexible *source* carries such a typed model;
+        observed sources (including text-source auto-guarantee) and
+        transform/gate/coalesce producers resolve to a dynamic (None) effective
+        producer schema at runtime and are therefore skipped here. Gating on
+        producer MODE — not guarantee-emptiness — avoids false rejection of the
+        observed-source-with-auto-guaranteed-column case the runtime accepts.
+        """
+        if not is_source_producer_id(producer.producer_id):
+            # transform/aggregation/gate/coalesce producers => dynamic effective
+            # producer schema at runtime; the consumer's implicit requirement is
+            # not statically enforced against them. Named sources mint
+            # ``source:<name>`` producer ids, so match on the predicate, not the
+            # literal "source" — else the parity check silently skips every
+            # named typed source (elspeth-3332619032).
+            return False
+        schema_config = get_raw_schema_config(producer.options, owner=_producer_owner(producer))
+        return schema_config is not None and not schema_config.is_observed
+
     for node in nodes:
         consumer_required, consumer_required_error = _parse_node_required_fields(node)
         if consumer_required_error is not None:
             errors.append(consumer_required_error)
             continue
+        assert consumer_required is not None  # No error => resolved.
 
         consumer_locked_input, consumer_locked_error = _parse_consumer_locked_input(node)
         if consumer_locked_error is not None:
             errors.append(consumer_locked_error)
             continue
 
-        if not consumer_required and consumer_locked_input is None:
+        consumer_effective_required, consumer_effective_error = _parse_consumer_effective_required(node)
+        if consumer_effective_error is not None:
+            errors.append(consumer_effective_error)
+            continue
+        assert consumer_effective_required is not None  # No error => resolved.
+
+        # ``consumer_effective_required`` folds in a fixed/flexible consumer's
+        # *implicitly* required declared fields (which the explicit-only
+        # ``consumer_required`` misses), so a flexible consumer — whose input is
+        # NOT locked (``consumer_locked_input is None``) and whose explicit
+        # ``required_fields`` is empty — still reaches producer resolution.
+        if not consumer_required and consumer_locked_input is None and not consumer_effective_required:
             continue
 
         actual_producer = _walk_to_real_producer(
@@ -1508,26 +1673,60 @@ def _check_schema_contracts(
             continue
         assert producer_guaranteed is not None  # No error => guarantees resolved.
 
-        if consumer_required:
-            missing_fields = consumer_required - producer_guaranteed
+        producer_is_typed_source = _producer_is_typed_source(actual_producer)
+        contract_required = consumer_required
+        if producer_is_typed_source:
+            contract_required = consumer_required | consumer_effective_required
+
+        if contract_required:
+            contract_missing_fields = contract_required - producer_guaranteed
             edge_contracts.append(
                 EdgeContract(
                     from_id=actual_producer.producer_id,
                     to_id=node.id,
                     producer_guarantees=tuple(sorted(producer_guaranteed)),
-                    consumer_requires=tuple(sorted(consumer_required)),
-                    missing_fields=tuple(sorted(missing_fields)),
-                    satisfied=not missing_fields,
+                    consumer_requires=tuple(sorted(contract_required)),
+                    missing_fields=tuple(sorted(contract_missing_fields)),
+                    satisfied=not contract_missing_fields,
                 )
             )
+
+        if consumer_required:
+            missing_fields = consumer_required - producer_guaranteed
             if missing_fields:
+                error_component = (
+                    _producer_owner(actual_producer) if is_source_producer_id(actual_producer.producer_id) else f"node:{node.id}"
+                )
                 errors.append(
                     _err(
-                        f"node:{node.id}",
+                        error_component,
                         f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
                         f"Consumer ({node.plugin or node.node_type}) requires fields: [{_format_fields(consumer_required)}]. "
                         f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
                         f"Missing fields: [{_format_fields(missing_fields)}].",
+                        "high",
+                    )
+                )
+
+        # Implicit-required parity: a fixed/flexible consumer schema implicitly
+        # requires its declared (non-optional) fields. Runtime Phase-2 type
+        # validation rejects a TYPED producer that does not guarantee one of
+        # them; authoring's explicit-only ``consumer_required`` above misses
+        # this. Mirror runtime by checking the consumer's *effective* required
+        # set, but only against a typed (non-observed) producer — exactly the
+        # producers runtime does NOT bypass (graph.py:1392-1403). Report only
+        # the increment beyond the explicit set already handled above, so a
+        # field is never double-reported.
+        if producer_is_typed_source:
+            implicit_missing = consumer_effective_required - consumer_required - producer_guaranteed
+            if implicit_missing:
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Schema contract violation: '{actual_producer.producer_id}' -> '{node.id}'. "
+                        f"Consumer ({node.plugin or node.node_type}) requires fields: [{_format_fields(consumer_effective_required)}]. "
+                        f"Producer ({_producer_label(actual_producer)}) guarantees: [{_format_fields(producer_guaranteed)}]. "
+                        f"Missing fields: [{_format_fields(implicit_missing)}].",
                         "high",
                     )
                 )
@@ -1757,7 +1956,7 @@ def _check_schema_contracts(
     return tuple(errors), tuple(contract_warnings), tuple(edge_contracts)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class CompositionState:
     """Immutable, versioned snapshot of a pipeline under construction.
 
@@ -1765,7 +1964,7 @@ class CompositionState:
     All container fields are deep-frozen via freeze_fields().
 
     Attributes:
-        source: The pipeline's single data source. None until set.
+        sources: Named source roots keyed by stable composer/audit-visible name.
         nodes: Ordered tuple of transform, gate, aggregation, coalesce nodes.
         edges: Connections between nodes.
         outputs: Sink configurations.
@@ -1776,27 +1975,64 @@ class CompositionState:
             guided sessions (spec §5.2).
     """
 
-    source: SourceSpec | None
     nodes: tuple[NodeSpec, ...]
     edges: tuple[EdgeSpec, ...]
     outputs: tuple[OutputSpec, ...]
     metadata: PipelineMetadata
     version: int
     guided_session: GuidedSession | None = None
+    sources: Mapping[str, SourceSpec] = field(default_factory=dict)
 
-    def __post_init__(self) -> None:
-        if self.version < 1:
-            raise ValueError(f"CompositionState.version must be >= 1, got {self.version}")
+    def __init__(
+        self,
+        *,
+        nodes: tuple[NodeSpec, ...],
+        edges: tuple[EdgeSpec, ...],
+        outputs: tuple[OutputSpec, ...],
+        metadata: PipelineMetadata,
+        version: int,
+        guided_session: GuidedSession | None = None,
+        sources: Mapping[str, SourceSpec] | None = None,
+        source: SourceSpec | None = None,
+    ) -> None:
+        if version < 1:
+            raise ValueError(f"CompositionState.version must be >= 1, got {version}")
+        if source is not None and sources:
+            raise ValueError("CompositionState accepts either source or sources, not both")
+        source_map = {"source": source} if source is not None else dict(sources or {})
+        object.__setattr__(self, "nodes", nodes)
+        object.__setattr__(self, "edges", edges)
+        object.__setattr__(self, "outputs", outputs)
+        object.__setattr__(self, "metadata", metadata)
+        object.__setattr__(self, "version", version)
+        object.__setattr__(self, "guided_session", guided_session)
+        object.__setattr__(self, "sources", source_map)
+        freeze_fields(self, "sources")
 
     # --- Mutation methods ---
 
     def with_source(self, source: SourceSpec) -> CompositionState:
-        """Return new state with the given source, version incremented."""
-        return replace(self, source=source, version=self.version + 1)
+        """Return new state with the default named source, version incremented."""
+        return self.with_named_source("source", source)
 
     def without_source(self) -> CompositionState:
-        """Return new state with the source removed, version incremented."""
-        return replace(self, source=None, version=self.version + 1)
+        """Return new state with all sources removed, version incremented."""
+        return replace(self, sources={}, version=self.version + 1)
+
+    def with_named_source(self, source_name: str, source: SourceSpec) -> CompositionState:
+        """Add or replace a named source root. Version incremented."""
+        validate_composer_source_name(source_name)
+        sources = dict(self.sources)
+        sources[source_name] = source
+        return replace(self, sources=sources, version=self.version + 1)
+
+    def without_named_source(self, source_name: str) -> CompositionState | None:
+        """Remove one named source. Returns None if the source is not found."""
+        if source_name not in self.sources:
+            return None
+        sources = dict(self.sources)
+        del sources[source_name]
+        return replace(self, sources=sources, version=self.version + 1)
 
     def with_node(self, node: NodeSpec) -> CompositionState:
         """Add or replace a node (matched by id). Version incremented."""
@@ -1885,18 +2121,18 @@ class CompositionState:
                 "name": self.metadata.name,
                 "description": self.metadata.description,
             },
-            "source": None,
+            "sources": {},
             "nodes": [],
             "edges": [],
             "outputs": [],
         }
 
-        if self.source is not None:
-            result["source"] = {
-                "plugin": self.source.plugin,
-                "on_success": self.source.on_success,
-                "options": deep_thaw(self.source.options),
-                "on_validation_failure": self.source.on_validation_failure,
+        for source_name, source in self.sources.items():
+            result["sources"][source_name] = {
+                "plugin": source.plugin,
+                "on_success": source.on_success,
+                "options": deep_thaw(source.options),
+                "on_validation_failure": source.on_validation_failure,
             }
 
         for node in self.nodes:
@@ -1961,9 +2197,12 @@ class CompositionState:
         The round-trip invariant holds:
             state == CompositionState.from_dict(state.to_dict())
         """
-        source_data = d["source"]
+        raw_sources = d["sources"] if "sources" in d and d["sources"] is not None else {}
+        if not raw_sources and "source" in d and d["source"] is not None:
+            raw_sources = {"source": d["source"]}
+        sources = {name: SourceSpec.from_dict(source) for name, source in raw_sources.items()}
         return cls(
-            source=SourceSpec.from_dict(source_data) if source_data is not None else None,
+            sources=sources,
             nodes=tuple(NodeSpec.from_dict(n) for n in d["nodes"]),
             edges=tuple(EdgeSpec.from_dict(e) for e in d["edges"]),
             outputs=tuple(OutputSpec.from_dict(o) for o in d["outputs"]),
@@ -1983,8 +2222,13 @@ class CompositionState:
         _err = ValidationEntry  # local alias for brevity
 
         # 1. Source exists
-        if self.source is None:
+        if not self.sources:
             errors.append(_err("source", "No source configured.", "high"))
+        for source_name in self.sources:
+            source_name_error = _composer_source_name_validation_message(source_name)
+            if source_name_error is not None:
+                component = "source" if source_name == "source" else f"source:{source_name}"
+                errors.append(_err(component, source_name_error, "high"))
 
         # 2. At least one output
         if not self.outputs:
@@ -1993,7 +2237,7 @@ class CompositionState:
         # 3. Edge references valid
         node_ids = {n.id for n in self.nodes}
         output_names = {o.name for o in self.outputs}
-        valid_from = node_ids | {"source"}
+        valid_from = node_ids | set(self.sources) | {"source"}
         valid_to = node_ids | output_names
         for edge in self.edges:
             if edge.from_node not in valid_from:
@@ -2006,6 +2250,14 @@ class CompositionState:
         for node in self.nodes:
             if node.id in seen_node_ids:
                 errors.append(_err(f"node:{node.id}", f"Duplicate node ID: '{node.id}'.", "high"))
+            if node.id == "source" or node.id.startswith("source:"):
+                errors.append(
+                    _err(
+                        f"node:{node.id}",
+                        f"Reserved node id '{node.id}' cannot use the source producer namespace.",
+                        "high",
+                    )
+                )
             seen_node_ids.add(node.id)
 
         # 5. Output names unique
@@ -2058,6 +2310,13 @@ class CompositionState:
                     expr_error = _validate_gate_expression(node.condition)
                     if expr_error is not None:
                         errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {expr_error}", "high"))
+                    elif node.routes is not None:
+                        # Route-label / condition-return-type parity — mirror of
+                        # GateSettings.validate_boolean_routes so the composer does
+                        # not green-light a pipeline runtime config later rejects.
+                        parity_error = _validate_gate_route_parity(node.condition, node.routes)
+                        if parity_error is not None:
+                            errors.append(_err(f"node:{node.id}", f"Gate '{node.id}': {parity_error}", "high"))
                 if node.routes is None:
                     errors.append(_err(f"node:{node.id}", f"Gate '{node.id}' is missing required field 'routes'.", "high"))
             elif node.node_type == "transform":
@@ -2104,11 +2363,10 @@ class CompositionState:
                         )
                     )
 
-        errors.extend(_validate_runtime_route_destinations(self.source, self.nodes, self.outputs))
+        errors.extend(_validate_runtime_route_destinations(self.sources, self.nodes, self.outputs))
 
         # 8. Connection completeness
-        source_on_success = self.source.on_success if self.source else None
-        runtime_connections = _runtime_connection_targets(self.source, self.nodes)
+        runtime_connections = _runtime_connection_targets(self.sources, self.nodes)
         for node in self.nodes:
             if node.node_type == "coalesce":
                 missing_branches = sorted(
@@ -2140,7 +2398,7 @@ class CompositionState:
         semantic_errors, semantic_contracts = validate_semantic_contracts(self)
         errors.extend(semantic_errors)
 
-        numeric_contract_errors, numeric_contract_warnings = _batch_distribution_profile_value_field_entries(self.source, self.nodes)
+        numeric_contract_errors, numeric_contract_warnings = _batch_distribution_profile_value_field_entries(self.sources, self.nodes)
         errors.extend(numeric_contract_errors)
 
         # --- Warnings (advisory, non-blocking) ---
@@ -2153,7 +2411,7 @@ class CompositionState:
             warnings.append(_warn(component, message, "medium"))
 
         # Build connection-field targets (wiring that doesn't require edges)
-        connection_targets = _runtime_connection_targets(self.source, self.nodes)
+        connection_targets = _runtime_connection_targets(self.sources, self.nodes)
 
         # W1: Output has no runtime routing reference (on_success / on_error / routes)
         # Edges are UI-only — generate_yaml() uses only connection fields,
@@ -2164,8 +2422,9 @@ class CompositionState:
         # and on_write_failure route data to outputs without explicit
         # connection fields.
         implicit_targets: set[str] = set()
-        if self.source is not None and self.source.on_validation_failure != "discard":
-            implicit_targets.add(self.source.on_validation_failure)
+        for source in self.sources.values():
+            if source.on_validation_failure != "discard":
+                implicit_targets.add(source.on_validation_failure)
         for output in self.outputs:
             if output.on_write_failure != "discard":
                 implicit_targets.add(output.on_write_failure)
@@ -2180,13 +2439,20 @@ class CompositionState:
                 )
 
         # W2: Source on_success target doesn't match any node input or output name
-        if source_on_success is not None:
-            node_inputs = {n.input for n in self.nodes if n.input is not None}
+        node_inputs = {n.input for n in self.nodes if n.input is not None}
+        for source_name, source in self.sources.items():
+            source_on_success = source.on_success
             if source_on_success not in node_inputs and source_on_success not in output_names:
+                component = "source" if source_name == "source" else f"source:{source_name}"
+                message = (
+                    f"Source on_success '{source_on_success}' does not match any node input or output — data may not flow."
+                    if source_name == "source"
+                    else f"Source '{source_name}' on_success '{source_on_success}' does not match any node input or output — data may not flow."
+                )
                 warnings.append(
                     _warn(
-                        "source",
-                        f"Source on_success '{source_on_success}' does not match any node input or output — data may not flow.",
+                        component,
+                        message,
                         "medium",
                     )
                 )
@@ -2339,14 +2605,24 @@ class CompositionState:
         # W8: Source on_validation_failure reference validation
         # Mirrors rules from engine/orchestrator/validation.py so LLMs get
         # early feedback instead of failing at pipeline build time.
-        if self.source is not None:
-            vf_dest = self.source.on_validation_failure
+        for source_name, source in self.sources.items():
+            vf_dest = source.on_validation_failure
             if vf_dest != "discard" and vf_dest not in output_name_set:
+                component = "source" if source_name == "source" else f"source:{source_name}"
+                if source_name == "source":
+                    message = (
+                        f"Source on_validation_failure references '{vf_dest}' which is not a configured output — "
+                        "validation failures will cause a pipeline build error."
+                    )
+                else:
+                    message = (
+                        f"Source '{source_name}' on_validation_failure references '{vf_dest}' which is not a configured output — "
+                        "validation failures will cause a pipeline build error."
+                    )
                 warnings.append(
                     _warn(
-                        "source",
-                        f"Source on_validation_failure references '{vf_dest}' which is not a configured output — "
-                        "validation failures will cause a pipeline build error.",
+                        component,
+                        message,
                         "high",
                     )
                 )
@@ -2385,15 +2661,19 @@ class CompositionState:
                 )
 
         # S3: Source has no schema under the current composer/plugin config contract
-        if self.source is not None:
-            has_schema = _source_options_have_schema(self.source.options)
+        for source_name, source in self.sources.items():
+            has_schema = _source_options_have_schema(source.options)
             if not has_schema:
-                suggestions.append(
-                    _sug("source", "Source has no explicit schema. Downstream field references depend on runtime column names.", "low")
+                component = "source" if source_name == "source" else f"source:{source_name}"
+                message = (
+                    "Source has no explicit schema. Downstream field references depend on runtime column names."
+                    if source_name == "source"
+                    else f"Source '{source_name}' has no explicit schema. Downstream field references depend on runtime column names."
                 )
+                suggestions.append(_sug(component, message, "low"))
 
         # 9. Schema contract validation
-        contract_errors, contract_warnings, edge_contracts = _check_schema_contracts(self.source, self.nodes, self.outputs)
+        contract_errors, contract_warnings, edge_contracts = _check_schema_contracts(self.sources, self.nodes, self.outputs)
         errors.extend(contract_errors)
         warnings.extend(contract_warnings)
 

@@ -155,6 +155,22 @@ def _sync_get_blob(engine: Engine, blob_id: str, session_id: str | None = None) 
         return _blob_row_to_tool_dict(row)
 
 
+def _blob_id_uuid_validation_error(blob_id: Any) -> str | None:
+    """Return a repairable boundary error when ``blob_id`` is not canonical."""
+    if not isinstance(blob_id, str):
+        return f"blob_id must be a UUID string, got {type(blob_id).__name__}."
+    try:
+        UUID(blob_id)
+    except ValueError:
+        return (
+            f"blob_id {blob_id!r} is not a valid UUID. Use list_blobs or "
+            "list_composer_blobs to select an uploaded blob, ask the user to "
+            "upload the source file, or use create_blob for inline content "
+            "before calling this tool."
+        )
+    return None
+
+
 def _sync_get_blob_by_storage_path(
     engine: Engine,
     storage_path: str,
@@ -336,10 +352,22 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
     keys = rest.split(".")
 
     if prefix == "source":
-        if state.source is None:
-            raise ValueError("Cannot wire source ref: no source has been set")
-        patched_options = _set_nested_option(dict(deep_thaw(state.source.options)), keys, marker)
-        return state.with_source(replace(state.source, options=patched_options))
+        source_name = "source"
+    elif prefix.startswith("source:"):
+        source_name = prefix.removeprefix("source:")
+        if not source_name:
+            raise ValueError("source:<name> field_path must include a source name")
+    else:
+        source_name = None
+
+    if source_name is not None:
+        source = state.sources[source_name] if source_name in state.sources else None
+        if source is None:
+            if source_name == "source":
+                raise ValueError("Cannot wire source ref: no source has been set")
+            raise ValueError(f"Source {source_name!r} not found in composition state")
+        patched_options = _set_nested_option(dict(deep_thaw(source.options)), keys, marker)
+        return state.with_named_source(source_name, replace(source, options=patched_options))
 
     if prefix.startswith("node:"):
         node_id = prefix.removeprefix("node:")
@@ -371,13 +399,15 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
             raise ValueError(f"Output {output_name!r} not found in composition state")
         return replace(state, outputs=tuple(new_outputs), version=state.version + 1)
 
-    raise ValueError("field_path must start with source.options, node:<id>.options, or output:<name>.options")
+    raise ValueError("field_path must start with source.options, source:<name>.options, node:<id>.options, or output:<name>.options")
 
 
 def _affected_component_for_inline_field_path(field_path: str) -> tuple[str, ...]:
     prefix, _, _rest = field_path.partition(".options.")
     if prefix == "source":
         return ("source",)
+    if prefix.startswith("source:"):
+        return (prefix.removeprefix("source:"),)
     if prefix.startswith("node:"):
         return (prefix.removeprefix("node:"),)
     if prefix.startswith("output:"):
@@ -397,10 +427,10 @@ def _execute_wire_blob_inline_ref(
         return _failure_result(state, "Blob tools require session context.")
 
     field_path = arguments["field_path"]
-    try:
-        blob_id = UUID(arguments["blob_id"])
-    except ValueError:
-        return _failure_result(state, f"blob_id {arguments['blob_id']!r} is not a valid UUID")
+    blob_id_error = _blob_id_uuid_validation_error(arguments["blob_id"])
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
+    blob_id = UUID(arguments["blob_id"])
 
     # Tier-3 LLM tool argument. Absent ``encoding`` means utf-8 by the
     # published tool-schema contract (json_schema declares default "utf-8").
@@ -411,7 +441,9 @@ def _execute_wire_blob_inline_ref(
     # explicit failure result. The str narrowing also satisfies the
     # ContentEncoding cast below.
     encoding_value = arguments["encoding"] if "encoding" in arguments else "utf-8"
-    if not isinstance(encoding_value, str) or encoding_value not in ALLOWED_CONTENT_ENCODINGS:
+    if type(encoding_value) is not str:
+        return _failure_result(state, f"encoding must be a string, got {type(encoding_value).__name__}")
+    if encoding_value not in ALLOWED_CONTENT_ENCODINGS:
         return _failure_result(state, f"encoding must be one of {sorted(ALLOWED_CONTENT_ENCODINGS)}, got {encoding_value!r}")
     encoding = cast(ContentEncoding, encoding_value)
 
@@ -469,7 +501,10 @@ _WIRE_BLOB_INLINE_REF_DECLARATION = ToolDeclaration(
         "properties": {
             "field_path": {
                 "type": "string",
-                "description": "Canonical path: source.options.<field>, node:<node_id>.options.<field>, or output:<name>.options.<field>.",
+                "description": (
+                    "Canonical path: source.options.<field>, source:<name>.options.<field>, "
+                    "node:<node_id>.options.<field>, or output:<name>.options.<field>."
+                ),
             },
             "blob_id": {"type": "string", "format": "uuid", "description": "Ready blob ID to wire as inline content."},
             "encoding": {
@@ -595,20 +630,29 @@ def _blob_creation_provenance(content: str, context: ToolContext) -> _BlobCreati
     )
 
 
-def _state_source_blob_ref(state: CompositionState) -> str | None:
-    if state.source is None:
-        return None
-    # Tier-3: state.source.options is composer/user-authored pipeline config
-    # read back from our store. ``blob_ref`` may be absent (no source blob
-    # binding) or — since the composer-LLM authors arbitrary JSON here —
-    # present with a non-string value. Both cases honestly mean "no usable
-    # string blob_ref", recorded as None; the str type-narrowing enforces
-    # this function's ``str | None`` contract against malformed external
-    # config rather than propagating a wrong-typed value downstream.
-    if "blob_ref" not in state.source.options:
-        return None
-    blob_ref = state.source.options["blob_ref"]
-    return blob_ref if isinstance(blob_ref, str) else None
+def _state_source_blob_refs(state: CompositionState) -> frozenset[str]:
+    """Blob refs bound to any pipeline source root."""
+    refs: set[str] = set()
+    for source_name, source in state.sources.items():
+        if "blob_ref" not in source.options:
+            continue
+        blob_ref = source.options["blob_ref"]
+        if not isinstance(blob_ref, str):
+            # The canonical writer sets blob_ref exclusively from
+            # authoritative blob metadata as blob["id"] (a str) in
+            # sources.py::_resolve_source_blob, and every caller-injection
+            # path is rejected (_reject_manual_source_blob_ref, the
+            # patch_source_options blob_ref guard). A present-but-non-str
+            # blob_ref therefore cannot arise from any valid authoring path:
+            # it is a corruption of the audited CompositionState. Silently
+            # treating it as "not bound" would let _execute_update_blob mutate
+            # a blob that is in fact bound to a pipeline source, defeating the
+            # binding guard — so escalate rather than suppress.
+            raise AuditIntegrityError(
+                f"Source '{source_name}' has a non-str blob_ref ({type(blob_ref).__name__}); CompositionState integrity anomaly"
+            )
+        refs.add(blob_ref)
+    return frozenset(refs)
 
 
 def _blob_storage_path(data_dir: str, session_id: str, blob_id: str, filename: str) -> Path:
@@ -1140,11 +1184,14 @@ def _execute_update_blob(
         ) from exc
 
     blob_id = validated.blob_id
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     content = validated.content
-    if _state_source_blob_ref(state) == blob_id:
+    if blob_id in _state_source_blob_refs(state):
         return _failure_result(
             state,
-            f"Blob '{blob_id}' is currently bound as the pipeline source; create a new blob and rebind the source instead.",
+            f"Blob '{blob_id}' is currently bound as a pipeline source; create a new blob and rebind the source instead.",
         )
     provenance = _blob_creation_provenance(content, context)
     provenance_message_id = _blob_provenance_message_id(context.user_message_id)
@@ -1435,6 +1482,9 @@ def _execute_delete_blob(
         return _failure_result(state, "Blob tools require session context.")
 
     blob_id = arguments["blob_id"]
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
 
     blob = _sync_get_blob(session_engine, blob_id, session_id)
     if blob is None:
@@ -1614,6 +1664,9 @@ def _execute_get_blob_content(
         return _failure_result(state, "Blob tools require session context.")
 
     blob_id = arguments["blob_id"]
+    blob_id_error = _blob_id_uuid_validation_error(blob_id)
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     blob = _sync_get_blob(session_engine, blob_id, session_id)
     if blob is None:
         return _failure_result(state, f"Blob '{blob_id}' not found.")

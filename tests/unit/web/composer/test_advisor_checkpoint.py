@@ -157,6 +157,28 @@ async def test_early_checkpoint_runs_on_transition_and_injects(make_service, emp
 
 
 @pytest.mark.asyncio
+async def test_early_checkpoint_threads_progress(make_service, empty_state, nonempty_state):
+    """The early-checkpoint wrapper forwards its progress sink into
+    ``_run_advisor_checkpoint`` so the early plan-review call is visible too.
+    """
+    service = make_service()
+    service._run_advisor_checkpoint = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
+
+    async def sink(event: object) -> None:
+        return None
+
+    await service._maybe_run_early_checkpoint(
+        state=nonempty_state,
+        prev_state=empty_state,
+        session_id="s1",
+        llm_messages=[],
+        recorder=make_recorder(),
+        progress=sink,
+    )
+    assert service._run_advisor_checkpoint.await_args.kwargs.get("progress") is sink
+
+
+@pytest.mark.asyncio
 async def test_early_checkpoint_skips_when_pipeline_already_nonempty(make_service, nonempty_state):
     service = make_service()
     service._run_advisor_checkpoint = AsyncMock()
@@ -212,6 +234,37 @@ async def test_run_advisor_checkpoint_end_returns_verdict(make_service, simple_s
     assert "rate" in excerpt  # node id
     assert "requires: url" in excerpt  # declared field contract
     assert "model=gpt-5.5" in excerpt  # intent-bearing option value surfaced
+
+
+@pytest.mark.asyncio
+async def test_run_advisor_checkpoint_emits_progress(make_service, simple_state):
+    """The advisor checkpoint emits a ``calling_model`` progress event like
+    every other composer model call, so the UI/poller is not frozen on a stale
+    phase while the (silent) advisor model runs. Regression guard for the
+    0.6.0 tutorial-latency investigation (advisor checkpoints ran with no
+    composer-progress emit, indistinguishable from a stall).
+    """
+    from elspeth.contracts.composer_progress import ComposerProgressEvent
+
+    service = make_service()
+    service._call_advisor_with_audit = AsyncMock(return_value=("CLEAN", {}))
+
+    events: list[ComposerProgressEvent] = []
+
+    async def sink(event: ComposerProgressEvent) -> None:
+        events.append(event)
+
+    await service._run_advisor_checkpoint(
+        phase="end",
+        state=simple_state,
+        session_id="s1",
+        recorder=make_recorder(),
+        progress=sink,
+    )
+
+    assert events, "advisor checkpoint emitted no progress event"
+    assert events[0].phase == "calling_model"
+    assert "advisor" in events[0].headline.lower()
 
 
 @pytest.mark.asyncio

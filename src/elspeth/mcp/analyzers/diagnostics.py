@@ -138,7 +138,7 @@ def diagnose(db: LandscapeDB, factory: RecorderFactory) -> DiagnosticReport:
                 func.count(validation_errors_table.c.error_id).label("val_errors"),
             )
             .outerjoin(validation_errors_table, runs_table.c.run_id == validation_errors_table.c.run_id)
-            .where(runs_table.c.status == "completed")
+            .where(runs_table.c.status.in_(("completed", "completed_with_failures")))
             .group_by(runs_table.c.run_id)
             .having(func.count(validation_errors_table.c.error_id) > 10)
             .order_by(func.count(validation_errors_table.c.error_id).desc())

@@ -56,7 +56,7 @@ const composerSettingsEnv: Record<string, string> = {
   // and secret_key is left at its default; here we set it explicitly so
   // the ELSPETH_WEB__SECRET_KEY guard in src/elspeth/web/config.py is
   // satisfied even if a non-loopback CORS origin is configured later.
-  ELSPETH_WEB__secret_key: "e2e-jwt-placeholder", // secret-scan: allow-this-line
+  ELSPETH_WEB__secret_key: "e2e-jwt-placeholder-key-000000000000", // secret-scan: allow-this-line
   // Local-only shareable-review HMAC key for the Playwright-managed backend.
   // WebSettings requires an operator-provided base64 string and decodes it to
   // bytes before constructing ShareTokenSigner.

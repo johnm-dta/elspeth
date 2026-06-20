@@ -80,8 +80,10 @@ HINTED_PLUGIN_CASES: tuple[tuple[str, str, str, Mapping[str, object], str], ...]
         "sink",
         "database",
         "patch_output_options",
-        {"write_mode": "upsert"},
-        "unique constraint",
+        # The database sink's only write-behaviour knob is if_exists (append|replace);
+        # the former write_mode/upsert surface was hint-rot and was removed.
+        {"if_exists": "replace"},
+        "recreates the target table",
     ),
 )
 

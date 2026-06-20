@@ -243,7 +243,7 @@ class TestDispatchTool:
             scratch_dir,
         )
         assert result["success"] is True
-        assert result["state"]["source"]["plugin"] == "csv"
+        assert result["state"]["sources"]["source"]["plugin"] == "csv"
 
     def test_set_output_requires_explicit_collision_policy(self, scratch_dir: Path) -> None:
         result = _dispatch_tool(
@@ -406,7 +406,7 @@ class TestDispatchTool:
             scratch_dir,
         )
         assert load_result["success"] is True
-        assert load_result["state"]["source"]["plugin"] == "csv"
+        assert load_result["state"]["sources"]["source"]["plugin"] == "csv"
 
     def test_delete_missing_session_before_scratch_exists_returns_not_found(self, tmp_path: Path) -> None:
         scratch_dir = tmp_path / "scratch"

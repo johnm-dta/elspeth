@@ -59,6 +59,8 @@ class TestTransformSuccessReasonAudit:
             source_node_id=source.node_id,
             row_index=0,
             data={"amount": 100},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
 
@@ -119,6 +121,8 @@ class TestTransformSuccessReasonAudit:
             source_node_id=source.node_id,
             row_index=0,
             data={"x": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -168,6 +172,8 @@ class TestTransformSuccessReasonAudit:
             source_node_id=source.node_id,
             row_index=0,
             data={"amount": 950},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(
@@ -226,6 +232,8 @@ class TestTransformSuccessReasonAudit:
             source_node_id=source.node_id,
             row_index=0,
             data={"x": 1},
+            source_row_index=0,
+            ingest_sequence=0,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         state = factory.execution.begin_node_state(

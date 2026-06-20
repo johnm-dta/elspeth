@@ -22,6 +22,7 @@ import time
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 import chromadb
+import httpx
 from pydantic import BaseModel, field_validator, model_validator
 
 from elspeth.contracts.call_data import RawCallPayload
@@ -183,7 +184,27 @@ class ChromaSearchProvider:
         token_id: str | None,
     ) -> list[RetrievalChunk]:
         count_start = time.monotonic()
-        collection_count = self._collection.count()
+        count_request = RawCallPayload({"query": query, "top_k": top_k, "collection": self._config.collection})
+        try:
+            collection_count = self._collection.count()
+        except (
+            chromadb.errors.InvalidDimensionException,
+            chromadb.errors.InvalidArgumentError,
+            chromadb.errors.NotFoundError,
+            chromadb.errors.AuthorizationError,
+        ) as exc:
+            self._record_error(state_id, count_start, count_request, exc, retryable=False)
+            raise RetrievalError(
+                f"Chroma count failed (permanent): {exc}",
+                retryable=False,
+            ) from exc
+        except chromadb.errors.ChromaError as exc:
+            self._record_error(state_id, count_start, count_request, exc, retryable=True)
+            raise RetrievalError(f"Chroma count failed: {exc}", retryable=True) from exc
+        except (ConnectionError, TimeoutError, OSError) as exc:
+            # OS-level failures that bypass the ChromaDB SDK's own error wrapping
+            self._record_error(state_id, count_start, count_request, exc, retryable=True)
+            raise RetrievalError(f"Chroma connection failed during count: {exc}", retryable=True) from exc
         if collection_count == 0:
             # The corpus is empty: no query() is issued and zero chunks are
             # returned. This is still an auditable retrieval decision — the
@@ -203,6 +224,8 @@ class ChromaSearchProvider:
                 response_data=RawCallPayload({"result_count": 0, "skipped_count": 0, "top_score": None, "collection_count": 0}),
                 latency_ms=round(empty_elapsed_ms),
             )
+            self.last_skipped_count = 0
+            self.last_skipped_reasons = []
             return []
         effective_top_k = min(top_k, collection_count)
 
@@ -240,13 +263,14 @@ class ChromaSearchProvider:
         # distance validation crashes, and normalization failures would leave
         # no trace in the Landscape (fix: elspeth-9454d584d2).
         try:
-            chunks, skipped = self._parse_and_build_chunks(results, min_score)
+            chunks, skipped_items = self._parse_and_build_chunks(results, min_score)
         except RetrievalError as exc:
             self._record_error(state_id, start_time, request_payload, exc, retryable=exc.retryable)
             raise
 
         chunks.sort(key=lambda c: c.score, reverse=True)
-        self.last_skipped_count = skipped
+        self.last_skipped_count = len(skipped_items)
+        self.last_skipped_reasons = skipped_items
 
         call_index = self._execution.allocate_call_index(state_id)
         self._execution.record_call(
@@ -256,7 +280,7 @@ class ChromaSearchProvider:
             status=CallStatus.SUCCESS,
             request_data=request_payload,
             response_data=RawCallPayload(
-                {"result_count": len(chunks), "skipped_count": skipped, "top_score": chunks[0].score if chunks else None}
+                {"result_count": len(chunks), "skipped_count": len(skipped_items), "top_score": chunks[0].score if chunks else None}
             ),
             latency_ms=round(elapsed_ms),
         )
@@ -267,14 +291,14 @@ class ChromaSearchProvider:
         self,
         results: Any,
         min_score: float,
-    ) -> tuple[list[RetrievalChunk], int]:
+    ) -> tuple[list[RetrievalChunk], list[dict[str, Any]]]:
         """Parse ChromaDB query results and build RetrievalChunk list.
 
         Tier 3 boundary: the SDK response structure is external data.
         All access is guarded against malformed/unexpected responses.
 
         Returns:
-            Tuple of (chunks, skipped_count)
+            Tuple of (chunks, skipped_items)
 
         Raises:
             RetrievalError: On malformed response structure, corrupt distances,
@@ -314,10 +338,10 @@ class ChromaSearchProvider:
             ) from exc
 
         chunks: list[RetrievalChunk] = []
-        skipped = 0
+        skipped_items: list[dict[str, Any]] = []
         for doc, distance, metadata, doc_id in zip(documents, distances, metadatas, ids, strict=True):
             if not isinstance(doc, str):  # Tier 3: SDK may return non-str from corrupt index
-                skipped += 1
+                skipped_items.append({"reason": "invalid_content_type", "id": doc_id, "type": type(doc).__name__})
                 continue
 
             # ChromaDB is our infrastructure, not an external API — corrupt
@@ -362,7 +386,7 @@ class ChromaSearchProvider:
                     retryable=False,
                 ) from exc
 
-        return chunks, skipped
+        return chunks, skipped_items
 
     def _normalize_distance(self, distance: float) -> float:
         if not math.isfinite(distance):
@@ -433,7 +457,10 @@ class ChromaSearchProvider:
                 count=count,
                 message=message,
             )
-        except (chromadb.errors.ChromaError, ConnectionError, OSError) as exc:
+        except (chromadb.errors.ChromaError, ConnectionError, OSError, ValueError, httpx.HTTPError) as exc:
+            # ValueError: chromadb 1.5.5 raises plain ValueError on unreachable HTTP server.
+            # httpx.HTTPError: httpx transport errors inherit only from Exception,
+            # not from ChromaError/ConnectionError/OSError.
             return CollectionReadinessResult(
                 collection=collection_name,
                 reachable=False,

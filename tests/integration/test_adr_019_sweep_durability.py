@@ -22,6 +22,7 @@ from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_core import RunExecutionCore
 from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
 from tests.fixtures.base_classes import as_sink, as_source, as_transform
+from tests.fixtures.landscape import insert_crashed_leader_seat
 from tests.fixtures.pipeline import build_linear_pipeline
 from tests.fixtures.plugins import CollectSink, PassTransform
 from tests.fixtures.stores import MockPayloadStore
@@ -38,7 +39,7 @@ def _runtime_val_manifest_json() -> str:
 def _build_minimal_run():
     source, _transforms, sinks, graph = build_linear_pipeline([{"value": 1}], transforms=[])
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[],
         sinks={"default": as_sink(sinks["default"])},
     )
@@ -65,6 +66,8 @@ def _plant_orphan_fork_parent(
         source_node_id=source.node_id,
         row_index=row_index,
         data={"planted": True},
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
     factory.data_flow.record_token_outcome(
@@ -105,6 +108,8 @@ def _plant_orphan_batch_consumed(
         source_node_id=source.node_id,
         row_index=row_index,
         data={"planted_i1b": True},
+        source_row_index=row_index,
+        ingest_sequence=row_index,
     )
     token = factory.data_flow.create_token(row_id=row.row_id)
     batch_id = f"batch_durability_{row_index}"
@@ -178,7 +183,9 @@ def test_fresh_run_sweep_crash_finalizes_failed_and_preserves_evidence(
         openrouter_catalog_sha256: str = "0" * 64,
         openrouter_catalog_source: str = "bundled",
     ):
-        factory, run = original_init(
+        # Epoch 21: _initialize_database_phase returns the CoordinationToken
+        # minted with the run's leader seat alongside (factory, run).
+        factory, run, coordination_token = original_init(
             self,
             config,
             payload_store,
@@ -191,7 +198,7 @@ def test_fresh_run_sweep_crash_finalizes_failed_and_preserves_evidence(
         )
         captured["run_id"] = run.run_id
         captured["token_id"] = plant(factory, run.run_id)
-        return factory, run
+        return factory, run, coordination_token
 
     monkeypatch.setattr(Orchestrator, "_initialize_database_phase", _init_and_plant)
     config, graph = _build_minimal_run()
@@ -219,14 +226,14 @@ def _setup_adr019_failed_resume_run(
 
     from elspeth.contracts.contract_records import ContractAuditRecord
     from elspeth.core.checkpoint import CheckpointManager
-    from elspeth.core.landscape.schema import edges_table, nodes_table, rows_table, runs_table, tokens_table
+    from elspeth.core.landscape.schema import edges_table, nodes_table, rows_table, run_sources_table, runs_table, tokens_table
 
     now = datetime.now(UTC)
     source_data = [{"value": i} for i in range(num_rows)]
     transform = PassTransform()
     _, _, _, graph = build_linear_pipeline(source_data, transforms=[as_transform(transform)])
 
-    source_nid = graph.get_source()
+    source_nid = graph.get_sources()[0]
     assert source_nid is not None
     transform_id_map = graph.get_transform_id_map()
     sink_id_map = graph.get_sink_id_map()
@@ -258,13 +265,14 @@ def _setup_adr019_failed_resume_run(
                 canonical_version="v1",
                 status=RunStatus.FAILED,
                 source_schema_json=json.dumps({"properties": {"value": {"type": "integer"}}, "required": ["value"]}),
-                schema_contract_json=audit_record.to_json(),
-                schema_contract_hash=contract.version_hash(),
                 runtime_val_manifest_json=_runtime_val_manifest_json(),
                 openrouter_catalog_sha256="0" * 64,
                 openrouter_catalog_source="bundled",
             )
         )
+        # Epoch 21 (ADR-030): the crashed-run image includes the expired
+        # leader seat begin_run would have minted atomically with the run.
+        insert_crashed_leader_seat(conn, run_id=run_id)
         for node_id, plugin_name, node_type in [
             (source_nid, "list_source", NodeType.SOURCE),
             (xform_nid, "passthrough", NodeType.TRANSFORM),
@@ -298,6 +306,30 @@ def _setup_adr019_failed_resume_run(
                     created_at=now,
                 )
             )
+        # ADR-025 §3: record run_sources for the single source node so the
+        # RC6 resume path can key the schema contract under the actual
+        # ``source_node_id``. Production code (Orchestrator emits this
+        # via ``_emit_source_loading`` before the first row is persisted)
+        # always writes at least one run_sources record on a real failed
+        # run; reproducing that shape here keeps the fixture realistic
+        # and avoids triggering ``EmptyResumeStateError`` for tests that
+        # legitimately exercise the early-exit path (all rows already
+        # processed) rather than the refuse path (no work persisted).
+        conn.execute(
+            insert(run_sources_table).values(
+                run_id=run_id,
+                source_node_id=source_nid,
+                source_name="source",
+                plugin_name="list_source",
+                lifecycle_state="loaded",
+                config_hash="test",
+                schema_json=json.dumps({"properties": {"value": {"type": "integer"}}, "required": ["value"]}),
+                schema_contract_json=audit_record.to_json(),
+                schema_contract_hash=contract.version_hash(),
+                field_resolution_json=None,
+                recorded_at=now,
+            )
+        )
         for i in range(num_rows):
             row_data = {"value": i}
             ref = payload_store.store(json.dumps(row_data).encode())
@@ -307,6 +339,8 @@ def _setup_adr019_failed_resume_run(
                     run_id=run_id,
                     source_node_id=source_nid,
                     row_index=i,
+                    source_row_index=i,
+                    ingest_sequence=i,
                     source_data_hash=f"h{i}",
                     source_data_ref=ref,
                     created_at=now,
@@ -331,11 +365,14 @@ def _setup_adr019_failed_resume_run(
         )
 
     if processed_count > 0:
+        # ADR-029 (F1): checkpoints no longer carry a blob layer; the only
+        # checkpoint-borne state is scalar barrier metadata. This linear
+        # fixture has no in-flight aggregation/coalesce barriers, so None
+        # (persisted as NULL) is the truthful value.
         CheckpointManager(db).create_checkpoint(
             run_id=run_id,
-            token_id=f"t{processed_count - 1}",
-            node_id=xform_nid,
             sequence_number=processed_count - 1,
+            barrier_scalars=None,
             graph=graph,
         )
 
@@ -372,7 +409,7 @@ def _build_resume_environment(run_id: str, *, num_rows: int, processed_count: in
     source.on_success = "default"
     sink = CollectSink()
     config = PipelineConfig(
-        source=as_source(source),
+        sources={"primary": as_source(source)},
         transforms=[as_transform(transform)],
         sinks={"default": as_sink(sink)},
     )
@@ -470,7 +507,20 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
     captured: dict[str, str] = {}
     original_loop = SourceIterationDriver.run_main_processing_loop
 
-    def _corrupting_loop(self: SourceIterationDriver, loop_ctx, factory, run_id, source_id, edge_map, *, shutdown_event=None):
+    def _corrupting_loop(
+        self: SourceIterationDriver,
+        loop_ctx,
+        factory,
+        run_id,
+        source_id,
+        edge_map,
+        *,
+        active_source_name,
+        active_source,
+        shutdown_event=None,
+        flush_end_of_input=True,
+        check_coordination_latch=None,
+    ):
         captured["run_id"] = run_id
         sink = factory.data_flow.register_node(
             run_id=run_id,
@@ -485,6 +535,8 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
             source_node_id=source_id,
             row_index=700 if kind == "I1c" else 701,
             data={"corrupt": kind},
+            source_row_index=700 if kind == "I1c" else 701,
+            ingest_sequence=700 if kind == "I1c" else 701,
         )
         token = factory.data_flow.create_token(row_id=row.row_id)
         captured["token_id"] = token.token_id
@@ -537,7 +589,18 @@ def test_realtime_invariant_crash_finalizes_failed_and_preserves_witnesses(
                 sink_name=DISCARD_SINK_NAME,
                 error_hash=_ERROR_HASH,
             )
-        return original_loop(self, loop_ctx, factory, run_id, source_id, edge_map, shutdown_event=None)
+        return original_loop(
+            self,
+            loop_ctx,
+            factory,
+            run_id,
+            source_id,
+            edge_map,
+            active_source_name=active_source_name,
+            active_source=active_source,
+            shutdown_event=shutdown_event,
+            flush_end_of_input=flush_end_of_input,
+        )
 
     monkeypatch.setattr(SourceIterationDriver, "run_main_processing_loop", _corrupting_loop)
     config, graph = _build_minimal_run()

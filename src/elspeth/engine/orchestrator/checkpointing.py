@@ -9,24 +9,18 @@ Extracted from Orchestrator (core.py) — these methods own:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING
 
-import structlog
-
 from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.contracts.types import CoalesceName, NodeID, SinkName
 
 if TYPE_CHECKING:
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
+    from elspeth.contracts.barrier_scalars import BarrierScalars
     from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.identity import TokenInfo
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.dag import ExecutionGraph
-    from elspeth.engine.orchestrator.types import LoopContext, RowProcessorHandle, _CheckpointFactory
-
-slog = structlog.get_logger(__name__)
+    from elspeth.engine.orchestrator.types import CheckpointAfterSinkCallback, LoopContext, RowProcessorHandle, _CheckpointFactory
 
 
 class CheckpointCoordinator:
@@ -40,10 +34,40 @@ class CheckpointCoordinator:
         self._checkpoint_config = checkpoint_config
         self._sequence_number = 0
         self._active_graph: ExecutionGraph | None = None  # relocated from Orchestrator._current_graph; late-bound at fire time
+        # ADR-030 leader fencing token; bound at run/resume start and
+        # threaded into every CheckpointManager write so the checkpoint
+        # INSERT/DELETE carries the verify-and-extend epoch fence.
+        self._coordination_token: CoordinationToken | None = None
 
     def set_active_graph(self, graph: ExecutionGraph | None) -> None:
         """Set (or clear) the active execution graph for late-bound checkpoint calls."""
         self._active_graph = graph
+
+    def bind_coordination(self, token: CoordinationToken | None) -> None:
+        """Bind (or clear) the leader fencing token for this run's checkpoint writes.
+
+        Called once at run/resume start with the token minted by
+        ``begin_run`` / ``acquire_run_leadership``. The token is carried by
+        value and never re-read mid-run (ADR-030 §G).
+        """
+        self._coordination_token = token
+
+    def _checkpoint_gate(self, *, action: str) -> tuple[RuntimeCheckpointConfig, CheckpointManager, ExecutionGraph] | None:
+        """Shared enabled/manager/graph precondition gate for checkpoint writes.
+
+        Returns the narrowed (config, manager, graph) triple when checkpointing
+        should proceed, or None when checkpointing is disabled/unconfigured. A
+        missing graph with checkpointing enabled should never happen — the
+        graph is set during execution — so that arm raises instead of silently
+        skipping.
+        """
+        if not self._checkpoint_config or not self._checkpoint_config.enabled:
+            return None
+        if self._checkpoint_manager is None:
+            return None
+        if self._active_graph is None:
+            raise OrchestrationInvariantError(f"Cannot create {action}: execution graph not available")
+        return self._checkpoint_config, self._checkpoint_manager, self._active_graph
 
     def reset_sequence(self) -> None:
         """Reset checkpoint ordering for a fresh run."""
@@ -53,19 +77,48 @@ class CheckpointCoordinator:
         """Continue checkpoint ordering from a previously persisted checkpoint."""
         self._sequence_number = sequence_number
 
+    def checkpoint_run_start(self, run_id: str) -> None:
+        """Write the sequence-0 run-start checkpoint (F1 design D4).
+
+        Called once per fresh run, before source iteration. Every
+        checkpointing-enabled run therefore has a baseline checkpoint row,
+        so resume topology validation is unconditional and ``can_resume``'s
+        missing-baseline arm is a genuine "run predates run-start
+        checkpointing or checkpointing was disabled" refusal.
+
+        Sequencing: the post-sink and shutdown paths PRE-increment
+        ``_sequence_number`` (0 -> 1 on first fire), so the baseline's
+        sequence 0 never collides; the manager's duplicate-sequence guard
+        is the backstop. The resume path must NOT call this — it rebases
+        onto the persisted sequence via :meth:`rebase_sequence`.
+
+        Errors propagate deliberately: a run that cannot persist its
+        baseline cannot checkpoint at all, so it crashes before any source
+        row is processed rather than running un-resumable.
+        """
+        gate = self._checkpoint_gate(action="run-start checkpoint")
+        if gate is None:
+            return
+        _config, manager, graph = gate
+
+        manager.create_checkpoint(
+            run_id=run_id,
+            sequence_number=0,
+            barrier_scalars=None,
+            graph=graph,
+            coordination_token=self._coordination_token,
+        )
+
     def maybe_checkpoint(
         self,
         run_id: str,
-        token_id: str,
-        node_id: str,
-        aggregation_state: AggregationCheckpointState | None = None,
-        coalesce_state: CoalesceCheckpointState | None = None,
+        *,
+        barrier_scalars: BarrierScalars | None,
     ) -> None:
         """Create checkpoint if configured.
 
         Called after a token has been durably written to its terminal sink.
-        The checkpoint represents a durable progress marker - recovery can
-        safely skip any row whose token has a checkpoint with a sink node_id.
+        The checkpoint represents a durable progress marker.
 
         IMPORTANT: Checkpoints are created AFTER sink writes, not during
         the main processing loop. This ensures the checkpoint represents
@@ -73,18 +126,18 @@ class CheckpointCoordinator:
 
         Args:
             run_id: Current run ID
-            token_id: Token that was just written to sink
-            node_id: Sink node that received the token
-            aggregation_state: Typed aggregation checkpoint state for crash recovery
-            coalesce_state: Typed pending coalesce state for crash recovery
+            barrier_scalars: Composed barrier scalars from the live executors
+                (``processor.get_barrier_scalars()``, F1 Task 2.4). Passed to
+                ``create_checkpoint`` unconditionally — the manager serializes
+                NULL when ``has_state`` is False.
+
+        F1: only scalar barrier metadata is persisted; buffered tokens live in
+        journal BLOCKED rows.
         """
-        if not self._checkpoint_config or not self._checkpoint_config.enabled:
+        gate = self._checkpoint_gate(action="checkpoint")
+        if gate is None:
             return
-        if self._checkpoint_manager is None:
-            return
-        if self._active_graph is None:
-            # Should never happen - graph is set during execution
-            raise OrchestrationInvariantError("Cannot create checkpoint: execution graph not available")
+        config, manager, graph = gate
 
         self._sequence_number += 1
 
@@ -92,7 +145,7 @@ class CheckpointCoordinator:
         # - 1 = every_row
         # - 0 = aggregation_only
         # - N = every N rows
-        frequency = self._checkpoint_config.frequency
+        frequency = config.frequency
         should_checkpoint = False
         if frequency == 0:
             # aggregation_only: checkpoint unconditionally. In the post-sink
@@ -107,14 +160,12 @@ class CheckpointCoordinator:
             should_checkpoint = (self._sequence_number % frequency) == 0  # every_n
 
         if should_checkpoint:
-            self._checkpoint_manager.create_checkpoint(
+            manager.create_checkpoint(
                 run_id=run_id,
-                token_id=token_id,
-                node_id=node_id,
                 sequence_number=self._sequence_number,
-                graph=self._active_graph,
-                aggregation_state=aggregation_state,
-                coalesce_state=coalesce_state,
+                barrier_scalars=barrier_scalars,
+                graph=graph,
+                coordination_token=self._coordination_token,
             )
 
     def make_checkpoint_after_sink_factory(
@@ -129,19 +180,37 @@ class CheckpointCoordinator:
         both the normal execution path and the resume path.
         """
 
-        def factory(sink_node_id: str) -> Callable[[TokenInfo], None]:
-            def callback(token: TokenInfo) -> None:
-                agg_state = processor.get_aggregation_checkpoint_state()
-                coalesce_state = processor.get_coalesce_checkpoint_state()
-                self.maybe_checkpoint(
-                    run_id=run_id,
-                    token_id=token.token_id,
-                    node_id=sink_node_id,
-                    aggregation_state=agg_state,
-                    coalesce_state=coalesce_state if coalesce_state is not None and coalesce_state.has_resumable_state else None,
-                )
+        coordinator = self
 
-            return callback
+        class BatchCheckpointCallback:
+            """Checkpoint tokens immediately and terminalize scheduler work in batches."""
+
+            def __init__(self, *, terminalize_scheduler: bool) -> None:
+                self._terminalize_scheduler = terminalize_scheduler
+                self._pending_terminal_tokens: list[str] = []
+
+            def __call__(self, token: TokenInfo) -> None:
+                coordinator.maybe_checkpoint(
+                    run_id=run_id,
+                    barrier_scalars=processor.get_barrier_scalars(),
+                )
+                if self._terminalize_scheduler:
+                    self._pending_terminal_tokens.append(token.token_id)
+                if len(self._pending_terminal_tokens) >= 64:
+                    self.flush()
+
+            def flush(self) -> None:
+                if not self._pending_terminal_tokens:
+                    return
+                token_ids = tuple(self._pending_terminal_tokens)
+                self._pending_terminal_tokens.clear()
+                processor.mark_sink_bound_scheduler_terminal_many(token_ids)
+
+        def factory(sink_node_id: str, *, terminalize_scheduler: bool = True) -> CheckpointAfterSinkCallback:
+            # sink_node_id is the factory's per-sink discriminator; the callback
+            # itself no longer persists a per-sink anchor (F2).
+            del sink_node_id
+            return BatchCheckpointCallback(terminalize_scheduler=terminalize_scheduler)
 
         return factory
 
@@ -149,8 +218,6 @@ class CheckpointCoordinator:
         self,
         run_id: str,
         loop_ctx: LoopContext,
-        sink_id_map: Mapping[SinkName, NodeID],
-        source_id: NodeID,
     ) -> None:
         """Persist a resumable checkpoint for graceful shutdown.
 
@@ -160,70 +227,18 @@ class CheckpointCoordinator:
         checkpoint has been emitted, especially buffered aggregation/coalesce
         pipelines that intentionally skip end-of-source flushes on shutdown.
         """
-        if not self._checkpoint_config or not self._checkpoint_config.enabled:
+        gate = self._checkpoint_gate(action="shutdown checkpoint")
+        if gate is None:
             return
-        if self._checkpoint_manager is None:
-            return
-        if self._active_graph is None:
-            raise OrchestrationInvariantError("Cannot create shutdown checkpoint: execution graph not available")
-
-        aggregation_state = loop_ctx.processor.get_aggregation_checkpoint_state()
-        raw_coalesce = loop_ctx.processor.get_coalesce_checkpoint_state()
-        # Persist coalesce state when it has pending barriers or completed keys
-        # needed for late-arrival detection on resume
-        coalesce_state = raw_coalesce if raw_coalesce is not None and raw_coalesce.has_resumable_state else None
-
-        token_id: str | None = None
-        node_id: str | None = None
-        checkpoint_agg_state: AggregationCheckpointState | None = None
-
-        if aggregation_state.nodes:
-            agg_node_id, agg_node_state = next(iter(aggregation_state.nodes.items()))
-            token_id = agg_node_state.tokens[-1].token_id
-            node_id = agg_node_id
-            checkpoint_agg_state = aggregation_state
-        elif coalesce_state is not None and coalesce_state.pending:
-            pending_entry = coalesce_state.pending[-1]
-            node_id = str(loop_ctx.coalesce_node_map[CoalesceName(pending_entry.coalesce_name)])
-            if pending_entry.branches:
-                last_branch = list(pending_entry.branches.values())[-1]
-                token_id = last_branch.token_id
-        else:
-            for sink_name, token_outcome_pairs in loop_ctx.pending_tokens.items():
-                if not token_outcome_pairs:
-                    continue
-                token_id = token_outcome_pairs[-1][0].token_id
-                node_id = str(sink_id_map[SinkName(sink_name)])
-                break
-
-        if token_id is None and loop_ctx.last_token_id is not None:
-            token_id = loop_ctx.last_token_id
-            if node_id is None:
-                node_id = str(source_id)
-
-        if token_id is None or node_id is None:
-            slog.warning(
-                "shutdown_checkpoint_skipped",
-                run_id=run_id,
-                reason="no_token_or_node_id_available",
-                has_aggregation_nodes=bool(aggregation_state.nodes),
-                has_coalesce_pending=coalesce_state is not None,
-                has_pending_sink_tokens=any(bool(pairs) for pairs in loop_ctx.pending_tokens.values()),
-                last_token_id=loop_ctx.last_token_id,
-                resolved_token_id=token_id,
-                resolved_node_id=node_id,
-            )
-            return
+        _config, manager, graph = gate
 
         self._sequence_number += 1
-        self._checkpoint_manager.create_checkpoint(
+        manager.create_checkpoint(
             run_id=run_id,
-            token_id=token_id,
-            node_id=node_id,
             sequence_number=self._sequence_number,
-            graph=self._active_graph,
-            aggregation_state=checkpoint_agg_state,
-            coalesce_state=coalesce_state,
+            barrier_scalars=loop_ctx.processor.get_barrier_scalars(),
+            graph=graph,
+            coordination_token=self._coordination_token,
         )
 
     def delete_checkpoints(self, run_id: str) -> None:
@@ -233,4 +248,4 @@ class CheckpointCoordinator:
             run_id: Run to clean up checkpoints for
         """
         if self._checkpoint_manager is not None:
-            self._checkpoint_manager.delete_checkpoints(run_id)
+            self._checkpoint_manager.delete_checkpoints(run_id, coordination_token=self._coordination_token)

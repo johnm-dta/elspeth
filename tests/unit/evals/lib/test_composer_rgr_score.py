@@ -46,10 +46,16 @@ def _scenario(**overrides: Any) -> dict[str, Any]:
 
 
 def _state_valid(**extras: Any) -> dict[str, Any]:
-    """Minimal valid state — is_valid=True, one node, one output."""
+    """Minimal valid state — is_valid=True, one node, one output.
+
+    Sources use the multi-source shape (ADR-025): a ``sources`` map keyed by
+    name. The ``source=`` convenience kwarg sets the default "primary" named
+    source so per-test fixtures stay terse.
+    """
+    source = extras.pop("source", {"plugin": "csv", "options": {"schema": {"mode": "observed"}}})
     base: dict[str, Any] = {
         "is_valid": True,
-        "source": {"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+        "sources": {"primary": source},
         "nodes": [{"id": "noop", "node_type": "transform", "plugin": "passthrough"}],
         "outputs": [{"name": "out", "plugin": "json"}],
     }
@@ -145,7 +151,28 @@ class TestBaselineAmberSignals:
             state=_state_valid(),
         )
         assert result["verdict"] == "AMBER"
-        assert any("expected node combo" in r for r in result["amber_reasons"])
+        assert any("expected workflow combo" in r for r in result["amber_reasons"])
+
+    def test_node_kind_group_does_not_match_substring_inside_plugin(self) -> None:
+        scenario = _scenario(green={"must_have_node_kinds_substring_any_of": [["gate"]]})
+        result = score(
+            scenario=scenario,
+            messages=[_msg("assistant", "ok")],
+            state=_state_valid(nodes=[{"id": "aggregate", "node_type": "transform", "plugin": "aggregate"}]),
+        )
+
+        assert result["verdict"] == "AMBER"
+        assert any("expected workflow combo" in r for r in result["amber_reasons"])
+
+    def test_node_kind_group_matches_source_plugin(self) -> None:
+        scenario = _scenario(green={"must_have_node_kinds_substring_any_of": [["csv"]]})
+        result = score(
+            scenario=scenario,
+            messages=[_msg("assistant", "ok")],
+            state=_state_valid(nodes=[]),
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
 
     def test_amber_on_outputs_min(self) -> None:
         result = score(
@@ -214,6 +241,16 @@ class TestNodeChainInOrder:
         assert result["verdict"] == "AMBER"
         assert any("'llm'" in r for r in result["amber_reasons"])
 
+    def test_chain_does_not_match_substring_inside_plugin(self) -> None:
+        result = score(
+            scenario=_scenario(green={"must_have_node_chain_in_order": ["gate"]}),
+            messages=[_msg("assistant", "ok")],
+            state=self._state_chain(["aggregate"]),
+        )
+
+        assert result["verdict"] == "AMBER"
+        assert any("'gate'" in r for r in result["amber_reasons"])
+
     def test_chain_matches_node_type_for_gates(self) -> None:
         """Gates have plugin: null but node_type: gate. Chain match on 'gate' should hit."""
         result = score(
@@ -227,6 +264,40 @@ class TestNodeChainInOrder:
             ),
         )
         assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    def test_chain_matches_source_transforms_and_sink(self) -> None:
+        state = _state_valid(
+            source={"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+            nodes=[
+                {"id": "n0", "node_type": "transform", "plugin": "t1"},
+                {"id": "n1", "node_type": "transform", "plugin": "t2"},
+            ],
+            outputs=[{"name": "out", "plugin": "jsonl"}],
+        )
+
+        result = score(
+            scenario=_scenario(green={"must_have_node_chain_in_order": ["csv", "t1", "t2", "jsonl"]}),
+            messages=[_msg("assistant", "ok")],
+            state=state,
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    def test_chain_fails_when_transform_missing_between_source_and_sink(self) -> None:
+        state = _state_valid(
+            source={"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+            nodes=[{"id": "n0", "node_type": "transform", "plugin": "t1"}],
+            outputs=[{"name": "out", "plugin": "jsonl"}],
+        )
+
+        result = score(
+            scenario=_scenario(green={"must_have_node_chain_in_order": ["csv", "t1", "t2", "jsonl"]}),
+            messages=[_msg("assistant", "ok")],
+            state=state,
+        )
+
+        assert result["verdict"] == "AMBER"
+        assert any("'t2'" in r for r in result["amber_reasons"])
 
 
 # --------------------------------------------------------------------------
@@ -489,7 +560,7 @@ class TestSourceOptionKeyAsserters:
 
     def test_green_when_required_source_keys_present(self) -> None:
         state = _state_valid()
-        state["source"] = {"plugin": "csv", "options": {"columns": ["a", "b"], "schema": {"mode": "observed"}}}
+        state["sources"] = {"primary": {"plugin": "csv", "options": {"columns": ["a", "b"], "schema": {"mode": "observed"}}}}
         result = score(
             scenario=_scenario(green={"must_have_options_keys_for_source": ["columns"]}),
             messages=[_msg("assistant", "done")],
@@ -509,7 +580,7 @@ class TestSourceOptionKeyAsserters:
 
     def test_amber_when_forbidden_source_key_present(self) -> None:
         state = _state_valid()
-        state["source"] = {"plugin": "csv", "options": {"schema": {"fields": ["id: int"], "mode": "fixed"}}}
+        state["sources"] = {"primary": {"plugin": "csv", "options": {"schema": {"fields": ["id: int"], "mode": "fixed"}}}}
         result = score(
             scenario=_scenario(green={"must_not_have_options_keys_for_source": ["schema.fields"]}),
             messages=[_msg("assistant", "done")],
@@ -565,6 +636,39 @@ class TestOutputOptionAsserters:
         )
         assert result["verdict"] == "AMBER"
         assert any("write_mode" in r for r in result["amber_reasons"])
+
+
+class TestOutputPluginAsserters:
+    """must_have_output_plugins — output sink plugin multiset pinning."""
+
+    def test_green_when_required_output_plugins_present(self) -> None:
+        state = _state_valid(
+            outputs=[
+                {"name": "approved", "plugin": "csv", "options": {}},
+                {"name": "rejected", "plugin": "csv", "options": {}},
+            ]
+        )
+        result = score(
+            scenario=_scenario(green={"must_have_output_plugins": ["csv", "csv"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    def test_amber_when_json_outputs_replace_required_csv_sinks(self) -> None:
+        state = _state_valid(
+            outputs=[
+                {"name": "approved", "plugin": "json", "options": {"format": "jsonl"}},
+                {"name": "rejected", "plugin": "json", "options": {"format": "jsonl"}},
+            ]
+        )
+        result = score(
+            scenario=_scenario(green={"must_have_output_plugins": ["csv", "csv"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+        assert result["verdict"] == "AMBER"
+        assert any("output plugins" in r and "csv" in r and "json" in r for r in result["amber_reasons"])
 
 
 # --------------------------------------------------------------------------

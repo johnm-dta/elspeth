@@ -120,8 +120,8 @@ class TestOutputSchemaConfigPropagation:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -158,8 +158,8 @@ class TestOutputSchemaConfigPropagation:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -180,8 +180,8 @@ class TestOutputSchemaConfigPropagation:
         source = MockSource()
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="output", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="output", options={})},
             transforms=[],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -201,8 +201,8 @@ class TestOutputSchemaConfigPropagation:
         source = MockSource()
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="output", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="output", options={})},
             transforms=[],
             sinks={"output": MockSinkWithSchema()},  # type: ignore[dict-item]
             aggregations={},
@@ -473,8 +473,8 @@ class TestAggregationSchemaConfigPropagation:
 
         source = MockSource()
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="agg_in", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="agg_in", options={})},
             transforms=[],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={"test_agg": (transform, agg_settings)},  # type: ignore[dict-item]
@@ -660,8 +660,8 @@ class TestPassThroughNodesInheritComputedSchema:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -704,8 +704,8 @@ class TestPassThroughNodesInheritComputedSchema:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -755,8 +755,8 @@ class TestPassThroughNodesInheritComputedSchema:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -817,8 +817,8 @@ class TestPassThroughNodesInheritComputedSchema:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -867,8 +867,8 @@ class TestPassThroughNodesUseTypedSchema:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -920,8 +920,8 @@ class TestPassThroughNodesUseTypedSchema:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},
@@ -1035,8 +1035,8 @@ class TestCoalesceMaterializedSchemaFromBuilder:
         )
 
         return ExecutionGraph.from_plugin_instances(
-            source=source,  # type: ignore[arg-type]
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": source},  # type: ignore[arg-type]
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=[wired_a, wired_b],
             sinks={"output": MockSink()},  # type: ignore[dict-item]
             aggregations={},

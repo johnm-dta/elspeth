@@ -286,11 +286,12 @@ def handle_step_3_chain_accept(
 ) -> StepHandlerResult:
     """Commit *proposal* atomically via _execute_set_pipeline and terminate the session.
 
-    Reconstructs the full pipeline spec from the existing state.source +
-    state.outputs and the new transforms from the proposal. Source.on_success
-    is rewired to "chain_in" so the chain sits between source and sinks; the
-    last transform produces "main" so outputs (which were committed against
-    the source's original "main" label in Step 2) remain reachable.
+    Reconstructs the full pipeline spec from the existing single guided source
+    + state.outputs and the new transforms from the proposal.
+    Source.on_success is rewired to "chain_in" so the chain sits between source
+    and sinks; the last transform produces "main" so outputs (which were
+    committed against the source's original "main" label in Step 2) remain
+    reachable.
 
     Wiring for N transforms:
         source.on_success="chain_in"
@@ -323,10 +324,11 @@ def handle_step_3_chain_accept(
     """
     if not proposal.steps:
         raise InvariantError("step 3 proposal had zero steps; refusing empty commit")
-    if state.source is None:
-        raise InvariantError("step 3 reached without a committed source; dispatcher bug")
+    if len(state.sources) != 1:
+        raise InvariantError(f"step 3 requires exactly one committed source, got {len(state.sources)}; dispatcher bug")
     if not state.outputs:
         raise InvariantError("step 3 reached without committed outputs; dispatcher bug")
+    source_name, source = next(iter(state.sources.items()))
 
     n = len(proposal.steps)
     node_args: list[dict[str, Any]] = []
@@ -345,11 +347,13 @@ def handle_step_3_chain_accept(
         )
 
     arguments: dict[str, Any] = {
-        "source": {
-            "plugin": state.source.plugin,
-            "on_success": "chain_in",  # rewired; was "main" pre-Step-3
-            "options": dict(state.source.options),
-            "on_validation_failure": state.source.on_validation_failure,
+        "sources": {
+            source_name: {
+                "plugin": source.plugin,
+                "on_success": "chain_in",  # rewired; was "main" pre-Step-3
+                "options": dict(source.options),
+                "on_validation_failure": source.on_validation_failure,
+            }
         },
         "nodes": node_args,
         "edges": [],

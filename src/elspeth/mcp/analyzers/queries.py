@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Any, cast
 
 from elspeth.contracts import NodeStateStatus
+from elspeth.contracts.coalesce_metadata import collision_value_fingerprint as _fingerprint_collision_value
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.formatters import dataclass_to_dict, serialize_datetime
@@ -22,6 +24,7 @@ from elspeth.mcp.types import (
     CallDetail,
     CollisionFieldRecord,
     CollisionRecord,
+    CollisionValueFingerprint,
     NodeDetail,
     NodeStateRecord,
     OperationCallRecord,
@@ -116,7 +119,13 @@ def list_rows(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int
     from elspeth.core.landscape.schema import rows_table
 
     with db.connection() as conn:
-        query = select(rows_table).where(rows_table.c.run_id == run_id).order_by(rows_table.c.row_index).limit(limit).offset(offset)
+        query = (
+            select(rows_table)
+            .where(rows_table.c.run_id == run_id)
+            .order_by(rows_table.c.ingest_sequence, rows_table.c.row_id)
+            .limit(limit)
+            .offset(offset)
+        )
         rows = conn.execute(query).fetchall()
 
     return [
@@ -125,6 +134,8 @@ def list_rows(db: LandscapeDB, factory: RecorderFactory, run_id: str, limit: int
             "run_id": row.run_id,
             "source_node_id": row.source_node_id,
             "row_index": row.row_index,
+            "source_row_index": row.source_row_index,
+            "ingest_sequence": row.ingest_sequence,
             "source_data_hash": row.source_data_hash,
             "source_data_ref": row.source_data_ref,
             "created_at": row.created_at.isoformat() if row.created_at else None,
@@ -243,7 +254,7 @@ def list_operations(
         db: Database connection
         factory: Recorder factory
         run_id: Run ID to query
-        operation_type: Filter by operation type
+        operation_type: Filter by type ('source_load', 'sink_write', or 'runtime_preflight')
         status: Filter by status ('open', 'completed', 'failed', 'pending')
         limit: Maximum operations to return
 
@@ -593,22 +604,28 @@ def get_calls(db: LandscapeDB, factory: RecorderFactory, state_id: str) -> list[
     return [_dataclass_to_dict(call) for call in calls]
 
 
-def _canonicalize_for_comparison(value: Any) -> str:
-    """Convert a value to canonical string for structural equality comparison.
+_VALUE_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
-    Uses RFC 8785 (JCS) for deterministic JSON serialization. This ensures
-    that structurally equal dicts with different key ordering compare as equal.
 
-    Falls back to repr() for non-JSON-serializable types — these will compare
-    by identity, which is conservative (may report false collisions).
-    """
-    import rfc8785
+def _is_collision_value_fingerprint(value: Any) -> bool:
+    """Return True when a stored collision value is already an audit-safe fingerprint."""
+    return (
+        isinstance(value, Mapping)
+        and set(value) == {"value_hash", "value_type"}
+        and isinstance(value.get("value_hash"), str)
+        and _VALUE_HASH_RE.match(value["value_hash"]) is not None
+        and isinstance(value.get("value_type"), str)
+    )
 
-    try:
-        return rfc8785.dumps(value).decode("utf-8")
-    except (TypeError, ValueError):
-        # Non-JSON-serializable type — fall back to repr
-        return repr(value)
+
+def _collision_value_fingerprint(value: Any) -> CollisionValueFingerprint:
+    """Fingerprint raw legacy values, or pass through already-redacted metadata."""
+    if _is_collision_value_fingerprint(value):
+        return {
+            "value_hash": value["value_hash"],
+            "value_type": value["value_type"],
+        }
+    return _fingerprint_collision_value(value)
 
 
 def list_collisions(
@@ -638,8 +655,9 @@ def list_collisions(
             overlap-only rows that don't contain real collisions)
 
     Returns:
-        List of collision records with field-level details including winner/loser values.
-        Only fields with genuinely differing values are reported as collisions.
+        List of collision records with field-level branch provenance and value
+        fingerprints. Only fields with genuinely differing value fingerprints are
+        reported as collisions.
     """
     from sqlalchemy import or_, select
 
@@ -707,7 +725,9 @@ def list_collisions(
             for row in rows:
                 context = json.loads(row.context_after_json)
 
-                # Extract collision values: {field: [[branch, value], ...]}
+                # Extract collision value fingerprints: {field: [[branch, fingerprint], ...]}.
+                # Legacy rows may still contain raw values; those are fingerprinted
+                # before comparison or response construction.
                 collision_values = context.get("union_field_collision_values", {})
                 field_origins = context.get("union_field_origins", {})
 
@@ -716,16 +736,18 @@ def list_collisions(
                     if not entries:
                         continue
 
-                    # Filter out overlap-only fields: union_field_collision_values contains
-                    # all overlapping fields, even when values are identical. Only report
-                    # fields where at least two branches provided different values.
-                    #
-                    # Use canonical JSON serialization for structural comparison. This
-                    # ensures dicts with same key/value pairs but different insertion
-                    # order compare as equal, avoiding false collision reports.
-                    values = [e[1] for e in entries]
-                    canonical_values = {_canonicalize_for_comparison(v) for v in values}
-                    if len(canonical_values) < 2:
+                    entry_fingerprints: list[tuple[str, CollisionValueFingerprint]] = [
+                        (cast(str, e[0]), _collision_value_fingerprint(e[1])) for e in entries
+                    ]
+
+                    # Filter out overlap-only fields: union_field_collision_values
+                    # contains all overlapping fields, even when values are identical.
+                    # Only report fields where at least two branches provided different
+                    # value fingerprints.
+                    fingerprint_keys = {
+                        (fingerprint["value_type"], fingerprint["value_hash"]) for _branch, fingerprint in entry_fingerprints
+                    }
+                    if len(fingerprint_keys) < 2:
                         continue
 
                     # Determine winner from union_field_origins, not from entry order.
@@ -740,22 +762,22 @@ def list_collisions(
                     # Compare against stored value (lowercase) per NodeStateStatus StrEnum.
                     is_failed = row.status == NodeStateStatus.FAILED.value
                     winner_branch: str | None = None
-                    winner_value = None
+                    winner_value_fingerprint: CollisionValueFingerprint | None = None
                     if not is_failed:
                         winner_branch = field_origins.get(field)
                         if winner_branch is not None:
-                            # Find the value from the winning branch
-                            for branch, val in entries:
+                            # Find the value fingerprint from the winning branch
+                            for branch, fingerprint in entry_fingerprints:
                                 if branch == winner_branch:
-                                    winner_value = val
+                                    winner_value_fingerprint = fingerprint
                                     break
 
                     collision_fields.append(
                         {
                             "field": field,
                             "winner_branch": winner_branch,
-                            "winner_value": winner_value,
-                            "competing_values": [(e[0], e[1]) for e in entries],
+                            "winner_value_fingerprint": winner_value_fingerprint,
+                            "competing_value_fingerprints": entry_fingerprints,
                         }
                     )
 

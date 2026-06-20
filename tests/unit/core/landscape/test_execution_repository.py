@@ -17,6 +17,7 @@ from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
 from elspeth.contracts import (
@@ -52,6 +53,7 @@ from elspeth.core.landscape.model_loaders import (
     OperationLoader,
     RoutingEventLoader,
 )
+from elspeth.core.landscape.schema import node_states_table
 from elspeth.core.payload_store import FilesystemPayloadStore
 from tests.fixtures.landscape import make_factory, make_landscape_db
 from tests.fixtures.stores import MockPayloadStore
@@ -130,7 +132,7 @@ def _make_repo_with_token(
 ) -> tuple[LandscapeDB, ExecutionRepository, RecorderFactory, str]:
     """Create repo with a token ready for processing."""
     db, repo, factory = _make_repo(run_id=run_id, payload_store=payload_store)
-    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1")
+    factory.data_flow.create_row(run_id, "source-0", 0, {"name": "test"}, row_id="row-1", source_row_index=0, ingest_sequence=0)
     factory.data_flow.create_token("row-1", token_id="tok-1")
     return db, repo, factory, "tok-1"
 
@@ -224,6 +226,120 @@ class TestBeginNodeStateQuarantined:
 
 class TestCompleteNodeStateCrashPaths:
     """Tests for complete_node_state audit integrity checks (C2)."""
+
+    def test_record_completed_node_state_inserts_terminal_state_atomically(self) -> None:
+        """Immediate source-style completion should not require an OPEN row first."""
+        db, repo, _fac, tok = _make_repo_with_token()
+
+        state = repo.record_completed_node_state(
+            token_id=tok,
+            node_id="source-0",
+            run_id="run-1",
+            step_index=0,
+            input_data={"name": "test"},
+            output_data={"name": "test"},
+            duration_ms=0,
+        )
+
+        assert isinstance(state, NodeStateCompleted)
+        assert state.token_id == tok
+        assert state.node_id == "source-0"
+        assert state.step_index == 0
+        assert state.status is NodeStateStatus.COMPLETED
+        assert state.input_hash == stable_hash({"name": "test"})
+        assert state.output_hash == stable_hash({"name": "test"})
+        assert state.duration_ms == 0
+
+        with db.read_only_connection() as conn:
+            rows = conn.execute(select(node_states_table).where(node_states_table.c.state_id == state.state_id)).mappings().all()
+
+        assert len(rows) == 1
+        assert rows[0]["status"] == NodeStateStatus.COMPLETED.value
+        assert rows[0]["completed_at"] is not None
+
+    def test_batch_begin_and_complete_success_states_preserves_per_token_rows(self) -> None:
+        """Batch sink-state writes must still leave one auditable row per token."""
+        db, repo, fac, tok = _make_repo_with_token()
+        fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
+        fac.data_flow.create_token("row-2", token_id="tok-2")
+
+        states = repo.begin_node_states_many(
+            (
+                (tok, "sink-0", "run-1", 2, {"name": "test"}),
+                ("tok-2", "sink-0", "run-1", 2, {"name": "second"}),
+            )
+        )
+
+        assert [state.token_id for state in states] == [tok, "tok-2"]
+        assert all(isinstance(state, NodeStateOpen) for state in states)
+        repo.complete_node_states_completed_many(
+            (
+                (states[0].state_id, {"row": {"name": "test"}, "artifact_path": "out.csv", "content_hash": "hash"}, 2.5),
+                (states[1].state_id, {"row": {"name": "second"}, "artifact_path": "out.csv", "content_hash": "hash"}, 2.5),
+            )
+        )
+
+        with db.read_only_connection() as conn:
+            rows = (
+                conn.execute(select(node_states_table).where(node_states_table.c.state_id.in_([state.state_id for state in states])))
+                .mappings()
+                .all()
+            )
+
+        assert {row["token_id"] for row in rows} == {tok, "tok-2"}
+        assert {row["status"] for row in rows} == {NodeStateStatus.COMPLETED.value}
+        assert {row["output_hash"] for row in rows} == {
+            stable_hash({"row": {"name": "test"}, "artifact_path": "out.csv", "content_hash": "hash"}),
+            stable_hash({"row": {"name": "second"}, "artifact_path": "out.csv", "content_hash": "hash"}),
+        }
+
+    def test_batch_begin_rowcount_mismatch_rolls_back_inserted_open_states(self) -> None:
+        """Rowcount mismatches must abort inside the write transaction."""
+        db, repo, fac, tok = _make_repo_with_token()
+        fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
+        fac.data_flow.create_token("row-2", token_id="tok-2")
+        original_connection = repo._db.write_connection
+
+        from contextlib import contextmanager
+
+        @contextmanager
+        def rowcount_mismatch_connection():
+            with original_connection() as conn:
+                original_execute = conn.execute
+
+                def patched_execute(stmt, *args: Any, **kwargs: Any):
+                    result = original_execute(stmt, *args, **kwargs)
+                    if stmt.is_insert and stmt.table is node_states_table:
+                        mock_result = MagicMock()
+                        mock_result.rowcount = 1
+                        return mock_result
+                    return result
+
+                conn.execute = patched_execute
+                yield conn
+
+        repo._db.write_connection = rowcount_mismatch_connection  # type: ignore[method-assign]
+
+        with pytest.raises(LandscapeRecordError, match="affected 1 rows for 2 states"):
+            repo.begin_node_states_many(
+                (
+                    (tok, "sink-0", "run-1", 2, {"name": "test"}),
+                    ("tok-2", "sink-0", "run-1", 2, {"name": "second"}),
+                )
+            )
+
+        with db.read_only_connection() as conn:
+            rows = conn.execute(select(node_states_table.c.token_id).where(node_states_table.c.token_id.in_((tok, "tok-2")))).all()
+        assert rows == []
+
+    def test_batch_complete_rejects_already_terminal_state(self) -> None:
+        """Batch completion must preserve terminal-state immutability checks."""
+        _db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "sink-0", "run-1", 2, {"a": 1})
+        repo.complete_node_state(state.state_id, NodeStateStatus.COMPLETED, output_data={"b": 2}, duration_ms=1.0)
+
+        with pytest.raises(AuditIntegrityError, match="already terminal"):
+            repo.complete_node_states_completed_many(((state.state_id, {"b": 3}, 2.0),))
 
     def test_nonexistent_state_raises_audit_integrity(self) -> None:
         """Completing a nonexistent state must raise AuditIntegrityError.
@@ -380,7 +496,7 @@ class TestRecordRoutingEventsRowcount:
         routes = [RoutingSpec(edge_id="edge-1", mode=RoutingMode.MOVE)]
 
         # Mock the connection's execute to return rowcount=0 for INSERTs
-        original_connection = repo._db.connection
+        original_connection = repo._db.write_connection
 
         from contextlib import contextmanager
 
@@ -401,7 +517,7 @@ class TestRecordRoutingEventsRowcount:
                 conn.execute = patched_execute
                 yield conn
 
-        repo._db.connection = mock_connection  # type: ignore[method-assign]
+        repo._db.write_connection = mock_connection  # type: ignore[method-assign]
 
         with pytest.raises(AuditIntegrityError, match="zero rows affected"):
             repo.record_routing_events(state.state_id, routes)
@@ -804,7 +920,7 @@ class TestRetryBatch:
     def test_retry_batch_keeps_lineages_distinct_for_multiple_failed_batches(self) -> None:
         """Failed batches on the same aggregation node must not share one retry row."""
         _db, repo, fac, tok = _make_repo_with_token()
-        fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2")
+        fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
         fac.data_flow.create_token("row-2", token_id="tok-2")
 
         batch_a = repo.create_batch("run-1", "agg-1", batch_id="batch-a")
@@ -970,6 +1086,34 @@ class TestCompleteNodeStateSuccessFailure:
         assert isinstance(completed, NodeStateCompleted)
         assert completed.success_reason_json is not None
         assert "classified" in completed.success_reason_json
+
+    def test_complete_rejects_success_reason_without_action(self) -> None:
+        """Tier 1 success_reason writes require an action string."""
+        _db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"x": 1})
+
+        with pytest.raises(ValueError, match=r"success_reason.*action"):
+            repo.complete_node_state(
+                state.state_id,
+                NodeStateStatus.COMPLETED,
+                output_data={"x": 1},
+                duration_ms=10.0,
+                success_reason={"fields_added": ["x"]},  # type: ignore[typeddict-item]
+            )
+
+    def test_complete_rejects_success_reason_with_non_string_action(self) -> None:
+        """Tier 1 success_reason action must be a string."""
+        _db, repo, _fac, tok = _make_repo_with_token()
+        state = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"x": 1})
+
+        with pytest.raises(ValueError, match=r"success_reason.*action.*str"):
+            repo.complete_node_state(
+                state.state_id,
+                NodeStateStatus.COMPLETED,
+                output_data={"x": 1},
+                duration_ms=10.0,
+                success_reason={"action": 123},  # type: ignore[typeddict-item]
+            )
 
     def test_complete_failed_requires_error(self) -> None:
         """FAILED status without error raises ValueError."""

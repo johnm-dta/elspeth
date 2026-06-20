@@ -20,7 +20,7 @@ Dependencies held by this core:
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from elspeth.contracts import (
@@ -54,7 +54,7 @@ from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
     RunContext,
 )
-from elspeth.engine.processor import RowProcessor, make_step_resolver
+from elspeth.engine.processor import BarrierJournalRestoreContext, RowProcessor, make_step_resolver
 from elspeth.engine.retry import RetryManager
 
 if TYPE_CHECKING:
@@ -64,9 +64,8 @@ if TYPE_CHECKING:
         SinkProtocol,
         TokenInfo,
     )
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
-    from elspeth.contracts.coalesce_checkpoint import CoalesceCheckpointState
     from elspeth.contracts.config.runtime import RuntimeConcurrencyConfig
+    from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.contracts.types import (
         BranchName,
@@ -80,6 +79,7 @@ if TYPE_CHECKING:
     from elspeth.engine.orchestrator.ceremony import RunCeremony
     from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
     from elspeth.engine.orchestrator.types import (
+        CheckpointAfterSinkCallback,
         ExecutionCounters,
         GraphArtifacts,
         LoopContext,
@@ -133,7 +133,7 @@ class RunExecutionCore:
         edge_map: Mapping[tuple[NodeID, str], str],
         sink_step: int,
         *,
-        on_token_written_factory: Callable[[str], Callable[[TokenInfo], None]] | None = None,
+        on_token_written_factory: _CheckpointFactory | None = None,
     ) -> DiversionCounts:
         """Write pending tokens to sinks using SinkExecutor.
 
@@ -201,24 +201,29 @@ class RunExecutionCore:
             # Group tokens by pending_outcome for separate write() calls
             # (sink_executor.write() takes a single PendingOutcome for all tokens in a batch)
             # PendingOutcome carries error_hash for QUARANTINED tokens
-            def pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str]:
+            def pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str, bool]:
                 pending = pair[1]
                 if pending is None:
-                    return (True, "", "", "")  # None sorts first
+                    return (True, "", "", "", False)  # None sorts last
                 outcome_value = pending.outcome.value if pending.outcome is not None else ""
-                return (False, outcome_value, pending.path.value, pending.error_hash or "")
+                return (False, outcome_value, pending.path.value, pending.error_hash or "", pending.scheduler_pending_sink)
 
             sorted_pairs = sorted(token_outcome_pairs, key=pending_sort_key)
-
-            # Build on_token_written callback (or None for resume)
-            on_token_written: Callable[[TokenInfo], None] | None = None
-            if on_token_written_factory is not None:
-                on_token_written = on_token_written_factory(sink_node_id)
 
             for _group_key, group in groupby(sorted_pairs, key=pending_sort_key):
                 group_pairs = list(group)
                 pending_outcome = group_pairs[0][1]
                 group_tokens = [token for token, _pending in group_pairs]
+                # Only tokens with a proven durable PENDING_SINK handoff are
+                # terminalized after sink durability. Aggregation flush
+                # outputs carry that handoff since F1/D6 (the atomic barrier
+                # completion inserts their PENDING_SINK rows); terminal
+                # coalesce merges and source-quarantine rows still need
+                # checkpoints but have no scheduler row to close.
+                terminalize_scheduler = bool(pending_outcome is not None and pending_outcome.scheduler_pending_sink)
+                on_token_written: CheckpointAfterSinkCallback | None = None
+                if on_token_written_factory is not None:
+                    on_token_written = on_token_written_factory(sink_node_id, terminalize_scheduler=terminalize_scheduler)
                 _, diversion_counts = sink_executor.write(
                     sink=sink,
                     tokens=group_tokens,
@@ -231,6 +236,8 @@ class RunExecutionCore:
                     failsink_edge_id=failsink_edge_id,
                     on_token_written=on_token_written,
                 )
+                if on_token_written is not None:
+                    on_token_written.flush()
                 reconcile_sink_write_diversions(
                     counters=counters,
                     sink_name=sink_name,
@@ -258,8 +265,8 @@ class RunExecutionCore:
         config_gate_id_map: dict[GateName, NodeID],
         coalesce_id_map: dict[CoalesceName, NodeID],
         payload_store: PayloadStore,
-        restored_aggregation_state: Mapping[NodeID, AggregationCheckpointState] | None = None,
-        restored_coalesce_state: CoalesceCheckpointState | None = None,
+        barrier_restore: BarrierJournalRestoreContext | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> tuple[RowProcessor, dict[CoalesceName, NodeID], CoalesceExecutor | None]:
         """Build a RowProcessor with all supporting infrastructure.
 
@@ -347,8 +354,8 @@ class RunExecutionCore:
                     branch_schemas=branch_schemas,
                     output_schema=output_schema,
                 )
-            if restored_coalesce_state is not None:
-                coalesce_executor.restore_from_checkpoint(restored_coalesce_state)
+            # F1: no blob restore here — on resume the RowProcessor rebuilds
+            # coalesce pendings from journal BLOCKED rows (barrier_restore).
 
         # Derive coalesce on_success from graph's terminal sink map (graph-authoritative),
         # falling back to settings for non-terminal coalesce nodes.
@@ -365,14 +372,17 @@ class RunExecutionCore:
         branch_to_sink = graph.get_branch_to_sink_map()
         typed_aggregation_settings: dict[NodeID, AggregationSettings] = {NodeID(k): v for k, v in config.aggregation_settings.items()}
 
+        # RowProcessor still carries a run-level source view for legacy helper
+        # surfaces. Per-row processing passes the active source explicitly.
+        first_source = next(iter(config.sources.values()))
         processor = RowProcessor(
             execution=factory.execution,
             data_flow=factory.data_flow,
             span_factory=self._span_factory,
             run_id=run_id,
             source_node_id=source_id,
-            source_on_success=config.source.on_success,
-            source_plugin=config.source,
+            source_on_success=first_source.on_success,
+            source_plugin=first_source,
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,
             traversal=traversal,
@@ -383,11 +393,22 @@ class RunExecutionCore:
             branch_to_sink=branch_to_sink,
             sink_names=frozenset(config.sinks),
             coalesce_on_success_map=coalesce_on_success_map,
-            restored_aggregation_state=restored_aggregation_state,
+            barrier_restore=barrier_restore,
             payload_store=payload_store,
             clock=self._clock,
             max_workers=self._concurrency_config.max_workers if self._concurrency_config else None,
             telemetry_manager=self._telemetry,
+            scheduler=factory.scheduler,
+            # ADR-030 §A.1: the registered worker identity IS the scheduler
+            # lease_owner. When no token was threaded (repository-level test
+            # construction), RowProcessor falls back to its own
+            # row-processor:{run_id}:{uuid} mint.
+            scheduler_lease_owner=coordination_token.worker_id if coordination_token is not None else None,
+            coordination_token=coordination_token,
+            # §C.2 path 1 (slice 4): leader housekeeping sweep — evict dead
+            # non-leader members then reap their expired item leases. None when
+            # no coordination substrate (direct repository-level construction).
+            run_coordination=factory.run_coordination if coordination_token is not None else None,
         )
 
         return processor, coalesce_node_map, coalesce_executor
@@ -403,17 +424,21 @@ class RunExecutionCore:
         payload_store: PayloadStore,
         *,
         include_source_on_start: bool = True,
-        restored_aggregation_state: Mapping[str, AggregationCheckpointState] | None = None,
-        restored_coalesce_state: CoalesceCheckpointState | None = None,
+        barrier_restore: BarrierJournalRestoreContext | None = None,
         shutdown_event: threading.Event | None = None,
+        coordination_token: CoordinationToken | None = None,
     ) -> RunContext:
         """Initialize run context: assign node IDs, create PluginContext, call on_start, build processor.
 
         Args:
             include_source_on_start: If True, call source.on_start(). False for resume
                 (source was fully consumed in original run).
-            restored_aggregation_state: Map of node_id -> state for resume path.
-            restored_coalesce_state: Pending coalesce state for resume path.
+            barrier_restore: Resume-only journal-restore inputs (F1); None on
+                the normal run path.
+            coordination_token: Leader fencing token (ADR-030). Threaded into
+                the RowProcessor so its worker identity doubles as the
+                scheduler lease_owner and so the slice-2 step-4 fenced verbs
+                (repair sweep, ingest) can present it.
 
         Returns:
             RunContext with ctx, processor, coalesce_executor, coalesce_node_map,
@@ -429,10 +454,10 @@ class RunExecutionCore:
 
         # Assign node_ids to all plugins
         assign_plugin_node_ids(
-            source=config.source,
+            sources=config.sources,
             transforms=config.transforms,
             sinks=config.sinks,
-            source_id=source_id,
+            source_id_map=artifacts.source_id_map,
             transform_id_map=transform_id_map,
             sink_id_map=sink_id_map,
         )
@@ -456,7 +481,10 @@ class RunExecutionCore:
 
         try:
             if include_source_on_start:
-                config.source.on_start(ctx)
+                for source_name, source in config.sources.items():
+                    ctx.node_id = artifacts.source_id_map[source_name]
+                    source.on_start(ctx)
+                ctx.node_id = source_id
             for transform in config.transforms:
                 transform.on_start(ctx)
             for sink in config.sinks.values():
@@ -474,10 +502,8 @@ class RunExecutionCore:
                 config_gate_id_map=config_gate_id_map,
                 coalesce_id_map=coalesce_id_map,
                 payload_store=payload_store,
-                restored_aggregation_state={NodeID(k): v for k, v in restored_aggregation_state.items()}
-                if restored_aggregation_state
-                else None,
-                restored_coalesce_state=restored_coalesce_state,
+                barrier_restore=barrier_restore,
+                coordination_token=coordination_token,
             )
         except Exception:
             cleanup_plugins(config, ctx, include_source=include_source_on_start)
@@ -513,7 +539,6 @@ class RunExecutionCore:
         interrupted_by_shutdown: bool,
         *,
         on_token_written_factory: _CheckpointFactory | None = None,
-        shutdown_checkpoint_source_id: NodeID | None = None,
     ) -> None:
         """Write all pending tokens to sinks and handle post-loop bookkeeping.
 
@@ -548,13 +573,10 @@ class RunExecutionCore:
         # At this point: sink writes are done, and any buffered aggregation/coalesce
         # state that we intentionally preserved can be checkpointed for resume.
         if interrupted_by_shutdown:
-            if shutdown_checkpoint_source_id is not None:
-                self._checkpoints.checkpoint_interrupted_progress(
-                    run_id=run_id,
-                    loop_ctx=loop_ctx,
-                    sink_id_map=sink_id_map,
-                    source_id=shutdown_checkpoint_source_id,
-                )
+            self._checkpoints.checkpoint_interrupted_progress(
+                run_id=run_id,
+                loop_ctx=loop_ctx,
+            )
             raise GracefulShutdownError(
                 rows_processed=counters.rows_processed,
                 run_id=run_id,

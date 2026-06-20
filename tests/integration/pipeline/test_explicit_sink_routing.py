@@ -106,7 +106,7 @@ class TestExplicitSinkRouting:
         sink = CollectSink(name="output")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"output": as_sink(sink)},
         )
@@ -146,7 +146,7 @@ class TestExplicitSinkRouting:
         sink_b = CollectSink(name="sink_b")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
             gates=[fork_gate],
@@ -217,7 +217,7 @@ class TestExplicitSinkRouting:
         source_sink = CollectSink(name="source_sink")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={
                 "output": as_sink(output_sink),
@@ -228,7 +228,7 @@ class TestExplicitSinkRouting:
         )
 
         settings = ElspethSettings(
-            source={"plugin": "test", "on_success": "source_out", "options": {}},
+            sources={"primary": {"plugin": "test", "on_success": "source_out", "options": {}}},
             sinks={
                 "output": {"plugin": "test", "on_write_failure": "discard"},
                 "source_sink": {"plugin": "test", "on_write_failure": "discard"},
@@ -263,9 +263,9 @@ class TestExplicitSinkRouting:
         Setup: source → aggregation(count=2, on_success=output) → output
         Verify: Flushed batch results arrive at on_success sink.
 
-        Uses the same wiring pattern as test_aggregation_checkpoint_bug: the
-        transform is a regular transform in the graph with on_success set,
-        and aggregation_settings tells the Orchestrator to batch it.
+        Uses the standard aggregation wiring pattern: the transform is a
+        regular transform in the graph with on_success set, and
+        aggregation_settings tells the Orchestrator to batch it.
         """
         from elspeth.core.dag import ExecutionGraph
 
@@ -278,8 +278,8 @@ class TestExplicitSinkRouting:
 
         # Build graph with transform as regular transform (on_success wires to sink)
         graph = ExecutionGraph.from_plugin_instances(
-            source=cast(SourceProtocol, source),
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": cast(SourceProtocol, source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms(cast("list[TransformProtocol]", [transform]), source_connection="source_out", final_sink="output"),
             sinks=cast("dict[str, SinkProtocol]", {"output": sink}),
             aggregations={},
@@ -298,7 +298,7 @@ class TestExplicitSinkRouting:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"output": as_sink(sink)},
             aggregation_settings={transform_node_id: agg_settings},
@@ -354,8 +354,8 @@ class TestExplicitSinkRouting:
 
         # Build graph through production path with explicit connection names
         graph = ExecutionGraph.from_plugin_instances(
-            source=cast(SourceProtocol, source),
-            source_settings=SourceSettings(plugin=source.name, on_success="source_out", options={}),
+            sources={"primary": cast(SourceProtocol, source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},
             transforms=wire_transforms(
                 cast("list[TransformProtocol]", [t1, t2]),
                 source_connection="source_out",
@@ -367,7 +367,7 @@ class TestExplicitSinkRouting:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(t1), as_transform(t2)],
             sinks={"output": as_sink(sink)},
         )
@@ -383,8 +383,8 @@ class TestExplicitSinkRouting:
         assert run_result.status == RunStatus.COMPLETED
         assert run_result.rows_processed == 3
 
-        # Checkpoints were created (one per row)
-        assert len(checkpoint_calls) == 3, f"Expected 3 checkpoint calls, got {len(checkpoint_calls)}"
+        # Checkpoints were created (run-start baseline + one per row, F1/D4)
+        assert len(checkpoint_calls) == 4, f"Expected 4 checkpoint calls (run-start baseline + one per row), got {len(checkpoint_calls)}"
 
         # All results routed to the correct on_success sink
         assert len(sink.results) == 3
@@ -419,7 +419,7 @@ class TestExplicitSinkRoutingEdgeCases:
         sink = CollectSink(name="direct_sink")
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[],
             sinks={"direct_sink": as_sink(sink)},
         )
@@ -460,7 +460,7 @@ class TestExplicitSinkRoutingEdgeCases:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[t.plugin for t in wired],
             sinks={"sink_a": as_sink(sink_a), "sink_b": as_sink(sink_b)},
         )
@@ -470,8 +470,8 @@ class TestExplicitSinkRoutingEdgeCases:
 
         source_settings = SourceSettings(plugin=source.name, on_success="source_out", options={})
         graph = ExecutionGraph.from_plugin_instances(
-            source=config.source,
-            source_settings=source_settings,
+            sources={"primary": config.sources["primary"]},
+            source_settings_map={"primary": source_settings},
             transforms=wired,
             sinks=config.sinks,
             aggregations={},
@@ -519,8 +519,8 @@ class TestExplicitSinkRoutingEdgeCases:
         )
 
         graph = ExecutionGraph.from_plugin_instances(
-            source=cast(SourceProtocol, source),
-            source_settings=SourceSettings(plugin=source.name, on_success="gate_in", options={}),
+            sources={"primary": cast(SourceProtocol, source)},
+            source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="gate_in", options={})},
             transforms=wire_transforms(
                 cast("list[TransformProtocol]", [transform]),
                 source_connection="downstream_conn",
@@ -532,7 +532,7 @@ class TestExplicitSinkRoutingEdgeCases:
         )
 
         config = PipelineConfig(
-            source=as_source(source),
+            sources={"primary": as_source(source)},
             transforms=[as_transform(transform)],
             sinks={"output": as_sink(sink_output), "flagged": as_sink(sink_flagged)},
             gates=[gate],

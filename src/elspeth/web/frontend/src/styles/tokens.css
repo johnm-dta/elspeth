@@ -54,13 +54,13 @@
      hue while staying in the same chromatic family. */
   --color-badge-coalesce:    #18c2c0;
 
-  /* ── Component type badge backgrounds — for inline styles (React Flow) ──── */
-  --color-badge-source-bg:   rgba(77, 184, 154, 0.15);
-  --color-badge-transform-bg: rgba(232, 160, 48, 0.15);
-  --color-badge-gate-bg:     rgba(195, 144, 249, 0.15);
-  --color-badge-sink-bg:     rgba(224, 112, 64, 0.15);
-  --color-badge-aggregation-bg: rgba(97, 218, 255, 0.15);
-  --color-badge-coalesce-bg: rgba(24, 194, 192, 0.15);
+  /* ── Component type badge backgrounds — opaque pre-composited over --color-bg ──── */
+  --color-badge-source-bg:   #184244;
+  --color-badge-transform-bg: #303e34;
+  --color-badge-gate-bg:     #2a3c52;
+  --color-badge-sink-bg:     #2e3737;
+  --color-badge-aggregation-bg: #1b4753;
+  --color-badge-coalesce-bg: #10434a;
 
   /* ── Component type badge borders ────────────────────────────────────────── */
   --color-badge-source-border:      rgba(77, 184, 154, 0.3);
@@ -224,7 +224,7 @@
   --color-bg:                #f4f8f9;
   --color-surface:           #ffffff;
   --color-surface-elevated:  #ffffff;
-  --color-surface-hover:     rgba(0, 45, 53, 0.04);
+  --color-surface-hover:     rgba(15, 45, 53, 0.06);
 
   /* Navigation family — pale navy chrome */
   --color-surface-nav:        #e8edf3;
@@ -278,7 +278,7 @@
   --color-info:              #176d8a;
   --color-state-positive:    #056e6c;
 
-  /* ── Component type badges — WCAG AA 4.5:1 on 12% badge backgrounds ──── */
+  /* ── Component type badges — verified at 3:1 non-text contrast on opaque backgrounds ──── */
   --color-badge-source:      #257963;
   --color-badge-transform:   #926414;
   --color-badge-gate:        #8356b6;
@@ -288,13 +288,13 @@
      (#0d8a88) on light mode; sits between aggregation and success. */
   --color-badge-coalesce:    #0e8090;
 
-  /* ── Component type badge backgrounds — for inline styles (React Flow) ──── */
-  --color-badge-source-bg:   rgba(42, 138, 112, 0.12);
-  --color-badge-transform-bg: rgba(176, 120, 24, 0.12);
-  --color-badge-gate-bg:     rgba(138, 90, 192, 0.12);
-  --color-badge-sink-bg:     rgba(184, 85, 48, 0.12);
-  --color-badge-aggregation-bg: rgba(40, 144, 184, 0.12);
-  --color-badge-coalesce-bg: rgba(14, 128, 144, 0.12);
+  /* ── Component type badge backgrounds — opaque pre-composited over --color-bg ──── */
+  --color-badge-source-bg:   #dcebe9;
+  --color-badge-transform-bg: #ece9de;
+  --color-badge-gate-bg:     #e7e5f2;
+  --color-badge-sink-bg:     #ede4e1;
+  --color-badge-aggregation-bg: #dcecf1;
+  --color-badge-coalesce-bg: #d8eaec;
 
   /* ── Component type badge borders ────────────────────────────────────────── */
   --color-badge-source-border:      rgba(42, 138, 112, 0.35);

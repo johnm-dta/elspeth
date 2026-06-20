@@ -49,6 +49,7 @@ def _make_bootstrap_config() -> SimpleNamespace:
         collection_probes=[],
         gates=[],
         coalesce=[],
+        queues={},
         checkpoint=SimpleNamespace(enabled=True),
         rate_limit=SimpleNamespace(),
         concurrency=SimpleNamespace(),
@@ -201,6 +202,36 @@ class TestBootstrapProgrammaticExecution:
         assert mock_orch_ctx.call_args is not None
         assert mock_orch_ctx.call_args.kwargs["output_format"] == "none"
 
+    def test_bootstrap_passes_declared_queues_to_graph_builder(self) -> None:
+        """Dependency/preflight graph construction must honor declared queue fan-in nodes."""
+        mock_config = _make_bootstrap_config()
+        mock_config.queues = {"inbound": object()}
+
+        with (
+            patch("elspeth.cli._load_settings_with_secrets", return_value=(mock_config, [])),
+            patch(
+                "elspeth.plugins.infrastructure.runtime_factory.instantiate_plugins_from_config", return_value=MagicMock(spec=PluginBundle)
+            ),
+            patch("elspeth.cli.ExecutionGraph") as mock_graph_cls,
+            patch("elspeth.core.landscape.LandscapeDB"),
+            patch("elspeth.core.payload_store.FilesystemPayloadStore"),
+            patch("elspeth.cli._orchestrator_context") as mock_orch_ctx,
+            patch("elspeth.cli._ensure_output_directories", return_value=[]),
+            patch("elspeth.engine.bootstrap.resolve_preflight", return_value=[]),
+        ):
+            mock_graph_cls.from_plugin_instances.return_value = _GraphStub()
+            mock_ctx = MagicMock()
+            mock_ctx.orchestrator.run.return_value = MagicMock()
+            mock_orch_ctx.return_value.__enter__ = MagicMock(return_value=mock_ctx)
+            mock_orch_ctx.return_value.__exit__ = MagicMock(return_value=False)
+
+            from elspeth.cli import bootstrap_and_run
+
+            bootstrap_and_run(Path("/fake/pipeline.yaml"))
+
+        assert mock_graph_cls.from_plugin_instances.call_args is not None
+        assert mock_graph_cls.from_plugin_instances.call_args.kwargs["queues"] == mock_config.queues
+
     def test_orchestrator_context_none_output_uses_null_event_bus(self) -> None:
         """The silent output mode uses NullEventBus, not console/json formatters."""
         from elspeth.cli import _orchestrator_context
@@ -208,30 +239,69 @@ class TestBootstrapProgrammaticExecution:
 
         mock_config = _make_bootstrap_config()
         mock_config.checkpoint.enabled = False
+        source = object()
         mock_graph = _GraphStub()
         mock_plugins = SimpleNamespace(
             transforms=[],
             aggregations={},
-            source=object(),
+            source=source,
+            sources={"source": source},
+            source_settings_map={},
             sinks={"out": object()},
         )
         mock_db = MagicMock()
 
         with (
-            patch("elspeth.contracts.config.runtime.RuntimeRateLimitConfig.from_settings", return_value=MagicMock()),
-            patch("elspeth.contracts.config.runtime.RuntimeConcurrencyConfig.from_settings", return_value=MagicMock()),
-            patch("elspeth.contracts.config.runtime.RuntimeCheckpointConfig.from_settings", return_value=MagicMock(enabled=False)),
-            patch("elspeth.contracts.config.runtime.RuntimeTelemetryConfig.from_settings", return_value=MagicMock()),
+            patch("elspeth.contracts.config.runtime.RuntimeRateLimitConfig.from_settings", return_value=MagicMock(spec=None)),
+            patch("elspeth.contracts.config.runtime.RuntimeConcurrencyConfig.from_settings", return_value=MagicMock(spec=None)),
+            patch(
+                "elspeth.contracts.config.runtime.RuntimeCheckpointConfig.from_settings", return_value=MagicMock(spec=None, enabled=False)
+            ),
+            patch("elspeth.contracts.config.runtime.RuntimeTelemetryConfig.from_settings", return_value=MagicMock(spec=None)),
             patch("elspeth.core.rate_limit.RateLimitRegistry") as mock_rate_limit_registry,
-            patch("elspeth.telemetry.create_telemetry_manager", return_value=MagicMock()),
+            patch("elspeth.telemetry.create_telemetry_manager", return_value=MagicMock(spec=None)),
             patch("elspeth.engine.Orchestrator") as mock_orchestrator,
         ):
-            mock_rate_limit_registry.return_value = MagicMock()
+            mock_rate_limit_registry.return_value = MagicMock(spec=None)
             with _orchestrator_context(mock_config, mock_graph, mock_plugins, db=mock_db, output_format="none"):
                 pass
 
         assert mock_orchestrator.call_args is not None
         assert isinstance(mock_orchestrator.call_args.kwargs["event_bus"], NullEventBus)
+
+    def test_orchestrator_context_preserves_named_sources(self) -> None:
+        """CLI PipelineConfig assembly carries plural source instances into runtime."""
+        from elspeth.cli import _orchestrator_context
+
+        mock_config = _make_bootstrap_config()
+        mock_config.checkpoint.enabled = False
+        mock_graph = MagicMock(spec=None)
+        mock_graph.get_aggregation_id_map.return_value = {}
+        mock_plugins = MagicMock(spec=PluginBundle)
+        mock_plugins.transforms = []
+        mock_plugins.aggregations = {}
+        first_source = MagicMock(spec=None)
+        second_source = MagicMock(spec=None)
+        mock_plugins.source = first_source
+        mock_plugins.sources = {"orders": first_source, "refunds": second_source}
+        mock_plugins.sinks = {"out": MagicMock(spec=None)}
+        mock_db = MagicMock(spec=None)
+
+        with (
+            patch("elspeth.contracts.config.runtime.RuntimeRateLimitConfig.from_settings", return_value=MagicMock(spec=None)),
+            patch("elspeth.contracts.config.runtime.RuntimeConcurrencyConfig.from_settings", return_value=MagicMock(spec=None)),
+            patch(
+                "elspeth.contracts.config.runtime.RuntimeCheckpointConfig.from_settings", return_value=MagicMock(spec=None, enabled=False)
+            ),
+            patch("elspeth.contracts.config.runtime.RuntimeTelemetryConfig.from_settings", return_value=MagicMock(spec=None)),
+            patch("elspeth.core.rate_limit.RateLimitRegistry", return_value=MagicMock(spec=None)),
+            patch("elspeth.telemetry.create_telemetry_manager", return_value=MagicMock(spec=None)),
+            patch("elspeth.engine.Orchestrator"),
+            _orchestrator_context(mock_config, mock_graph, mock_plugins, db=mock_db, output_format="none") as ctx,
+        ):
+            assert list(ctx.pipeline_config.sources) == ["orders", "refunds"]
+            assert ctx.pipeline_config.sources["orders"] is first_source
+            assert ctx.pipeline_config.sources["refunds"] is second_source
 
 
 class TestBootstrapDependencyResultsFlow:

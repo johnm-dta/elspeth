@@ -10,7 +10,7 @@ from sqlalchemy import and_, func, select
 from elspeth.contracts.audit import DISCARD_SINK_NAME
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.core.landscape.database import LandscapeDB
-from elspeth.core.landscape.schema import rows_table, runs_table, token_outcomes_table, tokens_table
+from elspeth.core.landscape.schema import rows_table, run_sources_table, runs_table, token_outcomes_table, tokens_table
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.discard_summary import _sqlite_database_file_missing, _unique_run_ids
 from elspeth.web.execution.schemas import (
@@ -39,6 +39,7 @@ def load_run_accounting_for_settings(
         landscape_url,
         passphrase=settings.landscape_passphrase,
         create_tables=False,
+        read_only=True,
     ) as db:
         return load_run_accounting_map_from_db(db, run_ids)
 
@@ -60,7 +61,7 @@ def load_run_accounting_map_from_db(
         if not present_run_ids:
             return {}
 
-        source_rows = _zero_counts(present_run_ids)
+        source_rows_by_source: dict[str, dict[str, int]] = {run_id: {} for run_id in present_run_ids}
         emitted_tokens = _zero_counts(present_run_ids)
         terminal_tokens = _zero_counts(present_run_ids)
         succeeded_tokens = _zero_counts(present_run_ids)
@@ -74,12 +75,25 @@ def load_run_accounting_map_from_db(
         duplicate_terminal_outcomes = _zero_counts(present_run_ids)
 
         source_stmt = (
-            select(rows_table.c.run_id, func.count().label("count"))
+            select(
+                rows_table.c.run_id,
+                func.coalesce(run_sources_table.c.source_name, rows_table.c.source_node_id).label("source_name"),
+                func.count().label("count"),
+            )
+            .select_from(
+                rows_table.outerjoin(
+                    run_sources_table,
+                    and_(
+                        run_sources_table.c.run_id == rows_table.c.run_id,
+                        run_sources_table.c.source_node_id == rows_table.c.source_node_id,
+                    ),
+                )
+            )
             .where(rows_table.c.run_id.in_(present_run_ids))
-            .group_by(rows_table.c.run_id)
+            .group_by(rows_table.c.run_id, "source_name")
         )
-        for run_id, count in conn.execute(source_stmt):
-            source_rows[str(run_id)] = int(count)
+        for run_id, source_name, count in conn.execute(source_stmt):
+            source_rows_by_source[str(run_id)][str(source_name)] = int(count)
 
         emitted_stmt = (
             select(tokens_table.c.run_id, func.count().label("count"))
@@ -171,6 +185,8 @@ def load_run_accounting_map_from_db(
                 f"for run {run_id!r}: duplicate_terminal_outcomes={duplicate_terminal_outcomes[run_id]}"
             )
         pending_tokens = missing_terminal_outcomes[run_id]
+        source_rows = source_rows_by_source[run_id]
+        source_row_total = sum(source_rows.values())
 
         closure: Literal["closed", "open", "unknown"] = (
             "closed"
@@ -180,7 +196,8 @@ def load_run_accounting_map_from_db(
             else "open"
         )
         accounting[run_id] = RunAccounting(
-            source=RunAccountingSource(rows_processed=source_rows[run_id]),
+            source=RunAccountingSource(rows_processed=source_row_total),
+            sources={source_name: RunAccountingSource(rows_processed=count) for source_name, count in sorted(source_rows.items())},
             tokens=RunAccountingTokens(
                 emitted=emitted_tokens[run_id],
                 terminal=terminal_tokens[run_id],

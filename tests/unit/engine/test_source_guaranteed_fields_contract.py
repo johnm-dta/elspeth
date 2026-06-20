@@ -70,7 +70,7 @@ class _TestSourcePlugin(BaseSource):
         self.declared_guaranteed_fields = declared_guaranteed_fields
 
     def load(self, ctx: PluginContext):
-        yield SourceRow.valid({"customer_id": "v"}, contract=_contract(("customer_id",)))
+        yield SourceRow.valid({"customer_id": "v"}, contract=_contract(("customer_id",)), source_row_index=0)
 
     def close(self) -> None:
         pass
@@ -168,7 +168,7 @@ def test_applies_to_true_for_inherited_declared_guaranteed_fields() -> None:
             self.node_id = None
 
         def load(self, ctx: PluginContext):
-            yield SourceRow.valid({"customer_id": "v"}, contract=_contract(("customer_id",)))
+            yield SourceRow.valid({"customer_id": "v"}, contract=_contract(("customer_id",)), source_row_index=0)
 
         def close(self) -> None:
             pass

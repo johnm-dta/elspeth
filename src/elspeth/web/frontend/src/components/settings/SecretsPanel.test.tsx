@@ -52,6 +52,41 @@ describe("SecretsPanel", () => {
     expect(screen.getByText("SERVER_KEY")).toBeInTheDocument();
   });
 
+  it("uses theme token references without hard-coded fallback colours", () => {
+    useSecretsStore.setState({
+      secrets: [
+        {
+          name: "SET_KEY",
+          scope: "user" as const,
+          available: true,
+          source_kind: "user",
+          reason: null,
+        },
+        {
+          name: "MISSING_KEY",
+          scope: "server" as const,
+          available: false,
+          source_kind: "env",
+          reason: "env_var_not_set",
+        },
+      ],
+    });
+
+    render(<SecretsPanel onClose={onClose} />);
+
+    const dialogStyle = screen.getByRole("dialog").getAttribute("style");
+    const availableStyle = screen.getByRole("img", { name: "Available" }).getAttribute("style");
+    const unavailableStyle = screen.getByRole("img", { name: "Unavailable" }).getAttribute("style");
+
+    expect(dialogStyle).toContain("var(--color-surface)");
+    expect(availableStyle).toContain("var(--color-success)");
+    expect(availableStyle).toContain("var(--color-success-bg)");
+    expect(unavailableStyle).toContain("var(--color-text-muted)");
+    expect(`${dialogStyle} ${availableStyle} ${unavailableStyle}`).not.toMatch(
+      /#16a34a|#9ca3af|#fff/i,
+    );
+  });
+
   it("surfaces human-readable reasons for unavailable secrets", () => {
     useSecretsStore.setState({
       secrets: [
@@ -138,6 +173,22 @@ describe("SecretsPanel", () => {
     render(<SecretsPanel onClose={onClose} />);
     const valueInput = screen.getByLabelText("Value");
     expect(valueInput).toHaveAttribute("type", "password");
+  });
+
+  it("associates name-specific form errors with the name field", () => {
+    useSecretsStore.setState({ error: "Secret name already exists." });
+
+    render(<SecretsPanel onClose={onClose} />);
+
+    const alert = screen.getByRole("alert");
+    const nameInput = screen.getByLabelText("Name");
+    const valueInput = screen.getByLabelText("Value");
+
+    expect(alert).toHaveAttribute("id", "secret-form-error");
+    expect(nameInput).toHaveAttribute("aria-invalid", "true");
+    expect(nameInput).toHaveAttribute("aria-describedby", "secret-form-error");
+    expect(valueInput).not.toHaveAttribute("aria-invalid");
+    expect(valueInput).not.toHaveAttribute("aria-describedby");
   });
 
   describe("submit failure recovery", () => {

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 from elspeth.contracts.enums import TriggerType
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import NodeID
-from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes
+from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes, flush_coalesce_pending
 from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
     AggregationFlushResult,
@@ -29,14 +29,20 @@ from elspeth.engine.orchestrator.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from elspeth.contracts import TransformProtocol
-    from elspeth.contracts.aggregation_checkpoint import AggregationCheckpointState
     from elspeth.contracts.plugin_context import PluginContext
     from elspeth.contracts.results import RowResult
+    from elspeth.contracts.types import CoalesceName
     from elspeth.core.landscape.execution_repository import ExecutionRepository
+    from elspeth.engine.coalesce_executor import CoalesceExecutor
     from elspeth.engine.dag_navigator import WorkItem
+
+# §D step-3 convergence valve: each iteration adopts every intake-pending
+# barrier row and force-resolves every flushable barrier, so legal pipelines
+# converge in a handful of rounds (one per barrier "layer" in the DAG).
+MAX_END_OF_INPUT_FLUSH_ITERATIONS = 1_000
 
 
 def find_aggregation_transform(
@@ -118,46 +124,6 @@ def handle_incomplete_batches(
     return batch_id_mapping
 
 
-def rebind_checkpoint_batch_ids(
-    state: AggregationCheckpointState,
-    batch_id_mapping: dict[str, str],
-) -> AggregationCheckpointState:
-    """Create a new checkpoint state with batch_ids rebound to retry batches.
-
-    When ``handle_incomplete_batches()`` retries failed/executing batches, the
-    checkpoint still references the dead original batch_ids. This function
-    produces a new ``AggregationCheckpointState`` where each node's batch_id
-    is replaced with the corresponding retry batch_id from the mapping.
-
-    Nodes whose batch_id is not in the mapping are left unchanged (e.g. DRAFT
-    batches that were not retried).
-
-    Args:
-        state: Original checkpoint state from the resume point.
-        batch_id_mapping: old_batch_id -> new_batch_id from ``handle_incomplete_batches()``.
-
-    Returns:
-        New ``AggregationCheckpointState`` with rebound batch_ids.
-    """
-    from dataclasses import replace
-
-    from elspeth.contracts.aggregation_checkpoint import (
-        AggregationNodeCheckpoint,
-    )
-
-    if not batch_id_mapping:
-        return state
-
-    rebound_nodes: dict[str, AggregationNodeCheckpoint] = {}
-    for node_id, node_ckpt in state.nodes.items():
-        if node_ckpt.batch_id in batch_id_mapping:
-            rebound_nodes[node_id] = replace(node_ckpt, batch_id=batch_id_mapping[node_ckpt.batch_id])
-        else:
-            rebound_nodes[node_id] = node_ckpt
-
-    return replace(state, nodes=rebound_nodes)
-
-
 def _process_flush_results(
     completed_results: Sequence[RowResult],
     work_items: Sequence[WorkItem],
@@ -195,23 +161,10 @@ def check_aggregation_timeouts(
 ) -> AggregationFlushResult:
     """Check and flush any aggregations whose timeout has expired.
 
-    Called BEFORE processing each row to ensure timeouts fire during active
-    processing, not just at end-of-source. Checking BEFORE buffering ensures
-    timed-out batches don't include the newly arriving row.
-
-    Before this was added, should_flush() was only called from buffer_row(),
-    meaning timeouts never fired during idle periods between rows.
-
-    KNOWN LIMITATION (True Idle):
-    Timeouts fire when the next row arrives, not during "true idle" periods.
-    If no rows arrive, buffered data will not flush until either:
-    1. A new row arrives (triggering this timeout check), or
-    2. The source completes (triggering flush_remaining_aggregation_buffers)
-
-    Example: If timeout_seconds=5 and rows stop arriving at T=10, the batch
-    won't flush until either a new row arrives or the source ends. For
-    streaming sources that may never end, consider using count triggers or
-    implementing periodic polling at the source level.
+    Called BEFORE processing each row and by the orchestrator's idle source
+    polling path. Checking BEFORE buffering ensures timed-out batches don't
+    include the newly arriving row; polling while source iteration waits lets
+    timeout batches flush even when no additional row arrives.
 
     Routing uses result.sink_name (set by on_success in the processor) rather
     than a default_sink_name parameter.
@@ -354,3 +307,95 @@ def flush_remaining_aggregation_buffers(
         )
 
     return counters.to_flush_result()
+
+
+def run_end_of_input_barrier_flush(
+    *,
+    config: PipelineConfig,
+    processor: RowProcessorHandle,
+    ctx: PluginContext,
+    counters: ExecutionCounters,
+    pending_tokens: PendingTokenMap,
+    coalesce_executor: CoalesceExecutor | None,
+    coalesce_node_map: Mapping[CoalesceName, NodeID],
+) -> None:
+    """End-of-input barrier resolution per ADR-030 §D steps 2-3 (slice 3).
+
+    Step 2 — journal quiescence gate: the EOF flush may run ONLY when the
+    journal shows zero READY rows and zero LEASED rows (excluding
+    resume-recovered pending sinks, which legitimately stay LEASED until the
+    later sink write) — otherwise a still-in-flight work item could deposit a
+    barrier arrival AFTER the "final" batch flushed, silently splitting it.
+    At N=1 the predicate is trivially satisfied when the drain returns, so a
+    non-quiescent journal here is a scheduler bug and is refused loudly; the
+    multi-worker "leader waits, claiming what it can" loop lands with the
+    worker-pool slices (4/5).
+
+    Step 3 — loop ``{ journal-first intake -> trigger evaluation
+    (END_OF_SOURCE) -> flush }`` until no BLOCKED barrier holds remain: a
+    flush output can itself block at a downstream barrier (passthrough
+    members feeding a coalesce, coalesce merges feeding an aggregation), so
+    one pass is not exhaustive. Late-branch rejections are journal-released
+    INSIDE the loop by the intake's §E.3a arm. Terminates because step 2
+    guarantees nothing outside the loop can newly ``mark_blocked``.
+    """
+    if not config.aggregation_settings and coalesce_executor is None:
+        return
+
+    unquiesced = processor.count_unquiesced_scheduler_work()
+    if unquiesced:
+        summary = "; ".join(processor.summarize_unquiesced_scheduler_work()) or "<unknown>"
+        raise OrchestrationInvariantError(
+            f"End-of-input barrier flush refused for run '{processor.run_id}': {unquiesced} journal work "
+            "item(s) could still deposit new barrier arrivals (ADR-030 §D step 2 requires zero READY and "
+            "zero non-pending-sink LEASED rows before the final flush). At N=1 the drain returns quiesced; "
+            f"unquiesced work: {summary}."
+        )
+
+    for _ in range(MAX_END_OF_INPUT_FLUSH_ITERATIONS):
+        # §E.2 intake: adopt anything deposited by the final drains (and, on
+        # the takeover path, inherited intake-pending rows), release late
+        # arrivals (§E.3a), replay durable branch losses (§E.5) — all before
+        # the END_OF_SOURCE trigger evaluation below.
+        intake_results = processor.run_barrier_intake(ctx)
+        accumulate_row_outcomes(intake_results, counters, pending_tokens)
+
+        if config.aggregation_settings:
+            flush_result = flush_remaining_aggregation_buffers(
+                config=config,
+                processor=processor,
+                ctx=ctx,
+                pending_tokens=pending_tokens,
+            )
+            counters.accumulate_flush_result(flush_result)
+
+            # TERMINAL GUARANTEE: After end-of-source flush, all aggregation
+            # buffers must be empty. Any remaining tokens would be silently
+            # lost — never reaching a terminal state in the audit trail.
+            for agg_node_id_str in config.aggregation_settings:
+                remaining = processor.get_aggregation_buffer_count(NodeID(agg_node_id_str))
+                if remaining > 0:
+                    raise OrchestrationInvariantError(
+                        f"Aggregation buffer for node '{agg_node_id_str}' still has "
+                        f"{remaining} tokens after end-of-source flush. "
+                        f"These tokens would never reach a terminal state."
+                    )
+
+        if coalesce_executor is not None:
+            flush_coalesce_pending(
+                coalesce_executor=coalesce_executor,
+                coalesce_node_map=dict(coalesce_node_map),
+                processor=processor,
+                ctx=ctx,
+                counters=counters,
+                pending_tokens=pending_tokens,
+            )
+
+        if not processor.has_blocked_barrier_work():
+            return
+
+    raise OrchestrationInvariantError(
+        f"End-of-input barrier flush for run '{processor.run_id}' did not converge within "
+        f"{MAX_END_OF_INPUT_FLUSH_ITERATIONS} intake/flush rounds; durable BLOCKED barrier holds remain. "
+        "Possible barrier cycle or a flush that re-deposits its own inputs."
+    )

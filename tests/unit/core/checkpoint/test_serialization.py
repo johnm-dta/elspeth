@@ -229,6 +229,15 @@ def test_unknown_envelope_type_raises() -> None:
         checkpoint_loads(tampered)
 
 
+def test_reserved_envelope_with_extra_keys_raises() -> None:
+    """Reserved envelope keys with polluted shape must not restore as an ordinary dict."""
+    import json
+
+    tampered = json.dumps({"data": {"__elspeth_type__": "evil", "__elspeth_value__": "payload", "extra": 1}})
+    with pytest.raises(AuditIntegrityError, match="invalid envelope shape"):
+        checkpoint_loads(tampered)
+
+
 def test_known_envelope_wrong_value_type_datetime_raises() -> None:
     """datetime envelope with non-string value must crash — type corruption."""
     import json

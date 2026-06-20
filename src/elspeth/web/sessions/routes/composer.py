@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import TypedDict
+
+from elspeth.contracts.trust_boundary import trust_boundary
+
 from ._helpers import (
     _COMPOSER_REQUESTS_INFLIGHT,
     _DATA_ERROR_KEY,
@@ -152,6 +156,14 @@ _PROPOSAL_COMPOSER_CONTEXT_FIELDS: tuple[str, ...] = (
 )
 
 
+@trust_boundary(
+    tier=3,
+    source="persisted LLM tool-call arguments of a stored CompositionProposalRecord (Tier-3 on read-back)",
+    source_param="arguments",
+    suppresses=("R5",),
+    invariant="returns None on any absent/wrong-typed branch of arguments.source.inline_blob.content; never raises on arguments",
+    non_raising=True,
+)
 def _inline_blob_content_for_proposal(
     proposal: CompositionProposalRecord,
     arguments: Mapping[str, Any],
@@ -159,13 +171,13 @@ def _inline_blob_content_for_proposal(
     """Return inline blob content that accept replay would persist, if any."""
     if proposal.tool_name != "set_pipeline":
         return None
-    source = arguments.get("source")
+    source = arguments["source"] if "source" in arguments else None
     if not isinstance(source, Mapping):
         return None
-    inline_blob = source.get("inline_blob")
+    inline_blob = source["inline_blob"] if "inline_blob" in source else None
     if not isinstance(inline_blob, Mapping):
         return None
-    content = inline_blob.get("content")
+    content = inline_blob["content"] if "content" in inline_blob else None
     return content if isinstance(content, str) else None
 
 
@@ -224,6 +236,11 @@ def _ensure_inline_blob_proposal_context(
             f"({', '.join(missing)}). Ask ELSPETH to regenerate the proposal."
         ),
     )
+
+
+class StateYamlResponse(TypedDict, total=False):
+    yaml: str
+    source_blob_ids: dict[str, str]
 
 
 def register_composer_routes(router: APIRouter) -> None:
@@ -957,11 +974,9 @@ def register_composer_routes(router: APIRouter) -> None:
                     new_state_record = await service.save_composition_state(
                         session.id,
                         state_data,
-                        # Preserves pre-fix labelling — see the parallel
-                        # comment on the post-compose path 1 site above.
-                        # Symmetric mis-attribution; out of scope for the
-                        # f217c634aa handler-site fix.
-                        provenance="session_seed",
+                        # Successful recompose state advance after the LLM
+                        # composer returns a newer state version.
+                        provenance="post_compose",
                     )
                     state_response = _state_response(new_state_record, live_validation=validation)
                     post_compose_state_id = new_state_record.id
@@ -976,7 +991,7 @@ def register_composer_routes(router: APIRouter) -> None:
                     _transition_state = result.state
                     _transition_state_d = _transition_state.to_dict()
                     _transition_state_data = CompositionStateData(
-                        source=_transition_state_d["source"],
+                        sources=_transition_state_d["sources"],
                         nodes=_transition_state_d["nodes"],
                         edges=_transition_state_d["edges"],
                         outputs=_transition_state_d["outputs"],
@@ -988,12 +1003,11 @@ def register_composer_routes(router: APIRouter) -> None:
                     _transition_record = await service.save_composition_state(
                         session.id,
                         _transition_state_data,
-                        # Mirrors the paired session_seed-labelled site immediately
-                        # above (post-compose path 1, transition_consumed flip).
-                        # Same known mis-attribution as that paired site — see the
-                        # comment block at the earlier save call for the
-                        # elspeth-obs-f217c634aa relabelling history.
-                        provenance="session_seed",
+                        # Metadata-only post-compose advance: the LLM result
+                        # did not change graph version, but the guided-session
+                        # transition was consumed and must be audited separately
+                        # from session seeding.
+                        provenance="post_compose",
                     )
                     post_compose_state_id = _transition_record.id
                     state_response = _state_response(_transition_record)
@@ -1174,15 +1188,18 @@ def register_composer_routes(router: APIRouter) -> None:
         session_id: UUID,
         request: Request,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
-    ) -> dict[str, str]:
+    ) -> StateYamlResponse:
         """Get YAML representation of the current composition state (M1).
 
         Runs runtime preflight on the exact CompositionState reconstructed
         from the persisted record, then generates deterministic YAML via
-        generate_yaml() against that same snapshot. The two operations see
-        the same Python object — there is no re-fetch between preflight
-        and serialization, so a state that passes the gate is byte-
-        identical to the state that gets serialized.
+        generate_yaml() against that same snapshot. YAML export preflight
+        deliberately does not receive the scoped secret resolver: export
+        serializes secret_ref markers, and a rejected preflight response must
+        not expose resolved secret values through plugin validation prose.
+        The two operations see the same Python object — there is no re-fetch
+        between preflight and serialization, so a state that passes the gate
+        is byte-identical to the state that gets serialized.
         """
         session = await _verify_session_ownership(session_id, user, request)
         service: SessionServiceProtocol = request.app.state.session_service
@@ -1194,8 +1211,8 @@ def register_composer_routes(router: APIRouter) -> None:
             runtime_validation = await _runtime_preflight_for_state(
                 state,
                 settings=request.app.state.settings,
-                secret_service=request.app.state.scoped_secret_resolver,
-                user_id=str(user.user_id),
+                secret_service=None,
+                user_id=None,
             )
         except (
             TimeoutError,
@@ -1244,8 +1261,6 @@ def register_composer_routes(router: APIRouter) -> None:
         )
         if not runtime_validation.is_valid:
             detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
-            if runtime_validation.errors:
-                detail = f"{detail} First error: {runtime_validation.errors[0].message}"
             raise HTTPException(status_code=409, detail=detail)
         yaml_str = generate_yaml(state)
 
@@ -1287,9 +1302,12 @@ def register_composer_routes(router: APIRouter) -> None:
             completion_verb="export_yaml",
         )
 
-        response = {"yaml": yaml_str}
-        if state.source is not None and "blob_ref" in state.source.options:
-            response["source_blob_id"] = str(state.source.options["blob_ref"])
+        response: StateYamlResponse = {"yaml": yaml_str}
+        source_blob_ids = {
+            source_name: str(source.options["blob_ref"]) for source_name, source in state.sources.items() if "blob_ref" in source.options
+        }
+        if source_blob_ids:
+            response["source_blob_ids"] = source_blob_ids
         return response
 
     def _build_get_guided_turn(
@@ -1540,7 +1558,7 @@ def register_composer_routes(router: APIRouter) -> None:
 
                     state_d = new_state.to_dict()
                     state_data = CompositionStateData(
-                        source=state_d["source"],
+                        sources=state_d["sources"],
                         nodes=state_d["nodes"],
                         edges=state_d["edges"],
                         outputs=state_d["outputs"],
@@ -1603,7 +1621,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         repair_meta = {**existing_meta_repair, "guided_session": repaired_guided.to_dict()}
                         repaired_state_d = repaired_state.to_dict()
                         repair_data = CompositionStateData(
-                            source=repaired_state_d["source"],
+                            sources=repaired_state_d["sources"],
                             nodes=repaired_state_d["nodes"],
                             edges=repaired_state_d["edges"],
                             outputs=repaired_state_d["outputs"],
@@ -1848,7 +1866,7 @@ def register_composer_routes(router: APIRouter) -> None:
             new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
             state_d = new_state.to_dict()
             state_data = CompositionStateData(
-                source=state_d["source"],
+                sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],
@@ -2050,7 +2068,7 @@ def register_composer_routes(router: APIRouter) -> None:
 
                     state_d = new_state.to_dict()
                     state_data = CompositionStateData(
-                        source=state_d["source"],
+                        sources=state_d["sources"],
                         nodes=state_d["nodes"],
                         edges=state_d["edges"],
                         outputs=state_d["outputs"],
@@ -2371,7 +2389,7 @@ def register_composer_routes(router: APIRouter) -> None:
 
                 state_d = new_state.to_dict()
                 state_data = CompositionStateData(
-                    source=state_d["source"],
+                    sources=state_d["sources"],
                     nodes=state_d["nodes"],
                     edges=state_d["edges"],
                     outputs=state_d["outputs"],
@@ -2683,6 +2701,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         plugin_hint=plugin_hint,
                         temperature=settings.composer_temperature,
                         seed=settings.composer_seed,
+                        recorder=recorder,
                     )
                     if source_resolution is not None:
                         finished_at = datetime.now(UTC)
@@ -2723,7 +2742,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         if not handler_result.tool_result.success:
                             raise HTTPException(
                                 status_code=400,
-                                detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+                                detail="Step 1 source commit failed",
                             )
 
                         turn_response: TurnResponse = {
@@ -2836,7 +2855,7 @@ def register_composer_routes(router: APIRouter) -> None:
 
                         state_d = new_state.to_dict()
                         state_data = CompositionStateData(
-                            source=state_d["source"],
+                            sources=state_d["sources"],
                             nodes=state_d["nodes"],
                             edges=state_d["edges"],
                             outputs=state_d["outputs"],
@@ -2909,6 +2928,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         user_message=body.message,
                         temperature=settings.composer_temperature,
                         seed=settings.composer_seed,
+                        recorder=recorder,
                     )
                 except InvariantError as exc:
                     finished_at = datetime.now(UTC)
@@ -3012,7 +3032,7 @@ def register_composer_routes(router: APIRouter) -> None:
 
                 state_d = new_state.to_dict()
                 state_data = CompositionStateData(
-                    source=state_d["source"],
+                    sources=state_d["sources"],
                     nodes=state_d["nodes"],
                     edges=state_d["edges"],
                     outputs=state_d["outputs"],
@@ -3084,6 +3104,13 @@ def register_composer_routes(router: APIRouter) -> None:
                         state_record_out.id if state_record_out is not None else None,
                         plugin_crash_pending=False,
                     )
+                    await _persist_llm_calls(
+                        service,
+                        session_id,
+                        recorder.llm_calls,
+                        state_record_out.id if state_record_out is not None else None,
+                        plugin_crash_pending=False,
+                    )
                     await _persist_chat_turns(
                         service,
                         session_id,
@@ -3117,6 +3144,25 @@ def register_composer_routes(router: APIRouter) -> None:
                                 user_id=user.user_id,
                                 site="post_guided_chat",
                                 channel="tool_invocations",
+                                exc_class=type(persist_exc).__name__,
+                                frames=_safe_frame_strings(persist_exc),
+                            )
+                    try:
+                        await _persist_llm_calls(
+                            service,
+                            session_id,
+                            recorder.llm_calls,
+                            state_record_out.id if state_record_out is not None else None,
+                            plugin_crash_pending=True,
+                        )
+                    except Exception as persist_exc:
+                        with contextlib.suppress(Exception):
+                            slog.error(
+                                "guided.audit_persist_failed_during_exception_handling",
+                                session_id=str(session_id),
+                                user_id=user.user_id,
+                                site="post_guided_chat",
+                                channel="llm_calls",
                                 exc_class=type(persist_exc).__name__,
                                 frames=_safe_frame_strings(persist_exc),
                             )

@@ -1104,7 +1104,8 @@ def _source_field_reaches_connection_without_type_change(
     proof step abstains instead of emitting a false positive.
     """
     resolver = ProducerResolver.build(
-        source=state.source,
+        source=None,
+        sources=state.sources,
         nodes=state.nodes,
         sink_names=frozenset(output.name for output in state.outputs),
     )
@@ -1265,7 +1266,16 @@ def compute_proof_diagnostics(
     """
     diagnostics: list[Mapping[str, Any]] = []
 
-    source = state.source
+    source = state.sources["source"] if "source" in state.sources else None
+    blob_id: Any | None = None
+    if source is not None and "blob_ref" in source.options:
+        blob_id = source.options["blob_ref"]
+    if blob_id is None:
+        for candidate_source in state.sources.values():
+            if "blob_ref" in candidate_source.options:
+                source = candidate_source
+                blob_id = candidate_source.options["blob_ref"]
+                break
     if source is None:
         return diagnostics
 
@@ -1586,6 +1596,55 @@ def compute_proof_diagnostics(
             }
         )
 
+    inspected_blob_id = str(blob_id)
+    node_plugins = {(n.plugin or "").lower() for n in state.nodes}
+    if "web_scrape" not in node_plugins and session_engine is not None and session_id is not None:
+        for source_name, candidate_source in state.sources.items():
+            if "blob_ref" not in candidate_source.options:
+                continue
+            candidate_blob_id = str(candidate_source.options["blob_ref"])
+            if candidate_blob_id == inspected_blob_id:
+                continue
+            if candidate_source.plugin != "text":
+                continue
+            candidate_blob = _sync_get_blob(session_engine, candidate_blob_id, session_id)
+            if candidate_blob is None or candidate_blob["status"] != "ready":
+                continue
+            candidate_storage_path = Path(candidate_blob["storage_path"])
+            if not candidate_storage_path.exists():
+                continue
+            candidate_content = candidate_storage_path.read_bytes()
+            _verify_blob_content_integrity(candidate_blob, candidate_content)
+            candidate_facts = inspect_blob_content(
+                content=candidate_content,
+                filename=candidate_blob["filename"],
+                mime_type=candidate_blob["mime_type"],
+                content_hash=candidate_blob["content_hash"],
+            )
+            if candidate_facts.source_kind != "text" or not candidate_facts.url_candidates:
+                continue
+            diagnostics.append(
+                _blocking_diagnostic(
+                    code="text_source_url_without_web_scrape",
+                    message=(
+                        f"Source blob contains URL(s) {list(candidate_facts.url_candidates)} but no "
+                        "web_scrape transform is wired downstream. The URL string itself will "
+                        "flow to sinks, not the URL's content."
+                    ),
+                    suggested_repair=(
+                        "upsert_node({node_type: 'transform', plugin: 'web_scrape', "
+                        "input: <source on_success>, options: {url_field: '<column>'}}) and route "
+                        "the source on_success to it."
+                    ),
+                    evidence_locator={
+                        "source": "blob",
+                        "source_name": source_name,
+                        "blob_id": candidate_blob_id,
+                        "url_candidates": list(candidate_facts.url_candidates),
+                    },
+                )
+            )
+
     return diagnostics
 
 
@@ -1634,19 +1693,19 @@ def _execute_preview_pipeline(
         "authoring_validation": authoring_payload,
         "runtime_preflight": runtime_result.model_dump() if runtime_result is not None else None,
         "proof_diagnostics": proof_diagnostics,
-        "source": None,
+        "sources": {
+            name: {
+                "plugin": source.plugin,
+                "on_success": source.on_success,
+                "has_schema_config": _source_options_have_schema(source.options),
+            }
+            for name, source in state.sources.items()
+        },
         "node_count": len(state.nodes),
         "output_count": len(state.outputs),
         "nodes": [{"id": n.id, "node_type": n.node_type, "plugin": n.plugin} for n in state.nodes],
         "outputs": [{"name": o.name, "plugin": o.plugin} for o in state.outputs],
     }
-
-    if state.source is not None:
-        summary["source"] = {
-            "plugin": state.source.plugin,
-            "on_success": state.source.on_success,
-            "has_schema_config": _source_options_have_schema(state.source.options),
-        }
 
     return ToolResult(
         success=True,

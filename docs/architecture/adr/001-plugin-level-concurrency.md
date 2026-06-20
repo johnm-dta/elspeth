@@ -1,9 +1,50 @@
 # ADR-001: Plugin-Level Concurrency (Push Complexity to the Edges)
 
 **Date:** 2026-01-22
-**Status:** Accepted
+**Status:** Accepted (amended 2026-05-23 by ADR-026 along the worker-execution axis; see *Amendments* below)
 **Deciders:** Architecture team, Core maintainers
 **Tags:** concurrency, architecture, orchestrator, plugins, audit-integrity
+
+## Amendments
+
+### 2026-05-23 — ADR-026 amends along the worker-execution axis
+
+ADR-001's original decision spans **two distinct concurrency axes**, and
+subsequent ADRs amend them independently:
+
+1. **Source-iteration axis** — within a run, how many sources does the
+   orchestrator pull from in parallel? Original ADR-001 answer (implicit):
+   one-at-a-time, sequential. Preserved by ADR-025 (multi-source
+   ingestion); the plural source surface does not commit to concurrent
+   iteration. Concurrent multi-source iteration would require a separate
+   future ADR and tracker item.
+
+2. **Worker-execution axis** — within a run, how many workers execute
+   token continuations concurrently? Original ADR-001 answer (implicit):
+   one worker per process. **Amended by ADR-026** (durable token
+   scheduler): RC6 ships concurrent token execution across N > 1
+   workers. Determinism along the audit-trail axis is preserved by
+   different mechanisms — the durable scheduler row carries
+   `ingest_sequence, step_index, created_at` as the deterministic claim
+   ordering, and every state-changing transition uses compare-and-set
+   so that two workers contending for the same token produce one
+   winner and one no-op rather than a race.
+
+The "Orchestrator is single-threaded and deterministic" key principle
+below remains accurate at the per-worker level: each worker processes
+its claimed tokens sequentially and writes audit events in strict order
+under its own lease. What changed is that a run may now have more than
+one such worker, with cross-worker ordering supplied by the scheduler's
+deterministic claim order rather than by serial in-process iteration.
+
+The "Audit trail ordering becomes non-deterministic" risk recorded under
+*Alternative 1* is mitigated for the worker-execution axis by the
+scheduler's CAS discipline and `(token_id, node_id, attempt)` uniqueness
+constraint, not by single-worker serialisation. Replay reproducibility
+is now established via deterministic claim order over the durable
+scheduler row, not via thread-count.
+
+
 
 ## Context
 
@@ -306,3 +347,6 @@ class TransformActor:
 **Revision History:**
 
 - 2026-01-22: Initial ADR (accepted)
+- 2026-05-23: Amended by ADR-026 (durable token scheduler) along the
+  worker-execution axis. ADR-025 (multi-source ingestion) preserves the
+  source-iteration axis. See *Amendments* section above.

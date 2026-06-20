@@ -496,23 +496,21 @@ def _state_response(
     Historical loads pass None, producing null for these fields.
     """
     # B4: Redact internal storage paths from blob-backed sources.
-    # ``redact_source_storage_path`` guarantees the ``"source"`` key is
-    # preserved in the returned mapping (either by returning the input dict
-    # unchanged when no blob_ref is present, or by building a shallow copy
-    # with ``redacted["source"] = redacted_source``). Index directly so any
+    # ``redact_source_storage_path`` guarantees the ``"sources"`` key is
+    # preserved in the returned mapping. Index directly so any
     # future contract violation surfaces as ``KeyError`` rather than being
     # masked by a silent fallback — silent-failure-hunter I6 review finding,
     # 2026-05-24.
-    source_data = deep_thaw(state.source)
-    if source_data is not None:
-        redacted = redact_source_storage_path({"source": source_data})
-        source_data = redacted["source"]
+    sources_data = deep_thaw(state.sources)
+    if sources_data is not None:
+        redacted = redact_source_storage_path({"sources": sources_data})
+        sources_data = redacted["sources"]
 
     return CompositionStateResponse(
         id=str(state.id),
         session_id=str(state.session_id),
         version=state.version,
-        source=source_data,
+        sources=sources_data,
         nodes=deep_thaw(state.nodes),
         edges=deep_thaw(state.edges),
         outputs=deep_thaw(state.outputs),
@@ -1597,7 +1595,7 @@ async def _state_data_from_composer_state(
     persisted_composer_meta = merge_implicit_decisions_meta(composer_meta, state)
     return (
         CompositionStateData(
-            source=state_d["source"],
+            sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],
@@ -2413,6 +2411,22 @@ async def _inspect_latest_ready_session_blob(
     return None
 
 
+def _prefilled_recipe_slot_mismatches(
+    *,
+    offered_slots: Mapping[str, Any],
+    submitted_slots: Mapping[str, Any],
+) -> tuple[str, ...]:
+    """Return server-prefilled recipe slots changed or omitted by the client."""
+    mismatches: list[str] = []
+    for slot_name, offered_value in offered_slots.items():
+        if slot_name not in submitted_slots:
+            mismatches.append(slot_name)
+            continue
+        if stable_hash(deep_thaw(submitted_slots[slot_name])) != stable_hash(deep_thaw(offered_value)):
+            mismatches.append(slot_name)
+    return tuple(sorted(mismatches))
+
+
 def _reject_hidden_field_submissions(
     knobs: KnobSchema,
     submitted_options: Mapping[str, Any],
@@ -3193,9 +3207,10 @@ async def _dispatch_guided_respond(
             # request).  A mismatched recipe_name means the client is trying to accept
             # a different recipe than the one offered — also rejected with 400.
             #
-            # Slots are operator-editable by design (the operator fills unsatisfied
-            # required slots and may rubber-stamp / override pre-fills); the binding
-            # check does NOT compare slot values, only recipe_name.
+            # The offered prefilled slots are server-authored and read-only in the UI.
+            # Compare their stable hashes against the client-submitted subset so a
+            # crafted API client cannot silently rewrite inspected facts.  Unsatisfied
+            # slots remain operator-editable and are intentionally not bound here.
             offered = guided.step_2_5_recipe_offer
             if offered is None:
                 raise HTTPException(
@@ -3213,6 +3228,19 @@ async def _dispatch_guided_respond(
                         f"recipe_offer ['accept'] recipe_name mismatch: "
                         f"client sent {recipe_name!r} but the server offered {offered.recipe_name!r}. "
                         "Accept must reference the recipe that was offered."
+                    ),
+                )
+            prefilled_mismatches = _prefilled_recipe_slot_mismatches(
+                offered_slots=offered.slots,
+                submitted_slots=slots_raw,
+            )
+            if prefilled_mismatches:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "recipe_offer ['accept'] prefilled slot mismatch: "
+                        f"client changed or omitted server-prefilled slot(s) {list(prefilled_mismatches)}. "
+                        "Prefilled recipe slots are read-only; accept must echo the offered values."
                     ),
                 )
 

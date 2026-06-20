@@ -11,8 +11,9 @@ from sqlalchemy.exc import DatabaseError, OperationalError
 
 from elspeth.contracts import NodeState, NodeStateCompleted, NodeStateFailed, NodeStateOpen, NodeStatePending, NodeType
 from elspeth.core.landscape import LandscapeDB
+from elspeth.core.landscape import explain as explain_lineage
 from elspeth.core.landscape.factory import RecorderFactory
-from elspeth.tui.types import LineageData, NodeStateInfo
+from elspeth.tui.types import LineageData, NodeStateInfo, TokenDisplayInfo
 from elspeth.tui.widgets.lineage_tree import LineageTree
 from elspeth.tui.widgets.node_detail import NodeDetailPanel
 
@@ -101,6 +102,10 @@ class ExplainScreen:
         self,
         db: LandscapeDB | None = None,
         run_id: str | None = None,
+        *,
+        token_id: str | None = None,
+        row_id: str | None = None,
+        sink: str | None = None,
     ) -> None:
         """Initialize explain screen.
 
@@ -113,6 +118,9 @@ class ExplainScreen:
         """
         # Selected node is tracked separately - it's a UI concern, not data state
         self._selected_node_id: str | None = None
+        self._token_id = token_id
+        self._row_id = row_id
+        self._sink = sink
 
         # Detail panel always exists, displays None state when nothing selected
         self._detail_panel = NodeDetailPanel(None)
@@ -150,6 +158,32 @@ class ExplainScreen:
         try:
             factory = RecorderFactory(db)
             nodes = factory.data_flow.get_nodes(run_id)
+            focused_tokens: list[TokenDisplayInfo] = []
+            if self._token_id is not None or self._row_id is not None:
+                try:
+                    lineage_result = explain_lineage(
+                        factory.query,
+                        factory.data_flow,
+                        run_id=run_id,
+                        token_id=self._token_id,
+                        row_id=self._row_id,
+                        sink=self._sink,
+                    )
+                except ValueError as e:
+                    return LoadingFailedState(db=db, run_id=run_id, error=str(e))
+                if lineage_result is None:
+                    return LoadingFailedState(
+                        db=db,
+                        run_id=run_id,
+                        error="Token or row not found, or no terminal tokens exist yet",
+                    )
+                focused_tokens.append(
+                    TokenDisplayInfo(
+                        token_id=lineage_result.token.token_id,
+                        row_id=lineage_result.token.row_id,
+                        path=[state.node_id for state in lineage_result.node_states],
+                    )
+                )
 
             # Organize nodes by type
             source_nodes = [n for n in nodes if n.node_type == NodeType.SOURCE]
@@ -167,7 +201,7 @@ class ExplainScreen:
                 },
                 "transforms": [{"name": n.plugin_name, "node_id": n.node_id, "node_type": n.node_type.value} for n in transform_nodes],
                 "sinks": [{"name": n.plugin_name, "node_id": n.node_id, "node_type": n.node_type.value} for n in sink_nodes],
-                "tokens": [],  # Tokens loaded separately when needed
+                "tokens": focused_tokens,
             }
             tree = LineageTree(lineage_data)
             return LoadedState(
@@ -345,7 +379,15 @@ class ExplainScreen:
 
         return "\n".join(lines)
 
-    def load(self, db: LandscapeDB, run_id: str) -> None:
+    def load(
+        self,
+        db: LandscapeDB,
+        run_id: str,
+        *,
+        token_id: str | None = None,
+        row_id: str | None = None,
+        sink: str | None = None,
+    ) -> None:
         """Load pipeline data from database.
 
         Transitions: UninitializedState → LoadedState | LoadingFailedState
@@ -365,6 +407,9 @@ class ExplainScreen:
                 allowed_states=["UninitializedState"],
             )
 
+        self._token_id = token_id
+        self._row_id = row_id
+        self._sink = sink
         self._state = self._load_pipeline_structure(db, run_id)
 
     def retry(self) -> None:

@@ -29,6 +29,7 @@ from elspeth.core.landscape.reproducibility import (
 from elspeth.core.landscape.schema import (
     calls_table,
     node_states_table,
+    operations_table,
     rows_table,
     runs_table,
     tokens_table,
@@ -210,6 +211,8 @@ def _create_nondeterministic_call(
                 run_id="run-1",
                 source_node_id=node_id,
                 row_index=0,
+                source_row_index=0,
+                ingest_sequence=0,
                 source_data_hash="src_hash",
                 created_at=datetime.now(UTC),
             )
@@ -252,6 +255,55 @@ def _create_nondeterministic_call(
         )
 
 
+def _create_nondeterministic_operation_call(
+    db: LandscapeDB,
+    factory: RecorderFactory,
+    *,
+    determinism: Determinism = Determinism.IO_READ,
+    response_ref: str | None = None,
+    response_hash: str | None = "resp_hash",
+    node_id: str = "operation-node",
+    operation_id: str = "op-1",
+    call_id: str = "operation-call-1",
+) -> None:
+    """Create a source/sink operation call chain for purge downgrade testing."""
+    factory.data_flow.register_node(
+        run_id="run-1",
+        plugin_name="source",
+        node_type=NodeType.SOURCE,
+        plugin_version="1.0",
+        config={},
+        node_id=node_id,
+        schema_config=_DYNAMIC_SCHEMA,
+        determinism=determinism,
+    )
+    with db.connection() as conn:
+        conn.execute(
+            operations_table.insert().values(
+                operation_id=operation_id,
+                run_id="run-1",
+                node_id=node_id,
+                operation_type="source_load",
+                started_at=datetime.now(UTC),
+                status="completed",
+            )
+        )
+        conn.execute(
+            calls_table.insert().values(
+                call_id=call_id,
+                state_id=None,
+                operation_id=operation_id,
+                call_index=0,
+                call_type=CallType.HTTP,
+                status=CallStatus.SUCCESS,
+                request_hash="req_hash",
+                response_hash=response_hash,
+                response_ref=response_ref,
+                created_at=datetime.now(UTC),
+            )
+        )
+
+
 class TestUpdateGradeAfterPurge:
     """Tests for update_grade_after_purge — degrades REPLAY → ATTRIBUTABLE."""
 
@@ -263,6 +315,16 @@ class TestUpdateGradeAfterPurge:
         _create_nondeterministic_call(db, factory, response_ref=None, response_hash="resp_hash")
         _set_grade(db, "run-1", ReproducibilityGrade.REPLAY_REPRODUCIBLE)
         update_grade_after_purge(db, "run-1")
+        run = factory.run_lifecycle.get_run("run-1")
+        assert run is not None
+        assert run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY
+
+    def test_replay_degrades_when_nondeterministic_operation_response_ref_deleted(self) -> None:
+        """Downgrade when a source/sink operation call response payload was purged."""
+        db, factory = _setup()
+        _create_nondeterministic_operation_call(db, factory, response_ref="ref://operation-response", response_hash="resp_hash")
+        _set_grade(db, "run-1", ReproducibilityGrade.REPLAY_REPRODUCIBLE)
+        update_grade_after_purge(db, "run-1", deleted_refs=["ref://operation-response"])
         run = factory.run_lifecycle.get_run("run-1")
         assert run is not None
         assert run.reproducibility_grade == ReproducibilityGrade.ATTRIBUTABLE_ONLY

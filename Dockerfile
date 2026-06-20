@@ -14,7 +14,23 @@
 #   docker run -p 8451:8451 -e ELSPETH_WEB__SECRET_KEY=<key> elspeth web     # Start web server
 
 # =============================================================================
-# Stage 1: Builder
+# Stage 1: Frontend Builder
+# =============================================================================
+FROM node:22-bookworm-slim@sha256:e21fc383b50d5347dc7a9f1cae45b8f4e2f0d39f7ade28e4eef7d2934522b752 AS frontend-builder
+
+WORKDIR /frontend
+
+# Install frontend dependencies from the lockfile first (layer caching)
+COPY src/elspeth/web/frontend/package.json src/elspeth/web/frontend/package-lock.json ./
+RUN npm ci
+
+# Build the React SPA. The resulting dist/ is ignored by git and .dockerignore,
+# so the release image must build it inside Docker.
+COPY src/elspeth/web/frontend/ ./
+RUN npm run build
+
+# =============================================================================
+# Stage 2: Python Builder
 # =============================================================================
 FROM python:3.13-slim@sha256:b04b5d7233d2ad9c379e22ea8927cd1378cd15c60d4ef876c065b25ea8fb3bf3 AS builder
 
@@ -27,6 +43,7 @@ WORKDIR /build
 
 # Copy only dependency specification first (layer caching)
 COPY pyproject.toml uv.lock ./
+COPY elspeth-lints/ ./elspeth-lints/
 
 # Create virtual environment and sync locked dependencies
 # We install the "all" extra to bundle all plugins (LLM, Azure)
@@ -42,8 +59,15 @@ COPY README.md ./
 RUN . /opt/venv/bin/activate && \
     uv sync --frozen --extra all --no-editable --active
 
+# Copy built SPA assets into the installed package, where app.py looks for
+# elspeth/web/frontend/dist at runtime.
+COPY --from=frontend-builder /frontend/dist /tmp/frontend-dist/
+RUN . /opt/venv/bin/activate && \
+    python -c 'from pathlib import Path; import shutil; import elspeth.web; target = Path(elspeth.web.__file__).parent / "frontend" / "dist"; shutil.rmtree(target, ignore_errors=True); target.parent.mkdir(parents=True, exist_ok=True); shutil.copytree("/tmp/frontend-dist", target)' && \
+    rm -rf /tmp/frontend-dist
+
 # =============================================================================
-# Stage 2: Runtime
+# Stage 3: Runtime
 # =============================================================================
 FROM python:3.13-slim@sha256:b04b5d7233d2ad9c379e22ea8927cd1378cd15c60d4ef876c065b25ea8fb3bf3 AS runtime
 

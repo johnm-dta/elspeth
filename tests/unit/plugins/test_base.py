@@ -189,7 +189,7 @@ class TestBaseSink:
                 return SinkWriteResult(
                     artifact=ArtifactDescriptor.for_file(
                         path="/tmp/memory",
-                        content_hash="test",
+                        content_hash="a" * 64,
                         size_bytes=len(str(rows)),
                     )
                 )
@@ -248,7 +248,7 @@ class TestBaseSink:
                 return SinkWriteResult(
                     artifact=ArtifactDescriptor.for_file(
                         path="/tmp/batch",
-                        content_hash="hash123",
+                        content_hash="abc123",
                         size_bytes=100,
                     )
                 )
@@ -267,7 +267,7 @@ class TestBaseSink:
 
         assert len(sink.rows) == 3
         assert isinstance(result.artifact, ArtifactDescriptor)
-        assert result.artifact.content_hash == "hash123"
+        assert result.artifact.content_hash == "abc123"
 
     def test_base_sink_has_io_write_determinism(self) -> None:
         """BaseSink should have IO_WRITE determinism by default."""
@@ -300,8 +300,8 @@ class TestBaseSource:
                 self._data = config["data"]
 
             def load(self, ctx: SourceContext) -> Iterator[SourceRow]:
-                for _row in self._data:
-                    yield SourceRow.valid(_row, contract=make_contract(_row))
+                for source_row_index, _row in enumerate(self._data):
+                    yield SourceRow.valid(_row, contract=make_contract(_row), source_row_index=source_row_index)
 
             def close(self) -> None:
                 pass

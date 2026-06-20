@@ -4,6 +4,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GraphView } from "./GraphView";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useExecutionStore } from "@/stores/executionStore";
 import type { CompositionProposal, CompositionState, NodeSpec, EdgeSpec } from "@/types/index";
 
 // Mock @xyflow/react — jsdom cannot do DOM measurements required by React Flow.
@@ -134,7 +135,7 @@ function makeState(overrides: Partial<CompositionState> = {}): CompositionState 
   return {
     id: "test-session",
     version: 1,
-    source: null,
+    sources: {},
     nodes: [],
     edges: [],
     outputs: [],
@@ -170,6 +171,7 @@ function makeProposal(
 describe("GraphView", () => {
   beforeEach(() => {
     useSessionStore.setState({ compositionState: null, compositionProposals: [] });
+    useExecutionStore.setState({ validationResult: null } as never);
     document.documentElement.removeAttribute("style");
   });
 
@@ -276,8 +278,8 @@ describe("GraphView", () => {
     expect(screen.getByText("error")).toBeInTheDocument();
   });
 
-  it("shows minimap for >5 nodes", () => {
-    const nodes = Array.from({ length: 6 }, (_, i) =>
+  it("shows minimap for >8 nodes", () => {
+    const nodes = Array.from({ length: 9 }, (_, i) =>
       makeNode({ id: `n${i}`, node_type: "transform", plugin: "p" }),
     );
     useSessionStore.setState({
@@ -287,8 +289,8 @@ describe("GraphView", () => {
     expect(screen.getByTestId("minimap")).toBeInTheDocument();
   });
 
-  it("hides minimap for <=5 nodes", () => {
-    const nodes = Array.from({ length: 3 }, (_, i) =>
+  it("hides minimap for 6-node graphs that still fit the main viewport", () => {
+    const nodes = Array.from({ length: 6 }, (_, i) =>
       makeNode({ id: `n${i}`, node_type: "transform", plugin: "p" }),
     );
     useSessionStore.setState({
@@ -305,15 +307,17 @@ describe("GraphView", () => {
     document.documentElement.style.setProperty("--color-border-strong", "rgba(1, 2, 3, 0.4)");
     document.documentElement.style.setProperty("--color-text-muted", "#7a9a9a");
 
-    const nodes = Array.from({ length: 5 }, (_, i) =>
+    const nodes = Array.from({ length: 6 }, (_, i) =>
       makeNode({ id: `n${i}`, node_type: "transform", plugin: "p" }),
     );
     useSessionStore.setState({
       compositionState: makeState({
-        source: {
-          plugin: "csv",
-          options: {},
-          on_success: "gate_in",
+        sources: {
+          source: {
+            plugin: "csv",
+            options: {},
+            on_success: "gate_in",
+          },
         },
         nodes: [
           {
@@ -349,6 +353,51 @@ describe("GraphView", () => {
     expect(minimap).toHaveAttribute("data-stroke-color", "rgba(1, 2, 3, 0.4)");
   });
 
+  it("renders validation status markers with accessible names and non-colour glyphs", () => {
+    useSessionStore.setState({
+      compositionState: makeState({
+        nodes: [
+          makeNode({ id: "needs_fix", node_type: "transform", plugin: "p" }),
+          makeNode({ id: "needs_review", node_type: "transform", plugin: "p" }),
+        ],
+      }),
+    });
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        checks: [],
+        errors: [
+          {
+            component_id: "needs_fix",
+            component_type: "transform",
+            message: "Missing source plugin",
+            suggestion: null,
+          },
+        ],
+        warnings: [
+          {
+            component_id: "needs_review",
+            component_type: "transform",
+            message: "Review optional mapping",
+            suggestion: null,
+          },
+        ],
+      },
+    } as never);
+
+    render(<GraphView />);
+
+    const errorMarker = screen.getByRole("img", {
+      name: /validation: error/i,
+    });
+    const warningMarker = screen.getByRole("img", {
+      name: /validation: warning/i,
+    });
+
+    expect(errorMarker).toHaveTextContent(/\S/);
+    expect(warningMarker).toHaveTextContent(/\S/);
+  });
+
   it("bridges React Flow CSS variables to the Elspeth theme tokens", () => {
     const appCss = readFileSync("src/components/inspector/inspector.css", "utf8");
 
@@ -372,10 +421,12 @@ describe("GraphView", () => {
       // name that must match node.input for data to flow.
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "text",
-            options: {},
-            on_success: "transform_in",  // Connection point name
+          sources: {
+            source: {
+              plugin: "text",
+              options: {},
+              on_success: "transform_in",  // Connection point name
+            },
           },
           nodes: [
             makeNode({
@@ -396,10 +447,12 @@ describe("GraphView", () => {
     it("infers transform→transform edge when inputs match on_success values", () => {
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "step1_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "step1_in",
+            },
           },
           nodes: [
             makeNode({
@@ -427,10 +480,12 @@ describe("GraphView", () => {
       // Error handler receives rows via on_error connection point matching
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "process_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "process_in",
+            },
           },
           nodes: [
             makeNode({
@@ -463,10 +518,12 @@ describe("GraphView", () => {
       // Gate routes to different nodes via connection point matching
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "gate_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "gate_in",
+            },
           },
           nodes: [
             {
@@ -511,10 +568,12 @@ describe("GraphView", () => {
       // When some edges are explicit and others need inference
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "step1_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "step1_in",
+            },
           },
           nodes: [
             makeNode({
@@ -544,10 +603,12 @@ describe("GraphView", () => {
       // When on_success points directly to a sink name (not a connection point)
       useSessionStore.setState({
         compositionState: makeState({
-          source: {
-            plugin: "csv",
-            options: {},
-            on_success: "process_in",
+          sources: {
+            source: {
+              plugin: "csv",
+              options: {},
+              on_success: "process_in",
+            },
           },
           nodes: [
             makeNode({

@@ -51,6 +51,7 @@ We use a modified version of Michael Nygard's ADR template. See `000-template.md
 | [027](027-composer-operator-set-sampling.md) | Composer Sampling Is Operator-Set Configuration | 2026-06-04 | **Accepted** |
 | [028](028-queue-vs-coalesce-not-duplicates.md) | QUEUE and COALESCE Are Not Duplicates — Leave Them Separate | 2026-06-11 | **Accepted** |
 | [029](029-journal-is-barrier-buffer-truth.md) | Scheduler Journal Is the Single Source of Barrier-Buffer Truth | 2026-06-11 | **Accepted** |
+| [030](030-multi-worker-deployment-shape.md) | Multi-Worker Deployment Shape — One-Host WAL Pack | 2026-06-11 | **Accepted** |
 
 ## Status Definitions
 

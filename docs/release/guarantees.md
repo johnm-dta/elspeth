@@ -252,7 +252,7 @@ ELSPETH prioritizes correctness and auditability over throughput. It is not desi
 - Sub-millisecond latency (audit recording has overhead)
 - Concurrent processing (single-threaded in RC-3)
 
-> **§7.1 amendment (RC-6, 10 June 2026):** "Single-threaded in RC-3" remains accurate as a description of the RC-3 engine. As of RC-6 the engine processes rows through a durable, lease-based token work queue: token lifecycles overlap — a later row's token can advance while an earlier row's token is durably parked at an aggregation barrier or awaiting a sink write — but compute remains one token at a time in a single worker process. There is no thread- or process-level parallelism, multi-worker operation is not enabled, and cross-source ingest is sequential in configuration declaration order by design. The non-guarantee stands: ELSPETH still does not promise concurrent processing as a performance property. What the scheduler does guarantee — deterministic ordering, durable work state, and crash recovery — is documented in §15.
+> **§7.1 amendment (RC-6, 10 June 2026):** "Single-threaded in RC-3" remains accurate as a description of the RC-3 engine. As of RC-6 the engine processes rows through a durable, lease-based token work queue: token lifecycles overlap — a later row's token can advance while an earlier row's token is durably parked at an aggregation barrier or awaiting a sink write — but each worker computes one token at a time. As of 0.6.0 a run may be processed by a single leader plus claim-only follower workers joined via `elspeth join <run_id>` (ADR-030), coordinated through lease/CAS-guarded durable work state on a shared WAL-mode landscape database on one host; there is no shared-memory threading within a worker, and cross-source ingest is sequential in configuration declaration order by design. The non-guarantee stands: ELSPETH still does not promise concurrent processing as a performance property. What the scheduler does guarantee — deterministic ordering, durable work state, and crash recovery — is documented in §15.
 
 ### 7.2 Access Control — AMENDED in RC-5
 
@@ -303,7 +303,7 @@ This contract is versioned with the software.
 
 | Version | Date | Changes |
 |---------|------|---------|
-| RC-6 (§15 addition) | June 2026 | §15 Multi-source execution and token scheduling guarantees. §7.1 amended — "single-threaded in RC-3" scoped to RC-3 history; current concurrency posture (single worker, overlapping token lifecycles, sequential cross-source ingest) stated explicitly. |
+| RC-6 (§15 addition) | June 2026 | §15 Multi-source execution and token scheduling guarantees. §7.1 amended — "single-threaded in RC-3" scoped to RC-3 history; current concurrency posture (single leader plus claim-only follower workers per ADR-030, overlapping token lifecycles, sequential cross-source ingest) stated explicitly. |
 | RC-5.2 (§11–§14 additions) | May 2026 | §11 Authentication and identity guarantees; §12 Secret-reference handling; §13 Multi-user session; §14 Composer authoring. §7.2 amended — "ELSPETH is not multi-user" disclaimer no longer accurate; replaced with organisational-policy boundary statement. |
 | RC-3 | Feb 2026 | Declarative DAG wiring, graceful shutdown, DROP-mode handling, gate plugin removal, telemetry hardening, test suite v2 migration |
 | RC-2 | Feb 2026 | Initial contract, bug fixes, checkpoint compatibility |
@@ -521,8 +521,8 @@ This is the audit-primacy rule from §7 applied to the session subsystem: a muta
 
 ### 15.6 What §15 Does Not Promise
 
-- **No compute parallelism.** Token lifecycles overlap (a token can be durably parked while later tokens advance), but compute is one token at a time in a single worker process. §7.1's performance non-guarantee stands.
-- **No multi-worker operation.** Running more than one worker against the same run is mechanically refused. Multi-worker capability is contingent on a future deployment-shape decision (ADR-026) and is not part of this contract.
+- **No compute parallelism within a worker.** Token lifecycles overlap (a token can be durably parked while later tokens advance), but each worker computes one token at a time. §7.1's performance non-guarantee stands.
+- **No unbounded or distributed parallelism.** 0.6.0 supports one leader plus claim-only follower workers against the same run, joined via `elspeth join <run_id>` and coordinated by lease/CAS-guarded durable work state on a shared WAL-mode landscape database on a single host (ADR-030). ELSPETH does not promise multi-host distribution, shared-memory threading, or that adding workers yields proportional speedup.
 - **No cross-source joining at ingest.** Queue fan-in nodes coordinate scheduling only; they do not merge row data or join source schemas.
 
 ---

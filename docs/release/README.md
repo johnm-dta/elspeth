@@ -1,6 +1,6 @@
 # `docs/release/` — Release Histories and Snapshots
 
-**Last reviewed:** 2026-06-05 (RC-5.3)
+**Last reviewed:** 2026-06-22 (0.6.0)
 **Audience:** Anyone navigating to release-level documentation
 **Register:** Lightly technical / directory-index
 
@@ -9,7 +9,7 @@ velocity records, public-sector evaluation material, and the long-lived
 assurance narrative.
 
 The directory is intentionally small. **Current** documents reflect the latest
-release (RC-5.3). Superseded point-in-time release docs and frozen historical
+release (0.6.0). Superseded point-in-time release docs and frozen historical
 snapshots were relocated to the
 [2026-05-19 docs cleanout archive](../../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md);
 that archive's MANIFEST is the relocation map. New readers should start with the
@@ -41,7 +41,7 @@ Before diving into the documents below, know which sources they aggregate. **If 
 
 ---
 
-## Current documents (RC-5.3, June 2026)
+## Current documents (0.6.0, June 2026)
 
 | Document | What it answers | Intended reader |
 |----------|-----------------|-----------------|

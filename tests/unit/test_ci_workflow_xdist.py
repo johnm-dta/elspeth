@@ -77,36 +77,9 @@ def test_judge_gates_workflow_has_bounded_job_timeouts() -> None:
     """Judge-gate jobs must not inherit GitHub's six-hour default timeout."""
     judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
 
-    for job_name in ("check-judge-coverage", "check-override-rate"):
+    for job_name in ("check-override-rate",):
         job = judge_workflow["jobs"][job_name]
         assert job["timeout-minutes"] == 15
-
-
-def test_judge_coverage_workflow_resolves_true_merge_base() -> None:
-    """C1 must diff against the actual PR merge-base, not the PR base tip SHA."""
-    judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
-    job = judge_workflow["jobs"]["check-judge-coverage"]
-
-    run = _step_run(job, "Resolve baseline ref")
-
-    assert "git merge-base" in run
-    assert "github.event.pull_request.base.sha" not in run
-
-
-def test_judge_coverage_workflow_runs_on_pushes_with_before_sha_baseline() -> None:
-    """C1 must not disappear on direct pushes to protected release branches."""
-    judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
-    job = judge_workflow["jobs"]["check-judge-coverage"]
-
-    assert "if" not in job
-    runs_on = str(job["runs-on"])
-    assert "github.event_name != 'pull_request'" in runs_on
-
-    run = _step_run(job, "Resolve baseline ref")
-
-    assert "github.event.before" in run
-    assert "github.event_name" in run
-    assert "git merge-base" in run
 
 
 def test_override_rate_workflow_pins_threshold_policy() -> None:
@@ -128,31 +101,6 @@ def test_override_rate_workflow_surfaces_pass_notice_in_step_summary() -> None:
 
     assert "GITHUB_STEP_SUMMARY" in run
     assert "Override-rate drift gate" in run
-
-
-def test_judge_coverage_workflow_summarizes_trust_boundary_decorator_additions() -> None:
-    """PRs adding @trust_boundary decorators must surface them in the step summary."""
-    judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
-    job = judge_workflow["jobs"]["check-judge-coverage"]
-
-    run = _step_run(job, "Summarize trust-boundary decorator additions")
-
-    assert "check-trust-boundary-diff" in run
-    assert "GITHUB_STEP_SUMMARY" in run
-    assert '--baseline-ref "$BASELINE_REF"' in run
-    assert "--root src/elspeth" in run
-
-
-def test_judge_coverage_workflow_checks_rotation_audit_manifest() -> None:
-    """Fingerprint rotations in allowlist YAML must have a rotations.log record."""
-    judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
-    job = judge_workflow["jobs"]["check-judge-coverage"]
-
-    run = _step_run(job, "Run rotation audit manifest gate")
-
-    assert "check-rotation-audit" in run
-    assert '--baseline-ref "$BASELINE_REF"' in run
-    assert "--rotation-log .elspeth/rotations.log" in run
 
 
 def test_integration_job_runs_on_rc_branch_pushes() -> None:

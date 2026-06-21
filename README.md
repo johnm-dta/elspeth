@@ -4,7 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-![Status: RC-5.3](https://img.shields.io/badge/status-RC--5.3-yellow.svg)
+![Status: 0.6.0](https://img.shields.io/badge/status-0.6.0-green.svg)
 
 Elspeth is a high-assurance pipeline substrate for consequential workflows:
 systems where the wrong output can cause operational, legal, safety, financial,
@@ -14,7 +14,7 @@ knowledge workers can use authenticated Web Composer authoring driven by an LLM
 tool loop. Both surfaces target the same primitives, plugin contracts, runtime
 assembly, graph-validation contracts, executor, Landscape audit trail, and
 run-accounting model. Validation and audit are core product properties, not
-after-the-fact diagnostics. In RC-5, composer-authored pipelines converge through
+after-the-fact diagnostics. Composer-authored pipelines converge through
 runtime-shaped validation and production execution setup; the longer-term
 compiler direction is to seal YAML and composer input into one compiled
 artifact that the executor runs directly.
@@ -25,10 +25,6 @@ artifact that the executor runs directly.
 
 - [Why Elspeth Exists](#why-elspeth-exists)
 - [Architecture At A Glance](#architecture-at-a-glance)
-- [What Changed In RC-5](#what-changed-in-rc-5)
-  - [RC-5.1 Updates](#rc-51-updates)
-  - [RC-5.2 Updates](#rc-52-updates)
-  - [RC-5.3 Updates](#rc-53-updates)
 - [Getting Started](#getting-started)
   - [YAML Operator Path](#yaml-operator-path)
   - [Web Composer Path](#web-composer-path)
@@ -117,7 +113,7 @@ operator-reviewed settings             LLM tool loop + session state
   Landscape audit trail + run accounting + artifacts
 ```
 
-In RC-5, the important current-state claim is precise:
+The current implementation provides these precise guarantees:
 
 - Web validation, web execution, and CLI execution all instantiate runtime
   plugins through the production plugin-instantiation helper and build an
@@ -151,8 +147,8 @@ reasonable to let both authoring surfaces feed the same executor.
 
 ## What Changed In 0.6.0
 
-0.6.0 is the single-worker-to-multi-worker transition (in progress; the line
-that will be cut as RC-0.6.0). Multiple cooperating processes on one host can
+0.6.0 is the single-worker-to-multi-worker transition. Multiple cooperating
+processes on one host can
 now operate against a single run backed by one WAL SQLite audit database: one
 **leader** owns source ingest, barrier evaluation, checkpoints, finalization,
 and sink I/O, while any number of **claim-only followers** attach through a new
@@ -209,145 +205,6 @@ keep plugins honest at the trust boundary:
 See the rewritten N>1 lease-recovery runbook at
 [`docs/runbooks/scheduler-lease-recovery.md`](docs/runbooks/scheduler-lease-recovery.md)
 and [CHANGELOG.md](CHANGELOG.md) for the full detail.
-
----
-
-## What Changed In RC-5
-
-RC-5 moves Elspeth from a CLI-first auditable pipeline engine to a dual-surface
-authoring and execution platform. The YAML operator path remains first-class,
-while the authenticated Web Composer adds LLM-assisted authoring through audited
-tools, session state, blobs, secret references, runtime-shaped preview and
-preflight validation, background execution, cancellation, diagnostics, WebSocket
-progress, and artifact retrieval.
-
-The assurance work also moved forward: runtime-shaped validation, declaration
-trust, VAL manifests, terminal outcome modelling, run-accounting invariants,
-strict response schemas, and CI policy gates are now part of the product
-surface.
-
-### RC-5.1 Updates
-
-RC-5.1 is a correctness and assurance follow-up to RC-5 rather than a new
-surface release. The notable deltas:
-
-- **`identity_node_advisory` validator** — `validate_pipeline` now detects
-  identity passthroughs wired between transforms and observed sinks, where the
-  passthrough silently degrades observed-sink lineage. Surfaces as an
-  actionable repair hint in the composer; gated by an exemption matrix locked
-  in by tests.
-- **Composer pipeline recipes, source inspection, and forced repair** — new
-  `apply_pipeline_recipe` MCP tool and template library, an `inspect_source`
-  MCP tool that surfaces external-data shape and silent-failure modes as
-  warnings, and a forced-repair loop driven by `proof_diagnostics` that fires
-  on the resumed-session first turn.
-- **Run outputs panel and artifact preview** — the frontend now exposes the
-  full audit-evidence manifest for a run, with downloadable artifacts gated by
-  a per-artifact `downloadable` flag and backed by a new
-  `/artifacts/preview` execution endpoint.
-- **Cancellation-requested badge** — runs whose cancellation has been requested
-  but not yet drained carry a distinct badge style, separate from the terminal
-  `cancelled` state.
-- **`data_dir` resolved to absolute path** — `WebSettings` resolves `data_dir`
-  to an absolute path at validation time, removing a class of ambiguity where
-  relative paths were interpreted against different working directories.
-- **GraphView viewport preservation** — composer GraphView preserves the
-  operator's pan/zoom across topology changes; iterative edits no longer reset
-  the view.
-- **Audit-integrity test coverage** — direct unit coverage for four
-  ADR-019-family invariants that previously had zero unit tests:
-  `sweep_deferred_invariants_or_crash`, `_validate_token_row_ownership`,
-  `link_validation_error_to_row`, and `_REQUIRED_COMPOSITE_FOREIGN_KEYS`. Plus
-  closure of residual SSRF blocked-IP coverage in `web_scrape`.
-- **Composer accessibility (Tier-1 panel-review pass)** — corrections to
-  `aria-controls`, `aria-expanded`, `aria-live` scoping, and focus management
-  across the composer surface; SecretsPanel form recovery on `createSecret`
-  failure; light-theme `--color-status-empty` override.
-- **Composer skill correctness** — multi-commit sweep closing fabrication and
-  silent-shape-downgrade loopholes, widening the grounding detector, and
-  forbidding identity nodes between transforms and observed sinks.
-- **Default `on_validation_failure = discard`** — the per-source default
-  validation-failure behaviour is now `discard` with documented quarantine
-  semantics, replacing the prior implicit fall-through.
-- **Unknown-plugin composer error is actionable** —
-  `_prevalidate_plugin_options` surfaces unknown plugin ids as structured,
-  actionable rejections instead of silent fail-open.
-
-### RC-5.2 Updates
-
-RC-5.2 turns the Web Composer into a more durable, recoverable authoring system:
-
-- **Guided Composer mode** — a structured authoring path for first-time users,
-  with deterministic recipe pre-match and a read-only LLM role for guided state.
-- **Durable composer progress** — persisted transcript rows, redacted tool-call
-  records, composition-state snapshots, and recovery diffs survive interrupted
-  or failed turns.
-- **Recovery UX** — operators can resume an interrupted authoring session with
-  the transcript, redacted tool evidence, and a before/after pipeline-state
-  comparison.
-- **Completion gestures and catalog polish** — the composer separates save,
-  run, execute, and YAML-export actions, while the catalog is now a searchable
-  reference surface.
-- **CI and documentation hardening** — release reports, docs cleanup, Playwright
-  gating, CodeQL, and `elspeth-lints` checks make the release train easier to
-  review and repeat.
-
-### RC-5.3 Updates
-
-RC-5.3 is a correctness and hardening follow-up to RC-5.2 rather than a new
-authoring surface. The theme is evidence integrity under failure. The notable
-deltas:
-
-- **Operator-set sampling (ADR-027)** — the Web Composer sources its LLM
-  sampling parameters from operator-set configuration, threaded through the
-  guided solvers, boot probe, and auto-title, and recorded on the
-  `ComposerLLMCall` audit contract.
-- **Audit rows follow real work** — artifact bytes are verified against the
-  audit hash before streaming, the Landscape prompt-hash anchor is validated
-  before insert (no committed bad row), SSRF-safe request success and
-  empty-corpus retrievals are recorded without duplicate rows, and the replayer
-  advances its sequence only after a concrete result.
-- **Output contracts reject bad rows at the boundary** — sparse-field contract
-  fixes for Azure Blob, Dataverse, and `JSONSource`; complete custom-header
-  enforcement for the CSV and Azure Blob sinks; database-sink target-table
-  compatibility, Chroma duplicate preflight, and JSON-sink buffer rollback on a
-  failed write.
-- **Trust-tier and error semantics** — corrected trust-boundary branch joins
-  and reconciled enforce-tier allowlists; web session Tier-1 errors raise typed
-  faults instead of crashing; `display_headers` fails closed on conflicting
-  original headers; redaction masks both path and file blob storage-path
-  carriers.
-- **Frontend recovery hardening** — stale-response guards across session
-  selection, navigation, blob loads, execution start, YAML refetch, and
-  run-outputs state; blob and secret stores clear on logout.
-- **Release gating** — container-image publication is gated on the release's
-  required checks passing, so an image cannot publish ahead of its CI evidence.
-
-The RC-5.3 release documentation is intentionally explicit:
-
-- [Executive Summary](docs/release/executive-summary.md) is the current
-  public-sector evaluation brief.
-- [Composer Guide](docs/release/composer-guide.md) explains the current web
-  authoring experience: guided mode, freeform authoring, readiness checks,
-  save-for-review, run, export, and recovery.
-- [Platform Architecture](docs/release/platform-architecture.md) explains the
-  runtime surfaces, trust boundaries, audit-first behaviour, and adopter
-  responsibilities.
-- [Audit and Lineage Guarantees](docs/release/guarantees.md) is the current
-  assurance surface for audit, lineage, execution, data, identity,
-  secret-reference handling, sessions, and Composer authoring.
-- [Public-Sector Assessment Mapping](docs/release/assessment-mapping.md)
-  records the current evidence against government evaluation touchpoints. It is
-  an evidence map, not a claim of formal conformance.
-- [Progress Report: RC-1 to RC-5](docs/release/elspeth-progress-rc1-to-rc5.md)
-  records shipped capability period by period, including the RC-5.2 composer
-  maturation stream.
-- [Velocity Report: RC-1 to RC-5](docs/release/elspeth-velocity-rc1-to-rc5.md)
-  records release cadence and peak-day attribution.
-- [Release Documentation Index](docs/release/README.md) identifies the current
-  RC-5.2 documents and the archived historical snapshots.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full release notes.
 
 ---
 
@@ -559,7 +416,7 @@ source of truth.
 The current product-level guarantees are summarised in
 [Audit and Lineage Guarantees](docs/release/guarantees.md).
 
-The RC-5 line makes several assurance mechanisms product-visible:
+Elspeth makes several assurance mechanisms product-visible:
 
 - **Declaration-trust:** plugin declarations that the graph builder trusts are
   also backed by runtime VAL checks, invariant tests, and CI scanners.
@@ -574,12 +431,7 @@ The RC-5 line makes several assurance mechanisms product-visible:
   coerced.
 - **Mechanical policy gates:** CI and pre-commit include checks for tier-model
   boundaries, component types, guard symmetry, contract manifests, composer
-  exception channels, catch ordering, audit-evidence typing, and (since
-  Phase 8) telemetry-backfill cohort-attribution trailers on commits that
-  touch code semantically owned by a different phase. Fresh clones should
-  install the no-stash staged-file pre-commit dispatcher with
-  `scripts/git-hooks/install-pre-commit-dispatcher.sh`, then install the
-  commit-msg dispatcher with `scripts/git-hooks/install-commit-msg-dispatcher.sh`.
+  exception channels, catch ordering, and audit-evidence typing.
 - **Secret discipline:** runtime secrets are resolved at execution boundaries,
   fingerprinted for audit, and not persisted as raw values in pipeline state.
 
@@ -646,11 +498,9 @@ landscape:
 
 ## Status And Direction
 
-The RC-5 line is where the Web Composer becomes a real product surface, but the
-structural change is broader than the web UI. The project now has two authoring
-paths over a single high-assurance substrate, richer run evidence, declared
-plugin contracts, a stronger terminal outcome model, and more mechanical CI
-policy around audit integrity.
+Elspeth is a dual-surface authoring and execution platform: a CLI-first
+auditable pipeline engine plus a Web Composer for guided authoring, over one
+shared execution and audit core.
 
 Current 0.6.0 behaviour:
 
@@ -665,7 +515,7 @@ Current 0.6.0 behaviour:
   followers across multiple processes on one host (`elspeth join`), backed by
   one WAL SQLite audit database.
 
-Direction after RC-5:
+Planned direction (design intentions, not release commitments):
 
 - introduce a first-class compiler facade over the existing graph builder
 - preview and seal a secret-safe compiled pipeline artifact
@@ -989,12 +839,12 @@ Rate limits are **per-service** - all plugins using the same service share the b
 
 ## Docker
 
-Elspeth can run from a published Docker image. Replace `v0.5.2` with the tag
-published for the release you are evaluating; use the exact tag for older
-release lines when evaluating an earlier RC.
+Elspeth can run from a published Docker image. Replace `v0.6.0` with the tag
+published for the release you are deploying; use the exact tag for an older
+release line when deploying an earlier version.
 
 ```bash
-IMAGE_TAG=v0.5.2
+IMAGE_TAG=v0.6.0
 
 # Run a pipeline
 docker run --rm \
@@ -1071,8 +921,7 @@ See [Architecture Documentation](ARCHITECTURE.md) for C4 diagrams and detailed d
 | [docs/architecture/adr/](docs/architecture/adr/) | Architects | Architecture Decision Records for routing, declaration-trust, terminal outcomes, and other load-bearing decisions |
 | [docs/guides/data-trust-and-error-handling.md](docs/guides/data-trust-and-error-handling.md) | Developers | Trust model, external-boundary handling, quarantine, and plugin error semantics |
 | [docs/guides/](docs/guides/) | All | Tutorials, MCP analysis guide, data trust model |
-| [CLAUDE.md](CLAUDE.md) | AI Assistants | Project context, trust model, patterns |
-| [docs/release/](docs/release/) | Evaluators | Executive summary, Composer guide, platform architecture, guarantees, assessment mapping, progress and velocity reports, release evidence, and archive map |
+| [docs/release/](docs/release/) | Evaluators | Executive summary, Composer guide, platform architecture, guarantees, assessment mapping, release evidence, and archive map |
 | [docs/reference/](docs/reference/) | Developers | Configuration reference |
 | [docs/runbooks/](docs/runbooks/) | Operators | Deployment and operations |
 
@@ -1107,6 +956,10 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 ```bash
 uv venv && source .venv/bin/activate
 uv pip install -e ".[dev,azure]"
+
+# Install the git hook dispatchers (pre-commit + commit-msg policy gates)
+scripts/git-hooks/install-pre-commit-dispatcher.sh
+scripts/git-hooks/install-commit-msg-dispatcher.sh
 
 # Install Azurite (Azure Blob Storage emulator for integration tests)
 npm install

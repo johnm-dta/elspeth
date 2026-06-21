@@ -151,8 +151,8 @@ reasonable to let both authoring surfaces feed the same executor.
 
 ## What Changed In 0.6.0
 
-0.6.0 is the single-worker-to-multi-worker transition (in progress; the line
-that will be cut as RC-0.6.0). Multiple cooperating processes on one host can
+0.6.0 is the single-worker-to-multi-worker transition. Multiple cooperating
+processes on one host can
 now operate against a single run backed by one WAL SQLite audit database: one
 **leader** owns source ingest, barrier evaluation, checkpoints, finalization,
 and sink I/O, while any number of **claim-only followers** attach through a new

@@ -3007,14 +3007,14 @@ class TestMessageRoutes:
                 new=AsyncMock(
                     return_value=Step1SourceChatResult(
                         source_resolution=Step1SourceChatResolution(
-                        assistant_message="I created the source.",
-                        plugin="csv",
-                        filename="source.csv",
-                        mime_type="text/csv",
-                        content="name,value\nalice,1\n",
-                        options={"path": "inline://source.csv"},
-                        observed_columns=("name", "value"),
-                        sample_rows=({"name": raw_row_secret, "value": "1"},),
+                            assistant_message="I created the source.",
+                            plugin="csv",
+                            filename="source.csv",
+                            mime_type="text/csv",
+                            content="name,value\nalice,1\n",
+                            options={"path": "inline://source.csv"},
+                            observed_columns=("name", "value"),
+                            sample_rows=({"name": raw_row_secret, "value": "1"},),
                         ),
                         fallback_chat=None,
                     )
@@ -4359,6 +4359,227 @@ class TestRevertEndpoint:
 
 class TestYamlEndpoint:
     """Tests for GET /api/sessions/{id}/state/yaml."""
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_imports_exported_runtime_yaml(self, tmp_path) -> None:
+        """Replay can seed a fresh session from captured final_yaml.json."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: /data/blobs/input.csv
+      schema:
+        mode: observed
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+      schema:
+        mode: observed
+    on_write_failure: discard
+"""
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+            resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 200, resp.text
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        assert record.sources["source"]["plugin"] == "csv"
+        assert record.outputs[0]["name"] == "main"
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_blob_storage_path_without_sidecar(self, tmp_path) -> None:
+        """Path-only imports must not bypass source blob ownership checks."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        blob_path = tmp_path / "blobs" / "other-session" / "old.csv"
+        blob_path.parent.mkdir(parents=True)
+        blob_path.write_text("id\n1\n")
+        yaml_text = f"""
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: {blob_path}
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    on_write_failure: discard
+"""
+
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 400
+        assert "source_blob_ids" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_remaps_source_blob_ids_to_owned_blob(self, tmp_path) -> None:
+        """Replay imports bind captured source blobs to the newly uploaded blob row."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        blob_id = uuid.uuid4()
+        blob_path = tmp_path / "blobs" / str(session.id) / f"{blob_id}_input.csv"
+        blob_path.parent.mkdir(parents=True)
+        blob_path.write_text("id\n1\n")
+        app.state.blob_service = SimpleNamespace(
+            get_blob=AsyncMock(
+                return_value=SimpleNamespace(
+                    id=blob_id,
+                    session_id=session.id,
+                    storage_path=str(blob_path),
+                )
+            )
+        )
+        old_blob_path = tmp_path / "blobs" / "old-session" / "old.csv"
+        yaml_text = f"""
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: {old_blob_path}
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    on_write_failure: discard
+"""
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+            resp = client.post(
+                f"/api/sessions/{session.id}/state/yaml",
+                json={"yaml": yaml_text, "source_blob_ids": {"source": str(blob_id)}},
+            )
+
+        assert resp.status_code == 200, resp.text
+        app.state.blob_service.get_blob.assert_awaited_once_with(blob_id)
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        source_options = record.sources["source"]["options"]
+        assert source_options["blob_ref"] == str(blob_id)
+        assert source_options["path"] == str(blob_path)
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_unknown_source_blob_sidecar_entry(self, tmp_path) -> None:
+        """source_blob_ids cannot bind blobs to sources absent from the YAML."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: /old/blob.csv
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    on_write_failure: discard
+"""
+
+        resp = client.post(
+            f"/api/sessions/{session.id}/state/yaml",
+            json={"yaml": yaml_text, "source_blob_ids": {"other": str(uuid.uuid4())}},
+        )
+
+        assert resp.status_code == 400
+        assert "unknown source" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_malformed_source_blob_id(self, tmp_path) -> None:
+        """source_blob_ids values must be UUIDs before any blob lookup."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        app.state.blob_service = SimpleNamespace(get_blob=AsyncMock())
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: /old/blob.csv
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    on_write_failure: discard
+"""
+
+        resp = client.post(
+            f"/api/sessions/{session.id}/state/yaml",
+            json={"yaml": yaml_text, "source_blob_ids": {"source": "not-a-uuid"}},
+        )
+
+        assert resp.status_code == 400
+        assert "must be a UUID" in resp.json()["detail"]
+        app.state.blob_service.get_blob.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_cross_session_source_blob(self, tmp_path) -> None:
+        """Replay sidecars cannot attach a blob owned by another session."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        other_session_id = uuid.uuid4()
+        blob_id = uuid.uuid4()
+        app.state.blob_service = SimpleNamespace(
+            get_blob=AsyncMock(
+                return_value=SimpleNamespace(
+                    id=blob_id,
+                    session_id=other_session_id,
+                    storage_path=str(tmp_path / "blobs" / str(other_session_id) / "input.csv"),
+                )
+            )
+        )
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: /old/blob.csv
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    on_write_failure: discard
+"""
+
+        resp = client.post(
+            f"/api/sessions/{session.id}/state/yaml",
+            json={"yaml": yaml_text, "source_blob_ids": {"source": str(blob_id)}},
+        )
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Blob not found"
+        app.state.blob_service.get_blob.assert_awaited_once_with(blob_id)
 
     @pytest.mark.asyncio
     async def test_yaml_returns_yaml_when_state_exists(self, tmp_path) -> None:

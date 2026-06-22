@@ -16,6 +16,7 @@ AGGREGATE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "aggr
 FINALIZE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "finalize_scenario.sh"
 HARNESS_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "harness.sh"
 POST_MESSAGE_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "post_message.sh"
+REPLAY_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "replay.sh"
 SWEEP_SCRIPT = REPO_ROOT / "evals" / "composer-harness" / "hardmode" / "sweep_simplified.sh"
 LEGACY_BASIC_FINALIZE_SCRIPT = REPO_ROOT / "evals" / "2026-05-03-composer" / "basic" / "finalize_scenario.sh"
 LEGACY_HARDMODE_FINALIZE_SCRIPT = REPO_ROOT / "evals" / "2026-05-03-composer" / "hardmode" / "finalize_scenario.sh"
@@ -371,6 +372,106 @@ esac
     fake_curl.chmod(0o755)
 
 
+def _write_fake_replay_curl(
+    bin_dir: Path,
+    log_path: Path,
+    *,
+    import_http: str = "500",
+    import_body_path: Path | None = None,
+    uploaded_blob_id: str = "98b1357d-5aab-4fb3-85b4-5ad643912e84",
+) -> None:
+    body_path = import_body_path or log_path.with_suffix(".import-body.json")
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+
+out=""
+url=""
+data=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w|-X|-H|--max-time|--data|--data-binary|-d)
+      if [[ "$1" == "--data" || "$1" == "--data-binary" || "$1" == "-d" ]]; then
+        data="$2"
+      fi
+      shift 2
+      ;;
+    --*)
+      shift
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+printf '%s\\n' "$url" >> "{log_path}"
+
+write_body() {{
+  if [[ -n "$out" ]]; then
+    printf '%s' "$1" > "$out"
+  else
+    printf '%s' "$1"
+  fi
+}}
+
+case "$url" in
+  */api/auth/login)
+    write_body '{{"access_token":"header.eyJleHAiOjQxMDI0NDQ4MDB9.signature"}}'
+    printf '\\n200'
+    ;;
+  */api/sessions)
+    write_body '{{"id":"session-1"}}'
+    printf '201'
+    ;;
+  */api/sessions/session-1/blobs/inline)
+    write_body '{{"id":"{uploaded_blob_id}"}}'
+    printf '201'
+    ;;
+  */api/sessions/session-1/state/yaml)
+    printf '%s' "$data" > "{body_path}"
+    write_body '{{"detail":"import rejected"}}'
+    printf '{import_http}'
+    ;;
+  */api/sessions/session-1/import-yaml)
+    write_body '{{"detail":"unexpected fallback"}}'
+    printf '599'
+    ;;
+  */api/sessions/session-1/validate)
+    write_body '{{"is_valid":true,"checks":[]}}'
+    printf '200'
+    ;;
+  */api/sessions/session-1/execute)
+    write_body '{{"run_id":"run-1"}}'
+    printf '202'
+    ;;
+  */api/runs/run-1/diagnostics)
+    write_body '{{}}'
+    printf '200'
+    ;;
+  */api/runs/run-1)
+    write_body '{{"status":"completed"}}'
+    printf '200'
+    ;;
+  *)
+    write_body '{{}}'
+    printf '200'
+    ;;
+esac
+"""
+    )
+    fake_curl.chmod(0o755)
+
+
 def test_harness_writes_suite_and_run_manifests(tmp_path: Path) -> None:
     """Bootstrap should leave machine-readable evidence about the scenario contract."""
 
@@ -462,6 +563,169 @@ def test_post_message_records_turn_manifest_and_non_2xx_status(tmp_path: Path) -
         "verified_by_harness": False,
         "evidence": None,
     }
+
+
+def test_replay_reports_state_yaml_import_failure_without_import_yaml_fallback(tmp_path: Path) -> None:
+    """A canonical YAML import failure must not be obscured by a dead fallback route."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    curl_log = tmp_path / "curl.log"
+    _write_fake_replay_curl(fake_bin, curl_log, import_http="500")
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final_yaml.json").write_text(json.dumps({"yaml": "sources: {}\nsinks: {}\n"}))
+    (run_dir / "scenario.json").write_text(json.dumps({"scenario_id": "s1"}))
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPLAY_SCRIPT), str(run_dir)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 76
+    assert "YAML import failed (HTTP 500)" in result.stderr
+    urls = curl_log.read_text().splitlines()
+    assert any(url.endswith("/api/sessions/session-1/state/yaml") for url in urls)
+    assert not any(url.endswith("/api/sessions/session-1/import-yaml") for url in urls)
+
+
+def test_replay_remaps_source_blob_ids_to_uploaded_blob(tmp_path: Path) -> None:
+    """Captured final_yaml source_blob_ids must be rebound to the replay upload."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    curl_log = tmp_path / "curl.log"
+    import_body_path = tmp_path / "import-body.json"
+    uploaded_blob_id = "2d33554d-00c8-4620-9bdd-034ec9a3fd28"
+    _write_fake_replay_curl(
+        fake_bin,
+        curl_log,
+        import_http="200",
+        import_body_path=import_body_path,
+        uploaded_blob_id=uploaded_blob_id,
+    )
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final_yaml.json").write_text(
+        json.dumps(
+            {
+                "yaml": "sources:\n  source:\n    plugin: csv\n    on_success: out\n    options:\n      path: /old/blob.csv\n      on_validation_failure: discard\nsinks:\n  out:\n    plugin: csv\n    on_write_failure: discard\n",
+                "source_blob_ids": {"source": "98b1357d-5aab-4fb3-85b4-5ad643912e84"},
+            }
+        )
+    )
+    (run_dir / "blob.req.json").write_text(json.dumps({"filename": "input.csv", "mime_type": "text/csv", "content": "id\n1\n"}))
+    (run_dir / "scenario.json").write_text(json.dumps({"scenario_id": "s1"}))
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPLAY_SCRIPT), str(run_dir)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    import_body = json.loads(import_body_path.read_text())
+    assert import_body["source_blob_ids"] == {"source": uploaded_blob_id}
+    urls = curl_log.read_text().splitlines()
+    assert any(url.endswith("/api/sessions/session-1/blobs/inline") for url in urls)
+    assert any(url.endswith("/api/sessions/session-1/state/yaml") for url in urls)
+
+
+def test_replay_raw_yaml_file_inherits_final_yaml_source_blob_sidecar(tmp_path: Path) -> None:
+    """Edited raw YAML replays must keep the captured source blob custody sidecar."""
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    curl_log = tmp_path / "curl.log"
+    import_body_path = tmp_path / "import-body.json"
+    uploaded_blob_id = "2d33554d-00c8-4620-9bdd-034ec9a3fd28"
+    _write_fake_replay_curl(
+        fake_bin,
+        curl_log,
+        import_http="200",
+        import_body_path=import_body_path,
+        uploaded_blob_id=uploaded_blob_id,
+    )
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "final_yaml.json").write_text(
+        json.dumps(
+            {
+                "yaml": "sources:\n  source:\n    plugin: csv\n    on_success: out\n    options:\n      path: /old/blob.csv\n      on_validation_failure: discard\nsinks:\n  out:\n    plugin: csv\n    on_write_failure: discard\n",
+                "source_blob_ids": {"source": "98b1357d-5aab-4fb3-85b4-5ad643912e84"},
+            }
+        )
+    )
+    edited_yaml = run_dir / "edited.yaml"
+    edited_yaml.write_text(
+        "sources:\n"
+        "  source:\n"
+        "    plugin: csv\n"
+        "    on_success: out\n"
+        "    options:\n"
+        "      path: /old/blob.csv\n"
+        "      on_validation_failure: discard\n"
+        "sinks:\n"
+        "  out:\n"
+        "    plugin: csv\n"
+        "    on_write_failure: discard\n"
+    )
+    (run_dir / "blob.req.json").write_text(json.dumps({"filename": "input.csv", "mime_type": "text/csv", "content": "id\n1\n"}))
+    (run_dir / "scenario.json").write_text(json.dumps({"scenario_id": "s1"}))
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "ELSPETH_EVAL_BASE_URL": "https://example.invalid",
+            "ELSPETH_EVAL_USER": "eval-user",
+            "ELSPETH_EVAL_PASS": "eval-pass",
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+
+    result = subprocess.run(
+        [str(REPLAY_SCRIPT), str(run_dir), "--yaml-file", str(edited_yaml)],
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    import_body = json.loads(import_body_path.read_text())
+    assert import_body["source_blob_ids"] == {"source": uploaded_blob_id}
+    assert import_body["yaml"] == edited_yaml.read_text()
 
 
 def test_sweep_simplified_help_exits_before_side_effects(tmp_path: Path) -> None:

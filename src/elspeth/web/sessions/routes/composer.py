@@ -3,8 +3,18 @@ from __future__ import annotations
 from collections.abc import Awaitable
 from typing import TypedDict
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.web.blobs.protocol import BlobNotFoundError
+from elspeth.web.composer.state import CompositionState, SourceSpec
 from elspeth.web.composer.tools import is_approval_required_blob_store_only_mutation_tool
+from elspeth.web.composer.yaml_importer import (
+    MAX_RUNTIME_YAML_IMPORT_CHARS,
+    RuntimeYamlImportError,
+    composition_state_from_runtime_yaml,
+)
+from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
 
 from ._helpers import (
     _COMPOSER_REQUESTS_INFLIGHT,
@@ -262,6 +272,96 @@ async def _await_with_deferred_cancellation[T](awaitable: Awaitable[T]) -> tuple
 class StateYamlResponse(TypedDict, total=False):
     yaml: str
     source_blob_ids: dict[str, str]
+
+
+class ImportStateYamlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    yaml: str = Field(min_length=1, max_length=MAX_RUNTIME_YAML_IMPORT_CHARS)
+    source_blob_ids: dict[str, str] | None = None
+
+
+def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_dir: str) -> bool:
+    allowed_dirs = allowed_source_directories(data_dir)
+    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+        value = options.get(key)
+        if not isinstance(value, str):
+            continue
+        resolved = resolve_data_path(value, data_dir)
+        if any(resolved.is_relative_to(directory) for directory in allowed_dirs):
+            return True
+    return False
+
+
+def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: str) -> None:
+    for source_name, source in state.sources.items():
+        if source.options.get("blob_ref") is not None:
+            continue
+        if _source_options_reference_blob_storage(source.options, data_dir=data_dir):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Source '{source_name}' points at session blob storage but has no source_blob_ids entry. "
+                    "Upload the blob into this session and include source_blob_ids for replay imports."
+                ),
+            )
+
+
+async def _state_with_imported_source_blobs(
+    state: CompositionState,
+    *,
+    source_blob_ids: Mapping[str, str] | None,
+    request: Request,
+    session_id: UUID,
+) -> CompositionState:
+    if not source_blob_ids:
+        return state
+
+    sources = dict(state.sources)
+    requested_blobs: list[tuple[str, UUID]] = []
+    for source_name, blob_id_raw in source_blob_ids.items():
+        if source_name not in sources:
+            raise HTTPException(status_code=400, detail=f"source_blob_ids references unknown source '{source_name}'")
+        try:
+            blob_id = UUID(blob_id_raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"source_blob_ids.{source_name} must be a UUID") from exc
+        requested_blobs.append((source_name, blob_id))
+
+    blob_service = getattr(request.app.state, "blob_service", None)
+    if blob_service is None:
+        raise HTTPException(status_code=409, detail="Blob service unavailable for YAML import")
+
+    for source_name, blob_id in requested_blobs:
+        try:
+            blob = await blob_service.get_blob(blob_id)
+        except BlobNotFoundError:
+            raise HTTPException(status_code=404, detail="Blob not found") from None
+        if blob.session_id != session_id:
+            raise HTTPException(status_code=404, detail="Blob not found")
+
+        source = sources[source_name]
+        options = dict(source.options)
+        for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+            options.pop(key, None)
+        options["path"] = blob.storage_path
+        options["blob_ref"] = str(blob.id)
+        sources[source_name] = SourceSpec(
+            plugin=source.plugin,
+            on_success=source.on_success,
+            options=options,
+            on_validation_failure=source.on_validation_failure,
+        )
+
+    return CompositionState(
+        sources=sources,
+        nodes=state.nodes,
+        edges=state.edges,
+        outputs=state.outputs,
+        metadata=state.metadata,
+        version=state.version,
+        guided_session=state.guided_session,
+    )
 
 
 def register_composer_routes(router: APIRouter) -> None:
@@ -1276,6 +1376,53 @@ def register_composer_routes(router: APIRouter) -> None:
         )
 
         return _state_response(new_state)
+
+    @router.post(
+        "/{session_id}/state/yaml",
+        response_model=CompositionStateResponse,
+    )
+    async def import_state_yaml(
+        session_id: UUID,
+        body: ImportStateYamlRequest,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> CompositionStateResponse:
+        """Seed a session's composition state from exported runtime YAML."""
+        session = await _verify_session_ownership(session_id, user, request)
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+        async with compose_lock:
+            try:
+                imported_state = composition_state_from_runtime_yaml(body.yaml)
+            except RuntimeYamlImportError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            imported_state = await _state_with_imported_source_blobs(
+                imported_state,
+                source_blob_ids=body.source_blob_ids,
+                request=request,
+                session_id=session.id,
+            )
+            _reject_unbound_blob_storage_sources(
+                imported_state,
+                data_dir=str(request.app.state.settings.data_dir),
+            )
+
+            service: SessionServiceProtocol = request.app.state.session_service
+            state_data, _validation = await _state_data_from_composer_state(
+                imported_state,
+                settings=request.app.state.settings,
+                secret_service=request.app.state.scoped_secret_resolver,
+                user_id=str(user.user_id),
+                runtime_preflight=None,
+                preflight_exception_policy="persist_invalid",
+                initial_version=imported_state.version,
+                telemetry_source="compose",
+            )
+            state_record = await service.save_composition_state(
+                session.id,
+                state_data,
+                provenance="session_seed",
+            )
+            return _state_response(state_record)
 
     @router.get("/{session_id}/state/yaml")
     async def get_state_yaml(

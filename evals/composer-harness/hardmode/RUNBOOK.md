@@ -250,7 +250,7 @@ with a `replay_summary.json` showing original-vs-replay status delta.
 | `post_message.sh` fails with 401 | JWT expired mid-scenario | The harness auto-refreshes; if it doesn't, re-run `hardmode/harness.sh <sid> --reuse-sid` to force a new login |
 | `finalize_scenario.sh` exits 75 (poll timeout) | Engine still running at 300s | Raise `ELSPETH_EVAL_RUN_TIMEOUT_SEC` or read partial run.json |
 | `artifact_collection_errors.json` lists `final_yaml`, `messages`, or `diagnostics` | Optional artifact endpoint failed after validate | Keep the ledger; classify the scenario from `validate.json`, `run.json`, and the recorded artifact error |
-| `replay.sh` says YAML import failed | Composer API renamed the import endpoint | Check `lib/common.sh` `_evals_http_post_json` calls — endpoint candidates are `/state/yaml` then `/import-yaml` |
+| `replay.sh` says YAML import failed | The session YAML import route rejected the captured YAML | Check `replays/<utc-ts>/import.json`; replay imports through `POST /api/sessions/{sid}/state/yaml` |
 | Persona-subagent breaks character | Subagent saw too much context | Spawn a *fresh* general-purpose subagent each turn — never re-use one across turns |
 
 ## Cost accounting

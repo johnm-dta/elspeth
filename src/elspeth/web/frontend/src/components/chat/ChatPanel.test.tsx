@@ -4,6 +4,8 @@ import {
   ChatPanel,
   deriveRowCount,
   findOriginatingMessageId,
+  hasExistingCompositionContent,
+  hasSafeInlineSourceDisambiguationBase,
   isAmbiguousInlineProposal,
   looksLikeData,
   parseProposedRowsFromUserInput,
@@ -1631,13 +1633,23 @@ describe("isAmbiguousInlineProposal", () => {
       affects: ["source"],
       arguments_redacted_json: {
         source: {
-          plugin: "inline_blob",
+          plugin: "csv",
+          on_success: "csv_rows",
+          blob_id: null,
+          options: "{}",
+          on_validation_failure: null,
           inline_blob: {
             filename: "chat.csv",
             mime_type: "text/csv",
             content: "<inline-blob:42-bytes>",
+            description: null,
           },
         },
+        sources: null,
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: null,
       },
       base_state_id: null,
       committed_state_id: null,
@@ -1701,10 +1713,311 @@ describe("isAmbiguousInlineProposal", () => {
       isAmbiguousInlineProposal(
         makeInlineProposal("I read your input as 3 rows.", {
           arguments_redacted_json: {
-            source: { plugin: "csv_file", options: { path: "x.csv" } },
+            source: {
+              plugin: "csv_file",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: '{"path":"<redacted-option-value>"}',
+              on_validation_failure: null,
+            },
+            sources: null,
+            nodes: [],
+            edges: [],
+            outputs: [],
+            metadata: null,
           },
         }),
       ),
+    ).toBe(false);
+  });
+
+  it("returns false when set_pipeline includes hidden full-pipeline changes", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: "{}",
+              on_validation_failure: null,
+              inline_blob: {
+                filename: "chat.csv",
+                mime_type: "text/csv",
+                content: "<inline-blob:42-bytes>",
+                description: null,
+              },
+            },
+            sources: null,
+            nodes: [],
+            edges: [],
+            outputs: [
+              {
+                sink_name: "exfil",
+                plugin: "webhook",
+                options: { url: "<redacted-option-value>" },
+              },
+            ],
+            metadata: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when set_pipeline includes hidden transform nodes", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: "{}",
+              on_validation_failure: null,
+              inline_blob: {
+                filename: "chat.csv",
+                mime_type: "text/csv",
+                content: "<inline-blob:42-bytes>",
+                description: null,
+              },
+            },
+            sources: null,
+            nodes: [
+              {
+                id: "unexpected_transform",
+                node_type: "transform",
+                plugin: "llm_filter",
+                input: "source",
+                options: { prompt: "<redacted-option-value>" },
+              },
+            ],
+            edges: [],
+            outputs: [],
+            metadata: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when the source carries validation-failure routing", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: "{}",
+              on_validation_failure: "unexpected_route",
+              inline_blob: {
+                filename: "chat.csv",
+                mime_type: "text/csv",
+                content: "<inline-blob:42-bytes>",
+                description: null,
+              },
+            },
+            sources: null,
+            nodes: [],
+            edges: [],
+            outputs: [],
+            metadata: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when the inline source carries extra source options", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: '{"delimiter":"|"}',
+              on_validation_failure: null,
+              inline_blob: {
+                filename: "chat.csv",
+                mime_type: "text/csv",
+                content: "<inline-blob:42-bytes>",
+                description: null,
+              },
+            },
+            sources: null,
+            nodes: [],
+            edges: [],
+            outputs: [],
+            metadata: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when set_pipeline includes non-default metadata", () => {
+    const proposal = makeInlineProposal("I read your input as 3 rows.");
+    expect(
+      isAmbiguousInlineProposal({
+        ...proposal,
+        arguments_redacted_json: {
+          ...proposal.arguments_redacted_json,
+          metadata: { name: "Hidden pipeline name", description: null },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when set_pipeline includes alternate sources", () => {
+    const proposal = makeInlineProposal("I read your input as 3 rows.");
+    expect(
+      isAmbiguousInlineProposal({
+        ...proposal,
+        arguments_redacted_json: {
+          ...proposal.arguments_redacted_json,
+          sources: {
+            extra: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              options: "{}",
+            },
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when the inline blob carries a non-default description", () => {
+    const proposal = makeInlineProposal("I read your input as 3 rows.");
+    const source = proposal.arguments_redacted_json[
+      "source"
+    ] as Record<string, unknown>;
+    const inlineBlob = source["inline_blob"] as Record<string, unknown>;
+    expect(
+      isAmbiguousInlineProposal({
+        ...proposal,
+        arguments_redacted_json: {
+          ...proposal.arguments_redacted_json,
+          source: {
+            ...source,
+            inline_blob: {
+              ...inlineBlob,
+              description: "Hidden source description",
+            },
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("hasExistingCompositionContent", () => {
+  const proposal: CompositionProposal = {
+    id: "prop-1",
+    session_id: "session-1",
+    tool_call_id: "tc-1",
+    tool_name: "set_pipeline",
+    status: "pending",
+    summary: "I read your input as 3 rows.",
+    rationale: "",
+    affects: ["source"],
+    arguments_redacted_json: {},
+    base_state_id: null,
+    committed_state_id: null,
+    audit_event_id: null,
+    created_at: "2026-05-18T10:00:00Z",
+    updated_at: "2026-05-18T10:00:00Z",
+  };
+
+  it("returns false for null or empty composition state", () => {
+    expect(hasExistingCompositionContent(null)).toBe(false);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [],
+          outputs: [],
+          metadata: { name: null, description: null },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [],
+          outputs: [],
+          metadata: { name: "Untitled Pipeline", description: "" },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns true when any state content would be replaced by set_pipeline", () => {
+    expect(hasExistingCompositionContent(makeComposition(1))).toBe(true);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [
+            {
+              id: "edge-1",
+              from_node: "a",
+              to_node: "b",
+              edge_type: "on_success",
+              label: null,
+            },
+          ],
+          outputs: [],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [],
+          outputs: [],
+          metadata: { name: "demo", description: "" },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [],
+          outputs: [],
+          metadata: { name: "Untitled Pipeline", description: "Custom notes" },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("allows an unknown state only for proposals against a null base state", () => {
+    expect(hasSafeInlineSourceDisambiguationBase(proposal, null)).toBe(true);
+    expect(
+      hasSafeInlineSourceDisambiguationBase(
+        { ...proposal, base_state_id: "existing-state" },
+        null,
+      ),
+    ).toBe(false);
+  });
+
+  it("denies any proposal when the known composition has replaceable content", () => {
+    expect(
+      hasSafeInlineSourceDisambiguationBase(proposal, makeComposition(1)),
     ).toBe(false);
   });
 });
@@ -1823,13 +2136,23 @@ describe("ChatPanel inline-source disambiguation routing", () => {
       affects: ["source"],
       arguments_redacted_json: {
         source: {
-          plugin: "inline_blob",
+          plugin: "csv",
+          on_success: "csv_rows",
+          blob_id: null,
+          options: "{}",
+          on_validation_failure: null,
           inline_blob: {
             filename: "chat.csv",
             mime_type: "text/csv",
             content: "<inline-blob:42-bytes>",
+            description: null,
           },
         },
+        sources: null,
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: null,
       },
       base_state_id: null,
       committed_state_id: null,
@@ -1965,6 +2288,60 @@ describe("ChatPanel inline-source disambiguation routing", () => {
       screen.queryByRole("region", { name: /row count/i }),
     ).toBeNull();
     // Falls back to the standard banner.
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("routes inline_blob set_pipeline proposals with hidden outputs to the standard banner", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    const fullPipelineProposal: CompositionProposal = {
+      ...proposal,
+      arguments_redacted_json: {
+        ...proposal.arguments_redacted_json,
+        outputs: [
+          {
+            sink_name: "unexpected",
+            plugin: "jsonl",
+            options: { path: "<redacted-option-value>" },
+          },
+        ],
+      },
+    };
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [fullPipelineProposal],
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /row count/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("routes ambiguous inline_blob proposals to the banner when accepting would replace existing state", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [proposal],
+      compositionState: makeComposition(1),
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /row count/i }),
+    ).toBeNull();
     expect(
       screen.getByRole("region", { name: /pending changes/i }),
     ).toBeInTheDocument();

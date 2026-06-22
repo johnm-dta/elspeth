@@ -56,6 +56,34 @@ function isTerminalComposerPhase(
   return phase === "complete" || phase === "failed" || phase === "cancelled";
 }
 
+function objectHasOnlyKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+): boolean {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isAbsentOrNull(value: Record<string, unknown>, key: string): boolean {
+  return !hasOwn(value, key) || value[key] === null;
+}
+
+function isEmptyRedactedOptions(value: unknown): boolean {
+  if (value === null || value === undefined) return true;
+  if (typeof value === "string") return value.trim() === "{}";
+  if (isRecord(value)) return Object.keys(value).length === 0;
+  return false;
+}
+
+const DEFAULT_PIPELINE_METADATA_NAME = "Untitled Pipeline";
+
 /**
  * Best-effort row-count from CSV-like text content.
  *
@@ -97,9 +125,16 @@ export function deriveRowCount(
 //     surface that carries an inline_blob source today; the inline-blob
 //     create path lives inside set_pipeline.source.inline_blob — see
 //     src/elspeth/web/composer/redaction.py:_InlineBlobModel).
-//   * The proposal's `arguments_redacted_json` must contain an inline
-//     blob under `source.inline_blob` (i.e., the proposal's source is
-//     an inline-blob, not a blob_id reference or an external source).
+//   * The proposal's `arguments_redacted_json` must contain the production
+//     set_pipeline scaffold — `source`, `nodes`, `edges`, `outputs` — but
+//     `nodes` / `edges` / `outputs` must be empty arrays and `source` must be
+//     an inline blob with only the required source plugin/routing label plus
+//     backend-redaction defaults. `sources`, `metadata`, `blob_id`,
+//     `on_validation_failure`, and `inline_blob.description` must be absent or
+//     null, and `options` must be absent or the redacted empty object. Because
+//     `set_pipeline` is an atomic full-state replacement, any non-default graph,
+//     output, metadata, source-option, or routing change stays on the standard
+//     approval banner with the full context visible.
 //   * The proposal's `summary` must contain a recognised
 //     row-count-ambiguity phrase — currently "I read" or "interpreted as".
 //     A Phase 5b refactor will replace this with a structured annotation
@@ -121,11 +156,84 @@ export function isAmbiguousInlineProposal(
   // Walk the arguments tree without coercion. The redaction layer
   // preserves the inline_blob marker even when the content has been
   // summarised, so a structural check is sufficient and does NOT need
-  // to peek at the (possibly redacted) content string.
-  const source = proposal.arguments_redacted_json["source"];
-  if (typeof source !== "object" || source === null) return false;
-  const inlineBlob = (source as Record<string, unknown>)["inline_blob"];
-  if (typeof inlineBlob !== "object" || inlineBlob === null) return false;
+  // to peek at the (possibly redacted) content string. Because set_pipeline
+  // is a full-state replacement, the widget is allowed only for the narrow
+  // production source-only scaffold: source plus empty nodes/edges/outputs.
+  // Any non-empty graph/output/metadata/source-option change stays on the
+  // standard proposal banner with the full approval context visible.
+  const args = proposal.arguments_redacted_json;
+  if (
+    !objectHasOnlyKeys(
+      args,
+      new Set(["source", "sources", "nodes", "edges", "outputs", "metadata"]),
+    )
+  ) {
+    return false;
+  }
+  if (!isAbsentOrNull(args, "sources") || !isAbsentOrNull(args, "metadata")) {
+    return false;
+  }
+  if (
+    !hasOwn(args, "nodes") ||
+    !hasOwn(args, "edges") ||
+    !hasOwn(args, "outputs") ||
+    !Array.isArray(args["nodes"]) ||
+    !Array.isArray(args["edges"]) ||
+    !Array.isArray(args["outputs"]) ||
+    args["nodes"].length !== 0 ||
+    args["edges"].length !== 0 ||
+    args["outputs"].length !== 0
+  ) {
+    return false;
+  }
+
+  const source = args["source"];
+  if (!isRecord(source)) return false;
+  const sourceRecord = source;
+  if (
+    !objectHasOnlyKeys(
+      sourceRecord,
+      new Set([
+        "plugin",
+        "on_success",
+        "blob_id",
+        "options",
+        "on_validation_failure",
+        "inline_blob",
+      ]),
+    )
+  ) {
+    return false;
+  }
+  if (
+    !isAbsentOrNull(sourceRecord, "blob_id") ||
+    !isAbsentOrNull(sourceRecord, "on_validation_failure") ||
+    (hasOwn(sourceRecord, "options") &&
+      !isEmptyRedactedOptions(sourceRecord["options"]))
+  ) {
+    return false;
+  }
+  if (typeof sourceRecord["plugin"] !== "string" || sourceRecord["plugin"] === "") {
+    return false;
+  }
+  if (
+    typeof sourceRecord["on_success"] !== "string" ||
+    sourceRecord["on_success"] === ""
+  ) {
+    return false;
+  }
+
+  const inlineBlob = sourceRecord["inline_blob"];
+  if (!isRecord(inlineBlob)) return false;
+  if (
+    !objectHasOnlyKeys(
+      inlineBlob,
+      new Set(["filename", "mime_type", "content", "description"]),
+    )
+  ) {
+    return false;
+  }
+  if (!isAbsentOrNull(inlineBlob, "description")) return false;
 
   const summary = proposal.summary;
   // Case-insensitive substring match. Two recognised ambiguity phrases
@@ -135,6 +243,33 @@ export function isAmbiguousInlineProposal(
   // interpretation).
   const lowered = summary.toLowerCase();
   return lowered.includes("i read") || lowered.includes("interpreted as");
+}
+
+export function hasExistingCompositionContent(
+  state: CompositionState | null | undefined,
+): boolean {
+  const metadataName = state?.metadata.name?.trim() ?? "";
+  const metadataDescription = state?.metadata.description?.trim() ?? "";
+  return (
+    state !== null &&
+    state !== undefined &&
+    (Object.keys(state.sources).length > 0 ||
+      state.nodes.length > 0 ||
+      state.edges.length > 0 ||
+      state.outputs.length > 0 ||
+      (metadataName.length > 0 &&
+        metadataName !== DEFAULT_PIPELINE_METADATA_NAME) ||
+      metadataDescription.length > 0)
+  );
+}
+
+export function hasSafeInlineSourceDisambiguationBase(
+  proposal: CompositionProposal,
+  state: CompositionState | null | undefined,
+): boolean {
+  if (hasExistingCompositionContent(state)) return false;
+  if (state === null || state === undefined) return proposal.base_state_id === null;
+  return true;
 }
 
 // ── Originating user-message resolution ──────────────────────────────────────
@@ -688,11 +823,14 @@ export function ChatPanel({
   //
   // A proposal is a disambiguation candidate iff:
   //   1. It is currently pending (status === "pending") and not stale.
-  //   2. `isAmbiguousInlineProposal(proposal)` is true (inline blob +
-  //      row-count-ambiguity narration phrases).
-  //   3. We can resolve a non-null originating user message ID for it
+  //   2. `isAmbiguousInlineProposal(proposal)` is true (source-only inline
+  //      blob + row-count-ambiguity narration phrases).
+  //   3. The current known composition has no content that a source-only
+  //      set_pipeline could silently replace. If the state is not loaded, the
+  //      proposal must itself declare a null base_state_id.
+  //   4. We can resolve a non-null originating user message ID for it
   //      (the F-10/F-11 guards need a stable key).
-  //   4. The originating message ID is NOT in either re-fire guard
+  //   5. The originating message ID is NOT in either re-fire guard
   //      set — the user has already disambiguated in either direction
   //      and we must not re-prompt.
   //
@@ -708,7 +846,11 @@ export function ChatPanel({
     return compositionProposals
       .filter((p) => p.status === "pending")
       .filter((p) => !staleProposalIds.includes(p.id))
-      .filter(isAmbiguousInlineProposal)
+      .filter(
+        (proposal) =>
+          isAmbiguousInlineProposal(proposal) &&
+          hasSafeInlineSourceDisambiguationBase(proposal, compositionState),
+      )
       .map((proposal) => {
         const messageId = findOriginatingMessageId(
           messages,
@@ -743,6 +885,7 @@ export function ChatPanel({
   }, [
     compositionProposals,
     staleProposalIds,
+    compositionState,
     messages,
     userRequestedSingleRowForMessageIds,
     nonSourceMessageIds,

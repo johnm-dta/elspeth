@@ -1176,7 +1176,7 @@ class ExecutionServiceImpl:
                             blob_metadata=blob_metadata,
                         )
                     except BlobIntegrityError:
-                        _BLOB_INLINE_HASH_MISMATCH_TOTAL.add(1, {"run_id": run_id})
+                        _BLOB_INLINE_HASH_MISMATCH_TOTAL.add(1)
                         raise
                     self._call_async(
                         self._session_service.record_blob_inline_resolutions(

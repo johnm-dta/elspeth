@@ -1510,7 +1510,7 @@ sinks:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.service.LandscapeDB")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
-    def test_hash_mismatch_increments_zero_threshold_counter(
+    def test_hash_mismatch_increments_zero_threshold_counter_without_run_id_label(
         self,
         mock_payload_cls: MagicMock,
         mock_landscape_cls: MagicMock,
@@ -1570,7 +1570,7 @@ sinks:
         with pytest.raises(BlobIntegrityError):
             service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
 
-        hash_counter.add.assert_called_once_with(1, {"run_id": str(run_id)})
+        hash_counter.add.assert_called_once_with(1)
         mock_load.assert_not_called()
         mock_orch_cls.assert_not_called()
 

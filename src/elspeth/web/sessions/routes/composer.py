@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from typing import TypedDict
 
 from elspeth.contracts.trust_boundary import trust_boundary
+from elspeth.web.composer.tools import is_approval_required_blob_store_only_mutation_tool
 
 from ._helpers import (
     _COMPOSER_REQUESTS_INFLIGHT,
@@ -238,6 +240,25 @@ def _ensure_inline_blob_proposal_context(
     )
 
 
+async def _await_with_deferred_cancellation[T](awaitable: Awaitable[T]) -> tuple[T, bool]:
+    """Await critical proposal work to completion while recording cancellation.
+
+    ``run_sync_in_worker`` deliberately leaves its worker running if the
+    request task is cancelled. Once an approved tool execution starts, the
+    route must keep the session lock until the side effect is paired with a
+    terminal proposal transition.
+    """
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while True:
+        try:
+            return await asyncio.shield(task), cancelled
+        except asyncio.CancelledError:
+            cancelled = True
+            if task.done():
+                return task.result(), cancelled
+
+
 class StateYamlResponse(TypedDict, total=False):
     yaml: str
     source_blob_ids: dict[str, str]
@@ -372,174 +393,240 @@ def register_composer_routes(router: APIRouter) -> None:
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
     ) -> CompositionProposalResponse:
         session = await _verify_session_ownership(session_id, user, request)
-        service: SessionServiceProtocol = request.app.state.session_service
-        proposals = await service.list_composition_proposals(session.id)
-        proposal = next((item for item in proposals if item.id == proposal_id), None)
-        if proposal is None:
-            raise HTTPException(status_code=404, detail="Proposal not found")
-        if proposal.status != "pending":
-            raise HTTPException(
-                status_code=409,
-                detail="Only pending proposals can be accepted.",
-            )
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+        async with compose_lock:
+            service: SessionServiceProtocol = request.app.state.session_service
+            proposals = await service.list_composition_proposals(session.id)
+            proposal = next((item for item in proposals if item.id == proposal_id), None)
+            if proposal is None:
+                raise HTTPException(status_code=404, detail="Proposal not found")
+            if proposal.status != "pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Only pending proposals can be accepted.",
+                )
 
-        current_record = await service.get_current_state(session.id)
-        if proposal.base_state_id is not None and (current_record is None or current_record.id != proposal.base_state_id):
-            raise HTTPException(
-                status_code=409,
-                detail="The session state changed after this proposal was created. Ask ELSPETH to rebase the proposal.",
+            current_record = await service.get_current_state(session.id)
+            if proposal.base_state_id is not None and (current_record is None or current_record.id != proposal.base_state_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail="The session state changed after this proposal was created. Ask ELSPETH to rebase the proposal.",
+                )
+            current_state = (
+                _state_from_record(current_record) if current_record is not None else _initial_composition_state_with_guided_session()
             )
-        current_state = (
-            _state_from_record(current_record) if current_record is not None else _initial_composition_state_with_guided_session()
-        )
-        arguments = cast(dict[str, Any], deep_thaw(proposal.arguments_json))
-        user_message_content = await _proposal_user_message_content(service, proposal)
-        _ensure_inline_blob_proposal_context(
-            proposal,
-            arguments,
-            user_message_content=user_message_content,
-        )
-        result = await run_sync_in_worker(
-            execute_tool,
-            proposal.tool_name,
-            arguments,
-            current_state,
-            request.app.state.catalog_service,
-            data_dir=str(request.app.state.settings.data_dir),
-            session_engine=request.app.state.session_engine,
-            session_id=str(session.id),
-            secret_service=request.app.state.scoped_secret_resolver,
-            user_id=str(user.user_id),
-            user_message_id=str(proposal.user_message_id) if proposal.user_message_id is not None else None,
-            user_message_content=user_message_content,
-            composer_model_identifier=proposal.composer_model_identifier,
-            composer_model_version=proposal.composer_model_version,
-            composer_provider=proposal.composer_provider,
-            composer_skill_hash=proposal.composer_skill_hash,
-            tool_arguments_hash=proposal.tool_arguments_hash,
-        )
-        if result.updated_state.version == current_state.version:
-            # The tool ran but did not advance composition state. The route
-            # used to return a single uninformative 409 here regardless of
-            # whether the tool succeeded with no-op or failed semantically.
-            # Distinguish the cases so the operator sees the actual reason
-            # — a generic "did not change composition state" leaves a user
-            # with no path forward (session f613306b-… 2026-05-14: the LLM
-            # emitted a set_pipeline with no `options` blocks on any node;
-            # the validator rejected it; the 409 said only that state
-            # didn't change, marking the proposal as "stale" in the
-            # frontend without revealing the validation errors that were
-            # the actual blocker).
-            if not result.success:
-                # ``result`` is our own ``execute_tool`` output. Every
-                # ``success=False`` ToolResult is built by one of the two
-                # failure factories in ``web/composer/tools/_common.py``
-                # (``_failure_result`` and the credential-repair factory),
-                # both of which set ``data`` to a Mapping carrying
-                # ``_DATA_ERROR_KEY``. That is a first-party contract — read
-                # it directly and let a contract violation (a future tool
-                # building ``success=False`` without the error key) crash
-                # loudly rather than degrade to a generic message.
-                error_summary = result.data[_DATA_ERROR_KEY] or "Composer proposal failed validation."
-                validation_errors_payload: list[dict[str, Any]] = []
-                if result.validation is not None:
-                    for entry in result.validation.errors:
-                        validation_errors_payload.append(
-                            {
-                                "component": entry.component,
-                                "message": entry.message,
-                            }
+            arguments = cast(dict[str, Any], deep_thaw(proposal.arguments_json))
+            user_message_content = await _proposal_user_message_content(service, proposal)
+            _ensure_inline_blob_proposal_context(
+                proposal,
+                arguments,
+                user_message_content=user_message_content,
+            )
+            cancellation_deferred = False
+            result, was_cancelled = await _await_with_deferred_cancellation(
+                run_sync_in_worker(
+                    execute_tool,
+                    proposal.tool_name,
+                    arguments,
+                    current_state,
+                    request.app.state.catalog_service,
+                    data_dir=str(request.app.state.settings.data_dir),
+                    session_engine=request.app.state.session_engine,
+                    session_id=str(session.id),
+                    secret_service=request.app.state.scoped_secret_resolver,
+                    user_id=str(user.user_id),
+                    user_message_id=str(proposal.user_message_id) if proposal.user_message_id is not None else None,
+                    user_message_content=user_message_content,
+                    composer_model_identifier=proposal.composer_model_identifier,
+                    composer_model_version=proposal.composer_model_version,
+                    composer_provider=proposal.composer_provider,
+                    composer_skill_hash=proposal.composer_skill_hash,
+                    tool_arguments_hash=proposal.tool_arguments_hash,
+                )
+            )
+            cancellation_deferred = cancellation_deferred or was_cancelled
+            if result.updated_state.version == current_state.version:
+                # The tool ran but did not advance composition state. The route
+                # used to return a single uninformative 409 here regardless of
+                # whether the tool succeeded with no-op or failed semantically.
+                # Distinguish the cases so the operator sees the actual reason
+                # — a generic "did not change composition state" leaves a user
+                # with no path forward (session f613306b-… 2026-05-14: the LLM
+                # emitted a set_pipeline with no `options` blocks on any node;
+                # the validator rejected it; the 409 said only that state
+                # didn't change, marking the proposal as "stale" in the
+                # frontend without revealing the validation errors that were
+                # the actual blocker).
+                if not result.success:
+                    # ``result`` is our own ``execute_tool`` output. Every
+                    # ``success=False`` ToolResult is built by one of the two
+                    # failure factories in ``web/composer/tools/_common.py``
+                    # (``_failure_result`` and the credential-repair factory),
+                    # both of which set ``data`` to a Mapping carrying
+                    # ``_DATA_ERROR_KEY``. That is a first-party contract — read
+                    # it directly and let a contract violation (a future tool
+                    # building ``success=False`` without the error key) crash
+                    # loudly rather than degrade to a generic message.
+                    error_summary = result.data[_DATA_ERROR_KEY] or "Composer proposal failed validation."
+                    validation_errors_payload: list[dict[str, Any]] = []
+                    if result.validation is not None:
+                        for entry in result.validation.errors:
+                            validation_errors_payload.append(
+                                {
+                                    "component": entry.component,
+                                    "message": entry.message,
+                                }
+                            )
+                    # Auto-reject the proposal. It is structurally unacceptable
+                    # in its current form — the LLM emitted invalid arguments
+                    # that the runtime validator rejects, and the proposal
+                    # cannot become acceptable without the composer producing
+                    # a fresh, corrected proposal. Leaving it pending causes
+                    # the "refresh asks me to reapprove" friction reported by
+                    # the operator on 2026-05-14: in-memory frontend stale
+                    # marking is lost on page reload, so the broken proposal
+                    # re-surfaces in the pending banner. Marking as rejected
+                    # server-side keeps the audit trail honest (the user
+                    # clicked Accept; the server recorded why it could not
+                    # apply; the proposal is terminal). Audit attribution
+                    # records the system as the rejecting actor so the trail
+                    # distinguishes operator-driven rejection from this
+                    # automatic-on-validation-failure path.
+                    # Control-flow sentinel, not a swallowed error. The
+                    # route-level session compose lock serializes normal
+                    # Accept/reject HTTP handlers, but non-route callers can
+                    # still transition the proposal between our load above and
+                    # this defensive auto-reject write. ``reject_composition_proposal``
+                    # raises ``ValueError`` for exactly that terminal-state case.
+                    # When that fires, the desired end state — the proposal is no
+                    # longer pending — is already satisfied, and the winning
+                    # transition recorded its own lifecycle event.
+                    # Fall through to the 422 below, which surfaces the real
+                    # validation failure to the operator. We suppress ONLY
+                    # ``ValueError`` (the benign status-race signal); we deliberately
+                    # do NOT suppress ``KeyError`` (proposal row missing): the row
+                    # was loaded successfully above and proposals are never
+                    # hard-deleted, so a missing row is corruption of our own data
+                    # and must crash rather than be swallowed.
+                    try:
+                        _rejected, was_cancelled = await _await_with_deferred_cancellation(
+                            service.reject_composition_proposal(
+                                session_id=session.id,
+                                proposal_id=proposal.id,
+                                actor=f"system:auto_reject_validation_failed:user:{user.user_id}",
+                            )
                         )
-                # Auto-reject the proposal. It is structurally unacceptable
-                # in its current form — the LLM emitted invalid arguments
-                # that the runtime validator rejects, and the proposal
-                # cannot become acceptable without the composer producing
-                # a fresh, corrected proposal. Leaving it pending causes
-                # the "refresh asks me to reapprove" friction reported by
-                # the operator on 2026-05-14: in-memory frontend stale
-                # marking is lost on page reload, so the broken proposal
-                # re-surfaces in the pending banner. Marking as rejected
-                # server-side keeps the audit trail honest (the user
-                # clicked Accept; the server recorded why it could not
-                # apply; the proposal is terminal). Audit attribution
-                # records the system as the rejecting actor so the trail
-                # distinguishes operator-driven rejection from this
-                # automatic-on-validation-failure path.
-                # Control-flow sentinel, not a swallowed error. TOCTOU: this
-                # handler does not hold a session write lock spanning the
-                # proposal load (above) and this auto-reject write, so a
-                # concurrent Accept/reject for the same proposal can transition
-                # it out of "pending" in between.
-                # ``reject_composition_proposal`` raises ``ValueError`` for
-                # exactly that case (status != "pending"). When that fires, the
-                # desired end state — the proposal is no longer pending — is
-                # already satisfied, AND the concurrent request that won the
-                # race already recorded its own ``proposal.rejected`` event in
-                # ``proposal_events``, so no audit fact is lost here (do not
-                # "fix" this by adding logging — there is nothing to record).
-                # Fall through to the 422 below, which surfaces the real
-                # validation failure to the operator. We suppress ONLY
-                # ``ValueError`` (the benign status-race signal); we deliberately
-                # do NOT suppress ``KeyError`` (proposal row missing): the row
-                # was loaded successfully above and proposals are never
-                # hard-deleted, so a missing row is corruption of our own data
-                # and must crash rather than be swallowed.
-                with contextlib.suppress(ValueError):
-                    await service.reject_composition_proposal(
+                        cancellation_deferred = cancellation_deferred or was_cancelled
+                    except ValueError:
+                        pass
+                    if cancellation_deferred:
+                        raise asyncio.CancelledError
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "detail": (
+                                f"The composer's proposed change could not be applied: {error_summary} "
+                                "The proposal has been automatically rejected. "
+                                "Ask the composer to revise and resubmit."
+                            ),
+                            "error_type": "proposal_validation_failed",
+                            "tool_name": proposal.tool_name,
+                            "validation_errors": validation_errors_payload,
+                        },
+                    )
+                if is_approval_required_blob_store_only_mutation_tool(proposal.tool_name):
+                    # Blob-only approvals intentionally produce no CompositionState
+                    # delta. The accepted proposal points at the current state snapshot
+                    # so the proposal lifecycle remains forward-only without inventing
+                    # a fake pipeline edit.
+                    if current_record is None:
+                        (state_data, _validation), was_cancelled = await _await_with_deferred_cancellation(
+                            _state_data_from_composer_state(
+                                current_state,
+                                settings=request.app.state.settings,
+                                secret_service=request.app.state.scoped_secret_resolver,
+                                user_id=str(user.user_id),
+                                runtime_preflight=result.runtime_preflight,
+                                preflight_exception_policy="raise",
+                                initial_version=current_state.version,
+                                telemetry_source="compose",
+                            )
+                        )
+                        cancellation_deferred = cancellation_deferred or was_cancelled
+                        current_record, was_cancelled = await _await_with_deferred_cancellation(
+                            service.save_composition_state(
+                                session.id,
+                                state_data,
+                                provenance="tool_call",
+                            )
+                        )
+                        cancellation_deferred = cancellation_deferred or was_cancelled
+                    assert current_record is not None
+                    try:
+                        committed, was_cancelled = await _await_with_deferred_cancellation(
+                            service.mark_composition_proposal_committed(
+                                session_id=session.id,
+                                proposal_id=proposal.id,
+                                committed_state_id=current_record.id,
+                                actor=f"user:{user.user_id}",
+                            )
+                        )
+                        cancellation_deferred = cancellation_deferred or was_cancelled
+                    except KeyError:
+                        raise HTTPException(status_code=404, detail="Proposal not found") from None
+                    except ValueError as exc:
+                        raise HTTPException(status_code=409, detail=str(exc)) from exc
+                    response = _composition_proposal_response(committed)
+                    if cancellation_deferred:
+                        raise asyncio.CancelledError
+                    return response
+
+                # Tool succeeded but produced no state change. Non-blob proposal tools
+                # are composition mutations and must advance state on success.
+                raise HTTPException(
+                    status_code=409,
+                    detail="Accepted proposal did not change composition state.",
+                )
+
+            (state_data, _validation), was_cancelled = await _await_with_deferred_cancellation(
+                _state_data_from_composer_state(
+                    result.updated_state,
+                    settings=request.app.state.settings,
+                    secret_service=request.app.state.scoped_secret_resolver,
+                    user_id=str(user.user_id),
+                    runtime_preflight=result.runtime_preflight,
+                    preflight_exception_policy="raise",
+                    initial_version=current_state.version,
+                    telemetry_source="compose",
+                )
+            )
+            cancellation_deferred = cancellation_deferred or was_cancelled
+            state_record, was_cancelled = await _await_with_deferred_cancellation(
+                service.save_composition_state(
+                    session.id,
+                    state_data,
+                    provenance="tool_call",
+                )
+            )
+            cancellation_deferred = cancellation_deferred or was_cancelled
+            try:
+                committed, was_cancelled = await _await_with_deferred_cancellation(
+                    service.mark_composition_proposal_committed(
                         session_id=session.id,
                         proposal_id=proposal.id,
-                        actor=f"system:auto_reject_validation_failed:user:{user.user_id}",
+                        committed_state_id=state_record.id,
+                        actor=f"user:{user.user_id}",
                     )
-                raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "detail": (
-                            f"The composer's proposed change could not be applied: {error_summary} "
-                            "The proposal has been automatically rejected. "
-                            "Ask the composer to revise and resubmit."
-                        ),
-                        "error_type": "proposal_validation_failed",
-                        "tool_name": proposal.tool_name,
-                        "validation_errors": validation_errors_payload,
-                    },
                 )
-            # Tool succeeded but produced no state change. This is rare
-            # post the blob-store-only-mutation interception fix
-            # (web/composer/service.py — create_blob/update_blob/delete_blob
-            # no longer reach this branch as proposals), but keep the
-            # surface in case a future tool ends up here.
-            raise HTTPException(
-                status_code=409,
-                detail="Accepted proposal did not change composition state.",
-            )
-
-        state_data, _validation = await _state_data_from_composer_state(
-            result.updated_state,
-            settings=request.app.state.settings,
-            secret_service=request.app.state.scoped_secret_resolver,
-            user_id=str(user.user_id),
-            runtime_preflight=result.runtime_preflight,
-            preflight_exception_policy="raise",
-            initial_version=current_state.version,
-            telemetry_source="compose",
-        )
-        state_record = await service.save_composition_state(
-            session.id,
-            state_data,
-            provenance="tool_call",
-        )
-        try:
-            committed = await service.mark_composition_proposal_committed(
-                session_id=session.id,
-                proposal_id=proposal.id,
-                committed_state_id=state_record.id,
-                actor=f"user:{user.user_id}",
-            )
-        except KeyError:
-            raise HTTPException(status_code=404, detail="Proposal not found") from None
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return _composition_proposal_response(committed)
+                cancellation_deferred = cancellation_deferred or was_cancelled
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Proposal not found") from None
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            response = _composition_proposal_response(committed)
+            if cancellation_deferred:
+                raise asyncio.CancelledError
+            return response
 
     @router.post(
         "/{session_id}/proposals/{proposal_id}/reject",
@@ -553,14 +640,21 @@ def register_composer_routes(router: APIRouter) -> None:
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
     ) -> CompositionProposalResponse:
         session = await _verify_session_ownership(session_id, user, request)
-        service: SessionServiceProtocol = request.app.state.session_service
-        proposal = await service.reject_composition_proposal(
-            session_id=session.id,
-            proposal_id=proposal_id,
-            actor=f"user:{user.user_id}",
-        )
-        _ = body
-        return _composition_proposal_response(proposal)
+        compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+        async with compose_lock:
+            service: SessionServiceProtocol = request.app.state.session_service
+            try:
+                proposal = await service.reject_composition_proposal(
+                    session_id=session.id,
+                    proposal_id=proposal_id,
+                    actor=f"user:{user.user_id}",
+                )
+            except KeyError:
+                raise HTTPException(status_code=404, detail="Proposal not found") from None
+            except ValueError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            _ = body
+            return _composition_proposal_response(proposal)
 
     @router.post(
         "/{session_id}/recompose",

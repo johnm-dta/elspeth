@@ -72,6 +72,7 @@ from elspeth.web.composer.tools import (
     RuntimePreflight,
     ToolResult,
     execute_tool,
+    is_approval_required_blob_store_only_mutation_tool,
     is_blob_store_only_mutation_tool,
     is_cacheable_discovery_tool,
     is_discovery_tool,
@@ -519,15 +520,13 @@ async def run_tool_batch(
             and turn_preferences is not None
             and turn_preferences.trust_mode == "explicit_approve"
             and is_mutation_tool(tool_name)
-            # Blob-store side-effect tools (create_blob, update_blob,
-            # delete_blob) cannot be intercepted as proposals: they
-            # never advance CompositionState.version, but the accept
-            # endpoint requires a version advance, so an intercepted
-            # proposal would be structurally unacceptable. Their
-            # composition-affecting reference points (set_pipeline,
-            # set_source_from_blob, apply_pipeline_recipe) ARE
-            # intercepted and carry the meaningful operator approval.
-            and not is_blob_store_only_mutation_tool(tool_name)
+            # create_blob stays immediate because it allocates the blob id a
+            # later composition proposal may reference. Destructive blob-only
+            # writes such as update_blob/delete_blob still require approval.
+            and (
+                not is_blob_store_only_mutation_tool(tool_name)
+                or is_approval_required_blob_store_only_mutation_tool(tool_name)
+            )
         ):
             if proposals_this_turn >= _MAX_PENDING_PROPOSALS_PER_TURN:
                 raise ComposerServiceError(

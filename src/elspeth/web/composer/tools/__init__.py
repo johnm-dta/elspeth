@@ -78,6 +78,7 @@ from elspeth.web.composer.tools.blobs import (
     _sync_list_blobs,
 )
 from elspeth.web.composer.tools.discovery import (
+    is_approval_required_blob_store_only_mutation_tool,
     is_blob_store_only_mutation_tool,
     is_cacheable_discovery_tool,
     is_discovery_tool,
@@ -177,6 +178,7 @@ __all__ = [
     "execute_tool",
     "get_expression_grammar",
     "get_tool_definitions",
+    "is_approval_required_blob_store_only_mutation_tool",
     "is_blob_store_only_mutation_tool",
     "is_cacheable_discovery_tool",
     "is_discovery_tool",

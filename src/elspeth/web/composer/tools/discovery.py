@@ -44,6 +44,7 @@ from elspeth.web.composer.tools._registry import (
 
 __all__ = [
     "_SESSION_AWARE_TOOL_NAMES",
+    "is_approval_required_blob_store_only_mutation_tool",
     "is_blob_store_only_mutation_tool",
     "is_cacheable_discovery_tool",
     "is_discovery_tool",
@@ -100,8 +101,13 @@ def is_session_aware_tool(name: str) -> bool:
 def is_blob_store_only_mutation_tool(name: str) -> bool:
     """Return True for blob-store side-effect tools that never advance CompositionState.
 
-    See ``_BLOB_STORE_ONLY_MUTATION_TOOL_NAMES`` for the rationale on excluding
-    these from the ``trust_mode == "explicit_approve"`` proposal-interception
-    gate.
+    This is a mechanical state-delta classification, not an approval policy:
+    destructive blob-store-only tools still require explicit approval when a
+    session is in ``trust_mode == "explicit_approve"``.
     """
     return name in _BLOB_STORE_ONLY_MUTATION_TOOL_NAMES
+
+
+def is_approval_required_blob_store_only_mutation_tool(name: str) -> bool:
+    """Return True for blob-only mutations that must not bypass explicit approval."""
+    return is_blob_store_only_mutation_tool(name) and name != "create_blob"

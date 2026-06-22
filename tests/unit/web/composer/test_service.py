@@ -57,7 +57,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REVIEW_PENDING_CODE
 from elspeth.web.sessions.engine import create_session_engine
-from elspeth.web.sessions.models import chat_messages_table, sessions_table
+from elspeth.web.sessions.models import blobs_table, chat_messages_table, sessions_table
 from elspeth.web.sessions.schema import initialize_session_schema
 from elspeth.web.sessions.service import SessionServiceImpl
 from elspeth.web.sessions.telemetry import build_sessions_telemetry
@@ -230,6 +230,42 @@ def _test_sessions_service(engine: Any, data_dir: Path | None = None) -> Session
         telemetry=build_sessions_telemetry(),
         log=structlog.get_logger("test.composer.sessions"),
     )
+
+
+def _create_session_blob_for_test(
+    *,
+    engine: Any,
+    session_id: str,
+    data_dir: Path,
+    filename: str = "seed.txt",
+    content: str = "original content",
+) -> str:
+    provenance_context = _verbatim_blob_context(engine, session_id, content)
+    result = _execute_tool(
+        "create_blob",
+        {
+            "filename": filename,
+            "mime_type": "text/plain",
+            "content": content,
+        },
+        _empty_state(),
+        _mock_catalog(),
+        data_dir=str(data_dir),
+        session_engine=engine,
+        session_id=session_id,
+        user_message_id=provenance_context["user_message_id"],
+        user_message_content=provenance_context["user_message_content"],
+    )
+    assert result.success is True, result.data
+    return str(result.data["blob_id"])
+
+
+def _blob_content_for_test(engine: Any, blob_id: str) -> str | None:
+    with engine.connect() as conn:
+        row = conn.execute(select(blobs_table.c.storage_path).where(blobs_table.c.id == blob_id)).first()
+    if row is None:
+        return None
+    return Path(row.storage_path).read_text(encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -710,6 +746,112 @@ class TestComposerSingleToolCall:
         # set_pipeline IS still intercepted — it advances composition state
         # and represents the meaningful operator approval.
         assert "set_pipeline" in proposal_tools
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_intercepts_update_blob_without_mutating_blob(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """update_blob is a destructive blob-store mutation and must require approval."""
+        engine, session_id = _session_engine_with_session()
+        sessions_service = _test_sessions_service(engine, tmp_path)
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(data_dir=tmp_path),
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
+        session_uuid = UUID(session_id)
+        blob_id = _create_session_blob_for_test(
+            engine=engine,
+            session_id=session_id,
+            data_dir=tmp_path,
+            content="original content",
+        )
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+        turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_update_blob",
+                    "name": "update_blob",
+                    "arguments": {"blob_id": blob_id, "content": "mutated content"},
+                }
+            ],
+        )
+        done = _make_llm_response(content="Update is pending approval.")
+        responses = [turn, done]
+
+        async def _llm(_messages: Any, _tools: Any) -> Any:
+            return responses.pop(0)
+
+        await service._run_one_turn_for_test(
+            llm=_llm,
+            session_id=session_id,
+            initial_state=_empty_state(),
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert [proposal.tool_name for proposal in proposals] == ["update_blob"]
+        assert proposals[0].status == "pending"
+        assert _blob_content_for_test(engine, blob_id) == "original content"
+
+    @pytest.mark.asyncio
+    async def test_explicit_approve_intercepts_delete_blob_without_deleting_blob(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """delete_blob is a destructive blob-store mutation and must require approval."""
+        engine, session_id = _session_engine_with_session()
+        sessions_service = _test_sessions_service(engine, tmp_path)
+        service = ComposerServiceImpl(
+            catalog=_mock_catalog(),
+            settings=_make_settings(data_dir=tmp_path),
+            sessions_service=sessions_service,
+            session_engine=engine,
+        )
+        session_uuid = UUID(session_id)
+        blob_id = _create_session_blob_for_test(
+            engine=engine,
+            session_id=session_id,
+            data_dir=tmp_path,
+            content="original content",
+        )
+        await sessions_service.update_composer_preferences(
+            session_uuid,
+            trust_mode="explicit_approve",
+            density_default="high",
+            actor="user:alice",
+        )
+        turn = _make_llm_response(
+            tool_calls=[
+                {
+                    "id": "call_delete_blob",
+                    "name": "delete_blob",
+                    "arguments": {"blob_id": blob_id},
+                }
+            ],
+        )
+        done = _make_llm_response(content="Delete is pending approval.")
+        responses = [turn, done]
+
+        async def _llm(_messages: Any, _tools: Any) -> Any:
+            return responses.pop(0)
+
+        await service._run_one_turn_for_test(
+            llm=_llm,
+            session_id=session_id,
+            initial_state=_empty_state(),
+        )
+
+        proposals = await sessions_service.list_composition_proposals(session_uuid)
+        assert [proposal.tool_name for proposal in proposals] == ["delete_blob"]
+        assert proposals[0].status == "pending"
+        assert _blob_content_for_test(engine, blob_id) == "original content"
 
     @pytest.mark.asyncio
     async def test_explicit_approve_invalid_arguments_do_not_crash_compose_loop(

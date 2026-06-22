@@ -90,7 +90,7 @@ docker run --rm \
 
 ## Common Commands
 
-For complete CLI reference including all options and flags, see [User Manual - CLI Commands](../USER_MANUAL.md#cli-commands).
+For complete CLI reference including all options and flags, see [User Manual - CLI Commands](user-manual.md#cli-commands).
 
 ### Run a Pipeline
 

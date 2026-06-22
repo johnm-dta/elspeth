@@ -2,9 +2,9 @@
 
 ## Supported Versions
 
-ELSPETH is currently on the `0.5.3` / RC-5.3 release-candidate line. Security
-fixes are prioritised against the current release-candidate branch and `main`.
-Older release-candidate snapshots are retained for provenance, but are not
+ELSPETH is currently on the `0.6.0` release line. Security
+fixes are prioritised against the current release branch and `main`.
+Older release snapshots are retained for provenance, but are not
 maintained as separately supported long-term release lines.
 
 ## Reporting a Vulnerability
@@ -24,7 +24,7 @@ Preferred disclosure path:
 3. If no private route is available, open a public issue that says only
    "Security disclosure path requested" and includes no exploit detail.
 
-At RC-5.2, a dedicated public security mailbox has not yet been published in
+As of 0.6.0, a dedicated public security mailbox has not yet been published in
 this repository. Publishing or enabling a permanent private disclosure channel
 remains a public-release readiness item.
 

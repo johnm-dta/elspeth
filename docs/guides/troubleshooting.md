@@ -548,5 +548,5 @@ If you're still stuck:
 ## See Also
 
 - [User Manual](user-manual.md) - CLI commands and usage
-- [Docker Deployment Guide](../runbooks/docker.md) - Container deployment
+- [Docker Deployment Guide](docker.md) - Container deployment
 - [Environment Variables Reference](../reference/environment-variables.md) - Configuration options

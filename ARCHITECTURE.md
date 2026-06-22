@@ -3,7 +3,7 @@
 C4 model documentation for the ELSPETH auditable pipeline framework.
 
 **Last Updated:** 2026-06-05 (synchronized with RC-5.3 documentation line)
-**Framework Version:** 0.5.3 (RC-5.3 release documentation; package metadata aligned at 0.5.3)
+**Framework Version:** 0.6.0 (package metadata aligned at 0.6.0)
 **Status:** Pre-release
 
 ---
@@ -1002,7 +1002,7 @@ ongoing CI enforcement.
 - Subsystems: 11 major (20+ including sub-components)
 - Plugins: 38 (6 sources + 26 transforms + 6 sinks; verified via the registry's `discover_all_plugins()` — same code path as `elspeth plugins list`)
 - ADRs: 24 accepted records (001–024, excluding the 000 template)
-- Status: Pre-release (RC-5.2 documentation line)
+- Status: Pre-release (0.6.0)
 
 All diagrams use Mermaid syntax for version control compatibility.
 

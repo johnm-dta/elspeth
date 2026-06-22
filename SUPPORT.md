@@ -2,7 +2,7 @@
 
 ## Current Support Status
 
-ELSPETH is currently a release-candidate, pre-production platform outside the
+ELSPETH 0.6.0 is currently a pre-production platform outside the
 scoped interim ATO statement described in `docs/release/executive-summary.md`.
 It is not offered with a public service-level agreement.
 

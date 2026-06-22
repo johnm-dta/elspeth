@@ -294,7 +294,7 @@ def check_one_directory(
                     missing_fields=missing,
                 )
             )
-        elif forbid_unverified_judge_metadata and _judge_metadata_payload(entry) is not None:
+        elif forbid_unverified_judge_metadata or not _has_authoritative_judge_metadata_signature(entry):
             violations.append(_unverified_judge_metadata_violation(entry))
     for per_file_entry in head_per_file_rules:
         if _per_file_rule_discriminator(per_file_entry) in baseline_per_file_discriminators:

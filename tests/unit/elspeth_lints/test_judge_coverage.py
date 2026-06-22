@@ -618,31 +618,43 @@ def test_e2e_renewal_by_expires_edit_requires_judge(tmp_path: Path) -> None:
     assert not report.passes
 
 
-def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
+def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A new entry that records signed judge metadata satisfies the gate."""
     enforce_dir = _init_git_fixture(tmp_path)
     yaml_path = enforce_dir / "web.yaml"
     yaml_path.write_text("allow_hits: []\n")
     baseline = _commit(tmp_path, "initial: empty allowlist")
+    key = "web/x.py:R5:judged:fp=dddddddddddddddd"
+    file_fingerprint = "0" * 64
+    recorded_at = datetime(2026, 5, 23, 12, tzinfo=UTC)
+    rationale = "model reasoned that this boundary is legitimate."
+    signature = _valid_v1_judge_signature(
+        key=key,
+        file_fingerprint=file_fingerprint,
+        ast_path="body[0]",
+        recorded_at=recorded_at,
+        rationale=rationale,
+    )
 
     yaml_path.write_text(
         textwrap.dedent(f"""\
         allow_hits:
-        - key: web/x.py:R5:judged:fp=dddddddddddddddd
+        - key: {key}
           owner: alice
           reason: new judged entry
           safety: contained
           judge_verdict: ACCEPTED
-          judge_recorded_at: '2026-05-23T12:00:00+00:00'
-          judge_model: anthropic/claude-opus-4-7
+          judge_recorded_at: '{recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
           judge_policy_hash: '{JUDGE_POLICY_HASH}'
-          judge_rationale: model reasoned that this boundary is legitimate.
-          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          judge_rationale: {rationale}
+          file_fingerprint: '{file_fingerprint}'
           ast_path: body[0]
-          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+          judge_metadata_signature: '{signature}'
     """)
     )
     _commit(tmp_path, "PR: judged new entry")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
 
     report = check_one_directory(
         allowlist_dir=enforce_dir,
@@ -654,6 +666,50 @@ def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
     assert report.new_entry_count == 1
     assert report.violations == ()
     assert report.passes
+
+
+def test_e2e_new_entry_with_forged_judge_signature_is_flagged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signature-shaped judge quartet is not proof of review."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial: empty allowlist")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:forged:fp=dddddddddddddddd
+          owner: alice
+          reason: forged judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: fabricated rationale from PR YAML
+          file_fingerprint: '{"0" * 64}'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    _commit(tmp_path, "PR: forged judged new entry")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,)
+    assert not report.passes
 
 
 def test_e2e_keyless_fork_mode_rejects_new_signed_entry(tmp_path: Path) -> None:

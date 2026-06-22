@@ -75,7 +75,9 @@ from elspeth_lints.core.allowlist import (
     JUDGE_METADATA_SIGNATURE_PREFIXES,
     AllowlistEntry,
     PerFileRule,
+    _verify_judge_metadata_signature_at_load,
 )
+from elspeth_lints.core.allowlist_io import AllowlistIOError, parse_allow_hits
 from elspeth_lints.core.atomic_io import atomic_update_text
 
 from .rule import (
@@ -113,6 +115,7 @@ class _AllowHitKeyRecord:
     key: str
     source_binding: tuple[str, object, object] | None
     judge_metadata_signature: object | None
+    judge_metadata_signature_verified: bool = False
 
 
 def identity_prefix(canonical_key: str) -> str:
@@ -811,7 +814,7 @@ def _allow_hit_key_records_by_prefix(text: str, *, source_label: str) -> dict[st
         key = raw_entry.get("key")
         if not isinstance(key, str) or _FP_TAG not in key:
             continue
-        by_prefix[identity_prefix(key)].append(_allow_hit_key_record(key=key, raw_entry=raw_entry))
+        by_prefix[identity_prefix(key)].append(_allow_hit_key_record(key=key, raw_entry=raw_entry, source_label=source_label))
     return by_prefix
 
 
@@ -826,7 +829,12 @@ def _binding_field_for(raw_entry: dict[object, object]) -> str:
     return "scope_fingerprint" if version == 2 else "file_fingerprint"
 
 
-def _allow_hit_key_record(*, key: str, raw_entry: dict[object, object]) -> _AllowHitKeyRecord:
+def _allow_hit_key_record(
+    *,
+    key: str,
+    raw_entry: dict[object, object],
+    source_label: str = "<memory>",
+) -> _AllowHitKeyRecord:
     if not _has_complete_rejudge_metadata(raw_entry):
         return _AllowHitKeyRecord(
             key=key,
@@ -842,6 +850,7 @@ def _allow_hit_key_record(*, key: str, raw_entry: dict[object, object]) -> _Allo
         key=key,
         source_binding=(key, raw_entry[binding_field], raw_entry["ast_path"]),
         judge_metadata_signature=raw_entry["judge_metadata_signature"],
+        judge_metadata_signature_verified=_raw_entry_has_authoritative_judge_metadata_signature(raw_entry, source_label=source_label),
     )
 
 
@@ -874,7 +883,21 @@ def _is_rejudged_key_change(old_record: _AllowHitKeyRecord, new_record: _AllowHi
         return False
     if old_record.source_binding == new_record.source_binding:
         return False
-    return old_record.judge_metadata_signature != new_record.judge_metadata_signature
+    return new_record.judge_metadata_signature_verified and old_record.judge_metadata_signature != new_record.judge_metadata_signature
+
+
+def _raw_entry_has_authoritative_judge_metadata_signature(raw_entry: dict[object, object], *, source_label: str) -> bool:
+    try:
+        parsed = parse_allow_hits({"allow_hits": [raw_entry]}, source_file=source_label)
+        entry = parsed[0]
+        _verify_judge_metadata_signature_at_load(
+            entry,
+            context=f"rotation-audit {source_label}:{entry.key}",
+            allow_shape_only=False,
+        )
+    except (AllowlistIOError, ValueError, IndexError):
+        return False
+    return True
 
 
 def _load_rotation_manifest_records(*, rotation_log_path: Path, repo_root: Path) -> set[tuple[str, str, str, str]]:

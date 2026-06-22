@@ -77,6 +77,7 @@ from typing import Any
 
 from elspeth_lints.core.allowlist import (
     AllowlistEntry,
+    _verify_judge_metadata_signature_at_load,
 )
 from elspeth_lints.core.allowlist_io import (
     AllowlistIOError,
@@ -409,7 +410,9 @@ def _is_fresh_judge_record_after_binding_drift(entry: AllowlistEntry, baseline_e
     head_binding = _judge_binding_identity(entry)
     if any(baseline_entry.judge_metadata_signature == entry.judge_metadata_signature for baseline_entry in judged_baseline_entries):
         return False
-    return all(_judge_binding_identity(baseline_entry) != head_binding for baseline_entry in judged_baseline_entries)
+    return _has_authoritative_judge_metadata_signature(entry) and all(
+        _judge_binding_identity(baseline_entry) != head_binding for baseline_entry in judged_baseline_entries
+    )
 
 
 def _judge_binding_identity(entry: AllowlistEntry) -> tuple[str, str | None, str | None, str | None]:
@@ -494,6 +497,19 @@ def _missing_judge_fields(entry: AllowlistEntry) -> tuple[str, ...]:
     if entry.judge_metadata_signature is None:
         missing.append("judge_metadata_signature")
     return tuple(missing)
+
+
+def _has_authoritative_judge_metadata_signature(entry: AllowlistEntry) -> bool:
+    """Return whether ``entry`` has a real HMAC, not only signature-shaped text."""
+    try:
+        _verify_judge_metadata_signature_at_load(
+            entry,
+            context=f"judge-coverage {entry.source_file}:{entry.key}",
+            allow_shape_only=False,
+        )
+    except ValueError:
+        return False
+    return True
 
 
 def _unverified_judge_metadata_violation(entry: AllowlistEntry) -> JudgeCoverageViolation:

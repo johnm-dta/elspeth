@@ -777,7 +777,7 @@ def _can_skip_judge_metadata_hmac_recompute_for_missing_key() -> bool:
     return mode == _JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING and (raw_key is None or raw_key == "")
 
 
-def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: str) -> None:
+def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: str, allow_shape_only: bool = True) -> None:
     """Assert a post-judge entry's verdict metadata has not been edited."""
     if entry.judge_metadata_signature is None:
         raise ValueError(
@@ -804,7 +804,7 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
     assert entry.judge_model is not None
     assert entry.judge_rationale is not None
     assert entry.judge_policy_hash is not None
-    if _can_skip_judge_metadata_hmac_recompute_for_missing_key():
+    if allow_shape_only and _can_skip_judge_metadata_hmac_recompute_for_missing_key():
         return
     expected = compute_judge_metadata_signature(
         key=entry.key,

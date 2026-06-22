@@ -39,10 +39,12 @@ from __future__ import annotations
 import inspect
 import subprocess
 import textwrap
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
+from elspeth_lints.core.allowlist import JudgeVerdict, compute_judge_metadata_signature
 from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.judge_coverage import (
     JUDGE_METADATA_MUTATED,
@@ -60,6 +62,53 @@ from elspeth_lints.core.judge_coverage import (
 )
 
 _FAKE_JUDGE_METADATA_SIGNATURE = "hmac-sha256:v1:" + "0" * 64
+_TEST_JUDGE_METADATA_HMAC_KEY = "test-judge-metadata-hmac-key-2026-05-24"
+
+
+def _valid_v1_judge_signature(
+    *,
+    key: str,
+    file_fingerprint: str,
+    ast_path: str,
+    recorded_at: datetime,
+    rationale: str,
+) -> str:
+    return compute_judge_metadata_signature(
+        key=key,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=recorded_at,
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_rationale=rationale,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        signature_version=1,
+        file_fingerprint=file_fingerprint,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
+
+
+def _valid_v2_judge_signature(
+    *,
+    key: str,
+    scope_fingerprint: str,
+    ast_path: str,
+    recorded_at: datetime,
+    rationale: str,
+    judge_transport: str = "openrouter",
+) -> str:
+    return compute_judge_metadata_signature(
+        key=key,
+        ast_path=ast_path,
+        judge_verdict=JudgeVerdict.ACCEPTED,
+        judge_recorded_at=recorded_at,
+        judge_model=DEFAULT_JUDGE_MODEL,
+        judge_rationale=rationale,
+        judge_policy_hash=JUDGE_POLICY_HASH,
+        signature_version=2,
+        scope_fingerprint=scope_fingerprint,
+        judge_transport=judge_transport,
+        hmac_key=_TEST_JUDGE_METADATA_HMAC_KEY.encode("utf-8"),
+    )
 
 
 def test_judge_gates_do_not_reintroduce_private_yaml_loaders() -> None:
@@ -780,8 +829,78 @@ def test_e2e_grandfathered_judge_metadata_mutation_is_flagged(tmp_path: Path) ->
     assert not report.passes
 
 
-def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(tmp_path: Path) -> None:
+def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A fresh judge record can replace an old one after source/fingerprint drift."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    new_key = "web/x.py:R5:judged:fp=bbbbbbbbbbbbbbbb"
+    new_file_fingerprint = "1" * 64
+    new_recorded_at = datetime(2026, 5, 24, 12, tzinfo=UTC)
+    new_rationale = "same accepted rationale"
+    new_signature = _valid_v1_judge_signature(
+        key=new_key,
+        file_fingerprint=new_file_fingerprint,
+        ast_path="body[1]",
+        recorded_at=new_recorded_at,
+        rationale=new_rationale,
+    )
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: same accepted rationale
+          file_fingerprint: '{"0" * 64}'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: judged entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: {new_key}
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '{new_recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: {new_rationale}
+          file_fingerprint: '{new_file_fingerprint}'
+          ast_path: body[1]
+          judge_metadata_signature: '{new_signature}'
+    """)
+    )
+    _commit(tmp_path, "PR: rejudge after fingerprint drift")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert report.violations == ()
+    assert report.passes
+
+
+def test_e2e_rejudge_with_forged_signature_is_metadata_mutation(tmp_path: Path) -> None:
+    """A binding drift is not a fresh rejudge unless the new signature verifies."""
     enforce_dir = _init_git_fixture(tmp_path)
     yaml_path = enforce_dir / "web.yaml"
     yaml_path.write_text(
@@ -814,13 +933,13 @@ def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(tmp_path: Pa
           judge_recorded_at: '2026-05-24T12:00:00+00:00'
           judge_model: anthropic/claude-opus-4-7
           judge_policy_hash: '{JUDGE_POLICY_HASH}'
-          judge_rationale: same accepted rationale
+          judge_rationale: forged fresh rationale
           file_fingerprint: '{"1" * 64}'
           ast_path: body[1]
           judge_metadata_signature: '{"hmac-sha256:v1:" + "1" * 64}'
     """)
     )
-    _commit(tmp_path, "PR: rejudge after fingerprint drift")
+    _commit(tmp_path, "PR: forged rejudge after fingerprint drift")
 
     report = check_one_directory(
         allowlist_dir=enforce_dir,
@@ -830,9 +949,140 @@ def test_e2e_same_rationale_rejudged_after_fingerprint_drift_passes(tmp_path: Pa
 
     assert report.head_entry_count == 1
     assert report.grandfathered_count == 0
+    assert report.new_entry_count == 0
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (JUDGE_METADATA_MUTATED,)
+    assert not report.passes
+
+
+def test_e2e_v2_rejudged_after_scope_drift_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A v2 fresh judge record can replace an old v2 record after scope drift."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    new_key = "web/x.py:R5:judged:fp=bbbbbbbbbbbbbbbb"
+    new_scope_fingerprint = "b" * 64
+    new_recorded_at = datetime(2026, 5, 24, 12, tzinfo=UTC)
+    new_rationale = "same accepted rationale"
+    new_signature = _valid_v2_judge_signature(
+        key=new_key,
+        scope_fingerprint=new_scope_fingerprint,
+        ast_path="body[1]",
+        recorded_at=new_recorded_at,
+        rationale=new_rationale,
+    )
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: same accepted rationale
+          judge_signature_version: 2
+          scope_fingerprint: '{"a" * 64}'
+          ast_path: body[0]
+          judge_transport: openrouter
+          judge_metadata_signature: '{"hmac-sha256:v2:" + "0" * 64}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: v2 judged entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: {new_key}
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '{new_recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: {new_rationale}
+          judge_signature_version: 2
+          scope_fingerprint: '{new_scope_fingerprint}'
+          ast_path: body[1]
+          judge_transport: openrouter
+          judge_metadata_signature: '{new_signature}'
+    """)
+    )
+    _commit(tmp_path, "PR: v2 rejudge after scope drift")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
     assert report.new_entry_count == 1
     assert report.violations == ()
     assert report.passes
+
+
+def test_e2e_v2_rejudge_with_forged_signature_is_metadata_mutation(tmp_path: Path) -> None:
+    """A v2 HMAC-shaped signature string is not enough to prove rejudge."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: same accepted rationale
+          judge_signature_version: 2
+          scope_fingerprint: '{"a" * 64}'
+          ast_path: body[0]
+          judge_transport: openrouter
+          judge_metadata_signature: '{"hmac-sha256:v2:" + "0" * 64}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: v2 judged entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:judged:fp=bbbbbbbbbbbbbbbb
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-24T12:00:00+00:00'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: forged fresh rationale
+          judge_signature_version: 2
+          scope_fingerprint: '{"b" * 64}'
+          ast_path: body[1]
+          judge_transport: openrouter
+          judge_metadata_signature: '{"hmac-sha256:v2:" + "1" * 64}'
+    """)
+    )
+    _commit(tmp_path, "PR: forged v2 rejudge after scope drift")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.new_entry_count == 0
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (JUDGE_METADATA_MUTATED,)
+    assert not report.passes
 
 
 def test_e2e_baseline_absent_directory_treats_all_entries_as_new(tmp_path: Path) -> None:

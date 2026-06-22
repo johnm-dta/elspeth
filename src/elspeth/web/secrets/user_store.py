@@ -309,9 +309,13 @@ class UserSecretStore:
     def list_secrets(self, *, user_id: str, auth_provider_type: AuthProviderType) -> list[SecretInventoryItem]:
         """List secret metadata for a user (no values returned).
 
-        The ``available`` flag reflects full resolvability: the
-        fingerprint key must be configured and the stored ciphertext must
-        be decryptable with the current web ``secret_key``.
+        The inventory path is intentionally metadata-only: it does not
+        select ciphertext or perform per-row decrypts.  The ``available``
+        flag reflects whether rows exist in a deployment currently
+        configured for fingerprint computation.  Callers that need full
+        resolvability (including key-rotation/corruption detection) must
+        use ``has_secret()``, ``get_secret()``, or the HTTP validate
+        endpoint, which perform the bounded single-secret decrypt.
 
         Reason precedence is **fingerprint-key-first**, mirroring
         :meth:`ServerSecretStore.list_secrets`.  When
@@ -320,13 +324,13 @@ class UserSecretStore:
         would otherwise be undecryptable — the global deployment gap
         masks per-row state because fixing the per-row state without
         first fixing the deployment state would not make the secret
-        resolvable.  Rows that survive the fingerprint-key gate but
-        fail decryption (key rotation, row corruption, tamper) report
-        ``value_decryption_failed``.
+        resolvable.  Per-row decryption failures are surfaced by
+        ``has_secret()``, ``get_secret()``, and validation routes rather
+        than by inventory listing.
         """
         t = user_secrets_table
         stmt = (
-            sa.select(t.c.name, t.c.encrypted_value, t.c.salt)
+            sa.select(t.c.name)
             .where(
                 sa.and_(
                     t.c.user_id == user_id,
@@ -350,17 +354,6 @@ class UserSecretStore:
                         available=False,
                         source_kind="user_store",
                         reason="fingerprint_resolver_not_configured",
-                    )
-                )
-                continue
-            if not self._row_is_resolvable(row.name, row=row):
-                items.append(
-                    SecretInventoryItem(
-                        name=row.name,
-                        scope="user",
-                        available=False,
-                        source_kind="user_store",
-                        reason="value_decryption_failed",
                     )
                 )
                 continue

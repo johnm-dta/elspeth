@@ -4999,6 +4999,42 @@ class TestSecretTools:
             "reason": "fingerprint_resolver_not_configured",
         }
 
+    def test_validate_secret_ref_uses_bounded_resolvability_check_for_inventory_hits(self) -> None:
+        """validate_secret_ref must not trust cheap inventory availability."""
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        svc = MagicMock()
+        svc.has_ref.return_value = False
+        svc.list_refs.return_value = [
+            SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="user",
+                available=True,
+                source_kind="user_store",
+            )
+        ]
+
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": "OPENROUTER_API_KEY"},
+            state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        svc.has_ref.assert_called_once_with("test-user", "OPENROUTER_API_KEY")
+        assert result.success is True
+        assert dict(result.data) == {
+            "name": "OPENROUTER_API_KEY",
+            "available": False,
+            "scope": "user",
+            "source_kind": "user_store",
+            "reason": "value_decryption_failed",
+        }
+
     def test_validate_secret_ref_without_service_returns_failure(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()

@@ -2650,8 +2650,8 @@ class TestComposerRuntimeRunStatusAgreement:
 # ── Shape 6 — SecretInventoryItem biconditional agreement ────────────────────
 # Closes elspeth-0d31c22d26 / Phase 2.3 (commit 22e3e0d9).  Per-mode coverage
 # (fingerprint_resolver_not_configured, env_var_not_set,
-# value_decryption_failed) lives in tests/unit/web/secrets/{server,user}_store.py
-# and tests/unit/web/secrets/test_routes.py.  Per the Phase 2.3 closure
+# value_decryption_failed) lives in tests/unit/web/secrets/ and the contract
+# tests below.  Per the Phase 2.3 closure
 # rationale ("agreement-suite scope ... does not need duplication") this suite
 # DOES NOT duplicate the per-mode tests.  The single contract-layer assertion
 # below pins the structural invariant (``available ⟺ reason is None``) so a

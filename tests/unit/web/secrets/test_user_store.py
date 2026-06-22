@@ -126,6 +126,50 @@ class TestUserSecretStore:
             assert item.source_kind == "user_store"
             # SecretInventoryItem has no value field — metadata only by design
 
+    def test_list_secrets_does_not_decrypt_each_row(self, store: UserSecretStore, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Inventory listing must not perform per-secret PBKDF/decrypt work."""
+        store.set_secret("KEY_A", value="val-a", user_id="user-1", auth_provider_type="local")
+        store.set_secret("KEY_B", value="val-b", user_id="user-1", auth_provider_type="local")
+
+        def fail_if_decrypted(*args: Any, **kwargs: Any) -> bool:
+            raise AssertionError("list_secrets must not decrypt user secret rows")
+
+        monkeypatch.setattr(store, "_row_is_resolvable", fail_if_decrypted)
+
+        items = store.list_secrets(user_id="user-1", auth_provider_type="local")
+
+        assert [item.name for item in items] == ["KEY_A", "KEY_B"]
+        assert all(item.available for item in items)
+        assert all(item.reason is None for item in items)
+
+    def test_list_secrets_selects_no_secret_material_columns(self, store: UserSecretStore, db_engine) -> None:
+        """Inventory listing must not read encrypted values or salts."""
+        store.set_secret("KEY_A", value="val-a", user_id="user-1", auth_provider_type="local")
+
+        statements: list[str] = []
+
+        def capture_statement(
+            _conn: Any,
+            _cursor: Any,
+            statement: str,
+            _parameters: Any,
+            _context: Any,
+            _executemany: bool,
+        ) -> None:
+            if "user_secrets" in statement:
+                statements.append(statement)
+
+        sa.event.listen(db_engine, "before_cursor_execute", capture_statement)
+        try:
+            items = store.list_secrets(user_id="user-1", auth_provider_type="local")
+        finally:
+            sa.event.remove(db_engine, "before_cursor_execute", capture_statement)
+
+        assert [item.name for item in items] == ["KEY_A"]
+        list_query = statements[-1].lower()
+        assert "encrypted_value" not in list_query
+        assert "salt" not in list_query
+
     def test_get_nonexistent_raises(self, store: UserSecretStore) -> None:
         """Getting a secret that doesn't exist must raise SecretNotFoundError."""
         with pytest.raises(SecretNotFoundError):
@@ -300,12 +344,16 @@ class TestUserSecretStore:
         assert items[0].available is False
         assert items[0].reason == "fingerprint_resolver_not_configured"
 
-    def test_rotation_makes_existing_secret_unresolvable(self, db_engine) -> None:
-        """A master-key rotation must make old rows unavailable, not falsely available.
+    def test_rotation_makes_existing_secret_unresolvable_for_resolution(self, db_engine) -> None:
+        """A master-key rotation must make explicit resolution unavailable.
 
         Typed ``SecretDecryptionError`` (not ``SecretNotFoundError``) so HTTP
         handlers can map to 409 Conflict with re-save guidance — the row
         exists but is in conflict with current server configuration.
+
+        Inventory listing is intentionally metadata-only and does not decrypt
+        every row, so row-level decryption failures are detected by
+        ``has_secret`` / ``get_secret`` / validate rather than ``list_secrets``.
         """
         writer_store = UserSecretStore(engine=db_engine, master_key=TEST_MASTER_KEY)
         writer_store.set_secret("ROTATED", value="val", user_id="u1", auth_provider_type="local")
@@ -316,13 +364,13 @@ class TestUserSecretStore:
         items = rotated_store.list_secrets(user_id="u1", auth_provider_type="local")
         assert len(items) == 1
         assert items[0].name == "ROTATED"
-        assert items[0].available is False
-        assert items[0].reason == "value_decryption_failed"
+        assert items[0].available is True
+        assert items[0].reason is None
         with pytest.raises(SecretDecryptionError, match="cannot be decrypted"):
             rotated_store.get_secret("ROTATED", user_id="u1", auth_provider_type="local")
 
-    def test_corrupt_ciphertext_is_not_reported_available(self, store: UserSecretStore, db_engine) -> None:
-        """Ciphertext corruption must propagate as unavailable across all store APIs."""
+    def test_corrupt_ciphertext_is_not_resolvable(self, store: UserSecretStore, db_engine) -> None:
+        """Ciphertext corruption must be caught by explicit resolution APIs."""
         store.set_secret("CORRUPT", value="val", user_id="u1", auth_provider_type="local")
 
         with db_engine.begin() as conn:
@@ -341,8 +389,8 @@ class TestUserSecretStore:
         assert store.has_secret("CORRUPT", user_id="u1", auth_provider_type="local") is False
         items = store.list_secrets(user_id="u1", auth_provider_type="local")
         assert len(items) == 1
-        assert items[0].available is False
-        assert items[0].reason == "value_decryption_failed"
+        assert items[0].available is True
+        assert items[0].reason is None
         with pytest.raises(SecretDecryptionError, match="cannot be decrypted"):
             store.get_secret("CORRUPT", user_id="u1", auth_provider_type="local")
 

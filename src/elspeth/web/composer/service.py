@@ -146,6 +146,15 @@ slog = structlog.get_logger()
 _LLM_API_MAX_ATTEMPTS = 3
 _LLM_API_RETRY_BASE_DELAY_SECONDS = 1.0
 _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS: Final[str] = "invalid_tool_arguments"
+_ADVISOR_ARGUMENT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "trigger",
+        "problem_summary",
+        "recent_errors",
+        "attempted_actions",
+        "schema_excerpt",
+    }
+)
 
 # Composer LLM sampling is operator-set via WebSettings.composer_temperature /
 # composer_seed: sent verbatim when configured, omitted when None.
@@ -3576,6 +3585,14 @@ class ComposerServiceImpl:
         anchor tracking on the caller side ensures repeated identical
         ARG_ERRORs surface the §7.7 structural hint.
         """
+        unknown_keys = sorted(set(arguments) - _ADVISOR_ARGUMENT_KEYS)
+        if unknown_keys:
+            return {
+                "status": "ARG_ERROR",
+                "error": f"request_advisor_hint received {len(unknown_keys)} unknown argument(s)",
+                "error_class": "ValueError",
+            }
+
         trigger = arguments["trigger"]
         if not isinstance(trigger, str):
             return {

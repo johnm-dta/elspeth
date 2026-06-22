@@ -179,6 +179,7 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freez
                 },
             },
             "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
+            "additionalProperties": False,
         },
     }
 )

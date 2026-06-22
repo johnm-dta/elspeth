@@ -52,12 +52,14 @@ async def test_legacy_tool_invocation_persistence_redacts_advisor_payloads() -> 
     raw_action = "RAW_ACTION: tried set_pipeline with sensitive prose"
     raw_schema = "RAW_SCHEMA: internal schema excerpt"
     raw_guidance = "RAW_GUIDANCE: frontier model advice with sensitive details"
+    raw_extra_context = "RAW_EXTRA_CONTEXT: unbounded context smuggled through an unknown key"
     arguments = {
         "trigger": "reactive_stuck",
         "problem_summary": raw_problem,
         "recent_errors": [raw_error],
         "attempted_actions": [raw_action],
         "schema_excerpt": raw_schema,
+        "full_context": raw_extra_context,
     }
     result = {
         "status": "SUCCESS",
@@ -115,10 +117,13 @@ async def test_legacy_tool_invocation_persistence_redacts_advisor_payloads() -> 
     assert raw_action not in persisted_blob
     assert raw_schema not in persisted_blob
     assert raw_guidance not in persisted_blob
+    assert "full_context" not in persisted_blob
+    assert raw_extra_context not in persisted_blob
     assert "<advisor-problem-summary:" in persisted_blob
     assert "<advisor-recent-errors:1-entries>" in persisted_blob
     assert "<advisor-attempted-actions:1-entries>" in persisted_blob
     assert "<advisor-schema-excerpt:" in persisted_blob
+    assert "<redacted-unknown-argument-key>" in persisted_blob
     assert '"guidance": "<redacted>"' in persisted_blob
 
 

@@ -216,6 +216,7 @@ def test_advisor_tool_schema_requires_trigger_and_mentions_proactive_criteria() 
     advisor = next(defn for defn in get_tool_definitions() if defn["name"] == "request_advisor_hint")
     parameters = advisor["parameters"]
     assert "trigger" in parameters["required"]
+    assert parameters["additionalProperties"] is False
 
     trigger_schema = parameters["properties"]["trigger"]
     assert trigger_schema["enum"] == [
@@ -227,6 +228,29 @@ def test_advisor_tool_schema_requires_trigger_and_mentions_proactive_criteria() 
     assert "security" in description
     assert "red-listed" in description
     assert "before `set_pipeline`" in description
+
+
+def test_advisor_argument_validation_rejects_unknown_keys() -> None:
+    """Advisor args are LLM-supplied; the runtime boundary must reject extras."""
+    service = ComposerServiceImpl(catalog=_mock_catalog(), settings=_make_settings())
+    raw_extra_context = "RAW_EXTRA_CONTEXT: raw traceback and source excerpt"
+
+    payload = service._validate_advisor_arguments(
+        {
+            "trigger": "proactive_security_safety",
+            "problem_summary": "stuck",
+            "recent_errors": ["e1"],
+            "attempted_actions": ["a1"],
+            "full_context": raw_extra_context,
+        }
+    )
+
+    assert payload is not None
+    assert payload["status"] == "ARG_ERROR"
+    assert payload["error_class"] == "ValueError"
+    assert "unknown argument" in payload["error"]
+    assert "full_context" not in payload["error"]
+    assert raw_extra_context not in payload["error"]
 
 
 def test_reactive_trigger_is_retired() -> None:

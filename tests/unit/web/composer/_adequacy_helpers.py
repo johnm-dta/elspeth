@@ -170,7 +170,10 @@ def _entry_hash(name: str, entry: ToolRedaction) -> dict[str, Any]:
     key-sets, summarizer keys, and reason text.  Summarizer *values* (callable
     identity) are not hashed for declarative entries because the declarative
     shape uses ``argument_summarizers`` keyed by string; key-set changes are
-    the detectable unit.  ``sensitive_path_count`` is
+    the detectable unit.  A declared ``known_argument_keys`` allowlist is
+    included because it changes whether unknown LLM-supplied arguments fail
+    closed before persistence.
+    ``sensitive_path_count`` is
     ``len(sensitive_argument_keys) + len(sensitive_response_keys)`` without
     deduplication (each named key contributes once per field surface).
     """
@@ -198,6 +201,8 @@ def _entry_hash(name: str, entry: ToolRedaction) -> dict[str, Any]:
                 else None
             ),
         }
+        if policy.known_argument_keys:
+            canon_payload["known_argument_keys"] = sorted(policy.known_argument_keys)
         sensitive_path_count = len(policy.sensitive_argument_keys) + len(policy.sensitive_response_keys)
 
     canon = json.dumps(canon_payload, sort_keys=True, separators=(",", ":"))

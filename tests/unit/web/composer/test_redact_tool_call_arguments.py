@@ -417,6 +417,29 @@ def test_declarative_non_sensitive_keys_passthrough(
     assert result["count"] == 42
 
 
+def test_advisor_declarative_unknown_argument_keys_are_sentinelised() -> None:
+    """Advisor persists LLM args; unknown keys must not pass through raw."""
+    tel = NoopRedactionTelemetry()
+    raw_extra_context = "RAW_EXTRA_CONTEXT: private traceback and schema excerpt"
+
+    result = redact_tool_call_arguments(
+        "request_advisor_hint",
+        {
+            "trigger": "proactive_security_safety",
+            "problem_summary": "stuck on provider options",
+            "recent_errors": ["validator echoed a private column"],
+            "attempted_actions": ["set_pipeline with sensitive options"],
+            "full_context": raw_extra_context,
+        },
+        telemetry=tel,
+    )
+
+    assert result["problem_summary"].startswith("<advisor-problem-summary:")
+    assert "full_context" not in result
+    assert result["_unknown_arguments"] == "<redacted-unknown-argument-key>"
+    assert raw_extra_context not in str(result)
+
+
 # ---------------------------------------------------------------------------
 # Failure modes: missing manifest, summarizer raises, summarizer non-str
 # ---------------------------------------------------------------------------

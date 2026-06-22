@@ -36,6 +36,15 @@ REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
 # (closes W6 / spec §8.1 RSK-03 weak echo).
 REDACTED_UNKNOWN_RESPONSE_KEY = "<redacted-unknown-response-key>"
 
+# Fixed sentinel for arguments that appear in the input but are not declared in
+# a manifest entry's optional known_argument_keys allowlist. Unknown key names
+# are removed too; they are LLM-controlled text and may themselves carry
+# sensitive payload. Most declarative tools still preserve historical
+# passthrough behavior; tools that persist untyped, LLM-supplied argument dicts
+# can opt into this fail-closed mode.
+REDACTED_UNKNOWN_ARGUMENT_KEY = "<redacted-unknown-argument-key>"
+REDACTED_UNKNOWN_ARGUMENTS_FIELD = "_unknown_arguments"
+
 # Sentinel applied to Sensitive[T] fields whose _SensitiveMarker carries no
 # summarizer callable.  A field declared ``Annotated[T, Sensitive()]`` (with
 # no ``summarizer=`` keyword) receives this value instead of the raw payload.
@@ -631,7 +640,7 @@ class ToolRedactionPolicy:
     ``argument_model`` set) is preferred for any tool that has, or would
     benefit from, a redaction-bearing Pydantic argument model.
 
-    Four invariants are enforced at construction time:
+    Five invariants are enforced at construction time:
 
     1. **No orphan summarizers** — every key in ``argument_summarizers`` must
        also appear in ``sensitive_argument_keys``. A summarizer for a key that
@@ -649,6 +658,10 @@ class ToolRedactionPolicy:
     4. **``handles_no_sensitive_data=False`` requires ``known_response_keys``**
        — the allowlist defends against response-shape drift; unknown keys at
        persistence time are fail-closed redacted with a fixed sentinel.
+
+    5. **``known_argument_keys`` covers ``sensitive_argument_keys`` when set** —
+       the argument allowlist is opt-in for legacy compatibility, but once a
+       policy declares it, every sensitive argument key must also be known.
 
     **Response-walker fail-closed behavior for declarative entries:**
 
@@ -685,6 +698,7 @@ class ToolRedactionPolicy:
 
     sensitive_argument_keys: tuple[str, ...] = ()
     sensitive_response_keys: tuple[str, ...] = ()
+    known_argument_keys: tuple[str, ...] = ()
     known_response_keys: tuple[str, ...] = ()
     argument_summarizers: Mapping[str, Callable[[Any], str]] = field(default_factory=dict)
     handles_no_sensitive_data: bool = False
@@ -700,6 +714,13 @@ class ToolRedactionPolicy:
             raise ValueError(
                 f"argument_summarizers keys {sorted(orphan_summarizers)} are not declared in "
                 f"sensitive_argument_keys; orphan summarizers indicate a policy bug."
+            )
+
+        orphan_sensitive_arguments = set(self.sensitive_argument_keys) - set(self.known_argument_keys)
+        if self.known_argument_keys and orphan_sensitive_arguments:
+            raise ValueError(
+                f"sensitive_argument_keys {sorted(orphan_sensitive_arguments)} are not declared in "
+                "known_argument_keys; the opt-in argument allowlist must cover every sensitive argument key."
             )
 
         if self.handles_no_sensitive_data and self.handles_no_sensitive_data_reason_struct is None:
@@ -724,6 +745,7 @@ class ToolRedactionPolicy:
             self,
             "sensitive_argument_keys",
             "sensitive_response_keys",
+            "known_argument_keys",
             "known_response_keys",
             "argument_summarizers",
         )
@@ -1751,10 +1773,11 @@ def _redact_via_policy(
         is registered → REDACTED_SENSITIVE_NO_SUMMARIZER substitutes the value
         (spec §4.3 line 1073: "Plain sensitive key → value replaced by literal
         string '<redacted>'.").
-      * Argument key NOT in sensitive_argument_keys → passthrough (the
-        declarative argument walker, unlike the response walker, does not
-        sentinelise unknown keys; the manifest enumerates the sensitive
-        surface explicitly).
+      * Argument key NOT in sensitive_argument_keys → passthrough by default
+        for legacy declarative entries. If ``policy.known_argument_keys`` is
+        declared, keys outside that allowlist are removed and replaced with a
+        generic REDACTED_UNKNOWN_ARGUMENT_KEY marker under
+        REDACTED_UNKNOWN_ARGUMENTS_FIELD.
 
     Walker atomicity (rev-3 W8b / rev-4 W8b): the output dict is built in a
     local variable and only returned on success.  A mid-walk raise leaves no
@@ -1763,9 +1786,17 @@ def _redact_via_policy(
     # Build the output dict by shallow-copying the input, then substituting
     # values for every sensitive key present.  Atomicity comes from the fact
     # that any raise during summarization aborts before we hand the dict back.
-    # Non-sensitive keys are passthrough (the argument walker does not
-    # sentinelise unknown keys — see the docstring).
+    # Non-sensitive keys are passthrough unless the policy opts into a closed
+    # argument allowlist.
     redacted: dict[str, Any] = dict(arguments)
+    if policy.known_argument_keys:
+        known_argument_keys = set(policy.known_argument_keys)
+        unknown_keys = [key for key in arguments if key not in known_argument_keys]
+        for key in unknown_keys:
+            redacted.pop(key, None)
+        if unknown_keys:
+            redacted[REDACTED_UNKNOWN_ARGUMENTS_FIELD] = REDACTED_UNKNOWN_ARGUMENT_KEY
+
     summarizers = policy.argument_summarizers
     for key in policy.sensitive_argument_keys:
         if key not in arguments:
@@ -1828,7 +1859,10 @@ def redact_tool_call_arguments(
       ``policy.sensitive_argument_keys``.  Missing keys are no-ops; present
       keys are summarized (via ``policy.argument_summarizers[key]``) or
       sentinel-substituted (``REDACTED_SENSITIVE_NO_SUMMARIZER``).  Keys
-      not in ``sensitive_argument_keys`` are passthrough.
+      not in ``sensitive_argument_keys`` are passthrough unless the policy
+      declares ``known_argument_keys``; in that case unknown argument key names
+      are removed and replaced with a generic ``REDACTED_UNKNOWN_ARGUMENT_KEY``
+      marker under ``REDACTED_UNKNOWN_ARGUMENTS_FIELD``.
 
     **Failure modes (all raise AuditIntegrityError):**
       - Manifest entry missing for ``tool_name`` (registry-consistency
@@ -2954,6 +2988,13 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         # request_advisor_hint (intercepted at service.py:2103).
         "request_advisor_hint": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=(
+                    "trigger",
+                    "problem_summary",
+                    "recent_errors",
+                    "attempted_actions",
+                    "schema_excerpt",
+                ),
                 sensitive_argument_keys=(
                     "problem_summary",
                     "recent_errors",

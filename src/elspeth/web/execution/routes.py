@@ -28,8 +28,7 @@ from pydantic import ValidationError
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
-from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
-from elspeth.web.auth.protocol import AuthProvider
+from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
 from elspeth.web.composer.service import _BadRequestLLMError
@@ -71,7 +70,9 @@ from elspeth.web.execution.schemas import (
     RunResultsResponse,
     RunStatusResponse,
     ValidationResult,
+    WebSocketTicketResponse,
 )
+from elspeth.web.execution.websocket_ticket import WebSocketTicketStore
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
@@ -94,6 +95,14 @@ async def _get_execution_service(request: Request) -> ExecutionService:
 
 async def _get_session_service(request: Request) -> SessionServiceProtocol:
     return cast(SessionServiceProtocol, request.app.state.session_service)
+
+
+def _get_websocket_ticket_store(app: Any) -> WebSocketTicketStore:
+    store = getattr(app.state, "websocket_ticket_store", None)
+    if store is None:
+        store = WebSocketTicketStore()
+        app.state.websocket_ticket_store = store
+    return cast(WebSocketTicketStore, store)
 
 
 # ── Ownership verification helpers ────────────────────────────────────
@@ -837,42 +846,29 @@ def create_execution_router() -> APIRouter:
     async def websocket_run_progress(
         websocket: WebSocket,
         run_id: str,
+        ticket: str | None = None,
         token: str | None = None,
     ) -> None:
         """Stream RunEvent JSON payloads for a specific run.
 
-        AC #12: Authentication via ?token=<jwt> query parameter.
+        Authentication uses a short-lived, single-use ?ticket=<opaque> query
+        parameter minted by POST /api/runs/{run_id}/ws-ticket. Session JWTs
+        are never accepted in the WebSocket URL.
         Close code 4001 on auth failure — client MUST NOT auto-reconnect
-        on 4001 (token must be refreshed or user must re-authenticate).
+        on 4001 (ticket must be refreshed or user must re-authenticate).
         """
         broadcaster: ProgressBroadcaster = websocket.app.state.broadcaster
-        auth_provider: AuthProvider = websocket.app.state.auth_provider
         service: ExecutionService = websocket.app.state.execution_service
 
-        # Auth: validate JWT from query parameter
-        if token is None:
-            await websocket.close(code=4001, reason="Missing authentication token")
+        if token is not None:
+            await websocket.close(code=4001, reason="Use a WebSocket ticket, not a session token")
             return
-        try:
-            user = await auth_provider.authenticate(token)
-        except AuthProviderUnavailable as provider_exc:
-            # Provider availability failure is a distinct outcome from an
-            # invalid token (auth/models.py: AuthProviderUnavailable; the HTTP
-            # path maps it to 503, not 401). The client may hold a VALID token,
-            # so closing 4001 here would wrongly tell it to re-authenticate
-            # instead of backing off (see docstring above). Surface to the
-            # operator and close with the transient/server-side code 1011, the
-            # WebSocket analogue of HTTP 503 used elsewhere in this function.
-            slog.error(
-                "websocket_auth_provider_unavailable",
-                run_id=run_id,
-                phase="authenticate",
-                error=str(provider_exc),
-            )
-            await websocket.close(code=1011, reason="Authentication provider unavailable")
+        if ticket is None:
+            await websocket.close(code=4001, reason="Missing WebSocket ticket")
             return
-        except AuthenticationError:
-            await websocket.close(code=4001, reason="Invalid authentication token")
+        user = _get_websocket_ticket_store(websocket.app).consume(ticket=ticket, run_id=run_id)
+        if user is None:
+            await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
             return
 
         await websocket.accept()
@@ -1286,5 +1282,19 @@ def create_execution_router() -> APIRouter:
             resolved,
             artifact_id=artifact_id,
         )
+
+    @router.post(
+        "/api/runs/{run_id}/ws-ticket",
+        response_model=WebSocketTicketResponse,
+    )
+    async def create_run_websocket_ticket(
+        run_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> WebSocketTicketResponse:
+        """Issue a short-lived one-use credential for the progress WebSocket."""
+        await _verify_run_ownership(run_id, user, request)
+        ticket = _get_websocket_ticket_store(request.app).issue(run_id=run_id, user=user)
+        return WebSocketTicketResponse(ticket=ticket.ticket, expires_at=ticket.expires_at)
 
     return router

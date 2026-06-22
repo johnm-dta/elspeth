@@ -2,15 +2,14 @@
 // ELSPETH WebSocket Manager
 //
 // Manages WebSocket connections for pipeline execution progress streaming.
-// Connects to /ws/runs/{runId}?token=<jwt> with the JWT appended as a
-// query parameter (not a header, since the WebSocket API doesn't support
-// custom headers).
+// Connects to /ws/runs/{runId}?ticket=<opaque>, where each ticket is minted by
+// authenticated REST and consumed once by the backend.
 //
 // Close code discrimination:
 //   1000 (normal)   -- run terminal, do NOT reconnect, poll REST
 //   1006 (abnormal) -- network drop, auto-reconnect with backoff
 //   1011 (internal) -- server error, do NOT reconnect, poll REST
-//   4001 (auth)     -- token invalid/expired, do NOT reconnect, trigger logout
+//   4001 (auth)     -- ticket/auth failure, do NOT reconnect, trigger logout
 //   4004 (not found) -- run unavailable/not owned, do NOT reconnect
 //
 // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped).
@@ -36,7 +35,7 @@ import type {
  * - onFailed: Terminal. Pipeline aborted due to unrecoverable error.
  * - onConnected: Socket opened, including after a reconnect.
  * - onDisconnected: Abnormal close entered the reconnect loop.
- * - onAuthFailure: Close code 4001. Token invalid/expired.
+ * - onAuthFailure: Close code 4001. Ticket or session auth failed.
  *   Caller should trigger authStore.logout(). No reconnect attempt.
  * - onRunUnavailable: Close code 4004. Run not found or not owned.
  *   Caller should surface the unavailable run. No reconnect attempt.
@@ -59,6 +58,9 @@ export interface WebSocketConnection {
   close: () => void;
 }
 
+/** Fetches a fresh one-use WebSocket ticket for one connection attempt. */
+export type WebSocketTicketProvider = () => Promise<string>;
+
 /** Initial reconnect delay in milliseconds. */
 const INITIAL_RECONNECT_DELAY_MS = 1000;
 
@@ -68,9 +70,9 @@ const MAX_RECONNECT_DELAY_MS = 30_000;
 /**
  * Connect to the execution progress WebSocket for a given run.
  *
- * The JWT is appended as a query parameter since the WebSocket API
- * does not support custom request headers. The backend validates the
- * token on connection upgrade; close code 4001 indicates auth failure.
+ * A fresh opaque ticket is requested before each connection attempt. This keeps
+ * the session JWT in the authenticated REST request and out of WebSocket URLs.
+ * Close code 4001 indicates auth failure.
  *
  * Returns a connection handle with a close() method. The connection
  * auto-reconnects on abnormal disconnects (code 1006 or unknown codes)
@@ -79,7 +81,7 @@ const MAX_RECONNECT_DELAY_MS = 30_000;
  */
 export function connectToRun(
   runId: string,
-  token: string,
+  getTicket: WebSocketTicketProvider,
   callbacks: WebSocketCallbacks,
 ): WebSocketConnection {
   let socket: WebSocket | null = null;
@@ -87,10 +89,18 @@ export function connectToRun(
   let reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function buildWsUrl(): string {
+  function buildWsUrl(ticket: string): string {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
-    return `${protocol}//${host}/ws/runs/${runId}?token=${encodeURIComponent(token)}`;
+    return `${protocol}//${host}/ws/runs/${runId}?ticket=${encodeURIComponent(ticket)}`;
+  }
+
+  function errorStatus(error: unknown): number | null {
+    if (typeof error !== "object" || error === null) {
+      return null;
+    }
+    const status = (error as { status?: unknown }).status;
+    return typeof status === "number" ? status : null;
   }
 
   function dispatchEvent(event: RunEvent): void {
@@ -115,10 +125,35 @@ export function connectToRun(
     }
   }
 
-  function connect(): void {
+  async function connect(): Promise<void> {
     if (closed) return;
 
-    socket = new WebSocket(buildWsUrl());
+    let ticket: string;
+    try {
+      ticket = await getTicket();
+    } catch (error) {
+      if (closed) return;
+      const status = errorStatus(error);
+      if (status === 401) {
+        closed = true;
+        callbacks.onAuthFailure();
+        return;
+      }
+      if (status === 404) {
+        closed = true;
+        callbacks.onRunUnavailable?.();
+        return;
+      }
+      scheduleReconnect();
+      return;
+    }
+    if (closed) return;
+    if (ticket.length === 0) {
+      scheduleReconnect();
+      return;
+    }
+
+    socket = new WebSocket(buildWsUrl(ticket));
 
     socket.onopen = (): void => {
       // Reset backoff on successful connection
@@ -167,7 +202,7 @@ export function connectToRun(
           return;
 
         case 4001:
-          // Auth failure -- token invalid or expired.
+          // Auth failure -- ticket invalid/expired or session auth failed.
           // Do NOT reconnect. Trigger logout to redirect to LoginPage.
           closed = true;
           callbacks.onAuthFailure();
@@ -194,14 +229,14 @@ export function connectToRun(
     callbacks.onDisconnected?.();
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
-      connect();
+      void connect();
       // Exponential backoff, capped at MAX_RECONNECT_DELAY_MS
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
     }, reconnectDelay);
   }
 
   // Start the initial connection
-  connect();
+  void connect();
 
   return {
     close(): void {

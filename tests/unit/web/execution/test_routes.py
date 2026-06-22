@@ -170,6 +170,42 @@ def _accounting(
 # ── REST Endpoint Tests ───────────────────────────────────────────────
 
 
+class TestWebSocketTicketEndpoint:
+    """POST /api/runs/{run_id}/ws-ticket."""
+
+    @pytest.mark.asyncio
+    async def test_issues_opaque_single_use_websocket_ticket(self) -> None:
+        run_id = uuid4()
+        app = _create_test_app()
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(f"/api/runs/{run_id}/ws-ticket")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body) == {"ticket", "expires_at"}
+        assert isinstance(body["ticket"], str)
+        assert body["ticket"]
+        assert body["ticket"] != "auth-token"
+
+        consumed = app.state.websocket_ticket_store.consume(ticket=body["ticket"], run_id=str(run_id))
+        assert consumed == UserIdentity(user_id=_TEST_USER_ID, username="testuser")
+        assert app.state.websocket_ticket_store.consume(ticket=body["ticket"], run_id=str(run_id)) is None
+
+    @pytest.mark.asyncio
+    async def test_does_not_issue_ticket_for_unowned_run(self) -> None:
+        run_id = uuid4()
+        app = _create_test_app()
+        app.state.session_service.get_session.return_value.user_id = "other-user"
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(f"/api/runs/{run_id}/ws-ticket")
+
+        assert response.status_code == 404
+        assert response.json() == {"detail": "Run not found"}
+        assert not hasattr(app.state, "websocket_ticket_store")
+
+
 class TestValidateEndpoint:
     """POST /api/sessions/{session_id}/validate"""
 

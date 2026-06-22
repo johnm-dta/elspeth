@@ -475,8 +475,10 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
     wsConnection?.close();
     set({ wsDisconnected: false });
 
-    // Open a WebSocket for live progress, passing JWT as query parameter
-    const token = useAuthStore.getState().token ?? "";
+    const getTicket = async (): Promise<string> => {
+      const response = await api.createRunWebSocketTicket(runId);
+      return response.ticket;
+    };
     function applyActiveRunEvent(event: RunEvent): boolean {
       let applied = false;
       set((state) => {
@@ -497,7 +499,7 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       }
     }
 
-    wsConnection = connectToRun(runId, token, {
+    wsConnection = connectToRun(runId, getTicket, {
       onConnected() {
         set({ wsDisconnected: false });
       },

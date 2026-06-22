@@ -714,6 +714,11 @@ export interface CancelRunResponse {
   cancel_requested: boolean;
 }
 
+export interface WebSocketTicketResponse {
+  ticket: string;
+  expires_at: string;
+}
+
 // ── Run outputs (full audit-evidence manifest + bounded preview) ──────────────
 //
 // Distinct from RunDiagnosticArtifact (capped operator-UI projection):

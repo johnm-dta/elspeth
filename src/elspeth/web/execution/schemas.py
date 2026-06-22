@@ -241,6 +241,13 @@ class ExecuteRequest(_StrictResponse):
     fanout_ack_token: str | None = Field(default=None, min_length=1)
 
 
+class WebSocketTicketResponse(_StrictResponse):
+    """Short-lived one-use ticket for the execution progress WebSocket."""
+
+    ticket: str
+    expires_at: datetime
+
+
 # ── Typed event payload models ──────────────────────────────────────────
 #
 # Each event_type has a dedicated payload model so that the server-side

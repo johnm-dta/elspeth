@@ -12,6 +12,7 @@ vi.mock("@/api/client", () => ({
   validatePipeline: vi.fn(),
   executePipeline: vi.fn(),
   cancelRun: vi.fn(),
+  createRunWebSocketTicket: vi.fn(),
   fetchRuns: vi.fn().mockResolvedValue([]),
   fetchRunDiagnostics: vi.fn(),
   evaluateRunDiagnostics: vi.fn(),
@@ -447,6 +448,30 @@ describe("executionStore failed run events", () => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     resetInterpretationStore();
+  });
+
+  it("passes an authenticated ticket provider to the websocket client", async () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    const { createRunWebSocketTicket } = await import("@/api/client");
+    (createRunWebSocketTicket as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ticket: "opaque-ws-ticket",
+      expires_at: "2026-06-22T12:00:30.000Z",
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+
+    expect(connectToRun).toHaveBeenCalledTimes(1);
+    expect(connectToRun).toHaveBeenCalledWith(
+      "run-1",
+      expect.any(Function),
+      expect.objectContaining({
+        onAuthFailure: expect.any(Function),
+      }),
+    );
+    const ticketProvider = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][1] as () => Promise<string>;
+    await expect(ticketProvider()).resolves.toBe("opaque-ws-ticket");
+    expect(createRunWebSocketTicket).toHaveBeenCalledWith("run-1");
   });
 
   it("preserves terminal failed event detail in progress and run list", () => {

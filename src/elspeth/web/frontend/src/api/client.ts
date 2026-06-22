@@ -29,6 +29,7 @@ import type {
   RunDiagnosticsEvaluation,
   RunOutputArtifactPreview,
   RunOutputsResponse,
+  WebSocketTicketResponse,
   SecretInventoryItem,
   Session,
   UserProfile,
@@ -849,6 +850,17 @@ export async function cancelRun(runId: string): Promise<CancelRunResponse> {
     headers: authHeaders("application/json"),
   });
   return parseResponse<CancelRunResponse>(response);
+}
+
+/** Issue a short-lived one-use ticket for the run progress WebSocket. */
+export async function createRunWebSocketTicket(
+  runId: string,
+): Promise<WebSocketTicketResponse> {
+  const response = await fetch(`/api/runs/${runId}/ws-ticket`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+  });
+  return parseResponse<WebSocketTicketResponse>(response);
 }
 
 /** Get the results/summary of a completed run. */

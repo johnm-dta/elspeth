@@ -35,7 +35,7 @@ from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
 from elspeth.web.composer.service import _BadRequestLLMError
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
-from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
+from elspeth.web.execution.diagnostics import llm_safe_diagnostics_snapshot, load_run_diagnostics_for_settings
 from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
     ExecuteRequestValidationError,
@@ -733,7 +733,7 @@ def create_execution_router() -> APIRouter:
         composer: ComposerService = request.app.state.composer_service
         settings: WebSettings = request.app.state.settings
         try:
-            explanation = await composer.explain_run_diagnostics(diagnostics.model_dump(mode="json"))
+            explanation = await composer.explain_run_diagnostics(llm_safe_diagnostics_snapshot(diagnostics))
         except _BadRequestLLMError as exc:
             # Provider rejected the request (400-class). Carrier exposes
             # `provider_detail` / `provider_status_code` precisely because

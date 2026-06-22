@@ -221,6 +221,7 @@ class RunSummaryCounts(TypedDict):
     operations: int
     source_loads: int
     sink_writes: int
+    runtime_preflights: int
 
 
 class RunSummaryErrors(TypedDict):

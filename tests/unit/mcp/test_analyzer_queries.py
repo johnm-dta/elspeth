@@ -841,6 +841,26 @@ class TestGetRunSummary:
         assert "error" not in result
         assert result["counts"]["tokens"] == 1
 
+    def test_summary_counts_runtime_preflight_operations(self) -> None:
+        """Runtime preflight operations must appear in the summary breakdown."""
+        setup = _build_linear_pipeline(
+            run_id="summary-preflight-run",
+            source_node_id="source-0",
+            transform_node_id="llm-transform",
+            sink_node_id="sink-0",
+        )
+        setup["factory"].execution.begin_operation("summary-preflight-run", "source-0", "source_load")
+        setup["factory"].execution.begin_operation("summary-preflight-run", "sink-0", "sink_write")
+        setup["factory"].execution.begin_operation("summary-preflight-run", "llm-transform", "runtime_preflight")
+
+        result = get_run_summary(setup["db"], setup["factory"], "summary-preflight-run")
+
+        assert "error" not in result
+        assert result["counts"]["operations"] == 3
+        assert result["counts"]["source_loads"] == 1
+        assert result["counts"]["sink_writes"] == 1
+        assert result["counts"]["runtime_preflights"] == 1
+
     def test_summary_for_nonexistent_run(self) -> None:
         """get_run_summary returns error for unknown run_id."""
         setup = make_recorder_with_run()

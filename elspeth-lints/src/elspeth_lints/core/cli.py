@@ -1593,6 +1593,7 @@ def _run_justify(args: argparse.Namespace) -> int:
     try:
         scope_fingerprint = _finding_scope_fingerprint(finding)
         ast_path = _finding_ast_path(finding)
+        finding_file_fingerprint = _finding_file_fingerprint(finding)
     except ValueError as exc:
         # Fail-closed BEFORE the paid judge call: a finding that can't bind
         # a v2 entry (no scope_fingerprint — e.g. a trust_boundary
@@ -1652,6 +1653,14 @@ def _run_justify(args: argparse.Namespace) -> int:
         line=finding.line,
         context_lines=JUDGE_EXCERPT_CONTEXT_LINES,
     )
+    if safe_excerpt.file_fingerprint != finding_file_fingerprint:
+        sys.stderr.write(
+            "Cannot justify finding: source file changed between scanner and judge excerpt "
+            f"for {finding_key}; scanner fingerprint {finding_file_fingerprint[:12]}..., "
+            f"excerpt fingerprint {safe_excerpt.file_fingerprint[:12]}... "
+            "Re-run justify after the source tree is stable.\n"
+        )
+        return 2
     try:
         rationale_duplicate_count, similar_entries = _find_similar_allowlist_entries(
             allowlist_dir=allowlist_dir,
@@ -1715,16 +1724,14 @@ def _run_justify(args: argparse.Namespace) -> int:
 
     # C8-3 binding (v2 scheme): bind the persisted entry to the
     # enclosing-scope AST fingerprint the judge inspected, not the whole
-    # file. ``scope_fingerprint`` and ``ast_path`` were computed up-front
-    # (the fail-closed precondition block above the judge call) because
-    # they depend only on ``finding``. They survive edits elsewhere in the
-    # same file that the v1 whole-file ``file_fingerprint`` did not (an
-    # unrelated edit to a neighbouring function invalidated a v1 binding
-    # and crashed the load — see the v2 migration). The single
-    # read-and-hash ``extract_safe_excerpt`` performed remains the source
-    # of truth for the per-file scrubber salt baked into
-    # ``RedactionRecord.redacted_hash``; that salt is independent of the
-    # binding scheme. The persisted entry stays cryptographically bound to
+    # file. ``scope_fingerprint`` and ``ast_path`` were computed from the
+    # scanner finding, and the scan-time file_fingerprint was checked against
+    # the single read-and-hash ``extract_safe_excerpt`` performed for the judge
+    # prompt before the judge was called. This proves the scanner finding,
+    # prompt excerpt, and signed binding all came from the same file bytes. The
+    # excerpt fingerprint remains the source of truth for the per-file scrubber
+    # salt baked into ``RedactionRecord.redacted_hash``; that salt is independent
+    # of the binding scheme. The persisted entry stays cryptographically bound to
     # the scope + AST node the judge inspected; the loader/matcher pair
     # (allowlist.load_allowlist and
     # allowlist.verify_entry_binding_against_finding) reads the
@@ -2169,6 +2176,17 @@ def _finding_scope_fingerprint(finding: Any) -> str:
             "tier-model-only until trust_boundary's scanner stamps the field)."
         )
     return scope_fingerprint
+
+
+def _finding_file_fingerprint(finding: Any) -> str:
+    """Return the source-file digest stamped by the scanner pass."""
+    file_fingerprint = getattr(finding, "file_fingerprint", "")
+    if not isinstance(file_fingerprint, str) or not file_fingerprint:
+        raise ValueError(
+            f"finding {_finding_canonical_key(finding)} has no file_fingerprint; "
+            "judge-gated writes must prove the scanner finding and judge excerpt came from the same source bytes."
+        )
+    return file_fingerprint
 
 
 def _suggest_yaml_target(*, finding: Any, allowlist_dir: Path) -> Path:

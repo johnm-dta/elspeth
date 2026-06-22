@@ -164,14 +164,11 @@ class SafeExcerpt:
     ``ReauditOutcome`` and the sidecar writer serialises it into the
     JSONL trail.
 
-    ``file_fingerprint`` is the SHA-256 hex digest of the source
-    file's bytes (the same primitive C8-3 uses for entry binding). It
-    is exposed here so the caller does not re-read the file: the
-    judge-write path in ``cli._run_justify`` consumes this value
-    directly into the YAML's ``file_fingerprint:`` binding field. It
-    is also the salt the scrubber used for ``RedactionRecord.redacted_hash``
-    — a single source of truth removes the risk of the binding
-    fingerprint and the salting fingerprint drifting out of sync.
+    ``file_fingerprint`` is the SHA-256 hex digest of the source file's
+    bytes. The judge-write path in ``cli._run_justify`` compares it to the
+    scanner finding's file digest before calling the judge, proving the
+    scanner finding and prompt excerpt came from the same source snapshot. It
+    is also the salt the scrubber used for ``RedactionRecord.redacted_hash``.
     """
 
     text: str
@@ -671,9 +668,8 @@ def extract_safe_excerpt(
     2. The resolved file is read once as bytes and hashed (SHA-256)
        to produce the ``file_fingerprint``. The bytes are then decoded
        as UTF-8 for the excerpt window. The single read + single hash
-       is the source of truth for both the C8-3 binding fingerprint
-       (consumed by ``cli._run_justify`` directly off the returned
-       ``SafeExcerpt``) AND the scrubber's per-file hash salt.
+       is the source of truth for the justify snapshot check and the
+       scrubber's per-file hash salt.
     3. Excerpt window is ``[line - context_lines, line + context_lines]``
        clamped to valid line indices (1-based), mirroring the original
        ``_extract_surrounding_code`` shape so the judge sees the same

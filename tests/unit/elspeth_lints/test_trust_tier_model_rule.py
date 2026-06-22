@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 import sys
 import tempfile
@@ -60,7 +61,8 @@ def parse_and_visit(source: str, filename: str = "test.py") -> list[Finding]:
     """Helper to parse source and run the visitor."""
     tree = ast.parse(source, filename=filename)
     source_lines = source.splitlines()
-    visitor = TierModelVisitor(filename, source_lines)
+    file_fingerprint = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    visitor = TierModelVisitor(filename, source_lines, file_fingerprint)
     visitor.visit(tree)
     return visitor.findings
 
@@ -2561,11 +2563,17 @@ class TestLayerImportScanner:
         file_path.write_text(dedent(source), encoding="utf-8")
         return scan_layer_imports_file(file_path, tmp_path)
 
+    @staticmethod
+    def _file_fingerprint(source: str) -> str:
+        return hashlib.sha256(dedent(source).encode("utf-8")).hexdigest()
+
     def test_flags_absolute_upward_import(self, tmp_path: Path) -> None:
         # NO-REGRESSION (the case with no real exemplar): a plain absolute
         # level-0 upward import must STILL be flagged after the rewrite.
-        violations, tc = self._scan(tmp_path, "core/mod.py", "from elspeth.plugins import transforms\n")
+        source = "from elspeth.plugins import transforms\n"
+        violations, tc = self._scan(tmp_path, "core/mod.py", source)
         assert [f.rule_id for f in violations] == ["L1"]
+        assert violations[0].file_fingerprint == self._file_fingerprint(source)
         assert tc == []
 
     def test_flags_relative_upward_import(self, tmp_path: Path) -> None:
@@ -2608,6 +2616,7 @@ class TestLayerImportScanner:
         violations, tc = self._scan(tmp_path, "core/mod.py", source)
         assert violations == []
         assert [f.rule_id for f in tc] == ["TC"]
+        assert tc[0].file_fingerprint == self._file_fingerprint(source)
 
     def test_type_checking_else_branch_is_runtime(self, tmp_path: Path) -> None:
         # The else: of `if TYPE_CHECKING:` is the runtime fallback — its imports

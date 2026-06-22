@@ -112,6 +112,11 @@ class Finding:
     def/class scope, so K=0 and the fallback always returns None for them: any
     module-body edit (e.g. adding an import) changes the module's
     scope_fingerprint, so the scope-fingerprint-equality check fails.
+
+    ``file_fingerprint`` is the SHA-256 digest of the exact source bytes the
+    scanner parsed to produce this finding. Judge-writing paths compare it to
+    the excerpt reader's digest so a file modified between scan and judge
+    prompt cannot be signed with a stale scope binding.
     """
 
     rule_id: str
@@ -125,6 +130,7 @@ class Finding:
     ast_path: str = ""
     scope_fingerprint: str = ""
     scope_depth: int = 0
+    file_fingerprint: str = ""
 
     @property
     def canonical_key(self) -> str:
@@ -536,9 +542,10 @@ class TierModelVisitor(ast.NodeVisitor):
         "web/sessions/telemetry.py": frozenset({"observed_value"}),
     }
 
-    def __init__(self, file_path: str, source_lines: list[str]) -> None:
+    def __init__(self, file_path: str, source_lines: list[str], file_fingerprint: str) -> None:
         self.file_path = file_path
         self.source_lines = source_lines
+        self.file_fingerprint = file_fingerprint
         self.findings: list[Finding] = []
         self.suppressed_findings: list[Finding] = []
         self.symbol_stack: list[str] = []
@@ -720,6 +727,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 ast_path="/".join(self.path_stack) or "<module-root>",
                 scope_fingerprint=self._scope_fingerprint_for_current_node(),
                 scope_depth=self._scope_depth_for_current_node(),
+                file_fingerprint=self.file_fingerprint,
             )
         )
 
@@ -748,6 +756,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 ast_path="/".join(self.path_stack) or "<module-root>",
                 scope_fingerprint=self._scope_fingerprint_for_current_node(),
                 scope_depth=self._scope_depth_for_current_node(),
+                file_fingerprint=self.file_fingerprint,
             )
         )
 
@@ -777,6 +786,7 @@ class TierModelVisitor(ast.NodeVisitor):
                 # don't-care — only the non-empty invariant is load-bearing.
                 scope_fingerprint=self._scope_fingerprint_for_current_node(),
                 scope_depth=self._scope_depth_for_current_node(),
+                file_fingerprint=self.file_fingerprint,
             )
         )
 
@@ -1640,7 +1650,8 @@ def scan_file(file_path: Path, root: Path) -> list[Finding]:
 def scan_file_with_observations(file_path: Path, root: Path) -> tuple[list[Finding], list[Finding]]:
     """Scan a single Python file and return violations plus suppression observations."""
     try:
-        source = file_path.read_text(encoding="utf-8")
+        source_bytes = file_path.read_bytes()
+        source = source_bytes.decode("utf-8")
     except (OSError, UnicodeDecodeError) as e:
         print(f"Warning: Could not read {file_path}: {e}", file=sys.stderr)
         return [], []
@@ -1653,8 +1664,9 @@ def scan_file_with_observations(file_path: Path, root: Path) -> tuple[list[Findi
 
     source_lines = source.splitlines()
     relative_path = str(file_path.relative_to(root))
+    file_fingerprint = hashlib.sha256(source_bytes).hexdigest()
 
-    visitor = TierModelVisitor(relative_path, source_lines)
+    visitor = TierModelVisitor(relative_path, source_lines, file_fingerprint)
     visitor.visit(tree)
     return visitor.findings, visitor.suppressed_findings
 
@@ -1714,7 +1726,8 @@ def scan_layer_imports_file(
         tc_findings: Findings for TYPE_CHECKING upward imports (warnings, allowlistable)
     """
     try:
-        source = file_path.read_text(encoding="utf-8")
+        source_bytes = file_path.read_bytes()
+        source = source_bytes.decode("utf-8")
     except (OSError, UnicodeDecodeError):
         return [], []
 
@@ -1725,6 +1738,7 @@ def scan_layer_imports_file(
 
     relative_path = str(file_path.relative_to(root))
     source_lines = source.splitlines()
+    file_fingerprint = hashlib.sha256(source_bytes).hexdigest()
     file_layer = _get_file_layer(relative_path)
 
     # L3 files (plugins, mcp, tui, etc.) can import anything — skip
@@ -1800,6 +1814,7 @@ def scan_layer_imports_file(
                         message=f"TYPE_CHECKING import: {from_name} annotates with {to_name} ({module_name})",
                         ast_path=import_ast_path,
                         scope_fingerprint=module_scope_fingerprint,
+                        file_fingerprint=file_fingerprint,
                     )
                 )
             else:
@@ -1819,6 +1834,7 @@ def scan_layer_imports_file(
                         message=f"Upward import: {from_name} imports from {to_name} ({module_name})",
                         ast_path=import_ast_path,
                         scope_fingerprint=module_scope_fingerprint,
+                        file_fingerprint=file_fingerprint,
                     )
                 )
 
@@ -2896,6 +2912,13 @@ def _source_lines_for_rule(file_path: Path) -> list[str]:
         return []
 
 
+def _file_fingerprint_for_rule(file_path: Path) -> str:
+    try:
+        return hashlib.sha256(file_path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 @dataclass(frozen=True, slots=True)
 class TierModelRule:
     """Run the legacy trust-tier analyzer through the elspeth-lints protocol."""
@@ -2907,7 +2930,11 @@ class TierModelRule:
     def analyze(self, tree: ast.AST, file_path: Path, context: RuleContext) -> list[LintFinding]:
         """Analyze one syntax tree for focused tests, or the whole repository root."""
         if isinstance(tree, ast.Module) and tree.body and file_path.suffix == ".py":
-            visitor = TierModelVisitor(_display_rule_file_path(file_path, context.root), _source_lines_for_rule(file_path))
+            visitor = TierModelVisitor(
+                _display_rule_file_path(file_path, context.root),
+                _source_lines_for_rule(file_path),
+                _file_fingerprint_for_rule(file_path),
+            )
             visitor.visit(tree)
             return [_legacy_finding_to_lint(finding) for finding in [*visitor.findings, *visitor.suppressed_findings]]
 

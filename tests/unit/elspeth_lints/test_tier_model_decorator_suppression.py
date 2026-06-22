@@ -18,6 +18,7 @@ kwargs, wrong-shaped values) emit their own ``R_TB_NONLITERAL`` /
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 from pathlib import Path
 from textwrap import dedent
@@ -38,7 +39,8 @@ def _visitor(source: str, filename: str = "test_module.py") -> TierModelVisitor:
     """Run the tier-model visitor on ``source`` and return the visitor."""
     tree = ast.parse(source, filename=filename)
     source_lines = source.splitlines()
-    visitor = TierModelVisitor(filename, source_lines)
+    file_fingerprint = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    visitor = TierModelVisitor(filename, source_lines, file_fingerprint)
     visitor.visit(tree)
     return visitor
 
@@ -106,6 +108,7 @@ class TestSuppressionPositive:
                 return None
         """)
         visitor = _visitor(source)
+        expected_file_fingerprint = hashlib.sha256(source.encode("utf-8")).hexdigest()
 
         assert _findings_by_rule(visitor.findings, "R1") == []
         assert _findings_by_rule(visitor.findings, "R5") == []
@@ -122,6 +125,7 @@ class TestSuppressionPositive:
                 "suppresses=('R1', 'R5')"
             ),
         ]
+        assert {item.file_fingerprint for item in suppressed} == {expected_file_fingerprint}
 
     def test_core_cli_emits_suppression_observation_without_failing(self, tmp_path: Path, capsys) -> None:
         """The CI-facing CLI surfaces suppression observations at note severity."""

@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from elspeth.contracts.freeze import freeze_fields, require_int
 from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl
@@ -589,7 +589,7 @@ class ArtifactDescriptor:
         """Create descriptor for file-based artifacts."""
         return cls(
             artifact_type="file",
-            path_or_uri=f"file://{path}",
+            path_or_uri=f"file://{quote(path, safe='/:')}",
             content_hash=content_hash,
             size_bytes=size_bytes,
         )

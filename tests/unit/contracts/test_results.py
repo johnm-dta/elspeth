@@ -747,6 +747,16 @@ class TestArtifactDescriptorFactories:
         assert descriptor.size_bytes == 2048
         assert descriptor.metadata is None
 
+    def test_for_file_encodes_uri_delimiters_in_literal_path(self) -> None:
+        """Literal filename delimiters must not become artifact URI query params."""
+        descriptor = ArtifactDescriptor.for_file(
+            path="/output/results?token=literal#fragment.csv",
+            content_hash="abc123",
+            size_bytes=2048,
+        )
+
+        assert descriptor.path_or_uri == "file:///output/results%3Ftoken%3Dliteral%23fragment.csv"
+
     def test_for_database(self) -> None:
         """for_database creates database artifact with db:// URI scheme."""
         # Use SanitizedDatabaseUrl - URL without password so no fingerprint key needed

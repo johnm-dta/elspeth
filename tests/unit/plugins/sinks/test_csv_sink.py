@@ -48,6 +48,21 @@ class TestCSVSink:
         assert rows[0]["id"] == "1"
         assert rows[0]["name"] == "alice"
 
+    def test_write_path_with_uri_delimiters_returns_auditable_artifact(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """A literal filename like '?token=x' must not fail artifact validation after writing."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output?token=literal.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": STRICT_SCHEMA}))
+
+        artifact = sink.write([{"id": "1", "name": "alice"}], ctx)
+        sink.flush()
+        sink.close()
+
+        assert output_file.exists()
+        assert output_file.read_text().splitlines() == ["id,name", "1,alice"]
+        assert "%3Ftoken%3Dliteral.csv" in artifact.artifact.path_or_uri
+
     def test_fail_if_exists_collision_policy_refuses_existing_write_target(
         self,
         tmp_path: Path,

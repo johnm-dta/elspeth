@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import hashlib
+import io
 import json
 import time
 from collections.abc import Mapping, Sequence
@@ -38,7 +39,7 @@ from elspeth.web.composer.skills import load_deployment_skill, load_skill_with_h
 from elspeth.web.composer.tutorial_models import TutorialOrphanCleanupResponse, TutorialRunOutput, TutorialRunResponse
 from elspeth.web.composer.tutorial_telemetry import _CacheSkipReason, record_tutorial_cache_skipped
 from elspeth.web.config import WebSettings
-from elspeth.web.execution.outputs import path_or_uri_to_filesystem_path
+from elspeth.web.execution.outputs import filesystem_path_candidates
 from elspeth.web.execution.protocol import ExecutionService
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.preferences.service import PreferencesService
@@ -77,6 +78,12 @@ class _LiveTutorialRun:
     response: TutorialRunResponse
     run_record: RunRecord
     projection: _LiveTutorialProjection
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedArtifactBytes:
+    path: Path
+    content: bytes
 
 
 async def run_tutorial_pipeline(
@@ -336,6 +343,8 @@ def _project_live_tutorial_output(settings: WebSettings, *, run_id: str, landsca
                     artifacts_table.c.artifact_id,
                     artifacts_table.c.artifact_type,
                     artifacts_table.c.path_or_uri,
+                    artifacts_table.c.content_hash,
+                    artifacts_table.c.size_bytes,
                     artifacts_table.c.created_at,
                 )
                 .where(artifacts_table.c.run_id == landscape_run_id)
@@ -404,6 +413,51 @@ def _count_discarded_rows(conn: Any, landscape_run_id: str) -> int:
 _ROW_FORMAT_SUFFIXES = frozenset({".csv", ".tsv", ".jsonl", ".ndjson", ".json"})
 
 
+def _has_stored_row_format_suffix(path_or_uri: str) -> bool:
+    fs_paths = filesystem_path_candidates(path_or_uri)
+    if fs_paths is None:
+        return False
+    return fs_paths[-1].suffix.lower() in _ROW_FORMAT_SUFFIXES
+
+
+def _read_audited_artifact_bytes(
+    artifact: Any,
+    *,
+    allowed: Sequence[Path],
+    run_id: str,
+) -> _VerifiedArtifactBytes | None:
+    fs_paths = filesystem_path_candidates(artifact.path_or_uri)
+    if fs_paths is None:
+        return None
+    if not _has_stored_row_format_suffix(artifact.path_or_uri):
+        return None
+
+    saw_allowed = False
+    saw_existing = False
+    for fs_path in fs_paths:
+        resolved = fs_path.resolve()
+        if not any(resolved.is_relative_to(base) for base in allowed):
+            continue
+        saw_allowed = True
+        try:
+            content = resolved.read_bytes()
+        except FileNotFoundError:
+            continue
+        saw_existing = True
+        content_hash = hashlib.sha256(content).hexdigest()
+        size_bytes = len(content)
+        if size_bytes == artifact.size_bytes and content_hash == artifact.content_hash:
+            return _VerifiedArtifactBytes(path=resolved, content=content)
+
+    if not saw_allowed:
+        raise TutorialRunIntegrityError(f"Tutorial run {run_id} artifact {artifact.artifact_id!r} is outside the sink allowlist")
+    if not saw_existing:
+        raise TutorialRunIntegrityError(f"Tutorial run {run_id} artifact {artifact.artifact_id!r} is missing from disk")
+    raise TutorialRunIntegrityError(
+        f"Tutorial run {run_id} artifact {artifact.artifact_id!r} does not match audited content_hash/size_bytes"
+    )
+
+
 def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id: str) -> list[dict[str, Any]]:
     """Project the rows produced by a tutorial run from its file artifacts.
 
@@ -425,15 +479,10 @@ def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id
     for artifact in artifact_rows:
         if artifact.artifact_type != "file":
             continue
-        fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
-        if fs_path is None:
+        verified = _read_audited_artifact_bytes(artifact, allowed=allowed, run_id=run_id)
+        if verified is None:
             continue
-        resolved = fs_path.resolve()
-        if not any(resolved.is_relative_to(base) for base in allowed):
-            raise TutorialRunIntegrityError(f"Tutorial run {run_id} artifact {artifact.artifact_id!r} is outside the sink allowlist")
-        if not resolved.exists():
-            raise TutorialRunIntegrityError(f"Tutorial run {run_id} artifact {artifact.artifact_id!r} is missing from disk")
-        rows = _parse_rows_file(resolved)
+        rows = _parse_rows_content(verified.path, verified.content)
         if rows is None:
             # Non-row-bearing artifact (auxiliary debug file, parquet we
             # don't read, etc.). Skip cleanly — distinct from "this row
@@ -452,6 +501,10 @@ def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id
 
 
 def _parse_rows_file(path: Path) -> list[dict[str, Any]] | None:
+    return _parse_rows_content(path, path.read_bytes())
+
+
+def _parse_rows_content(path: Path, content: bytes) -> list[dict[str, Any]] | None:
     """Parse a file artifact as a row sequence.
 
     Returns:
@@ -475,24 +528,21 @@ def _parse_rows_file(path: Path) -> list[dict[str, Any]] | None:
     if suffix not in _ROW_FORMAT_SUFFIXES:
         return None
     if suffix == ".csv":
-        with path.open(newline="", encoding="utf-8") as f:
-            return [dict(row) for row in csv.DictReader(f)]
+        return [dict(row) for row in csv.DictReader(io.StringIO(content.decode("utf-8"), newline=""))]
     if suffix == ".tsv":
-        with path.open(newline="", encoding="utf-8") as f:
-            return [dict(row) for row in csv.DictReader(f, delimiter="\t")]
+        return [dict(row) for row in csv.DictReader(io.StringIO(content.decode("utf-8"), newline=""), delimiter="\t")]
     if suffix in {".jsonl", ".ndjson"}:
         rows: list[dict[str, Any]] = []
-        with path.open(encoding="utf-8") as f:
-            for line in f:
-                if not line.strip():
-                    continue
-                value = json.loads(line)
-                if type(value) is not dict:
-                    raise TutorialRunIntegrityError(f"Tutorial artifact {path} contains a non-object JSONL row")
-                rows.append(dict(value))
+        for line in content.decode("utf-8").splitlines():
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if type(value) is not dict:
+                raise TutorialRunIntegrityError(f"Tutorial artifact {path} contains a non-object JSONL row")
+            rows.append(dict(value))
         return rows
     # suffix == ".json"
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(content.decode("utf-8"))
     if type(value) is list:
         if not all(type(item) is dict for item in value):
             raise TutorialRunIntegrityError(f"Tutorial artifact {path} JSON list contains a non-object row")

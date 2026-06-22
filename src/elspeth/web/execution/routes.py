@@ -51,8 +51,8 @@ from elspeth.web.execution.errors import (
 from elspeth.web.execution.fanout_guard import FANOUT_GUARD_ERROR_TYPE, ExecutionFanoutGuardRequired
 from elspeth.web.execution.outputs import (
     RunOutputsAuditUnavailableError,
+    filesystem_path_candidates,
     load_run_outputs_for_settings,
-    path_or_uri_to_filesystem_path,
 )
 from elspeth.web.execution.preview import DEFAULT_ARTIFACT_PREVIEW_BYTE_CAP, build_artifact_preview_from_head
 from elspeth.web.execution.progress import ProgressBroadcaster
@@ -174,6 +174,54 @@ def _artifact_purged_or_moved_http(artifact: RunOutputArtifact) -> HTTPException
             "path_or_uri": artifact.path_or_uri,
         },
     )
+
+
+def _artifact_error_type(exc: HTTPException) -> str | None:
+    if not isinstance(exc.detail, Mapping):
+        return None
+    error_type = exc.detail.get("error_type")
+    return error_type if isinstance(error_type, str) else None
+
+
+def _resolved_allowed_artifact_paths(
+    artifact: RunOutputArtifact,
+    *,
+    data_dir: str | Path,
+    object_store_error_type: str,
+) -> tuple[Path, ...]:
+    fs_paths = filesystem_path_candidates(artifact.path_or_uri)
+    if fs_paths is None:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "error_type": object_store_error_type,
+                "path_or_uri": artifact.path_or_uri,
+            },
+        )
+
+    allowed = allowed_sink_directories(str(data_dir))
+    resolved_paths: list[Path] = []
+    seen_paths: set[Path] = set()
+    for fs_path in fs_paths:
+        try:
+            resolved = fs_path.resolve()
+        except OSError:
+            continue
+        if resolved in seen_paths:
+            continue
+        if any(resolved.is_relative_to(base) for base in allowed):
+            resolved_paths.append(resolved)
+            seen_paths.add(resolved)
+
+    if not resolved_paths:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error_type": "output_path_outside_allowlist",
+                "path_or_uri": artifact.path_or_uri,
+            },
+        )
+    return tuple(resolved_paths)
 
 
 def _unlink_path(path: Path) -> None:
@@ -365,6 +413,77 @@ async def _verified_artifact_preview_head(
         actual_content_hash=snapshot.content_hash,
     )
     return snapshot
+
+
+async def _verified_artifact_file_snapshot_from_candidates(
+    artifact: RunOutputArtifact,
+    *,
+    data_dir: str | Path,
+    snapshot_dir: Path,
+) -> tuple[Path, _ArtifactFileSnapshot]:
+    candidates = _resolved_allowed_artifact_paths(
+        artifact,
+        data_dir=data_dir,
+        object_store_error_type="object_store_artifact_not_streamable",
+    )
+    purged_error: HTTPException | None = None
+    drift_error: HTTPException | None = None
+    for resolved in candidates:
+        try:
+            snapshot = await _verified_artifact_file_snapshot(
+                resolved,
+                artifact,
+                snapshot_dir=snapshot_dir,
+            )
+        except HTTPException as exc:
+            error_type = _artifact_error_type(exc)
+            if error_type == "artifact_purged_or_moved":
+                purged_error = exc
+                continue
+            if error_type == "artifact_content_drift":
+                drift_error = exc
+                continue
+            raise
+        return resolved, snapshot
+
+    if drift_error is not None:
+        raise drift_error
+    if purged_error is not None:
+        raise purged_error
+    raise _artifact_purged_or_moved_http(artifact)
+
+
+async def _verified_artifact_preview_head_from_candidates(
+    artifact: RunOutputArtifact,
+    *,
+    data_dir: str | Path,
+) -> tuple[Path, _ArtifactPreviewHeadSnapshot]:
+    candidates = _resolved_allowed_artifact_paths(
+        artifact,
+        data_dir=data_dir,
+        object_store_error_type="object_store_artifact_not_previewable",
+    )
+    purged_error: HTTPException | None = None
+    drift_error: HTTPException | None = None
+    for resolved in candidates:
+        try:
+            snapshot = await _verified_artifact_preview_head(resolved, artifact)
+        except HTTPException as exc:
+            error_type = _artifact_error_type(exc)
+            if error_type == "artifact_purged_or_moved":
+                purged_error = exc
+                continue
+            if error_type == "artifact_content_drift":
+                drift_error = exc
+                continue
+            raise
+        return resolved, snapshot
+
+    if drift_error is not None:
+        raise drift_error
+    if purged_error is not None:
+        raise purged_error
+    raise _artifact_purged_or_moved_http(artifact)
 
 
 # ── Ownership verification helpers ────────────────────────────────────
@@ -1388,48 +1507,7 @@ def create_execution_router() -> APIRouter:
                 detail={"error_type": "artifact_not_found", "artifact_id": artifact_id},
             )
 
-        fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
-        if fs_path is None:
-            # Object-store URI (azure://, dataverse://) — content streaming
-            # is not implemented for these. Audit-evidence retrieval for
-            # remote sinks goes through their own retrieval API.
-            raise HTTPException(
-                status_code=415,
-                detail={
-                    "error_type": "object_store_artifact_not_streamable",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
-
-        try:
-            resolved = fs_path.resolve()
-        except OSError:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error_type": "output_path_outside_allowlist",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            ) from None
         data_dir = request.app.state.settings.data_dir
-        allowed = allowed_sink_directories(data_dir)
-        if not any(resolved.is_relative_to(base) for base in allowed):
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error_type": "output_path_outside_allowlist",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
-
-        if not resolved.exists():
-            raise HTTPException(
-                status_code=410,
-                detail={
-                    "error_type": "artifact_purged_or_moved",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
 
         # Audit-evidence integrity: the artifact row and the on-disk file are
         # read-mutable in principle, so an in-allowlist file can be overwritten
@@ -1440,9 +1518,9 @@ def create_execution_router() -> APIRouter:
         # the whole-file SHA-256 for every file-streamable sink, so a whole-file
         # comparison is correct — and catches same-size byte substitution, which
         # a size check alone would miss.
-        snapshot = await _verified_artifact_file_snapshot(
-            resolved,
+        resolved, snapshot = await _verified_artifact_file_snapshot_from_candidates(
             artifact,
+            data_dir=data_dir,
             snapshot_dir=Path(request.app.state.settings.data_dir) / ".run-output-snapshots",
         )
         try:
@@ -1531,50 +1609,12 @@ def create_execution_router() -> APIRouter:
                 detail={"error_type": "artifact_not_found", "artifact_id": artifact_id},
             )
 
-        fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
-        if fs_path is None:
-            raise HTTPException(
-                status_code=415,
-                detail={
-                    "error_type": "object_store_artifact_not_previewable",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
-
-        try:
-            resolved = fs_path.resolve()
-        except OSError:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error_type": "output_path_outside_allowlist",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            ) from None
         data_dir = request.app.state.settings.data_dir
-        allowed = allowed_sink_directories(data_dir)
-        if not any(resolved.is_relative_to(base) for base in allowed):
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error_type": "output_path_outside_allowlist",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
 
-        if not resolved.exists():
-            # Manifest/preview race: file existed at manifest-load time
-            # but is gone now (purged, retention, manual delete). Match
-            # the /content endpoint's vocabulary — frontend handles either.
-            raise HTTPException(
-                status_code=410,
-                detail={
-                    "error_type": "artifact_purged_or_moved",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
-
-        snapshot = await _verified_artifact_preview_head(resolved, artifact)
+        resolved, snapshot = await _verified_artifact_preview_head_from_candidates(
+            artifact,
+            data_dir=data_dir,
+        )
 
         return build_artifact_preview_from_head(
             resolved,

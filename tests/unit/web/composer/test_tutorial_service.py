@@ -16,6 +16,7 @@ from elspeth.contracts.schema import SchemaConfig
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import calls_table, run_attributions_table
+from elspeth.web.composer import tutorial_service as tutorial_service_module
 from elspeth.web.composer import tutorial_telemetry as tutorial_telemetry_module
 from elspeth.web.composer.skills import load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialRunOutput
@@ -512,10 +513,28 @@ def test_parse_rows_file_parses_empty_csv_as_empty_rows(tmp_path: Path) -> None:
     assert rows == []  # legitimate empty result, distinct from "couldn't parse"
 
 
-def _fake_artifact(artifact_id: str, path_or_uri: str, artifact_type: str = "file") -> Any:
+def _fake_artifact(
+    artifact_id: str,
+    path_or_uri: str,
+    artifact_type: str = "file",
+    *,
+    content_hash: str | None = None,
+    size_bytes: int | None = None,
+) -> Any:
     from types import SimpleNamespace
 
-    return SimpleNamespace(artifact_id=artifact_id, artifact_type=artifact_type, path_or_uri=path_or_uri)
+    fs_path = Path(path_or_uri.removeprefix("file://"))
+    if content_hash is None and fs_path.exists():
+        content_hash = hashlib.sha256(fs_path.read_bytes()).hexdigest()
+    if size_bytes is None and fs_path.exists():
+        size_bytes = fs_path.stat().st_size
+    return SimpleNamespace(
+        artifact_id=artifact_id,
+        artifact_type=artifact_type,
+        path_or_uri=path_or_uri,
+        content_hash=content_hash or "0" * 64,
+        size_bytes=0 if size_bytes is None else size_bytes,
+    )
 
 
 def test_rows_from_artifacts_skips_auxiliary_and_returns_row_artifact_rows(tmp_path: Path) -> None:
@@ -538,6 +557,114 @@ def test_rows_from_artifacts_skips_auxiliary_and_returns_row_artifact_rows(tmp_p
 
     rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-aux")
     assert rows == [{"url": "ato.gov.au", "rating": "5"}]
+
+
+def test_rows_from_artifacts_skips_auxiliary_before_reading_bytes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    aux = outputs / "debug.bin"
+    aux.write_bytes(b"x" * 1024)
+    rows_file = outputs / "rows.csv"
+    rows_file.write_text("url,rating\nato.gov.au,5\n", encoding="utf-8")
+    artifacts = [
+        _fake_artifact("aux-1", str(aux)),
+        _fake_artifact("rows-1", str(rows_file)),
+    ]
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path == aux:
+            raise AssertionError("auxiliary artifact should be skipped before byte reads")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-aux-skip")
+
+    assert rows == [{"url": "ato.gov.au", "rating": "5"}]
+
+
+def test_rows_from_artifacts_skips_legacy_percent_encoded_suffix_auxiliary_before_reading_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    legacy_aux = outputs / "debug%2Ecsv"
+    decoded_decoy = outputs / "debug.csv"
+    legacy_aux.write_bytes(b"x" * 1024)
+    decoded_decoy.write_text("url,rating\ndecoy.example,1\n", encoding="utf-8")
+    rows_file = outputs / "rows.csv"
+    rows_file.write_text("url,rating\nato.gov.au,5\n", encoding="utf-8")
+    artifacts = [
+        _fake_artifact("aux-legacy", f"file://{outputs}/debug%2Ecsv"),
+        _fake_artifact("rows-1", str(rows_file)),
+    ]
+    original_read_bytes = Path.read_bytes
+
+    def guarded_read_bytes(path: Path) -> bytes:
+        if path in {legacy_aux, decoded_decoy}:
+            raise AssertionError("legacy percent-suffix auxiliary artifact should be skipped before byte reads")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-percent-aux-skip")
+
+    assert rows == [{"url": "ato.gov.au", "rating": "5"}]
+
+
+def test_rows_from_artifacts_uses_legacy_raw_percent_candidate_when_it_matches_audit(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    legacy_raw_file = outputs / "results%3Ftoken=literal.csv"
+    decoded_decoy = outputs / "results?token=literal.csv"
+    audited_bytes = b"url,rating\nraw.example,5\n"
+    legacy_raw_file.write_bytes(audited_bytes)
+    decoded_decoy.write_bytes(b"url,rating\ndecoded.example,1\n")
+    artifacts = [
+        _fake_artifact(
+            "rows-legacy",
+            f"file://{outputs}/results%3Ftoken=literal.csv",
+            content_hash=hashlib.sha256(audited_bytes).hexdigest(),
+            size_bytes=len(audited_bytes),
+        )
+    ]
+
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-legacy")
+
+    assert rows == [{"url": "raw.example", "rating": "5"}]
+
+
+def test_rows_from_artifacts_parses_verified_bytes_when_file_changes_after_verification(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    rows_file = outputs / "rows.csv"
+    audited_bytes = b"url,rating\nato.gov.au,5\n"
+    rows_file.write_bytes(audited_bytes)
+    artifacts = [
+        _fake_artifact(
+            "rows-1",
+            str(rows_file),
+            content_hash=hashlib.sha256(audited_bytes).hexdigest(),
+            size_bytes=len(audited_bytes),
+        )
+    ]
+    real_parse_rows_content = tutorial_service_module._parse_rows_content
+
+    def tampering_parse_rows_content(path: Path, content: bytes) -> list[dict[str, Any]] | None:
+        path.write_text("url,rating\ntampered.example,1\n", encoding="utf-8")
+        return real_parse_rows_content(path, content)
+
+    monkeypatch.setattr(tutorial_service_module, "_parse_rows_content", tampering_parse_rows_content)
+
+    rows = _rows_from_artifacts(artifacts, data_dir=tmp_path, run_id="run-snapshot")
+
+    assert rows == [{"url": "ato.gov.au", "rating": "5"}]
+    assert rows_file.read_text(encoding="utf-8") == "url,rating\ntampered.example,1\n"
 
 
 def test_rows_from_artifacts_distinguishes_no_row_format_from_all_empty(tmp_path: Path) -> None:

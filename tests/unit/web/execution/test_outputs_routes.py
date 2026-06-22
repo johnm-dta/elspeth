@@ -237,6 +237,48 @@ class TestRunOutputContentEndpoint:
         assert sink_file.read_bytes() == b'{"interaction_id":"INT-1001"}\n'
 
     @pytest.mark.asyncio
+    async def test_content_serves_decoded_file_uri_candidate_when_raw_percent_file_also_exists(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        decoded_file = outputs_dir / "results?token=literal.csv"
+        raw_percent_file = outputs_dir / "results%3Ftoken%3Dliteral.csv"
+        audited_bytes = b"id,name\n1,alice\n"
+        decoded_file.write_bytes(audited_bytes)
+        raw_percent_file.write_bytes(b"id,name\n2,bob\n")
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(
+            monkeypatch,
+            artifacts=[
+                RunOutputArtifact(
+                    artifact_id="art-encoded",
+                    sink_node_id="results",
+                    artifact_type="file",
+                    path_or_uri=f"file://{outputs_dir}/results%3Ftoken%3Dliteral.csv",
+                    content_hash=hashlib.sha256(audited_bytes).hexdigest(),
+                    size_bytes=len(audited_bytes),
+                    created_at=datetime.now(UTC),
+                    exists_now=True,
+                    downloadable=True,
+                )
+            ],
+            run_id=run_id,
+        )
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-encoded/content")
+
+        assert response.status_code == 200
+        assert response.content == audited_bytes
+
+    @pytest.mark.asyncio
     async def test_content_streams_verified_bytes_when_file_rewritten_after_integrity_check(self, monkeypatch, tmp_path) -> None:
         """The bytes returned must be the bytes that passed artifact integrity verification."""
         run_id = uuid4()
@@ -754,6 +796,48 @@ class TestRunOutputPreviewEndpoint:
         assert response.status_code == 200
         assert "INT-1001" in response.json()["preview_text"]
         assert "INT-9999" not in response.json()["preview_text"]
+
+    @pytest.mark.asyncio
+    async def test_preview_serves_legacy_raw_percent_candidate_when_it_matches_audit(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        legacy_raw_file = outputs_dir / "results%3Ftoken=literal.jsonl"
+        decoded_decoy = outputs_dir / "results?token=literal.jsonl"
+        audited_bytes = b'{"legacy":true}\n'
+        legacy_raw_file.write_bytes(audited_bytes)
+        decoded_decoy.write_bytes(b'{"legacy":false}\n')
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(
+            monkeypatch,
+            artifacts=[
+                RunOutputArtifact(
+                    artifact_id="art-legacy",
+                    sink_node_id="results",
+                    artifact_type="file",
+                    path_or_uri=f"file://{outputs_dir}/results%3Ftoken=literal.jsonl",
+                    content_hash=hashlib.sha256(audited_bytes).hexdigest(),
+                    size_bytes=len(audited_bytes),
+                    created_at=datetime.now(UTC),
+                    exists_now=True,
+                    downloadable=True,
+                )
+            ],
+            run_id=run_id,
+        )
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-legacy/preview")
+
+        assert response.status_code == 200
+        assert response.json()["preview_text"] == '{"legacy":true}\n'
 
     @pytest.mark.asyncio
     async def test_409_when_preview_file_content_drifts_under_same_size(self, monkeypatch, tmp_path) -> None:

@@ -260,6 +260,23 @@ def _assert_parent_assistant_message(
         )
 
 
+def _assert_assistant_row_has_audit_content(
+    *,
+    content: str,
+    raw_content: str | None,
+    tool_calls: Any,
+    caller: str,
+) -> None:
+    """Reject assistant rows that carry no auditable model output."""
+    if content.strip():
+        return
+    if raw_content is not None and raw_content.strip():
+        return
+    if tool_calls:
+        return
+    raise AuditIntegrityError(f"{caller}: refusing to persist empty assistant audit row with no raw_content and no tool_calls")
+
+
 def _validate_tool_call_id_set_equality(
     *,
     redacted_assistant_tool_calls: tuple[Mapping[str, Any], ...],
@@ -1739,6 +1756,13 @@ class SessionServiceImpl:
                 conn,
                 parent_assistant_id=parent_assistant_id,
                 session_id=session_id,
+                caller="_insert_chat_message",
+            )
+        elif role == "assistant":
+            _assert_assistant_row_has_audit_content(
+                content=content,
+                raw_content=raw_content,
+                tool_calls=tool_calls,
                 caller="_insert_chat_message",
             )
         msg_id = str(uuid.uuid4())

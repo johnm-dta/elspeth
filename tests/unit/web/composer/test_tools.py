@@ -22,6 +22,7 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSchemaInfo,
+    PluginSecretRequirement,
     PluginSummary,
 )
 from elspeth.web.composer.state import (
@@ -841,9 +842,8 @@ class TestUpsertNode:
             catalog,
         )
 
-        # Advisory, not blocking (elspeth-abb2cb0931): the node is accepted because
-        # shield availability is not yet testable. The missing prompt-shield surfaces
-        # as a non-blocking validation warning rather than rejecting the upsert.
+        # Advisory, not blocking: the missing prompt-shield surfaces as a
+        # non-blocking validation warning rather than rejecting the upsert.
         assert result.success is True
         warning_text = " ".join(w.message for w in result.updated_state.validate().warnings)
         assert PROMPT_SHIELD_USER_TERM in warning_text
@@ -2100,6 +2100,145 @@ class TestDiscoveryTools:
         )
         assert result.success is True
         catalog.get_schema.assert_called_once_with("source", "csv")
+
+    def test_list_transforms_hides_secret_required_plugin_without_declared_candidate(self) -> None:
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="azure_prompt_shield",
+                description="Prompt injection shield",
+                plugin_type="transform",
+                config_fields=[
+                    ConfigFieldSummary(name="api_key", type="string", required=True),
+                    ConfigFieldSummary(name="endpoint", type="string", required=True),
+                ],
+                secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+            ),
+        ]
+        secret_service = MagicMock()
+        secret_service.list_refs.return_value = [
+            SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
+        ]
+        secret_service.has_ref.side_effect = lambda _user_id, name: name == "OPENROUTER_API_KEY"
+
+        result = execute_tool(
+            "list_transforms",
+            {},
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        assert result.success is True
+        names = {item.name for item in result.data}
+        assert "passthrough" in names
+        assert "azure_prompt_shield" not in names
+
+    def test_list_transforms_shows_secret_required_plugin_when_declared_candidate_available(self) -> None:
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="azure_prompt_shield",
+                description="Prompt injection shield",
+                plugin_type="transform",
+                config_fields=[
+                    ConfigFieldSummary(name="api_key", type="string", required=True),
+                    ConfigFieldSummary(name="endpoint", type="string", required=True),
+                ],
+                secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+            ),
+        ]
+        secret_service = MagicMock()
+        secret_service.list_refs.return_value = [
+            SecretInventoryItem(name="AZURE_CONTENT_SAFETY_KEY", scope="server", available=True),
+        ]
+        secret_service.has_ref.side_effect = lambda _user_id, name: name == "AZURE_CONTENT_SAFETY_KEY"
+
+        result = execute_tool(
+            "list_transforms",
+            {},
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        assert result.success is True
+        names = {item.name for item in result.data}
+        assert "azure_prompt_shield" in names
+
+    def test_get_plugin_schema_rejects_secret_required_plugin_without_declared_candidate(self) -> None:
+        catalog = _mock_catalog()
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="azure_prompt_shield",
+            plugin_type="transform",
+            description="Prompt injection shield",
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string"},
+                    "endpoint": {"type": "string"},
+                },
+                "required": ["api_key", "endpoint"],
+            },
+            knob_schema={"fields": []},
+            secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+        )
+        secret_service = MagicMock()
+        secret_service.has_ref.return_value = False
+
+        result = execute_tool(
+            "get_plugin_schema",
+            {"plugin_type": "transform", "name": "azure_prompt_shield"},
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert "azure_prompt_shield" in result.data["error"]
+        assert "AZURE_CONTENT_SAFETY_KEY" in result.data["error"]
+
+    def test_get_plugin_assistance_rejects_secret_required_plugin_without_declared_candidate(self) -> None:
+        catalog = _mock_catalog()
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="azure_prompt_shield",
+            plugin_type="transform",
+            description="Prompt injection shield",
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string"},
+                    "endpoint": {"type": "string"},
+                },
+                "required": ["api_key", "endpoint"],
+            },
+            knob_schema={"fields": []},
+            secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+        )
+        secret_service = MagicMock()
+        secret_service.has_ref.return_value = False
+
+        result = execute_tool(
+            "get_plugin_assistance",
+            {"plugin_type": "transform", "plugin_name": "azure_prompt_shield"},
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert "azure_prompt_shield" in result.data["error"]
+        assert "AZURE_CONTENT_SAFETY_KEY" in result.data["error"]
 
     def test_get_expression_grammar_is_static(self) -> None:
         grammar = get_expression_grammar()
@@ -8916,6 +9055,7 @@ class TestGetPluginAssistance:
         assert "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete" in hints
         assert "If scraped public internet content flows into an LLM" in hints
         assert "azure_prompt_shield" in hints
+        assert "only when discovery lists it" in hints
         assert "prompt_injection_shield_recommendation" in hints
 
     def test_field_mapper_discovery_explains_cleanup_whitelist_semantics(self) -> None:
@@ -8982,6 +9122,7 @@ class TestGetPluginAssistance:
         assert "internet content" in hints
         assert "prompt-injection shielding is important" in hints
         assert "azure_prompt_shield" in hints
+        assert "only when discovery lists it" in hints
         assert "surface this to the user as a strong recommendation" in hints
         assert "recommendation is not permission to add a node" in hints
         assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints

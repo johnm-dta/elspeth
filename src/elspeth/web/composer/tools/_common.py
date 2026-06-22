@@ -50,6 +50,7 @@ from elspeth.plugins.infrastructure.validation import (
     get_transform_config_model,
 )
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
+from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
@@ -88,9 +89,7 @@ from elspeth.web.validation import (
 )
 
 _DATA_ERROR_KEY: Final[str] = "error"
-_RUNTIME_OWNED_LLM_OPTION_KEYS: Final[frozenset[str]] = frozenset(
-    {"resolved_prompt_template_hash"}
-)
+_RUNTIME_OWNED_LLM_OPTION_KEYS: Final[frozenset[str]] = frozenset({"resolved_prompt_template_hash"})
 _RESOLVER_OWNED_INTERPRETATION_REQUIREMENT_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "event_id",
@@ -836,6 +835,8 @@ _INVALID_OPTIONS_PLUGIN_RE: Final[re.Pattern[str]] = re.compile(
 def build_plugin_schemas_for_failure(
     result: ToolResult,
     catalog: CatalogService,
+    *,
+    schema_unavailable_message: Callable[[PluginSchemaInfo], str | None] | None = None,
 ) -> Mapping[str, Mapping[str, Any]] | None:
     """Build the ``plugin_schemas`` augmentation dict for a failed mutation.
 
@@ -846,7 +847,9 @@ def build_plugin_schemas_for_failure(
     is resolved through ``catalog.get_schema`` and dumped to a plain dict
     via ``PluginSchemaInfo.model_dump()`` so the payload is byte-identical
     to what the LLM would otherwise receive from a discrete
-    ``get_plugin_schema`` tool call.
+    ``get_plugin_schema`` tool call. When ``schema_unavailable_message`` is
+    supplied, plugins hidden by the same availability gate as
+    ``get_plugin_schema`` are omitted rather than inlining a forbidden schema.
 
     Returns ``None`` when the result is successful or when no error
     message matches the option-shape pattern. The caller is responsible
@@ -871,6 +874,8 @@ def build_plugin_schemas_for_failure(
             if key in discovered:
                 continue
             schema = catalog.get_schema(kind, plugin_name)
+            if schema_unavailable_message is not None and schema_unavailable_message(schema) is not None:
+                continue
             discovered[key] = schema.model_dump()
     if not discovered:
         return None
@@ -1431,9 +1436,7 @@ def _runtime_owned_llm_option_error(
                 "resolve_interpretation_event."
             )
         resolver_owned_fields = sorted(
-            field
-            for field in _RESOLVER_OWNED_INTERPRETATION_REQUIREMENT_FIELDS
-            if requirement.get(field) is not None
+            field for field in _RESOLVER_OWNED_INTERPRETATION_REQUIREMENT_FIELDS if requirement.get(field) is not None
         )
         if resolver_owned_fields:
             field_names = ", ".join(resolver_owned_fields)

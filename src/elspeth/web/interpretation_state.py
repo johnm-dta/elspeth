@@ -228,10 +228,9 @@ def composition_review_contract_error(state: CompositionState) -> str | None:
 
     Only blocking contracts are aggregated here. The prompt-injection-shield
     recommendation is advisory, not blocking (see
-    :func:`prompt_shield_recommendation_warning_pairs` and filigree
-    elspeth-abb2cb0931): shield availability is not yet testable, so an
-    unshielded LLM-over-untrusted-content composition surfaces a warning rather
-    than failing the contract. Composition is therefore gated solely on the
+    :func:`prompt_shield_recommendation_warning_pairs`): an unshielded
+    LLM-over-untrusted-content composition surfaces a warning rather than
+    failing the contract. Composition is therefore gated solely on the
     raw-HTML-cleanup review contract here.
     """
 

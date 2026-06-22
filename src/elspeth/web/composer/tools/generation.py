@@ -43,6 +43,7 @@ from elspeth.web.composer.state import (
     _source_options_have_schema,
     _validate_gate_expression,
 )
+from elspeth.web.composer.tools._availability import schema_secret_unavailable_message
 from elspeth.web.composer.tools._common import (
     _DATA_ERROR_KEY,
     ToolContext,
@@ -235,6 +236,9 @@ def _handle_get_plugin_schema(
 ) -> ToolResult:
     try:
         schema = context.catalog.get_schema(arguments["plugin_type"], arguments["name"])
+        unavailable = schema_secret_unavailable_message(schema, context)
+        if unavailable is not None:
+            return _failure_result(state, unavailable)
         return _discovery_result(state, schema)
     except (ValueError, KeyError) as exc:
         # ValueError: catalog contract for "unknown plugin/type"
@@ -531,7 +535,6 @@ def _execute_get_plugin_assistance(
     Unknown plugin name or invalid plugin_type surfaces here as a tool
     failure with the original message so the agent can correct the call.
     """
-    del context  # unused; signature uniformity with the other handlers.
     plugin_type_raw = args["plugin_type"]
     plugin_name = args["plugin_name"]
     # ``args`` is LLM tool-call arguments (Tier 3). ``plugin_type``/``plugin_name``
@@ -547,6 +550,14 @@ def _execute_get_plugin_assistance(
             f"Unknown plugin_type: {plugin_type_raw!r}. Must be one of: 'source', 'transform', 'sink'.",
         )
     plugin_type: PluginKind = plugin_type_raw
+
+    try:
+        schema = context.catalog.get_schema(plugin_type, plugin_name)
+    except (ValueError, KeyError) as exc:
+        return _failure_result(state, str(exc))
+    unavailable = schema_secret_unavailable_message(schema, context)
+    if unavailable is not None:
+        return _failure_result(state, unavailable)
 
     manager = get_shared_plugin_manager()
     try:

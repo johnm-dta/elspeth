@@ -15,6 +15,7 @@ from collections.abc import Mapping
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Final
 
+from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import build_mode_transition_system_prompt
@@ -22,6 +23,8 @@ from elspeth.web.composer.guided.state_machine import TerminalKind
 from elspeth.web.composer.redaction import redact_source_storage_path
 from elspeth.web.composer.skills import load_deployment_skill, load_skill_with_hash
 from elspeth.web.composer.state import CompositionState
+from elspeth.web.composer.tools._availability import filter_secret_available_summaries
+from elspeth.web.composer.tools._common import ToolContext
 
 if TYPE_CHECKING:
     from elspeth.web.composer.guided.state_machine import TerminalState
@@ -155,6 +158,8 @@ def build_context_string(
     catalog: CatalogService,
     *,
     schemas_loaded: frozenset[tuple[str, str]] = _SCHEMAS_LOADED_UNSET,
+    secret_service: WebSecretResolver | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Build the injected context string with current state and plugin summary.
 
@@ -197,9 +202,10 @@ def build_context_string(
         "suggestions": [e.to_dict() for e in validation.suggestions],
     }
 
-    source_plugins = catalog.list_sources()
-    transform_plugins = catalog.list_transforms()
-    sink_plugins = catalog.list_sinks()
+    availability_context = ToolContext(catalog=catalog, secret_service=secret_service, user_id=user_id)
+    source_plugins = filter_secret_available_summaries(catalog.list_sources(), availability_context)
+    transform_plugins = filter_secret_available_summaries(catalog.list_transforms(), availability_context)
+    sink_plugins = filter_secret_available_summaries(catalog.list_sinks(), availability_context)
 
     source_names = [p.name for p in source_plugins]
     transform_names = [p.name for p in transform_plugins]
@@ -281,6 +287,8 @@ def build_messages(
     *,
     guided_terminal: TerminalState | None = None,
     schemas_loaded: frozenset[tuple[str, str]] = _SCHEMAS_LOADED_UNSET,
+    secret_service: WebSecretResolver | None = None,
+    user_id: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build the full message list for the LLM.
 
@@ -376,7 +384,13 @@ def build_messages(
     # 2. Dynamic state/plugin context. Keep this outside the first
     # system message so provider prompt-cache markers cover only the
     # stable skill/deployment prefix.
-    context_str = build_context_string(state, catalog, schemas_loaded=schemas_loaded)
+    context_str = build_context_string(
+        state,
+        catalog,
+        schemas_loaded=schemas_loaded,
+        secret_service=secret_service,
+        user_id=user_id,
+    )
     messages.append({"role": "system", "content": context_str})
 
     # 3. Chat history

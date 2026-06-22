@@ -558,7 +558,7 @@ class WebScrapeTransform(BaseTransform):
                     "http.abuse_contact and http.scraping_reason are mandatory and recorded in the audit trail — operator must declare them, not the model.",
                     "If the user-facing output should exclude raw scraped content, route the final path through field_mapper with select_only: true before the sink; a sink name or output name is not cleanup.",
                     "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete when raw scraped-content cleanup is required; insert or restore the final field_mapper before the sink.",
-                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Use azure_prompt_shield or the deployment's equivalent.",
+                    "If scraped public internet content flows into an LLM, surface prompt-injection shielding as an important recommendation. Recommend an available authorized prompt-injection shield; use azure_prompt_shield only when discovery lists it, or use the deployment's equivalent when available.",
                     "Recommendation is not permission to add a node; do not substitute azure_content_safety; do not insert it automatically unless requested or policy-required.",
                     "If no prompt shield is authorized, make the direct public-content-to-LLM routing reviewable with a pipeline_decision requirement on the LLM node using user_term prompt_injection_shield_recommendation.",
                     "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",

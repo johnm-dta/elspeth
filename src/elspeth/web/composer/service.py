@@ -3092,7 +3092,7 @@ class ComposerServiceImpl:
         # still gate behind a per-instance flag so steady-state compose()
         # calls don't churn the connection pool.
         await self._maybe_upsert_skill_markdown_history()
-        llm_messages = self._build_messages(messages, state, message, guided_terminal, session_id=session_id)
+        llm_messages = self._build_messages(messages, state, message, guided_terminal, session_id=session_id, user_id=user_id)
         tools = self._get_litellm_tools()
         # Per-call audit recorder. Surfaced on ComposerResult and on
         # the three partial-state-carrier exceptions so the route handler
@@ -3435,6 +3435,7 @@ class ComposerServiceImpl:
         user_message: str,
         guided_terminal: TerminalState | None = None,
         session_id: str | None = None,
+        user_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Build the message list. Returns a NEW list on every call.
 
@@ -3471,6 +3472,8 @@ class ComposerServiceImpl:
                 data_dir=self._data_dir,
                 guided_terminal=guided_terminal,
                 schemas_loaded=self._schemas_loaded_for_session(session_id),
+                secret_service=self._secret_service,
+                user_id=user_id,
             )
         except OSError as exc:
             raise ComposerServiceError(f"Failed to load deployment skill ({type(exc).__name__})") from exc

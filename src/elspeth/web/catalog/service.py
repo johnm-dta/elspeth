@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from elspeth.contracts.enums import AuditCharacteristic, DerivedAuditCharacteristics, Determinism
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
+from elspeth.core.secrets import is_secret_field
 from elspeth.plugins.infrastructure.discovery import get_plugin_description
 from elspeth.plugins.infrastructure.manager import PluginManager, PluginNotFoundError
 from elspeth.web.catalog.knob_schema import (
@@ -21,6 +22,7 @@ from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginKind,
     PluginSchemaInfo,
+    PluginSecretRequirement,
     PluginSummary,
 )
 
@@ -325,6 +327,7 @@ class CatalogServiceImpl:
             json_schema=json_schema,
             knob_schema=cast(dict[str, Any], knob_schema),
             composer_hints=self._discovery_composer_hints(plugin_cls),
+            secret_requirements=self._secret_requirements(plugin_cls, schema=json_schema),
         )
 
     def _discovery_composer_hints(self, plugin_cls: PluginClass) -> tuple[str, ...]:
@@ -432,6 +435,11 @@ class CatalogServiceImpl:
             capability_tags=capability_tags,
             audit_characteristics=audit_characteristics,
             composer_hints=self._discovery_composer_hints(plugin_cls),
+            secret_requirements=self._secret_requirements(
+                plugin_cls,
+                schema=schema,
+                config_fields=config_fields,
+            ),
         )
 
     def _catalog_schema(self, plugin_cls: PluginClass, plugin_type: PluginKind) -> dict[str, Any]:
@@ -488,6 +496,61 @@ class CatalogServiceImpl:
             self._field_summary(field_name, field_schema, field_name in required_fields)
             for field_name, field_schema in parsed.properties.items()
         ]
+
+    def _secret_requirements(
+        self,
+        plugin_cls: PluginClass,
+        *,
+        schema: dict[str, Any],
+        config_fields: Sequence[ConfigFieldSummary] | None = None,
+    ) -> tuple[PluginSecretRequirement, ...]:
+        """Return composer discovery secret requirements for a plugin.
+
+        Plugin-declared requirements carry canonical inventory names. Schema
+        fallback covers ordinary required credential fields, but leaves
+        candidates empty because a JSON schema field name does not identify the
+        operator's chosen secret-reference name.
+        """
+
+        declared = tuple(
+            PluginSecretRequirement(field=field_name, candidates=tuple(candidates))
+            for field_name, candidates in plugin_cls.discovery_secret_requirements.items()
+        )
+        declared_fields = {req.field for req in declared}
+        if config_fields is None:
+            required_secret_fields = self._required_secret_fields_from_schema(schema)
+        else:
+            required_secret_fields = tuple(field.name for field in config_fields if field.required and is_secret_field(field.name))
+        inferred = tuple(
+            PluginSecretRequirement(field=field_name) for field_name in required_secret_fields if field_name not in declared_fields
+        )
+        return (*declared, *inferred)
+
+    def _required_secret_fields_from_schema(self, schema: dict[str, Any]) -> tuple[str, ...]:
+        if "oneOf" in schema and "$defs" in schema:
+            return self._common_required_secret_fields_from_discriminated(schema)
+
+        parsed = _SchemaObject.model_validate(schema)
+        return tuple(field_name for field_name in parsed.required if is_secret_field(field_name))
+
+    def _common_required_secret_fields_from_discriminated(self, schema: dict[str, Any]) -> tuple[str, ...]:
+        defs: dict[str, dict[str, Any]] = schema["$defs"]
+        variant_required_secret_fields: list[set[str]] = []
+        ordered_first_variant: list[str] = []
+        for raw_entry in schema["oneOf"]:
+            entry = _OneOfEntry.model_validate(raw_entry)
+            if not entry.ref.startswith(_DEFS_REF_PREFIX):
+                continue
+            variant = _SchemaObject.model_validate(defs[entry.ref[len(_DEFS_REF_PREFIX) :]])
+            fields = {field_name for field_name in variant.required if is_secret_field(field_name)}
+            if not variant_required_secret_fields:
+                ordered_first_variant = [field_name for field_name in variant.required if field_name in fields]
+            variant_required_secret_fields.append(fields)
+
+        if not variant_required_secret_fields:
+            return ()
+        common = set.intersection(*variant_required_secret_fields)
+        return tuple(field_name for field_name in ordered_first_variant if field_name in common)
 
     def _fields_from_discriminated(self, schema: dict[str, Any]) -> list[ConfigFieldSummary]:
         """Union fields across ``$defs`` variants referenced by ``oneOf``.

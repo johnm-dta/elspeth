@@ -770,7 +770,7 @@ class TestStep3BlobDiscoveryTierMigration:
         assert self._get("list_blobs") == {
             "name": "list_blobs",
             "description": "List uploaded/created files (blobs) in this session with metadata.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_list_composer_blobs(self) -> None:
@@ -780,7 +780,7 @@ class TestStep3BlobDiscoveryTierMigration:
                 "List ready blobs available for audited inline-content authoring. "
                 "Returns only blob_id, mime_type, size_bytes, content_hash, and filename; never content bytes."
             ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_list_composer_blobs_declaration_kind(self) -> None:
@@ -796,6 +796,7 @@ class TestStep3BlobDiscoveryTierMigration:
                     "blob_id": {"type": "string", "description": "Blob ID."},
                 },
                 "required": ["blob_id"],
+                "additionalProperties": False,
             },
         }
 
@@ -836,6 +837,7 @@ class TestStep3BlobDiscoveryTierMigration:
                     },
                 },
                 "required": ["blob_id"],
+                "additionalProperties": False,
             },
         }
 

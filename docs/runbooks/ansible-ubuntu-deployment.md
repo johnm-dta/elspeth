@@ -472,6 +472,7 @@ elspeth_server_secret_allowlist:
   - OPENAI_API_KEY
   - ANTHROPIC_API_KEY
   - AZURE_API_KEY
+  - AZURE_CONTENT_SAFETY_KEY
 
 # ---- Payload-store retention -----------------------------------------
 # Mirrors core/config.py:PayloadStoreSettings.retention_days. Surfaced

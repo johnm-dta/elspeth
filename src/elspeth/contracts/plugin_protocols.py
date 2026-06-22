@@ -88,6 +88,7 @@ class _PluginReferenceContent(Protocol):
     example_use: str | None
     capability_tags: tuple[str, ...]
     audit_characteristics: DeclaredAuditCharacteristics
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]]
 
 
 class _PluginAssistanceHooks(Protocol):

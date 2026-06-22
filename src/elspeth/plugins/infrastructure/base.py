@@ -234,6 +234,16 @@ class BaseTransform(ABC):
     additionally rejects bare-string members that pass mypy under
     StrEnum/str inference."""
 
+    discovery_secret_requirements: ClassVar[Mapping[str, tuple[str, ...]]] = {}
+    """Credential-bearing config fields that must have a configured secret ref
+    before composer discovery advertises the plugin.
+
+    Keys are config field names such as ``api_key``. Values are browser-safe
+    candidate secret-reference names, never secret values. An empty tuple means
+    the field requires some available secret, but the plugin has no canonical
+    inventory name.
+    """
+
     # Config model — each subclass sets this to its Pydantic config class.
     # get_config_model() is the public API; override it for dynamic dispatch
     # (e.g. provider-based LLM config selection).
@@ -968,6 +978,10 @@ class BaseSink(ABC):
     declaration site rather than disappearing silently from the rendered
     catalog card."""
 
+    discovery_secret_requirements: ClassVar[Mapping[str, tuple[str, ...]]] = {}
+    """Credential-bearing config fields that must have a configured secret ref
+    before composer discovery advertises the plugin. See BaseTransform."""
+
     # Config model — each subclass sets this to its Pydantic config class.
     config_model: ClassVar[type[PluginConfig] | None] = None
 
@@ -1364,6 +1378,10 @@ class BaseSource(ABC):
     the enum itself is the closed vocabulary; typos fail mypy at the
     declaration site rather than disappearing silently from the rendered
     catalog card."""
+
+    discovery_secret_requirements: ClassVar[Mapping[str, tuple[str, ...]]] = {}
+    """Credential-bearing config fields that must have a configured secret ref
+    before composer discovery advertises the plugin. See BaseTransform."""
 
     # Config model — each subclass sets this to its Pydantic config class.
     # NullSource sets this to None (no config validation needed).

@@ -6,7 +6,7 @@ import pytest
 
 from elspeth.plugins.infrastructure.manager import PluginManager
 from elspeth.web.catalog.protocol import CatalogService
-from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSecretRequirement, PluginSummary
 from elspeth.web.catalog.service import CatalogServiceImpl
 
 
@@ -112,6 +112,15 @@ class TestListTransforms:
         field_names = {field.name for field in batch_stats.config_fields}
 
         assert "required_input_fields" not in field_names
+
+    def test_azure_prompt_shield_declares_content_safety_secret_requirement(self, catalog: CatalogServiceImpl) -> None:
+        """Composer discovery must not advertise Prompt Shield without its Azure key."""
+        transforms = catalog.list_transforms()
+        prompt_shield = next(t for t in transforms if t.name == "azure_prompt_shield")
+        expected = (PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),)
+
+        assert prompt_shield.secret_requirements == expected
+        assert catalog.get_schema("transform", "azure_prompt_shield").secret_requirements == expected
 
 
 class TestListSinks:

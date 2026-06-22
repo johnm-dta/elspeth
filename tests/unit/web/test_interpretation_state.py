@@ -505,7 +505,7 @@ def test_unrelated_pipeline_decision_does_not_satisfy_raw_html_cleanup_review() 
 def test_gate_routed_web_scrape_into_llm_warns_without_prompt_shield() -> None:
     # The gate topology routes web_scrape output into the LLM via gate routes,
     # exercising the enhanced _producer_by_output_stream (routes/fork_to). The
-    # prompt-shield recommendation is advisory, not blocking (elspeth-abb2cb0931):
+    # Prompt-shield recommendation is advisory, not blocking:
     # an unshielded LLM-over-scrape surfaces a warning and still composes.
     state = _state_with_web_scrape_gate_to_llm()
 

@@ -34,6 +34,7 @@ from elspeth.web.composer.state import (
     SourceSpec,
     validate_composer_source_name,
 )
+from elspeth.web.composer.tools._availability import filter_secret_available_summaries
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
@@ -73,7 +74,7 @@ def _handle_list_sources(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, context.catalog.list_sources())
+    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_sources(), context))
 
 
 _LIST_SOURCES_DECLARATION = ToolDeclaration(

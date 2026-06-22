@@ -25,6 +25,7 @@ from elspeth.web.composer.state import (
     _validate_gate_expression,
     _validate_gate_route_parity,
 )
+from elspeth.web.composer.tools._availability import filter_secret_available_summaries
 from elspeth.web.composer.tools._common import (
     ToolContext,
     ToolResult,
@@ -107,7 +108,7 @@ def _handle_list_transforms(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, context.catalog.list_transforms())
+    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_transforms(), context))
 
 
 _LIST_TRANSFORMS_DECLARATION = ToolDeclaration(
@@ -125,7 +126,7 @@ def _handle_list_sinks(
     state: CompositionState,
     context: ToolContext,
 ) -> ToolResult:
-    return _discovery_result(state, context.catalog.list_sinks())
+    return _discovery_result(state, filter_secret_available_summaries(context.catalog.list_sinks(), context))
 
 
 _LIST_SINKS_DECLARATION = ToolDeclaration(

@@ -32,6 +32,7 @@ from elspeth.web.composer.state import (
     CompositionState,
     ValidationSummary,
 )
+from elspeth.web.composer.tools._availability import schema_secret_unavailable_message
 from elspeth.web.composer.tools._common import (
     RuntimePreflight,
     ToolContext,
@@ -329,6 +330,7 @@ def _augment_with_plugin_schemas(
     result: ToolResult,
     tool_name: str,
     catalog: CatalogService,
+    context: ToolContext,
 ) -> ToolResult:
     """Attach inline ``plugin_schemas`` to a failed option-shape rejection.
 
@@ -352,7 +354,11 @@ def _augment_with_plugin_schemas(
         return result
     if result.success or result.plugin_schemas is not None:
         return result
-    schemas = build_plugin_schemas_for_failure(result, catalog)
+    schemas = build_plugin_schemas_for_failure(
+        result,
+        catalog,
+        schema_unavailable_message=lambda schema: schema_secret_unavailable_message(schema, context),
+    )
     if schemas is None:
         return result
     return replace(result, plugin_schemas=schemas)
@@ -487,7 +493,7 @@ def execute_tool(
     # validation errors so the LLM avoids a follow-up discovery round-trip.
     # No-op for non-augmentation-eligible tools or successful results
     # (gated inside ``_augment_with_plugin_schemas``).
-    return _augment_with_plugin_schemas(result, tool_name, catalog)
+    return _augment_with_plugin_schemas(result, tool_name, catalog, context)
 
 
 # ---------------------------------------------------------------------------

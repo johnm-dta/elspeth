@@ -159,6 +159,7 @@ class WebSettings(BaseModel):
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "AZURE_API_KEY",
+        "AZURE_CONTENT_SAFETY_KEY",
     )
     orphan_run_max_age_seconds: int = Field(default=3600, ge=60)
     orphan_run_check_interval_seconds: int = Field(default=300, ge=30)

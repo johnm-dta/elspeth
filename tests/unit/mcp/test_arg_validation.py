@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from elspeth.mcp.server import _ToolDef, _validate_tool_args
+from elspeth.mcp.server import _TOOLS, _ToolDef, _validate_tool_args
 
 
 class TestRequiredStringFields:
@@ -72,6 +72,69 @@ class TestOptionalStringDefaults:
     def test_rejects_non_string(self) -> None:
         with pytest.raises(TypeError, match="must be string"):
             _validate_tool_args("get_errors", {"run_id": "r1", "error_type": 123})
+
+
+class TestAdvertisedEnumFields:
+    """String enum constraints must be enforced before analyzer dispatch."""
+
+    @pytest.mark.parametrize(
+        ("tool_name", "base_args", "field_name", "valid_value"),
+        [
+            ("list_runs", {}, "status", "running"),
+            ("list_operations", {"run_id": "r1"}, "operation_type", "source_load"),
+            ("list_operations", {"run_id": "r1"}, "status", "open"),
+            ("get_errors", {"run_id": "r1"}, "error_type", "validation"),
+            ("get_node_states", {"run_id": "r1"}, "status", "completed"),
+        ],
+    )
+    def test_validator_accepts_values_from_advertised_enum(
+        self,
+        tool_name: str,
+        base_args: dict[str, object],
+        field_name: str,
+        valid_value: str,
+    ) -> None:
+        assert valid_value in _TOOLS[tool_name].schema_properties[field_name]["enum"]
+
+        args = _validate_tool_args(tool_name, {**base_args, field_name: valid_value})
+
+        assert args[field_name] == valid_value
+
+    @pytest.mark.parametrize(
+        ("tool_name", "base_args", "field_name"),
+        [
+            ("list_runs", {}, "status"),
+            ("list_operations", {"run_id": "r1"}, "operation_type"),
+            ("list_operations", {"run_id": "r1"}, "status"),
+            ("get_errors", {"run_id": "r1"}, "error_type"),
+            ("get_node_states", {"run_id": "r1"}, "status"),
+        ],
+    )
+    def test_validator_rejects_values_outside_advertised_enum(
+        self,
+        tool_name: str,
+        base_args: dict[str, object],
+        field_name: str,
+    ) -> None:
+        bad_value = "__not_a_valid_enum_value__"
+        assert bad_value not in _TOOLS[tool_name].schema_properties[field_name]["enum"]
+
+        with pytest.raises(ValueError, match=rf"{field_name}.*must be one of"):
+            _validate_tool_args(tool_name, {**base_args, field_name: bad_value})
+
+    @pytest.mark.parametrize(
+        ("tool_name", "field_name"),
+        [
+            ("list_runs", "status"),
+            ("list_operations", "operation_type"),
+            ("list_operations", "status"),
+            ("get_node_states", "status"),
+        ],
+    )
+    def test_nullable_enum_fields_still_accept_null(self, tool_name: str, field_name: str) -> None:
+        args = _validate_tool_args(tool_name, {"run_id": "r1", field_name: None})
+
+        assert args[field_name] is None
 
 
 class TestOptionalIntFields:

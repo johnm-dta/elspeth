@@ -444,9 +444,10 @@ _TOOLS: dict[str, _ToolDef] = {
 def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Validate MCP tool arguments at the Tier 3 boundary.
 
-    Checks required fields exist, validates types (str, int, dict), and
-    applies defaults for optional fields. Returns a new dict with only
-    the declared fields, preventing unexpected keys from leaking through.
+    Checks required fields exist, validates types (str, int, dict), enforces
+    advertised enum constraints, and applies defaults for optional fields.
+    Returns a new dict with only the declared fields, preventing unexpected
+    keys from leaking through.
 
     Raises:
         ValueError: Missing required field or unknown tool.
@@ -459,24 +460,39 @@ def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     spec = defn.args
     validated: dict[str, Any] = {}
 
+    def validate_advertised_enum(fname: str, value: str) -> None:
+        schema = defn.schema_properties.get(fname, {})
+        enum_values = schema.get("enum")
+        if enum_values is None:
+            return
+        if not isinstance(enum_values, list):
+            raise TypeError(f"'{name}': '{fname}' schema enum must be a list")
+        if value not in enum_values:
+            valid_values = ", ".join(repr(candidate) for candidate in enum_values)
+            raise ValueError(f"'{name}': '{fname}' must be one of: {valid_values}")
+
     for fname in spec.required_str:
         if fname not in arguments:
             raise ValueError(f"'{name}' requires '{fname}'")
         val = arguments[fname]
         if not isinstance(val, str):
             raise TypeError(f"'{name}': '{fname}' must be string, got {type(val).__name__}")
+        validate_advertised_enum(fname, val)
         validated[fname] = val
 
     for fname in spec.optional_str:
         val = arguments.get(fname)
         if val is not None and not isinstance(val, str):
             raise TypeError(f"'{name}': '{fname}' must be string or null, got {type(val).__name__}")
+        if isinstance(val, str):
+            validate_advertised_enum(fname, val)
         validated[fname] = val
 
     for fname, str_default in spec.optional_str_defaults:
         val = arguments.get(fname, str_default)
         if not isinstance(val, str):
             raise TypeError(f"'{name}': '{fname}' must be string, got {type(val).__name__}")
+        validate_advertised_enum(fname, val)
         validated[fname] = val
 
     int_mins = dict(spec.optional_int_min)

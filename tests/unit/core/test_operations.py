@@ -161,7 +161,7 @@ def test_track_operation_renders_informative_error_for_blank_base_exception_stri
     assert ctx.operation_id is None
 
 
-def test_track_operation_ignores_broken_exception_str_override() -> None:
+def test_track_operation_falls_back_for_broken_exception_str_override() -> None:
     class _BrokenStrError(Exception):
         def __str__(self) -> str:
             raise RuntimeError("boom")
@@ -182,7 +182,7 @@ def test_track_operation_ignores_broken_exception_str_override() -> None:
         raise _BrokenStrError("original message")
 
     assert factory.complete_calls[0]["status"] == "failed"
-    assert factory.complete_calls[0]["error"] == "original message"
+    assert factory.complete_calls[0]["error"] == "_BrokenStrError"
     assert ctx.operation_id is None
 
 

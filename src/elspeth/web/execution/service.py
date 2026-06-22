@@ -99,6 +99,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
+from elspeth.web.provider_config_policy import web_rag_provider_config_policy_error
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -590,6 +591,37 @@ class ExecutionServiceImpl:
                             raise PathAllowlistViolationError(
                                 f"Transform '{node.id}' {key}='{value}' resolves outside allowed output directories"
                             )
+
+        if composition_state.nodes:
+            for node in composition_state.nodes:
+                if node.node_type != "transform":
+                    continue
+                provider_policy_error = web_rag_provider_config_policy_error(node.options)
+                if provider_policy_error is not None:
+                    raise PipelineValidationError(
+                        errors=(
+                            ValidationError(
+                                component_id=node.id,
+                                component_type="transform",
+                                message=provider_policy_error,
+                                suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
+                                error_code=None,
+                            ),
+                        ),
+                        readiness=ValidationReadiness(
+                            authoring_valid=False,
+                            execution_ready=False,
+                            completion_ready=False,
+                            blockers=[
+                                ValidationReadinessBlocker(
+                                    code="managed_identity_policy",
+                                    component_id=node.id,
+                                    component_type="transform",
+                                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                                )
+                            ],
+                        ),
+                    )
 
         # Fail-closed pre-run validation gate (notes/composer-advisor-surface-map-2026-06-08.md).
         # Previously execute() created a run and let an invalid pipeline fail OPAQUELY

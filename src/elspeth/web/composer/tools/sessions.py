@@ -71,6 +71,7 @@ from elspeth.web.composer.tools._common import (
     _validate_sink_path,
     _validate_source_path,
     _validate_transform_provider_config_path,
+    _validate_transform_provider_config_policy,
     _vf_destination_note,
     validate_composer_file_sink_collision_policy,
 )
@@ -482,6 +483,10 @@ def _execute_set_pipeline(
             node_prevalidation = _prevalidate_transform(node_plugin, review_options)
             if node_prevalidation is not None:
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
+
+            provider_policy_error = _validate_transform_provider_config_policy(node_options)
+            if provider_policy_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 
             # S2: confine nested provider_config persist_directory (RAG
             # retrieval). Parity with the per-output sink-path check below so

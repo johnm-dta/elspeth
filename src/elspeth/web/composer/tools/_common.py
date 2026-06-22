@@ -78,6 +78,7 @@ from elspeth.web.paths import (
     allowed_source_directories,
     resolve_data_path,
 )
+from elspeth.web.provider_config_policy import web_rag_provider_config_policy_error
 from elspeth.web.secrets.ref_policy import (
     allowed_secret_ref_fields,
     allowed_secret_ref_fields_text,
@@ -1238,6 +1239,11 @@ def _validate_transform_provider_config_path(
                 f"or {data_dir}/blobs/."
             )
     return None
+
+
+def _validate_transform_provider_config_policy(options: Mapping[str, Any]) -> str | None:
+    """Validate non-path web provider_config policy constraints."""
+    return web_rag_provider_config_policy_error(options)
 
 
 def _prevalidate_plugin_options(

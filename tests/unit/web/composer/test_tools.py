@@ -6086,6 +6086,20 @@ class TestTransformProviderConfigPathSecurity:
             "query_field": "text",
         }
 
+    @staticmethod
+    def _azure_search_managed_identity_options() -> dict[str, Any]:
+        return {
+            "provider": "azure_search",
+            "provider_config": {
+                "endpoint": "https://tenant-b.search.windows.net",
+                "index": "payroll",
+                "use_managed_identity": True,
+            },
+            "schema": {"mode": "observed"},
+            "output_prefix": "rag_",
+            "query_field": "text",
+        }
+
     def test_helper_rejects_persist_directory_outside_allowed(self) -> None:
         from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
 
@@ -6122,6 +6136,131 @@ class TestTransformProviderConfigPathSecurity:
             data_dir="/data",
         )
         assert error is None
+
+    def test_helper_rejects_azure_search_managed_identity(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(self._azure_search_managed_identity_options())
+        assert error is not None
+        assert "managed identity" in error.lower()
+
+    def test_helper_rejects_string_true_managed_identity(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        options = self._azure_search_managed_identity_options()
+        options["provider_config"]["use_managed_identity"] = "true"
+
+        error = _validate_transform_provider_config_policy(options)
+        assert error is not None
+        assert "managed identity" in error.lower()
+
+    def test_upsert_node_rejects_azure_search_managed_identity(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "rows",
+                "on_success": "retrieved",
+                "on_error": "discard",
+                "options": self._azure_search_managed_identity_options(),
+            },
+            state,
+            catalog,
+            data_dir="/data",
+        )
+        assert result.success is False
+        assert "managed identity" in result.data["error"].lower()
+
+    def test_patch_node_options_rejects_azure_search_managed_identity(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "rows",
+                "on_success": "retrieved",
+                "on_error": "discard",
+                "options": self._rag_options("/data/outputs/chroma"),
+            },
+            state,
+            catalog,
+            data_dir="/data",
+        )
+        assert created.success is True
+
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "rag",
+                "patch": {
+                    "provider": "azure_search",
+                    "provider_config": {
+                        "endpoint": "https://tenant-b.search.windows.net",
+                        "index": "payroll",
+                        "use_managed_identity": True,
+                    },
+                },
+            },
+            created.updated_state,
+            catalog,
+            data_dir="/data",
+        )
+
+        assert result.success is False
+        assert "managed identity" in result.data["error"].lower()
+
+    def test_set_pipeline_rejects_azure_search_managed_identity(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "source_out",
+                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            "nodes": [
+                {
+                    "id": "rag",
+                    "node_type": "transform",
+                    "plugin": "rag_retrieval",
+                    "input": "source_out",
+                    "on_success": "main",
+                    "on_error": "discard",
+                    "options": self._azure_search_managed_identity_options(),
+                }
+            ],
+            "edges": [{"id": "e1", "from_node": "source", "to_node": "rag", "edge_type": "on_success", "label": None}],
+            "outputs": [
+                {
+                    "sink_name": "main",
+                    "plugin": "csv",
+                    "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
+        assert result.success is False
+        assert "managed identity" in result.data["error"].lower()
+
+    def test_helper_allows_azure_search_api_key(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        options = self._azure_search_managed_identity_options()
+        options["provider_config"] = {
+            "endpoint": "https://tenant-a.search.windows.net",
+            "index": "docs",
+            "api_key": "test-key",
+        }
+        assert _validate_transform_provider_config_policy(options) is None
 
     def test_upsert_node_rejects_persist_directory_outside_allowed(self) -> None:
         state = _empty_state()

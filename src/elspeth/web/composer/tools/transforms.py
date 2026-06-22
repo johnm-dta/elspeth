@@ -41,6 +41,7 @@ from elspeth.web.composer.tools._common import (
     _validate_mutation_arguments,
     _validate_plugin_name,
     _validate_transform_provider_config_path,
+    _validate_transform_provider_config_policy,
 )
 from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
@@ -454,6 +455,10 @@ def _execute_upsert_node(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
+        provider_policy_error = _validate_transform_provider_config_policy(node_options)
+        if provider_policy_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
+
         # S2: confine nested provider_config persist_directory (RAG retrieval).
         provider_path_error = _validate_transform_provider_config_path(node_options, context.data_dir)
         if provider_path_error is not None:
@@ -746,6 +751,10 @@ def _execute_patch_node_options(
         prevalidation_error = _prevalidate_transform(current.plugin, new_options)
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
+
+        provider_policy_error = _validate_transform_provider_config_policy(new_options)
+        if provider_policy_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 
         # S2: confine nested provider_config persist_directory (RAG retrieval).
         # A merge-patch can introduce an escaping path just as upsert_node can.

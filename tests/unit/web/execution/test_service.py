@@ -4657,6 +4657,46 @@ class TestTransformProviderConfigPathRestriction:
         assert isinstance(run_id, UUID)
 
     @pytest.mark.asyncio
+    async def test_azure_search_managed_identity_provider_config_rejected_before_run(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Web execution must not run user-authored RAG configs with server managed identity."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "azure_search",
+                    "provider_config": {
+                        "endpoint": "https://tenant-b.search.windows.net",
+                        "index": "payroll",
+                        "use_managed_identity": True,
+                    },
+                },
+            }
+        ]
+        state.edges = None
+
+        with (
+            patch.object(service, "_run_pipeline") as run_pipeline,
+            pytest.raises(PipelineValidationError, match="managed identity"),
+        ):
+            await service.execute(session_id=uuid4())
+
+        run_pipeline.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_non_rag_transform_without_provider_config_passes(
         self,
         service: ExecutionServiceImpl,

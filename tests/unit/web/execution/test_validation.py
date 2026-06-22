@@ -901,6 +901,60 @@ class TestValidatePipelineTransformProviderConfigPathAllowlist:
         assert path_check.passed is True
 
 
+class TestValidatePipelineTransformProviderConfigManagedIdentityPolicy:
+    """Web-authored RAG provider configs must not enable server managed identity."""
+
+    def test_azure_search_managed_identity_provider_config_blocked(self) -> None:
+        node = _make_node(
+            plugin="rag_retrieval",
+            options={
+                "provider": "azure_search",
+                "provider_config": {
+                    "endpoint": "https://tenant-b.search.windows.net",
+                    "index": "payroll",
+                    "use_managed_identity": True,
+                },
+            },
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert any(c.name == "managed_identity_policy" and c.passed is False for c in result.checks)
+        assert any("managed identity" in e.message.lower() for e in result.errors)
+        assert result.readiness is not None
+        assert any(b.code == "managed_identity_policy" for b in result.readiness.blockers)
+
+    def test_azure_search_api_key_provider_config_remains_allowed(self) -> None:
+        node = _make_node(
+            plugin="rag_retrieval",
+            options={
+                "provider": "azure_search",
+                "provider_config": {
+                    "endpoint": "https://tenant-a.search.windows.net",
+                    "index": "docs",
+                    "api_key": "test-key",
+                },
+            },
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        managed_identity_check = next(c for c in result.checks if c.name == "managed_identity_policy")
+        assert managed_identity_check.passed is True
+
+
 class TestValidatePipelineSemanticContractsLegacy:
     """Validation must catch transform pairings that violate line framing.
 
@@ -1342,7 +1396,7 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 13
+        assert len(result.checks) == 14
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True

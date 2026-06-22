@@ -82,6 +82,7 @@ from elspeth.web.execution.schemas import (
     CHECK_BLOB_INLINE_REFS,
     CHECK_IDENTITY_NODE_ADVISORY,
     CHECK_INTERPRETATION_REVIEW,
+    CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
     CHECK_OUTCOME_SECRET_REFS_RESOLVED,
     CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
@@ -109,6 +110,7 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
 )
+from elspeth.web.provider_config_policy import web_rag_provider_config_policy_error
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
@@ -119,6 +121,7 @@ _CHECK_BLOB_INLINE_REFS = CHECK_BLOB_INLINE_REFS
 _CHECK_SEMANTIC_CONTRACTS = CHECK_SEMANTIC_CONTRACTS
 _CHECK_BATCH_TRANSFORM_OPTIONS = CHECK_BATCH_TRANSFORM_OPTIONS
 _CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
+_CHECK_MANAGED_IDENTITY_POLICY = CHECK_MANAGED_IDENTITY_POLICY
 _CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
@@ -939,6 +942,50 @@ def validate_pipeline(
                 outcome_code=None,
             )
         )
+
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        provider_policy_error = web_rag_provider_config_policy_error(node.options)
+        if provider_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_MANAGED_IDENTITY_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' uses disallowed managed identity provider_config",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            checks.extend(_skipped_checks(_CHECK_MANAGED_IDENTITY_POLICY))
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=provider_policy_error,
+                        suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
+                        error_code=None,
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_MANAGED_IDENTITY_POLICY,
+                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_MANAGED_IDENTITY_POLICY,
+            passed=True,
+            detail="No web-authored managed identity provider_config",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
 
     web_scrape_network_errors: list[ValidationError] = []
     for node in state.nodes:

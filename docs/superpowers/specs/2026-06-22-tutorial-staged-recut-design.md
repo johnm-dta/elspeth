@@ -1,7 +1,8 @@
 # Tutorial staged recut — design
 
 - **Date:** 2026-06-22
-- **Status:** Approved (brainstorm complete; revised after code-review adjudication) — ready for implementation planning
+- **Status:** Approved (brainstorm complete; revised after code-review adjudication
+  **and a six-lens external peer-review panel, rev 4**) — ready for implementation planning
 - **Branch:** `worktree-tutorial-staged-recut` — branched from `release/0.7.0`
   (merge-base `4bbb0624b`; `release/0.7.0` tip at design time `3074b2623`).
   `4bbb0624b` is the merge-base, **not** the branch tip.
@@ -36,6 +37,38 @@
   rule; the wire view needs **two reads** (topology + edge_contracts overlay); the
   profile must ride the **wire response**; §8 references the existing DB-reset
   runbook; plus test/gate and file-map corrections.
+- **rev 4 (2026-06-22):** Adjudicated a six-lens external peer-review panel
+  (citation-reality ×2, architecture, systems, quality, security). Citation accuracy
+  held up (≈88 exact, ≈14 minor line-drift, ≈5 materially wrong). Material corrections,
+  operator-decided:
+  (1) **Shield re-polarized (D11/B4)** — the recipe omits an *unbuildable*
+  `azure_prompt_shield` hard node, but the **existing medium-severity prompt-shield
+  advisory warning stays LIVE** and surfaces at the wire stage; the test pins the
+  *presence* of that advisory (+ absence of the hard node), **not** "no shield
+  recommendation" (which would make the flagship example the one pipeline that
+  suppresses the advisory the rest of the system shows). `elspeth-abb2cb0931` is a
+  *conditional, security-labeled "restore once plugins gate on secret availability"*
+  ticket, not a blessing to remove all shield signal.
+  (2) **Advisor terminal gate is profile-gated + has a sustained-UNAVAILABLE escape
+  (D13)** — the END sign-off fires only when the **server-owned**
+  `profile.advisor_checkpoints` is on (live-guided's empty profile opts out, so D14's
+  global wire stage is **not** a blocking-advisor regression for live guided; a client
+  cannot flip it — closed-enum profile, server constructs the object). FLAGGED/MALFORMED
+  stay fail-closed; **sustained UNAVAILABLE/timeout** (infra, never a quality verdict)
+  gets a differentiated "complete without sign-off (advisor unreachable)" affordance on
+  budget-exhaustion, so an advisor outage cannot brick a first-run tutorial.
+  (3) **Fork strip seam corrected** — the verbatim `composer_meta` copy is in
+  **`sessions/service.py:5076` (and a second copy at `:5153`)**, NOT `composer/service.py`
+  (5007 lines); the route-layer blob-rewrite save (`sessions/routes/sessions.py:489`)
+  only fires when `rewritten=True`, and the canonical `inline_blob` source has no
+  `blob_ref` → `rewritten=False`, so the strip MUST happen inside `fork_session`, not the
+  blob-rewrite path. "Single chokepoint" was wrong.
+  (4) Accuracy: `REQUEST_ADVISOR` (`_helpers.py:3342`) is a real chain re-solve, **not**
+  a no-op; `_build_checkpoint_arguments` is at `service.py:4083` (not 4108); B1's orphan
+  gate is unreachable from the guided dispatch path (not "only inside
+  `_try_terminate_no_tools`"). Plus migration secret-archive hardening (§8), a
+  terminal-stamp invariant test, a 4th-cache-input test, and the field_mapper sink-field
+  assertion (§9).
 
 ## 1. Motivation
 
@@ -114,8 +147,12 @@ We **do not** relocate guided into a neutral `staged/` package now (Approach C �
 deferred; the profile boundary makes it a later mechanical move). We **do not**
 build a profile registry, a profile picker, or any "add workflow" UI — only the
 plumbing (the profile parameter + one wired instance). A future profile is
-*write-a-profile-object + wire its entry point*, touching no engine code. That
-additivity is the acceptance test for the profile boundary.
+*write-a-profile-object + wire its entry point*, adding **no new state-machine dispatch
+branches**. That additivity is the acceptance test for the profile boundary. (Honesty
+caveat, rev 4: a future profile that adds *new* `WorkflowProfile` fields still touches the
+persistence layer — a `GUIDED_SESSION_SCHEMA_VERSION` bump + strict `to_dict`/`from_dict`
+lines + the wire `WorkflowProfileResponse` shape. The guarantee is "no engine *logic*
+change / no new dispatch branch", not "literally zero code".)
 
 ### Decisions log
 
@@ -131,12 +168,12 @@ additivity is the acceptance test for the profile boundary.
 | D8 | Profile scope | **Plumbing only** — no registry/picker/menu; one wired instance |
 | D9 | Frontend | Tutorial **drives the real coached guided stepper** |
 | D10 | Migration | **In-place** for 0.7.0; remove big-bang components; no feature flag |
-| **D11** | Canonical compose path | **Add a web_scrape recipe** (+ predicate) so the canonical pipeline composes deterministically (zero-LLM). **web_scrape is a TRANSFORM** — the predicate matches the URL-row `inline_blob` SOURCE; the builder emits source→web_scrape→llm_rate→field_mapper(cleanup)→jsonl. The recipe records an **audited prompt-injection-shield suppression** (no shield node; elspeth-abb2cb0931). Generalises recipe-match to web-scrape guided users |
+| **D11** | Canonical compose path | **Add a web_scrape recipe** (+ predicate) so the canonical pipeline composes deterministically (zero-LLM). **web_scrape is a TRANSFORM** — the predicate matches the URL-row `inline_blob` SOURCE; the builder emits source→web_scrape→llm_rate→field_mapper(cleanup)→jsonl. **Shield: re-polarized (rev 4).** The recipe omits an *unbuildable* `azure_prompt_shield` hard node (the composer can't instantiate it without configured secrets — `elspeth-abb2cb0931`, a conditional security ticket), **but the existing medium-severity prompt-shield advisory warning STAYS LIVE** and surfaces at the wire stage. Test pins advisory **presence** + absence of the hard node (NOT "no shield recommendation"). Generalises recipe-match to web-scrape guided users |
 | **D12** | Per-stage review surfacing | **Reuse the freeform `interpretation_events` store** — NO new backend guided `TurnType`. Surface after **every** site-creating commit (source, transform, AND recipe-apply), covering **all five kinds** (prompt_template, model_choice, invented_source, vague_term, pipeline_decision). Frontend: the guided ChatPanel branch must **project** pending events from `interpretationEventsStore` and **block advancement** while pending (the `GuidedTurn.tsx` `interpretation_review` case is dead code, not the path) |
-| **D13** | Advisor terminal ordering + verdicts | END sign-off is a **pre-terminal gate inside the wire-commit branch**. CLEAN stamps COMPLETED. **Every non-CLEAN verdict** (FLAGGED, MALFORMED, UNAVAILABLE, timeout) is **fail-closed**: re-emit the wire turn while passes remain, then fail-closed non-runnable on budget-exhaustion. **No manual-proceed bypass** (reverses rev-2's fail-open). `STEP_4_WIRE` re-enterable, bounded by a **persisted** pass counter (D16) |
+| **D13** | Advisor terminal ordering + verdicts | END sign-off is a **pre-terminal gate inside the wire-commit branch**, **gated on the server-owned `profile.advisor_checkpoints`** (rev 4: live-guided's empty profile bypasses it, so D14's global wire stage is NOT a blocking-advisor regression for live guided; a client cannot disable it — closed-enum profile, server builds the object). CLEAN stamps COMPLETED. **FLAGGED / MALFORMED** are fail-closed-blocking: re-emit the wire turn while passes remain, then fail-closed non-runnable on budget-exhaustion — **no manual-proceed bypass**. **Sustained UNAVAILABLE / timeout** (infra failure, never a quality verdict) re-emits a retry while passes remain, then on budget-exhaustion offers a **differentiated "complete without sign-off (advisor unreachable)" escape** — ONLY for unavailability, **never** for a FLAG — so an advisor outage cannot brick a first-run tutorial (rev 4, reverses rev-3's undifferentiated fail-closed). `STEP_4_WIRE` re-enterable, bounded by a **persisted** pass counter (D16) |
 | **D14** | Stage set ownership | The stage SET is a **global engine property** (the frozen-total `GuidedStep` enum), NOT a `WorkflowProfile` field; live guided also gains the wire stage (intended improvement, not a parity regression) |
 | **D15** | Schema migration mechanism | **Purge** (not migrate) AND bump `SESSION_SCHEMA_EPOCH` 22→23 so boot fail-closes loudly. Session-DB-only cutover; reuse the existing `docs/runbooks/staging-session-db-recreation.md` |
-| **D16** | Duplicate-submission protection | **Minimal + concurrency parity.** Rely on existing per-session `compose_lock` + `step_advance` + terminal-409 + run-cache; **persist `advisor_checkpoint_passes_used`** on `GuidedSession` (same v6 bump) so duplicate advisor confirms can't re-call the provider unbounded; AND give `/guided/respond` the optimistic-concurrency `step_index` 409 guard `/guided/chat` already has. NO full idempotency-key infra (YAGNI) |
+| **D16** | Duplicate-submission protection | **Minimal + concurrency parity.** Rely on existing per-session `compose_lock` + `step_advance` + terminal-409 + run-cache; **persist `advisor_checkpoint_passes_used`** on `GuidedSession` (same v6 bump) so duplicate advisor confirms can't re-call the provider unbounded; AND give `/guided/respond` the optimistic-concurrency `step_index` 409 guard `/guided/chat` already has; AND guard **`POST /guided/start` against double-submit** — a second start for a session that already has a persisted `GuidedSession` returns the existing session (idempotent), never re-initialises (rev 4, closes the one open review item). NO full idempotency-key infra (YAGNI) |
 
 ## 4. Architecture
 
@@ -195,7 +232,11 @@ Must hit all of these in lockstep (import-time asserts catch omissions):
 - `guided/prompts.py:43-58` — add the step to `_STEP_FILE_NAMES` and
   `_STEP_PLAYBOOK_ORDER` and create `guided/skills/step_4_wire.md`, or the
   import-time asserts (`:64-73`) crash. (Note H1: this grows the whole-skill chain
-  solver prompt — accepted.)
+  solver prompt — accepted.) **Authoring guidance (rev 4):** `step_4_wire.md` is
+  concatenated into the chain solver's prompt at *transform*-solve time (before wiring),
+  so it must contain only **wiring constraints that legitimately bound node proposals**
+  (e.g. routing/contract rules) — **not** wire-stage UX copy ("you will see a
+  visualization…"), which is pure noise/contamination in the chain-solve context.
 - `guided/emitters.py:428-432` **and** `sessions/routes/_helpers.py:3674-3678` —
   append the step to **both** duplicated `_ORDER` ordinal tuples; add a
   `build_step_4_wire_turn` emitter.
@@ -236,11 +277,23 @@ Must hit all of these in lockstep (import-time asserts catch omissions):
   persisted `GuidedSession.profile` (round-tripped by the v6 schema) rather than
   re-constructing a default. The frontend tutorial machine calls this start
   endpoint instead of relying on the lazy GET default. The lazy no-arg GET path
-  stays untouched for live guided (empty profile).
+  stays untouched for live guided (empty profile). **Idempotent start (rev 4):** a
+  second `POST /guided/start` for a session that **already** has a persisted
+  `GuidedSession` returns the existing session unchanged (never re-initialises or
+  double-creates) — the single double-submit guard the design needs beyond D16's
+  per-step 409s; profile discriminator is validated against a server-side **closed
+  enum** so a client cannot inject an arbitrary profile or weaken gating.
 - Gate recipe-match toggle (STEP_2_5 dispatch, `_helpers.py:3053-3161`), advisor
   checkpoints (`solve_chain` call sites `_helpers.py:3112/3352`), and welcome/
   graduation copy on profile flags. **The stage SET is NOT gated on the profile**
-  (D14) — it is a global engine property governed by the frozen-total enum.
+  (D14) — it is a global engine property governed by the frozen-total enum. **But the
+  `STEP_4_WIRE` terminal advisor END sign-off IS gated on `profile.advisor_checkpoints`
+  (rev 4, D13):** the empty/live-guided profile gets the wire *stage* (topology review +
+  `validate().is_valid` confirm) but **no mandatory terminal advisor call** — only the
+  per-phase on-demand `REQUEST_ADVISOR` escape. This is what keeps D14's global wire
+  stage from regressing live guided into a blocking advisor round-trip. The flag is read
+  from the **server-constructed** profile, never from client input, so a client cannot
+  select a profile that weakens the gate.
 
 `WorkflowProfile` fields (initial): `entry_seed` (canonical prompt + pre-filled
 source vs empty), `coaching` (per-stage copy, on/off), `advisor_checkpoints`
@@ -263,13 +316,21 @@ field** (D14). The default (empty) profile sets all to live-guided behaviour.
   request and `composer_advisor_checkpoint_max_passes` **never bounds re-entry**. The
   `STEP_4_WIRE` branch reads/increments/persists it (this is what makes D13's "bounded
   re-entry" real).
-- **Profile lifecycle — strip on fork (finding 10).** `composer_meta['guided_session']`
-  (now carrying `profile`) is copied **verbatim** on fork (`service.py:5076`; blob
-  re-save `sessions.py:489`, "fork inherits the operational provenance") and
-  round-tripped on resume — so a persisted `TutorialProfile` would **leak** into a
-  forked/resumed ordinary guided session. Rule: **reset `GuidedSession.profile` to the
-  empty/canonical profile at the `composer_meta` copy seam on fork** (single chokepoint
-  covering both copy paths) unless the fork is an explicit tutorial continuation.
+- **Profile lifecycle — strip on fork (finding 10; corrected rev 4).**
+  `composer_meta['guided_session']` (now carrying `profile`) is copied **verbatim** on
+  fork. **The copy seam is in `sessions/service.py` `fork_session`, NOT
+  `composer/service.py`** (which is only 5007 lines — the old `service.py:5076` citation
+  pointed at the wrong file). There are **two** verbatim copies there
+  (`sessions/service.py:5076` and `:5153`); the route-layer blob-rewrite re-save
+  (`sessions/routes/sessions.py:489`, "fork inherits the operational provenance") is a
+  **conditional third path** that only fires when `rewritten=True`. **The canonical
+  `inline_blob` URL source has no `blob_ref`, so `rewritten=False` and the blob-rewrite
+  save never runs for the canonical tutorial** — therefore the strip CANNOT live only in
+  the blob-rewrite path; it must happen inside `fork_session` (covering both `:5076` and
+  `:5153`). Rule: **reset `GuidedSession.profile` to the empty/canonical profile inside
+  `fork_session` before persisting the forked record**, unless the fork is an explicit
+  tutorial continuation. (Resume of a tutorial's *own* session correctly preserves the
+  profile — that is the intended round-trip, not a leak.)
 - **Duplicate-submission / concurrency (D16).** Inherited guarantees (state them so
   the plan doesn't reinvent them): all guided mutations are serialized per-session by
   `compose_lock` (`_helpers.py:212`); duplicate `/guided/respond` is naturally
@@ -285,10 +346,13 @@ field** (D14). The default (empty) profile sets all to live-guided behaviour.
 ### B1 — Per-stage interpretation review (fixes a latent silent-orphan bug)
 
 **Latent bug (verified):** the freeform fail-closed orphan gate
-(`service.py:_missing_pending_interpretation_review_sites`, `:1376`) runs **only**
-inside the freeform no-tool finalize loop (`_try_terminate_no_tools`, `:2565`).
-Guided commits each step by calling `_execute_*` tools directly (`steps.py`) and
-**never enters that loop**. So a guided step 3 that commits an `llm` node creates
+(`service.py:_missing_pending_interpretation_review_sites`, `:1376`) is invoked from
+several freeform finalize/checkpoint call sites (`_try_terminate_no_tools`, `:2565`, and
+others) — **none of which is reachable from the guided dispatch path**
+(`_dispatch_guided_respond`). Guided commits each step by calling `_execute_*` tools
+directly (`steps.py`) and **never traverses any of those call sites** (rev 4: the gate is
+not "only" in `_try_terminate_no_tools`; the load-bearing fact is that the *guided* path
+reaches none of its callers). So a guided step 3 that commits an `llm` node creates
 real interpretation sites that are **surfaced to no one** and only fail at *run*
 time with `UnresolvedInterpretationPlaceholderError` (`execution/service.py:514-525`)
 and zero pending events — the staging-500 class. The recut hits this the moment a
@@ -394,7 +458,7 @@ has none of these.
 ### B3 — Advisor wiring (end sign-off + per-phase escape; corrected ordering)
 
 The advisor's `_run_advisor_checkpoint(phase='end')` (`service.py:4176`) +
-`_build_checkpoint_arguments(phase='end')` (`service.py:4108`) is state-driven,
+`_build_checkpoint_arguments(phase='end')` (`service.py:4083` — rev 4, not 4108) is state-driven,
 non-raising, and already loads the **big-bang monolith** via
 `build_system_prompt(self._data_dir)` (`service.py:3954`) — decoupled from the
 per-stage skills. It is a **private `ComposerServiceImpl` method absent from the
@@ -410,34 +474,48 @@ into the route/dispatcher.
 `composer.py:2381` (once terminal is stamped, `/guided/respond` rejects further
 responses with 409 at `composer.py:2131`, foreclosing the revise turn). Behaviour:
 
-**Verdict matrix (corrected, D13 — every non-CLEAN is fail-closed).** rev-2's
-"soft re-emit / manual proceed on UNAVAILABLE" was a **fail-open** that contradicted
-D7 (operator chose blocking) and the implemented binding-authority doctrine
-(`service.py:2747` fails closed on `not verdict.ok`; comment at `:2711-2712`: "an
-unavailable advisor … FAILS CLOSED — the mandatory final authority D-5/D-7/D-8").
-Corrected — there is **no learner-driven manual-proceed**:
+**Gate precondition (rev 4):** the entire terminal sign-off runs **only when the
+server-owned `profile.advisor_checkpoints` is on** (D13/§4.3). For the empty/live-guided
+profile the `STEP_4_WIRE` handler skips the advisor call and stamps `COMPLETED` directly
+on a valid pipeline — no blocking advisor round-trip, no UNAVAILABLE exposure. The matrix
+below applies to profiles with the gate **on** (the tutorial profile).
 
-| Verdict | Terminal | Wire re-emit (while passes remain) | Affordance |
+**Verdict matrix (rev 4 — differentiated by failure *class*).** rev-2 fail-open-everywhere
+contradicted the binding-authority doctrine (`service.py:2747` fails closed on
+`not verdict.ok`; comment `:2711-2712`). rev-3's undifferentiated fail-closed-everywhere
+fixed that but could **brick a first-run learner** on a sustained advisor *outage* — an
+infra failure, not a quality verdict. rev-4 splits the two: a **FLAGGED/MALFORMED** verdict
+(the advisor actually judged the pipeline unsafe) stays fully fail-closed with no bypass;
+a **sustained UNAVAILABLE/timeout** (the advisor never rendered a judgement) gets a single
+audited escape at budget-exhaustion. There is **no** learner-driven manual-proceed past a
+real FLAG:
+
+| Verdict | Terminal | Wire re-emit (while passes remain) | Budget-exhausted outcome |
 |---|---|---|---|
 | CLEAN | COMPLETED | — | — |
-| FLAGGED | None | yes | `findings_text`; "resolve & re-confirm" |
-| MALFORMED / unparseable | None | yes | folds into not-CLEAN→flagged at `service.py:4217`; same as FLAGGED |
-| UNAVAILABLE / timeout (after bounded retry) | None | yes | "advisor sign-off could not be obtained; retry" — **never** a manual bypass |
-| Budget-exhausted (passes used up, still non-CLEAN) | **fail-closed non-runnable** (reuse `_advisor_signoff_blocked_validation`) | no | "resolve & re-run the composer" |
+| FLAGGED | None | yes — `findings_text`; "resolve & re-confirm" | **fail-closed non-runnable** (`_advisor_signoff_blocked_validation`); "resolve & re-run" — **no bypass** |
+| MALFORMED / unparseable | None | yes — folds into not-CLEAN→flagged at `service.py:4217`; same as FLAGGED | **fail-closed non-runnable** — **no bypass** |
+| UNAVAILABLE / timeout (after bounded retry) | None | yes — "advisor sign-off could not be obtained; retry" | **differentiated escape:** offer "complete without sign-off (advisor unreachable)" — an **audited operator-acknowledged** completion, gated on `reason="unavailable"` ONLY, **never** reachable from a FLAG |
 
 Timeout is an UNAVAILABLE sub-case (caught + retried inside `_run_advisor_checkpoint`,
-bounded by `composer_advisor_timeout_seconds`). The non-dead-end concern that
-motivated rev-2's fail-open is already satisfied **without** fail-open: because
-`STEP_4_WIRE` is re-enterable, a transient blip just re-emits a retry turn — the
-learner is never bricked *and* never bypasses authority. The run-time interpretation
-gate is a backstop, not a substitute for sign-off.
+bounded by `composer_advisor_timeout_seconds`). **Why the split is safe:** the advisor is a
+*structural/compose-time* review — it never sees row content, so it is not a
+prompt-injection control (B4); a sustained outage therefore degrades only the structural
+sign-off, and the run-time interpretation gate + the wire-stage `validate().is_valid`
+confirm remain hard backstops. The escape must **record an audit event** distinguishing
+"completed without sign-off because advisor unreachable" from a CLEAN sign-off, so the
+provenance is honest. A transient blip (within budget) still just re-emits a retry — the
+learner is bricked by neither a blip nor a sustained outage, and never bypasses a real FLAG.
 
 `STEP_4_WIRE` is **re-enterable** (self-loop, bounded by the **persisted**
 `advisor_checkpoint_passes_used`, D16 — the per-compose local would reset to 0 each
 HTTP request and never bound re-entry). **Per-phase on-demand "go to advisor":**
-ride the existing `ControlSignal.REQUEST_ADVISOR` (today a no-op re-prompt at step
-3 only, `_helpers.py:3342`) — repoint it to the whole-pipeline checkpoint with a
-"structurally complete enough to review" guard, extended to all stages. Keep the
+ride the existing `ControlSignal.REQUEST_ADVISOR` (corrected rev 4 — today this is
+**not a no-op**: at step 3 only, `_helpers.py:3342`, it fires a full
+`solve_chain_with_auto_drop` re-solve with an advisor-framed `repair_context`). **Add**
+the whole-pipeline checkpoint as an additional `REQUEST_ADVISOR` target (with a
+"structurally complete enough to review" guard, extended to all stages); **preserve** the
+existing step-3 chain re-solve where it applies — do not silently replace it. Keep the
 trust tier correct: operator-triggered escapes must **not** route through the
 Tier-3 `_validate_advisor_arguments`, and backend checkpoints must not consume
 unvalidated user text.
@@ -464,8 +542,8 @@ example `examples/chaosweb/settings.yaml` uses a `csv` source with a url column.
 
 Today every recipe gates on `source.plugin == csv` (`recipe_match.py:186`
 `_is_csv`; `composer/recipes.py:219/314/469`), so `match_recipe` returns `None` and
-the dispatcher falls through to the live chain solver (`_helpers.py:3107`,
-`solve_chain_with_auto_drop`). Add:
+the dispatcher falls through to the live chain solver (`_helpers.py:3112` — rev 4; `:3107`
+is the preceding comment, `solve_chain_with_auto_drop`). Add:
 
 1. A predicate in `composer/guided/recipe_match.py` matching the **URL-row SOURCE
    plugin** (`inline_blob`) + single jsonl output + the url-column/required-fields
@@ -479,20 +557,35 @@ the dispatcher falls through to the live chain solver (`_helpers.py:3107`,
    node** (skill `pipeline_composer.md:958-1014,1233`) so it passes the B1 blocking
    cleanup contract (`sessions.py:657`).
 
-**Prompt-injection-shield decision (audited suppression).** The canonical
-`web_scrape → llm_rate` flow routes untrusted public-web text into an LLM. Because
-the recipe is deterministic and zero-LLM, the recipe **author** makes the shield
-decision up front (no runtime LLM judgement). On the record: the prompt-injection
-shield control is **deliberately suppressed** under `elspeth-abb2cb0931` (the
-composer cannot gate `azure_prompt_shield` on configured-secret availability, so
-recommending it is misleading). Therefore the recipe ships **without** a shield
-node and **without** a `prompt_injection_shield_recommendation` decision — this is
-an **audited suppression, not an oversight**. Add a test asserting the built
-pipeline contains no `azure_prompt_shield` node and stages no shield recommendation,
-with a comment referencing `elspeth-abb2cb0931`, so the suppression is pinned and
-cannot silently regress (when that ticket lands, the recipe gains an authorized
-shield + decision). This generalises recipe-match to web-scrape guided users (a
-co-restructure win) and is what makes the §4.1 "zero-LLM canonical compose" true.
+**Prompt-injection-shield decision (re-polarized, rev 4).** The canonical
+`web_scrape → llm_rate` flow routes **untrusted public-web text into an LLM**, and the
+`field_mapper(cleanup)` runs *after* the LLM (skill `pipeline_composer.md:970`) — so the
+LLM **does** consume the raw content; cleanup is output/audit minimization, not an
+injection mitigation. The recipe **omits an `azure_prompt_shield` hard node**, because the
+composer cannot instantiate it without configured `endpoint`+`api_key` secrets
+(`elspeth-abb2cb0931`). **But `elspeth-abb2cb0931` is a conditional, security-labeled
+"restore the shield advice once plugins gate on secret availability" ticket — not a
+licence to remove all shield signal.** Critically, the codebase **already emits a
+medium-severity advisory warning** for exactly this unshielded `web_scrape → llm` shape:
+`prompt_shield_recommendation_warning_pairs` (`interpretation_state.py`) → emitted by
+`CompositionState.validate()` (`state.py:2410`) → carried in
+`_authoring_validation_payload["warnings"]` (`tools/sessions.py:1157`) — **the same
+payload B2's wire stage renders.** That advisory is secret-availability-independent.
+
+**Therefore: keep the advisory LIVE on the canonical tutorial.** The recipe ships without
+the unbuildable hard node, **but must not suppress the advisory warning** — otherwise the
+flagship example becomes the one `web_scrape → llm` pipeline in the system that hides the
+very signal everything else shows, teaching an insecure pattern silently. Re-polarized
+test (replacing rev-3's "pin no shield recommendation", which would go green precisely
+when the security advisory disappears): assert **(a)** no `azure_prompt_shield` node, AND
+**(b)** the medium-severity prompt-shield advisory **is present** in the wire validation
+payload — pinning the *presence* of the security signal, with a comment referencing
+`elspeth-abb2cb0931`. Add a one-line **learner-facing caveat** at the wire/graduation
+stage ("production pipelines over untrusted content warrant a prompt-injection shield").
+When `elspeth-abb2cb0931`'s secret-gating prerequisite lands, the recipe upgrades to an
+authorized shield + decision (verify that prerequisite is still unbuilt before shipping —
+if it landed, author the shield now). This generalises recipe-match to web-scrape guided
+users and is what makes the §4.1 "zero-LLM canonical compose" true.
 
 ## 6. Run / audit / cache tail
 
@@ -599,9 +692,17 @@ scope/unproven for this cutover. Spec-level deltas on top of the runbook:
    engine** (`app.py:874`), so per-user stored secrets live **in `sessions.db`** and
    are destroyed by this delete. Operators must re-enter per-user secrets after
    deploy (acceptable pre-release; must be stated).
-5. **Backup:** archive the full SQLite artifact set — `sessions.db` + `-wal` + `-shm`
-   + **`-journal`** — as one unit before deletion (the runbook's `cp -a` loop;
-   reversible within the deploy window).
+5. **Backup (hardened, rev 4):** archive the full SQLite artifact set — `sessions.db` +
+   `-wal` + `-shm` + **`-journal`** — as one unit before deletion (the runbook's `cp -a`
+   loop; reversible within the deploy window). **Because this archive contains the
+   encrypted `UserSecretStore` blob** (§8.4) **plus any uncheckpointed secret rows in the
+   WAL/journal**, two extra steps are mandatory: (a) run `PRAGMA wal_checkpoint(TRUNCATE)`
+   (or take a clean shutdown) **before** the `cp -a`, so the sidecars don't carry
+   uncheckpointed secret material into the archive; (b) **destroy or secure the archive at
+   the end of the deploy window** — it is a long-lived copy of live secret material and is
+   only inert if `settings.secret_key` is **rotated**; if the key is reused across the
+   deploy, the archive is decryptable with the running app's key. State this in the
+   runbook's `user_secrets` blast-radius sign-off.
 6. **Verification:** assert `PRAGMA user_version == SESSION_SCHEMA_EPOCH` on the new
    DB, plus a smoke test that creating + running a fresh guided/tutorial session
    reaches `COMPLETED` without a 500.
@@ -623,9 +724,15 @@ pipeline still applies. No long-lived feature flag.
     source (not `web_scrape`); `_build_*` names the head source + emits
     source→web_scrape→llm_rate→field_mapper→jsonl, staging the raw-HTML
     `pipeline_decision` so it passes the blocking cleanup contract; recipe-apply
-    redirects **through** the wire stage. **Shield suppression test:** the built
-    pipeline has **no** `azure_prompt_shield` node and stages no shield recommendation
-    (comment refs `elspeth-abb2cb0931`).
+    redirects **through** the wire stage. **Shield advisory test (re-polarized, rev 4):**
+    assert the built pipeline has **no** `azure_prompt_shield` node **AND** that the
+    medium-severity prompt-shield advisory warning **IS present** in the wire validation
+    payload (`prompt_shield_recommendation_warning_pairs` → `warnings`) — pin the
+    *presence* of the security signal, not its absence (comment refs `elspeth-abb2cb0931`).
+    **Data-minimization test:** assert the composed `field_mapper(select_only)` sink field
+    set **excludes** the raw `content`/`fingerprint` web_scrape fields (pin the actual
+    output field set, not merely that *a* cleanup decision is staged — the contract checks
+    presence, not mapping correctness).
   - **Zero-LLM compose assertion:** the recipe-apply path makes **zero** LLM calls at
     compose time (assert `llm_call_count == 0` / no `_litellm_acompletion`) — the gate
     for the §4.1 zero-LLM claim.
@@ -633,11 +740,17 @@ pipeline still applies. No long-lived feature flag.
     the two-read merge (`get_pipeline_state` + `preview_pipeline.edge_contracts`);
     `validate().is_valid` confirm gate; re-validate + re-surface after a
     `field_mapper`/schema-relax reconciliation (B6).
-  - **Advisor END sign-off matrix (B3/D13 — all non-CLEAN fail-closed):** CLEAN →
-    COMPLETED; FLAGGED/MALFORMED/UNAVAILABLE/timeout → re-emit wire turn while passes
-    remain (terminal stays None); budget-exhausted → fail-closed non-runnable. Assert
-    terminal **never** COMPLETED on a non-CLEAN verdict, **no** manual-proceed path,
-    and pre-terminal ordering (no 409 dead-end).
+  - **Advisor END sign-off matrix (B3/D13 — rev 4, profile-gated + differentiated):**
+    **Profile-gating:** with the **empty/live-guided profile** the wire stage reaches
+    COMPLETED on a valid pipeline with **zero advisor calls** (assert no provider call);
+    with the **tutorial profile** the gate fires. **Verdict classes:** CLEAN → COMPLETED;
+    **FLAGGED/MALFORMED** → re-emit while passes remain, then budget-exhausted →
+    **fail-closed non-runnable, no bypass** (assert terminal never COMPLETED, no
+    manual-proceed); **UNAVAILABLE/timeout** → re-emit while passes remain, then
+    budget-exhausted → the **differentiated "complete without sign-off (advisor
+    unreachable)" escape** fires (assert it is reachable ONLY for `reason="unavailable"`,
+    **never** from a FLAGGED budget-exhaustion, and that it records the audit event
+    distinguishing it from CLEAN). Pre-terminal ordering (no 409 dead-end) for every path.
   - **Duplicate-submission (D16):** a double-confirm at the wire stage results in
     **exactly one** advisor provider call (the persisted `advisor_checkpoint_passes_used`
     bounds re-entry across requests); a stale `step_index` on `/guided/respond` → 409.
@@ -648,9 +761,22 @@ pipeline still applies. No long-lived feature flag.
   - **Cache identity (C2 — four inputs):** editing a stage block, **the deployment
     overlay**, OR a `recipe_match` predicate/`recipes.py` builder each invalidates the
     cache; `_state_matches_cached_topology` tolerance; single-profile seed assertion.
-  - **Profile lifecycle (finding 10):** fork a tutorial-profile session → the forked
+    **Regression guard (rev 4):** the existing
+    `test_tutorial_model_id_includes_composer_model_core_skill_and_deployment_skill` asserts
+    only **three** inputs — add an explicit assertion that mutating `recipes.py` /
+    `recipe_match.py` content shifts `tutorial_model_id`, so omitting the 4th key cannot
+    pass silently.
+  - **Profile lifecycle (finding 10; rev 4):** fork a tutorial-profile session → the forked
     `GuidedSession.profile` is the **empty** profile (no tutorial seed/coaching/
-    bookends); an ordinary guided fork is unaffected.
+    bookends); an ordinary guided fork is unaffected. **Critical case:** fork a tutorial
+    session whose source is the canonical **`inline_blob` (no `blob_ref`, `rewritten=False`)**
+    — assert the strip still applies, proving it lives in `fork_session`
+    (`sessions/service.py`, both `:5076` and `:5153`), not the conditional blob-rewrite save.
+  - **Terminal-stamp invariant (rev 4 — high implementation risk):** after BOTH
+    `handle_step_2_5_recipe_apply` and `handle_step_3_chain_accept`, assert
+    `session.terminal is None` AND `session.step == STEP_4_WIRE` — neither completion seam
+    may stamp `COMPLETED` directly (missing either move silently skips the wire stage,
+    surfacing, and advisor gate). Make it an import-time/unit invariant, not only an E2E.
   - `WorkflowProfile` schema-v6 strict round-trip (incl. `advisor_checkpoint_passes_used`);
     a **pre-v6 GuidedSession is rejected** on load; the `SESSION_SCHEMA_EPOCH` 22→23
     boot guard fires.
@@ -661,9 +787,14 @@ pipeline still applies. No long-lived feature flag.
   - **E2E happy path:** recipe-apply/chain-accept → wire-confirm (`validate().is_valid`)
     → advisor sign-off CLEAN → `terminal=COMPLETED`, asserting no 409 dead-end and the
     COMPLETED stamp lands inside the wire branch.
-  - **Interpretation lifecycle (E2E):** an **unresolved** per-stage card **blocks the
+  - **Interpretation lifecycle:** an **unresolved** per-stage card **blocks the
     run** (`UnresolvedInterpretationPlaceholderError`); resolving it via
     `interpretationEventsStore` **permits** the run to proceed — exercise both branches.
+    **Rev 4: put the blocks-run/permits-run assertion at the BACKEND integration tier**
+    (mirror the freeform `test_compose_loop_interpretation_review_dispatch.py` mock pattern
+    — hit `POST /tutorial/run` with an unresolved `interpretation_events` row); reserve
+    E2E for the UI projection/blocking only, to keep the load-bearing backstop off the
+    flaky live-LLM staging path.
   - **Bridging (D9):** the `TutorialGuidedShell` mounts the **real** `ChatPanel`
     guided branch and reads `profile.coaching` / `profile.bookends` off the **wire**
     `GuidedSession` (not a tutorial-only stepper).
@@ -717,20 +848,29 @@ pipeline still applies. No long-lived feature flag.
   `get_pipeline_state` (connection-label topology) + `preview_pipeline`
   (`edge_contracts` overlay) — and reads `from`/`to` keys (B2/M1).
 - **Advisor must gate the terminal stamp inside the wire branch** (B5/D13), or the 409
-  guard dead-ends the revise turn; **every non-CLEAN verdict fails closed** (no manual
-  proceed); the re-entry bound only works because the pass counter is **persisted**
-  (D16). Size budgets to avoid the 300s timeout.
-- **Profile leak (finding 10):** `composer_meta` is copied verbatim on fork — strip the
-  profile to empty at the copy seam or the tutorial state leaks into ordinary sessions.
+  guard dead-ends the revise turn. **rev 4:** the gate is **profile-gated** (live-guided's
+  empty profile bypasses it — no regression from D14's global wire stage); **FLAGGED/MALFORMED
+  fail closed with no bypass**, but **sustained UNAVAILABLE gets a differentiated audited
+  escape** so an advisor outage cannot brick a first-run tutorial. The re-entry bound only
+  works because the pass counter is **persisted** (D16). Size budgets to avoid the 300s timeout.
+- **Profile leak (finding 10; rev 4):** `composer_meta` is copied verbatim on fork — the
+  seam is **`sessions/service.py` `fork_session`** (`:5076` AND `:5153`), NOT
+  `composer/service.py`; the canonical `inline_blob` source skips the route blob-rewrite
+  save (`rewritten=False`), so strip the profile inside `fork_session` or the tutorial
+  state leaks into ordinary sessions.
 - **Migration:** purge `sessions.db` + bump `SESSION_SCHEMA_EPOCH`; **user secrets are
   destroyed** with it; follow `docs/runbooks/staging-session-db-recreation.md`
   (single-DB path; back up the full `-wal/-shm/-journal` set first).
 - **web_scrape recipe (D11)** is new engine work; web_scrape is a **transform** (the
   predicate keys the `inline_blob` source); it must stage the raw-HTML cleanup
-  `pipeline_decision` or the deterministic path trips the blocking cleanup contract,
-  and record the **audited shield suppression** (`elspeth-abb2cb0931`).
-- Preserve the `elspeth-abb2cb0931` prompt-injection-shield suppression markers when
-  any LLM-node skill content moves into a stage block.
+  `pipeline_decision` or the deterministic path trips the blocking cleanup contract.
+  **rev 4:** it omits the *unbuildable* shield hard node but **keeps the existing
+  medium-severity prompt-shield advisory warning live** (`elspeth-abb2cb0931` is a
+  conditional "restore once secret-gating exists" ticket); the test pins the advisory's
+  **presence**, not its absence — do not let the flagship example hide the signal.
+- When any LLM-node skill content moves into a stage block, **preserve the live
+  prompt-shield advisory** (`prompt_shield_recommendation_warning_pairs`) and the
+  `elspeth-abb2cb0931` marker comment — do not suppress the warning.
 
 ## 12. Key file map (for the implementation plan)
 - Engine (guided package): `composer/guided/protocol.py`, `state_machine.py`,
@@ -750,9 +890,12 @@ pipeline still applies. No long-lived feature flag.
   `:1651`, edge_contracts summary `:1685-1692`), `_authoring_validation_payload`
   (`composer/tools/sessions.py:1153`).
 - Advisor: `composer/service.py` (`_run_advisor_checkpoint` `:4176`,
-  `_build_checkpoint_arguments` `:4108`, `_call_advisor_with_audit` `:3912`,
+  `_build_checkpoint_arguments` `:4083` (rev 4, not 4108), `_call_advisor_with_audit` `:3912`,
   `_advisor_blocked_result` `:4130`), `composer/protocol.py:703`,
   `composer/tool_batch.py:653`, `config.py`.
+- Fork seam (profile strip, rev 4): `sessions/service.py` `fork_session` (`:5076` AND
+  `:5153` — both verbatim `composer_meta` copies), `sessions/routes/sessions.py:489`
+  (conditional blob-rewrite save, `rewritten=True` only). **NOT `composer/service.py`.**
 - Tutorial tail/cache: `composer/tutorial_service.py` (`tutorial_model_id` `:784`),
   `preferences/tutorial_cache.py`.
 - Migration: `sessions/models.py:117` (`SESSION_SCHEMA_EPOCH`), `sessions/schema.py`,

@@ -306,7 +306,7 @@ def _run_event_from_record(record: RunEventRecord) -> RunEvent:
             "event_type": record.event_type,
             "data": record.data,
         }
-    )
+    ).with_event_sequence(record.sequence)
 
 
 def _counted(label: str, count: int) -> str:
@@ -946,12 +946,17 @@ def create_execution_router() -> APIRouter:
                 await websocket.close(code=1011, reason="Run status failed internal accounting validation")
                 return
             current = current_snapshot.response
+            max_replayed_sequence = 0
+            replayed_terminal = False
             for persisted in await websocket.app.state.session_service.list_run_events(UUID(run_id)):
                 replay_event = _run_event_from_record(persisted)
                 await websocket.send_json(replay_event.model_dump(mode="json"))
+                max_replayed_sequence = max(max_replayed_sequence, persisted.sequence)
                 if replay_event.event_type in ("completed", "cancelled", "failed"):
-                    await websocket.close(code=1000)
-                    return
+                    replayed_terminal = True
+            if replayed_terminal:
+                await websocket.close(code=1000)
+                return
             if current.status in RUN_STATUS_TERMINAL_VALUES:
                 event = _build_terminal_run_event(current, cancelled_run_record=current_snapshot.record)
                 await websocket.send_json(event.model_dump(mode="json"))
@@ -988,6 +993,8 @@ def create_execution_router() -> APIRouter:
                         await websocket.send_json(terminal_event.model_dump(mode="json"))
                         await websocket.close(code=1000)
                         break
+                    continue
+                if event.event_sequence is not None and event.event_sequence <= max_replayed_sequence:
                     continue
                 await websocket.send_json(event.model_dump(mode="json"))
                 # "error" events are non-terminal (per-row exceptions).

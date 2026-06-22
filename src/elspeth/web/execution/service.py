@@ -1806,7 +1806,7 @@ class ExecutionServiceImpl:
 
     def _persist_and_broadcast_run_event(self, run_id: str, run_event: RunEvent) -> BroadcastResult:
         try:
-            self._call_async(
+            record = self._call_async(
                 self._session_service.append_run_event(
                     run_id=UUID(run_id),
                     timestamp=run_event.timestamp,
@@ -1814,6 +1814,7 @@ class ExecutionServiceImpl:
                     data=run_event.data.model_dump(mode="json"),
                 )
             )
+            run_event = run_event.with_event_sequence(record.sequence)
         except (OSError, SQLAlchemyError) as exc:
             slog.error(
                 "run_event_persist_failed",

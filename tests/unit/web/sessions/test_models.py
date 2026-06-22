@@ -386,6 +386,7 @@ class TestCheckConstraints:
                     insert(run_events_table).values(
                         id=str(uuid.uuid4()),
                         run_id=run_id,
+                        sequence=1,
                         timestamp=datetime.now(UTC),
                         event_type="invalid_type",
                         data="{}",

@@ -23,6 +23,7 @@ from concurrent.futures import Future
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -265,7 +266,14 @@ def mock_session_service() -> MagicMock:
     svc.create_run = AsyncMock(return_value=MagicMock(id=uuid4()))
     svc.get_run = AsyncMock(return_value=MagicMock(status="pending"))
     svc.update_run_status = AsyncMock()
-    svc.append_run_event = AsyncMock()
+    next_event_sequence = 0
+
+    async def append_run_event(**_kwargs: Any) -> SimpleNamespace:
+        nonlocal next_event_sequence
+        next_event_sequence += 1
+        return SimpleNamespace(sequence=next_event_sequence)
+
+    svc.append_run_event = AsyncMock(side_effect=append_run_event)
     svc.list_run_events = AsyncMock(return_value=[])
     return svc
 

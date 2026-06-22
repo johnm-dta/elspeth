@@ -4347,37 +4347,51 @@ class SessionServiceImpl:
         rid = str(run_id)
         payload = deep_thaw(dict(data))
 
-        def _sync() -> None:
+        def _sync() -> tuple[str, int]:
             with self._engine.begin() as conn:
-                conn.execute(
-                    insert(run_events_table).values(
-                        id=str(event_id),
-                        run_id=rid,
-                        timestamp=timestamp,
-                        event_type=event_type,
-                        data=payload,
+                session_id = conn.execute(select(runs_table.c.session_id).where(runs_table.c.id == rid)).scalar_one_or_none()
+                if session_id is None:
+                    raise ValueError(f"Run {run_id} not found")
+                session_id = str(session_id)
+                with self._session_write_lock(conn, session_id):
+                    sequence = (
+                        int(
+                            conn.execute(
+                                select(func.coalesce(func.max(run_events_table.c.sequence), 0)).where(run_events_table.c.run_id == rid)
+                            ).scalar_one()
+                        )
+                        + 1
                     )
-                )
+                    conn.execute(
+                        insert(run_events_table).values(
+                            id=str(event_id),
+                            run_id=rid,
+                            sequence=sequence,
+                            timestamp=timestamp,
+                            event_type=event_type,
+                            data=payload,
+                        )
+                    )
+                return session_id, sequence
 
-        await self._run_sync(_sync)
+        _session_id, sequence = await self._run_sync(_sync)
         return RunEventRecord(
             id=event_id,
             run_id=run_id,
+            sequence=sequence,
             timestamp=timestamp,
             event_type=event_type,
             data=cast(Mapping[str, Any], payload),
         )
 
     async def list_run_events(self, run_id: UUID) -> list[RunEventRecord]:
-        """List persisted run events in timestamp order."""
+        """List persisted run events in durable insertion order."""
         rid = str(run_id)
 
         def _sync() -> Any:
             with self._engine.connect() as conn:
                 return conn.execute(
-                    select(run_events_table)
-                    .where(run_events_table.c.run_id == rid)
-                    .order_by(run_events_table.c.timestamp, run_events_table.c.id)
+                    select(run_events_table).where(run_events_table.c.run_id == rid).order_by(run_events_table.c.sequence)
                 ).fetchall()
 
         rows = await self._run_sync(_sync)
@@ -5262,6 +5276,7 @@ class SessionServiceImpl:
         return RunEventRecord(
             id=UUID(row.id),
             run_id=UUID(row.run_id),
+            sequence=int(row.sequence),
             timestamp=self._ensure_utc(row.timestamp),
             event_type=cast(SessionRunEventType, row.event_type),
             data=cast(Mapping[str, Any], row.data),

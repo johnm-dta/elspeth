@@ -387,6 +387,7 @@ class TestWebSocketTimeoutRecovery:
                 RunEventRecord(
                     id=uuid4(),
                     run_id=run_id,
+                    sequence=1,
                     timestamp=datetime.now(tz=UTC),
                     event_type="error",
                     data={"message": "row failed", "node_id": None, "row_id": None},
@@ -409,6 +410,120 @@ class TestWebSocketTimeoutRecovery:
             }
         ]
         app.state.session_service.list_run_events.assert_awaited_once_with(run_id)
+
+    @pytest.mark.asyncio
+    async def test_replay_sends_later_persisted_events_before_closing_on_terminal(self) -> None:
+        run_id = uuid4()
+        timestamp = datetime.now(tz=UTC)
+        svc = MagicMock()
+        svc.verify_run_ownership = AsyncMock(return_value=True)
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=timestamp,
+                finished_at=None,
+                error=None,
+                landscape_run_id=None,
+            )
+        )
+        app = self._make_authed_app(svc)
+        app.state.session_service.list_run_events = AsyncMock(
+            return_value=[
+                RunEventRecord(
+                    id=uuid4(),
+                    run_id=run_id,
+                    sequence=1,
+                    timestamp=timestamp,
+                    event_type="progress",
+                    data={
+                        "source_rows_processed": 1,
+                        "tokens_succeeded": 0,
+                        "tokens_failed": 0,
+                        "tokens_quarantined": 0,
+                        "tokens_routed_success": 0,
+                        "tokens_routed_failure": 0,
+                    },
+                ),
+                RunEventRecord(
+                    id=uuid4(),
+                    run_id=run_id,
+                    sequence=2,
+                    timestamp=timestamp,
+                    event_type="failed",
+                    data={"status": "failed", "detail": "pipeline crashed", "node_id": None},
+                ),
+                RunEventRecord(
+                    id=uuid4(),
+                    run_id=run_id,
+                    sequence=3,
+                    timestamp=timestamp,
+                    event_type="error",
+                    data={"message": "late row error", "node_id": None, "row_id": None},
+                ),
+            ]
+        )
+
+        websocket = await _call_websocket(app, str(run_id), ticket=_issue_ws_ticket(app, str(run_id)))
+
+        assert [payload["event_type"] for payload in websocket.sent_json] == ["progress", "failed", "error"]
+        assert websocket.close_code == 1000
+
+    @pytest.mark.asyncio
+    async def test_reconnect_skips_live_event_already_delivered_by_replay(self) -> None:
+        run_id = uuid4()
+        timestamp = datetime.now(tz=UTC)
+        svc = MagicMock()
+        svc.verify_run_ownership = AsyncMock(return_value=True)
+        svc.get_status = AsyncMock(
+            return_value=RunStatusResponse(
+                run_id=str(run_id),
+                status="running",
+                started_at=timestamp,
+                finished_at=None,
+                error=None,
+                landscape_run_id=None,
+            )
+        )
+        app = self._make_authed_app(svc)
+        replay_record = RunEventRecord(
+            id=uuid4(),
+            run_id=run_id,
+            sequence=1,
+            timestamp=timestamp,
+            event_type="error",
+            data={"message": "row failed", "node_id": None, "row_id": None},
+        )
+        app.state.session_service.list_run_events = AsyncMock(return_value=[replay_record])
+        duplicate_live = RunEvent(
+            run_id=str(run_id),
+            timestamp=timestamp,
+            event_type="error",
+            data={"message": "row failed", "node_id": None, "row_id": None},
+        ).with_event_sequence(1)
+        later_live = RunEvent(
+            run_id=str(run_id),
+            timestamp=timestamp,
+            event_type="progress",
+            data=ProgressData(
+                source_rows_processed=2,
+                tokens_succeeded=0,
+                tokens_failed=0,
+                tokens_quarantined=0,
+                tokens_routed_success=0,
+                tokens_routed_failure=0,
+            ),
+        ).with_event_sequence(2)
+
+        with patch(
+            "elspeth.web.execution.routes.asyncio.wait_for",
+            new=AsyncMock(side_effect=[duplicate_live, later_live, WebSocketDisconnect(code=1000)]),
+        ):
+            websocket = await _call_websocket(app, str(run_id), ticket=_issue_ws_ticket(app, str(run_id)))
+
+        assert [payload["event_type"] for payload in websocket.sent_json] == ["error", "progress"]
+        assert websocket.sent_json[0]["data"]["message"] == "row failed"
+        assert websocket.sent_json[1]["data"]["source_rows_processed"] == 2
 
     @pytest.mark.asyncio
     async def test_timeout_synthesizes_terminal_event_when_status_turned_completed(self) -> None:

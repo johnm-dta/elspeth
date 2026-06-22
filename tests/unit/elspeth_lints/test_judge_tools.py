@@ -27,8 +27,9 @@ import asyncio
 import os
 import sys
 import types
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -44,6 +45,7 @@ from elspeth_lints.core.judge import (
     _call_openrouter,
     _extract_trailing_verdict_json,
     _tool_scope_decision,
+    _TransportResult,
     build_readonly_tool_scope,
     call_judge,
 )
@@ -198,7 +200,7 @@ def test_guard_allows_in_root_symlink(scope: AgentToolScope) -> None:
 # --------------------------------------------------------------------------
 
 
-def _run_hook(scope: AgentToolScope, payload: dict[str, object]) -> dict:
+def _run_hook(scope: AgentToolScope, payload: dict[str, object]) -> dict[str, Any]:
     hook = _build_pretooluse_scope_hook(scope)
     return asyncio.run(hook(payload, None, None))
 
@@ -261,7 +263,7 @@ def _install_tool_fake_sdk(
     messages: list[tuple[str, bool]],
     num_turns: int = 2,
     served: str = "claude-opus-4-7",
-    capture: dict | None = None,
+    capture: dict[str, Any] | None = None,
 ) -> types.ModuleType:
     """Fake SDK whose managed ``ClaudeSDKClient`` emits a sequence of messages.
 
@@ -283,12 +285,12 @@ def _install_tool_fake_sdk(
             self.text = text
 
     class ToolUseBlock:
-        def __init__(self, name: str = "Read", tool_input: dict | None = None) -> None:
+        def __init__(self, name: str = "Read", tool_input: dict[str, object] | None = None) -> None:
             self.name = name
             self.input = tool_input or {}
 
     class HookMatcher:
-        def __init__(self, *, matcher: object = None, hooks: list | None = None, timeout: object = None) -> None:
+        def __init__(self, *, matcher: object = None, hooks: list[object] | None = None, timeout: object = None) -> None:
             self.matcher = matcher
             self.hooks = hooks or []
 
@@ -341,6 +343,8 @@ def _install_tool_fake_sdk(
         async def query(self, prompt: object, session_id: str = "default") -> None:
             if capture is not None:
                 capture["prompt"] = prompt
+                if hasattr(prompt, "__aiter__"):
+                    capture["prompt_messages"] = [item async for item in cast(AsyncIterable[object], prompt)]
 
         async def receive_response(self) -> AsyncIterator[object]:
             async for m in _emit_messages():
@@ -373,7 +377,7 @@ def test_tool_mode_extracts_verdict_from_final_narrated_message(monkeypatch: pyt
 
 
 def test_tool_mode_builds_streaming_hook_guarded_options(monkeypatch: pytest.MonkeyPatch, scope: AgentToolScope) -> None:
-    capture: dict = {}
+    capture: dict[str, Any] = {}
     _install_tool_fake_sdk(
         monkeypatch,
         messages=[("done\n" + _VERDICT_JSON, False)],
@@ -394,7 +398,18 @@ def test_tool_mode_builds_streaming_hook_guarded_options(monkeypatch: pytest.Mon
     # disconnects in-loop — the fix for the -9 SIGKILL on a lingering subprocess.
     assert capture["used_client"] is True
     assert capture["disconnected"] is True
-    assert isinstance(capture["prompt"], str)  # client.query(prompt_text)
+    # Tool mode must use the SDK's streaming-input prompt shape; with a plain
+    # string prompt the SDK does not invoke PreToolUse hooks for Read/Grep/Glob.
+    assert not isinstance(capture["prompt"], str)
+    assert hasattr(capture["prompt"], "__aiter__")
+    prompt_messages = capture["prompt_messages"]
+    assert len(prompt_messages) == 1
+    prompt_message = cast(dict[str, object], prompt_messages[0])
+    assert prompt_message["type"] == "user"
+    wrapped = cast(dict[str, object], prompt_message["message"])
+    assert wrapped["role"] == "user"
+    assert isinstance(wrapped["content"], str)
+    assert "UNTRUSTED DATA BOUNDARY" in wrapped["content"]
     # tool-mode addendum rides OUTSIDE the hashed policy block.
     assert "TOOL-AUGMENTED INVESTIGATION MODE" in opts["system_prompt"]["append"]
 
@@ -444,11 +459,10 @@ def test_call_judge_openrouter_with_tool_scope_raises(scope: AgentToolScope) -> 
 def test_call_judge_threads_scope_only_when_set() -> None:
     # Backward-compat: with no tool_scope, a 3-arg fake transport_impl (the
     # historical signature) is invoked unchanged.
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
-    def fake_impl(request: JudgeRequest, model_id: str, max_tokens: int) -> object:
+    def fake_impl(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
         seen["args"] = (model_id, max_tokens)
-        from elspeth_lints.core.judge import _TransportResult
 
         return _TransportResult(raw_text=_VERDICT_JSON, served_model_id="m", prompt_tokens_total=10, prompt_tokens_cached=None)
 

@@ -43,7 +43,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1339,6 +1339,16 @@ def _build_pretooluse_scope_hook(scope: AgentToolScope) -> Callable[..., Any]:
     return _hook
 
 
+async def _one_user_message_stream(text: str) -> AsyncIterator[dict[str, Any]]:
+    """A one-item async stream carrying the user prompt.
+
+    The Claude Agent SDK only invokes PreToolUse hooks for the read tools in
+    streaming-input mode, which requires an async iterable of message dicts
+    rather than a plain string prompt.
+    """
+    yield {"type": "user", "message": {"role": "user", "content": text}}
+
+
 def _call_agent_sdk(
     request: JudgeRequest,
     model_id: str,
@@ -1457,13 +1467,13 @@ def _call_agent_sdk(
             max_turns=tool_scope.max_turns,
             cwd=str(tool_scope.cwd),
         )
-        # Tool path: the managed ``ClaudeSDKClient``. Investigation keeps the
-        # subprocess alive across tool turns; the bare ``query()`` generator
-        # leaves it lingering, so when ``asyncio.run`` closes the loop the child
-        # is SIGKILLed (-9, "Fatal error in message reader") — the failure the
-        # operator hit on the second investigation entry. The client's
-        # ``__aexit__`` calls ``disconnect()`` IN-LOOP, terminating the
-        # subprocess gracefully before the loop closes.
+        # Tool path: the managed ``ClaudeSDKClient`` with streaming input.
+        # Investigation keeps the subprocess alive across tool turns; the bare
+        # ``query()`` generator left it lingering, so when ``asyncio.run`` closed
+        # the loop the child was SIGKILLed (-9, "Fatal error in message reader").
+        # The client's ``__aexit__`` calls ``disconnect()`` IN-LOOP, terminating
+        # the subprocess gracefully before the loop closes, while the async
+        # prompt stream keeps the PreToolUse hook active for Read/Grep/Glob.
         drain = _drain_agent_query_client(sdk, prompt_text, options, model_id, tool_scope.max_turns)
 
     try:
@@ -1671,11 +1681,13 @@ async def _drain_agent_query_client(sdk: Any, prompt_text: str, options: Any, re
     Investigation keeps the subprocess alive across tool turns. The async-context
     client connects on enter and ``disconnect()``s on exit — IN the event loop —
     terminating the subprocess gracefully before ``asyncio.run`` closes the loop.
-    The bare ``query()`` generator left the streaming child alive, so loop close
+    The prompt remains an async message stream because the SDK only invokes
+    PreToolUse hooks for auto-approved read tools in streaming-input mode. The
+    bare ``query()`` generator left that streaming child alive, so loop close
     SIGKILLed it (-9, "Fatal error in message reader") on the second sweep entry.
     """
     async with sdk.ClaudeSDKClient(options=options) as client:
-        await client.query(prompt_text)
+        await client.query(_one_user_message_stream(prompt_text))
         return await _consume_agent_messages(
             sdk,
             client.receive_response(),

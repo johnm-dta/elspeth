@@ -955,6 +955,75 @@ class TestValidatePipelineTransformProviderConfigManagedIdentityPolicy:
         assert managed_identity_check.passed is True
 
 
+class TestValidatePipelineLlmRetryBudgetPolicy:
+    """Web-authored sequential multi-query LLM retries must be bounded."""
+
+    @staticmethod
+    def _llm_multi_query_options(**overrides: Any) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "provider": "openrouter",
+            "model": "openai/gpt-4o-mini",
+            "api_key": "test-key",
+            "prompt_template": "Classify {{ text }}.",
+            "schema": {"mode": "observed"},
+            "required_input_fields": [],
+            "queries": [
+                {
+                    "name": "classify",
+                    "input_fields": {"text": "body"},
+                }
+            ],
+        }
+        options.update(overrides)
+        return options
+
+    def test_sequential_multi_query_llm_default_retry_budget_blocked(self) -> None:
+        node = _make_node(plugin="llm", options=self._llm_multi_query_options())
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert any(c.name == "llm_retry_budget_policy" and c.passed is False for c in result.checks)
+        assert any("sequential multi-query LLM" in e.message for e in result.errors)
+        assert result.readiness is not None
+        assert any(b.code == "llm_retry_budget_policy" for b in result.readiness.blockers)
+
+    def test_sequential_multi_query_llm_small_retry_budget_allowed(self) -> None:
+        node = _make_node(
+            plugin="llm",
+            options=self._llm_multi_query_options(max_capacity_retry_seconds="30.0"),
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        retry_budget_check = next(c for c in result.checks if c.name == "llm_retry_budget_policy")
+        assert retry_budget_check.passed is True
+
+    def test_pooled_multi_query_llm_numeric_string_pool_size_allowed(self) -> None:
+        node = _make_node(plugin="llm", options=self._llm_multi_query_options(pool_size="2.0"))
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        retry_budget_check = next(c for c in result.checks if c.name == "llm_retry_budget_policy")
+        assert retry_budget_check.passed is True
+
+
 class TestValidatePipelineSemanticContractsLegacy:
     """Validation must catch transform pairings that violate line framing.
 
@@ -1396,11 +1465,12 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 14
+        assert len(result.checks) == 15
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
         assert _check(result, "web_scrape_network_policy").passed is True
+        assert _check(result, "llm_retry_budget_policy").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "blob_inline_refs").passed is True
         assert _check(result, "semantic_contracts").passed is True

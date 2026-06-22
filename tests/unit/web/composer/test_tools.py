@@ -6242,7 +6242,11 @@ class TestTransformProviderConfigPathSecurity:
                 {
                     "sink_name": "main",
                     "plugin": "csv",
-                    "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                    "options": {
+                        "path": "/data/outputs/out.csv",
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
                     "on_write_failure": "discard",
                 }
             ],
@@ -6371,6 +6375,168 @@ class TestTransformProviderConfigPathSecurity:
         result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
         assert result.success is False
         assert "persist_directory" in result.data["error"]
+
+
+class TestTransformLlmRetryBudgetPolicy:
+    """Composer must not persist unsafe sequential multi-query LLM retry budgets."""
+
+    @staticmethod
+    def _catalog_with_llm() -> MagicMock:
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="llm",
+                description="LLM transform",
+                plugin_type="transform",
+                config_fields=[],
+            ),
+        ]
+        return catalog
+
+    @staticmethod
+    def _llm_multi_query_options(**overrides: Any) -> dict[str, Any]:
+        options = _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"})
+        options.update(
+            {
+                "prompt_template": "Classify {{ text }}.",
+                "required_input_fields": [],
+                "queries": [
+                    {
+                        "name": "classify",
+                        "input_fields": {"text": "body"},
+                    }
+                ],
+            }
+        )
+        options.update(overrides)
+        return options
+
+    def test_helper_rejects_default_sequential_multi_query_retry_budget(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(
+            self._llm_multi_query_options(),
+            plugin="llm",
+        )
+        assert error is not None
+        assert "sequential multi-query llm" in error.lower()
+
+    def test_helper_allows_small_sequential_multi_query_retry_budget(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(
+            self._llm_multi_query_options(max_capacity_retry_seconds=30.0),
+            plugin="llm",
+        )
+        assert error is None
+
+    def test_helper_allows_pooled_multi_query_default_retry_budget(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(
+            self._llm_multi_query_options(pool_size="2.0"),
+            plugin="llm",
+        )
+        assert error is None
+
+    def test_helper_rejects_fractional_multi_query_pool_size(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(
+            self._llm_multi_query_options(pool_size="2.5"),
+            plugin="llm",
+        )
+        assert error is not None
+        assert "sequential multi-query llm" in error.lower()
+
+    def test_upsert_node_rejects_default_sequential_multi_query_retry_budget(self) -> None:
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "llm_review",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "reviewed",
+                "on_error": "discard",
+                "options": self._llm_multi_query_options(),
+            },
+            _empty_state(),
+            self._catalog_with_llm(),
+            data_dir="/data",
+        )
+        assert result.success is False
+        assert "sequential multi-query llm" in result.data["error"].lower()
+
+    def test_patch_node_options_rejects_oversized_sequential_multi_query_retry_budget(self) -> None:
+        catalog = self._catalog_with_llm()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "llm_review",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "reviewed",
+                "on_error": "discard",
+                "options": self._llm_multi_query_options(max_capacity_retry_seconds=30),
+            },
+            _empty_state(),
+            catalog,
+            data_dir="/data",
+        )
+        assert created.success is True
+
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "llm_review",
+                "patch": {"max_capacity_retry_seconds": 31},
+            },
+            created.updated_state,
+            catalog,
+            data_dir="/data",
+        )
+        assert result.success is False
+        assert "sequential multi-query llm" in result.data["error"].lower()
+
+    def test_set_pipeline_rejects_default_sequential_multi_query_retry_budget(self) -> None:
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "source_out",
+                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            "nodes": [
+                {
+                    "id": "llm_review",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "source_out",
+                    "on_success": "main",
+                    "on_error": "discard",
+                    "options": self._llm_multi_query_options(),
+                }
+            ],
+            "edges": [{"id": "e1", "from_node": "source", "to_node": "llm_review", "edge_type": "on_success", "label": None}],
+            "outputs": [
+                {
+                    "sink_name": "main",
+                    "plugin": "csv",
+                    "options": {
+                        "path": "/data/outputs/out.csv",
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+        result = execute_tool("set_pipeline", args, _empty_state(), self._catalog_with_llm(), data_dir="/data")
+        assert result.success is False
+        assert "sequential multi-query llm" in result.data["error"].lower()
 
 
 # ---------------------------------------------------------------------------

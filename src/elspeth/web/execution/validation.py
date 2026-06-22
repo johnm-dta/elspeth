@@ -82,6 +82,7 @@ from elspeth.web.execution.schemas import (
     CHECK_BLOB_INLINE_REFS,
     CHECK_IDENTITY_NODE_ADVISORY,
     CHECK_INTERPRETATION_REVIEW,
+    CHECK_LLM_RETRY_BUDGET_POLICY,
     CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
     CHECK_OUTCOME_SECRET_REFS_RESOLVED,
@@ -110,7 +111,7 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
 )
-from elspeth.web.provider_config_policy import web_rag_provider_config_policy_error
+from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
@@ -122,6 +123,7 @@ _CHECK_SEMANTIC_CONTRACTS = CHECK_SEMANTIC_CONTRACTS
 _CHECK_BATCH_TRANSFORM_OPTIONS = CHECK_BATCH_TRANSFORM_OPTIONS
 _CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
 _CHECK_MANAGED_IDENTITY_POLICY = CHECK_MANAGED_IDENTITY_POLICY
+_CHECK_LLM_RETRY_BUDGET_POLICY = CHECK_LLM_RETRY_BUDGET_POLICY
 _CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
@@ -982,6 +984,53 @@ def validate_pipeline(
             name=_CHECK_MANAGED_IDENTITY_POLICY,
             passed=True,
             detail="No web-authored managed identity provider_config",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
+        if llm_retry_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_LLM_RETRY_BUDGET_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' uses disallowed sequential multi-query LLM retry budget",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            checks.extend(_skipped_checks(_CHECK_LLM_RETRY_BUDGET_POLICY))
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=llm_retry_policy_error,
+                        suggestion=(
+                            "Set max_capacity_retry_seconds to a small positive value "
+                            "or configure pool_size > 1 for pooled retry handling."
+                        ),
+                        error_code=None,
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_LLM_RETRY_BUDGET_POLICY,
+                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_LLM_RETRY_BUDGET_POLICY,
+            passed=True,
+            detail="No unsafe web-authored sequential multi-query LLM retry budget",
             affected_nodes=(),
             outcome_code=None,
         )

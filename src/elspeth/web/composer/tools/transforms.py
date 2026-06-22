@@ -455,7 +455,7 @@ def _execute_upsert_node(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
-        provider_policy_error = _validate_transform_provider_config_policy(node_options)
+        provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=plugin)
         if provider_policy_error is not None:
             return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 
@@ -752,7 +752,7 @@ def _execute_patch_node_options(
         if prevalidation_error is not None:
             return _failure_result(state, prevalidation_error)
 
-        provider_policy_error = _validate_transform_provider_config_policy(new_options)
+        provider_policy_error = _validate_transform_provider_config_policy(new_options, plugin=current.plugin)
         if provider_policy_error is not None:
             return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 

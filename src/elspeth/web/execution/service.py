@@ -99,7 +99,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
-from elspeth.web.provider_config_policy import web_rag_provider_config_policy_error
+from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -618,6 +618,35 @@ class ExecutionServiceImpl:
                                     component_id=node.id,
                                     component_type="transform",
                                     detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                                )
+                            ],
+                        ),
+                    )
+                llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
+                if llm_retry_policy_error is not None:
+                    raise PipelineValidationError(
+                        errors=(
+                            ValidationError(
+                                component_id=node.id,
+                                component_type="transform",
+                                message=llm_retry_policy_error,
+                                suggestion=(
+                                    "Set max_capacity_retry_seconds to a small positive value "
+                                    "or configure pool_size > 1 for pooled retry handling."
+                                ),
+                                error_code=None,
+                            ),
+                        ),
+                        readiness=ValidationReadiness(
+                            authoring_valid=False,
+                            execution_ready=False,
+                            completion_ready=False,
+                            blockers=[
+                                ValidationReadinessBlocker(
+                                    code="llm_retry_budget_policy",
+                                    component_id=node.id,
+                                    component_type="transform",
+                                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
                                 )
                             ],
                         ),

@@ -39,6 +39,7 @@ ValidationCheckName = Literal[
     "interpretation_review",
     "blob_inline_refs",
     "managed_identity_policy",
+    "llm_retry_budget_policy",
     "settings_load",
     "plugin_instantiation",
     "value_source_compliance",
@@ -59,6 +60,7 @@ CHECK_BATCH_TRANSFORM_OPTIONS: Final[ValidationCheckName] = "batch_transform_opt
 CHECK_INTERPRETATION_REVIEW: Final[ValidationCheckName] = "interpretation_review"
 CHECK_BLOB_INLINE_REFS: Final[ValidationCheckName] = "blob_inline_refs"
 CHECK_MANAGED_IDENTITY_POLICY: Final[ValidationCheckName] = "managed_identity_policy"
+CHECK_LLM_RETRY_BUDGET_POLICY: Final[ValidationCheckName] = "llm_retry_budget_policy"
 CHECK_SETTINGS: Final[ValidationCheckName] = "settings_load"
 RUNTIME_CHECK_PLUGIN_INSTANTIATION: Final[ValidationCheckName] = "plugin_instantiation"
 CHECK_VALUE_SOURCE_COMPLIANCE: Final[ValidationCheckName] = "value_source_compliance"
@@ -78,6 +80,7 @@ VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
     CHECK_INTERPRETATION_REVIEW,
     CHECK_BLOB_INLINE_REFS,
     CHECK_MANAGED_IDENTITY_POLICY,
+    CHECK_LLM_RETRY_BUDGET_POLICY,
     CHECK_SETTINGS,
     RUNTIME_CHECK_PLUGIN_INSTANTIATION,
     CHECK_VALUE_SOURCE_COMPLIANCE,

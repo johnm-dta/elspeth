@@ -484,7 +484,7 @@ def _execute_set_pipeline(
             if node_prevalidation is not None:
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
 
-            provider_policy_error = _validate_transform_provider_config_policy(node_options)
+            provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=node_plugin)
             if provider_policy_error is not None:
                 return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 

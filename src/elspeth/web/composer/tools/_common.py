@@ -78,7 +78,7 @@ from elspeth.web.paths import (
     allowed_source_directories,
     resolve_data_path,
 )
-from elspeth.web.provider_config_policy import web_rag_provider_config_policy_error
+from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.secrets.ref_policy import (
     allowed_secret_ref_fields,
     allowed_secret_ref_fields_text,
@@ -1241,9 +1241,12 @@ def _validate_transform_provider_config_path(
     return None
 
 
-def _validate_transform_provider_config_policy(options: Mapping[str, Any]) -> str | None:
-    """Validate non-path web provider_config policy constraints."""
-    return web_rag_provider_config_policy_error(options)
+def _validate_transform_provider_config_policy(options: Mapping[str, Any], *, plugin: str | None = None) -> str | None:
+    """Validate non-path web transform configuration policy constraints."""
+    provider_policy_error = web_rag_provider_config_policy_error(options)
+    if provider_policy_error is not None:
+        return provider_policy_error
+    return web_llm_retry_budget_policy_error(plugin, options)
 
 
 def _prevalidate_plugin_options(

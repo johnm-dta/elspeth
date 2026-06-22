@@ -11,6 +11,7 @@ are the canary that catches the regression.
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -71,6 +72,38 @@ def _call_handler(handlers, name: str, arguments: dict):
         params=CallToolRequestParams(name=name, arguments=arguments),
     )
     return handlers[CallToolRequest](req)
+
+
+def _valid_csv_output_args() -> dict[str, object]:
+    return {
+        "sink_name": "main",
+        "plugin": "csv",
+        "options": {
+            "path": "outputs/out.csv",
+            "schema": {"mode": "observed"},
+            "mode": "write",
+            "collision_policy": "auto_increment",
+        },
+        "on_write_failure": "discard",
+    }
+
+
+def _assert_tool_argument_error_response_and_audit(response, probe: _ProbeRecorder, *, tool_name: str, invocation_index: int = 0) -> None:
+    call_result = response.root
+    assert call_result.isError is True
+    assert call_result.content[0].text.startswith("Tool error: ")
+
+    inv = probe.invocations[invocation_index]
+    assert inv.status == ComposerToolStatus.ARG_ERROR
+    assert inv.tool_name == tool_name
+    assert inv.error_class == "ToolArgumentError"
+    assert inv.error_message == "ToolArgumentError"
+    assert inv.version_after is None
+    assert inv.result_canonical is not None
+    assert json.loads(inv.result_canonical) == {
+        "error": call_result.content[0].text,
+        "isError": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -196,6 +229,87 @@ async def test_argument_canonicalization_failure_records_arg_error() -> None:
     assert inv.version_after is None
     assert hashlib.sha256(inv.arguments_canonical.encode("utf-8")).hexdigest() == inv.arguments_hash
     assert inv.result_canonical is not None
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("set_output", {"sink_name": "main", "options": {}, "on_write_failure": "discard"}),
+        ("set_output", {"sink_name": "main", "plugin": "csv", "on_write_failure": "discard"}),
+        ("set_pipeline", {"source": None, "nodes": [], "edges": []}),
+        ("patch_output_options", {"patch": {"mode": "append"}}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_malformed_mutation_args_before_collision_check_record_arg_error(
+    tool_name: str,
+    arguments: dict,
+) -> None:
+    """Malformed mutation args must not be audited as plugin crashes."""
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+        response = await _call_handler(server.request_handlers, tool_name, arguments)
+
+    assert len(probe.invocations) == 1
+    _assert_tool_argument_error_response_and_audit(response, probe, tool_name=tool_name)
+
+
+@pytest.mark.asyncio
+async def test_patch_output_options_missing_patch_records_arg_error_after_existing_output() -> None:
+    """Missing patch on an existing output is malformed input, not a plugin crash."""
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+        seeded = await _call_handler(server.request_handlers, "set_output", _valid_csv_output_args())
+        response = await _call_handler(server.request_handlers, "patch_output_options", {"sink_name": "main"})
+
+    assert seeded.root.isError is not True
+    assert len(probe.invocations) == 2
+    assert probe.invocations[0].status == ComposerToolStatus.SUCCESS
+    _assert_tool_argument_error_response_and_audit(response, probe, tool_name="patch_output_options", invocation_index=1)
+
+
+@pytest.mark.asyncio
+async def test_set_pipeline_output_without_options_preserves_collision_control_error() -> None:
+    """Absent set_pipeline output options remains a control error, not ARG_ERROR."""
+    catalog = create_catalog_service()
+    with tempfile.TemporaryDirectory() as td:
+        scratch = Path(td)
+        probe = _ProbeRecorder()
+        server = create_server(catalog, scratch, recorder=probe)
+        response = await _call_handler(
+            server.request_handlers,
+            "set_pipeline",
+            {
+                "source": None,
+                "nodes": [],
+                "edges": [],
+                "outputs": [
+                    {
+                        "sink_name": "main",
+                        "plugin": "csv",
+                    },
+                ],
+            },
+        )
+
+    call_result = response.root
+    assert call_result.isError is not True
+    payload = json.loads(call_result.content[0].text)
+    assert payload["success"] is False
+    assert "collision_policy" in payload["error"]
+    assert len(probe.invocations) == 1
+    inv = probe.invocations[0]
+    assert inv.status == ComposerToolStatus.SUCCESS
+    assert inv.result_canonical is not None
+    recorded_payload = json.loads(inv.result_canonical)
+    assert recorded_payload["success"] is False
+    assert recorded_payload["error"] == payload["error"]
 
 
 @pytest.mark.asyncio
@@ -393,7 +507,7 @@ async def test_preview_runtime_preflight_failure_records_before_transport_error(
             server.request_handlers,
             "preview_pipeline",
             {},
-    )
+        )
 
     call_result = response.root
     assert call_result.isError is True

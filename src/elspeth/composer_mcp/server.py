@@ -223,31 +223,46 @@ def _tool_file_sink_collision_control_error(
 ) -> str | None:
     """Validate MCP mutation args that can create or update file sink options."""
     if tool_name == "set_output":
-        # Tier-3 MCP args. ``options`` is schema-required for set_output, but an
-        # absent ``options`` here is meaning-preserving as an empty mapping: a
-        # file sink with no options correctly fails the explicit-collision-policy
-        # check below (it has no collision_policy/mode), which is exactly the
-        # control error we want to surface. Explicit branch, not ``.get`` — the
-        # default is visible and the lint does not see a defensive accessor.
-        set_output_options = arguments["options"] if "options" in arguments else {}
+        if "sink_name" not in arguments or "plugin" not in arguments or "options" not in arguments:
+            return None
+        sink_name = arguments["sink_name"]
+        plugin = arguments["plugin"]
+        if not isinstance(sink_name, str) or not isinstance(plugin, str):
+            return None
+        set_output_options = arguments["options"]
+        if not isinstance(set_output_options, Mapping):
+            return None
         return validate_composer_file_sink_collision_policy(
-            arguments["plugin"],
+            plugin,
             set_output_options,
             require_explicit=True,
         )
 
     if tool_name == "set_pipeline":
-        for out_args in arguments["outputs"]:
-            # ``sink_name`` is schema-required; absence is malformed client input.
-            # Used only as the error label, so an explicit "?" placeholder keeps
-            # the diagnostic honest without a defensive ``.get`` default.
-            output_name = out_args["sink_name"] if "sink_name" in out_args else "?"
+        if "outputs" not in arguments:
+            return None
+        outputs = arguments["outputs"]
+        if not isinstance(outputs, list):
+            return None
+        for out_args in outputs:
+            if not isinstance(out_args, Mapping):
+                return None
+            if "plugin" not in out_args:
+                return None
+            if "sink_name" not in out_args:
+                return None
+            output_name = out_args["sink_name"]
+            plugin = out_args["plugin"]
+            if not isinstance(output_name, str) or not isinstance(plugin, str):
+                return None
             # ``options`` is optional in the set_pipeline output schema; absence
             # legitimately means "no options" → empty mapping, which the policy
             # validator rejects with the explicit-collision-policy control error.
             out_options = out_args["options"] if "options" in out_args else {}
+            if not isinstance(out_options, Mapping):
+                return None
             error = validate_composer_file_sink_collision_policy(
-                out_args["plugin"],
+                plugin,
                 out_options,
                 require_explicit=True,
             )
@@ -256,10 +271,17 @@ def _tool_file_sink_collision_control_error(
         return None
 
     if tool_name == "patch_output_options":
-        current = next((o for o in state.outputs if o.name == arguments["sink_name"]), None)
+        if "sink_name" not in arguments or "patch" not in arguments:
+            return None
+        sink_name = arguments["sink_name"]
+        patch = arguments["patch"]
+        if not isinstance(sink_name, str) or not isinstance(patch, dict):
+            return None
+        patch_dict = cast(dict[str, Any], patch)
+        current = next((o for o in state.outputs if o.name == sink_name), None)
         if current is None:
             return None
-        new_options = _apply_merge_patch(current.options, arguments["patch"])
+        new_options = _apply_merge_patch(current.options, patch_dict)
         return validate_composer_file_sink_collision_policy(
             current.plugin,
             new_options,

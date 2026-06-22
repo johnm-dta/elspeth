@@ -51,6 +51,8 @@ from pydantic import BaseModel, ConfigDict
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.web.composer.redaction import (
     REDACTED_SENSITIVE_NO_SUMMARIZER,
+    REDACTED_UNKNOWN_ARGUMENT_KEY,
+    REDACTED_UNKNOWN_ARGUMENTS_FIELD,
     HandlesNoSensitiveDataReason,
     Sensitive,
     ToolRedaction,
@@ -438,6 +440,36 @@ def test_advisor_declarative_unknown_argument_keys_are_sentinelised() -> None:
     assert "full_context" not in result
     assert result["_unknown_arguments"] == "<redacted-unknown-argument-key>"
     assert raw_extra_context not in str(result)
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("list_blobs", {}),
+        ("list_composer_blobs", {}),
+        ("get_blob_metadata", {"blob_id": "11111111-1111-4111-8111-111111111111"}),
+        ("inspect_source", {"blob_id": "11111111-1111-4111-8111-111111111111"}),
+    ],
+)
+def test_blob_discovery_unknown_argument_keys_are_sentinelised(
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Blob discovery arguments are persisted; extra LLM-authored keys must not pass through raw."""
+    tel = NoopRedactionTelemetry()
+    raw_payload = "RAW_EXTRA_BLOB_DISCOVERY_PAYLOAD: uploaded CSV excerpt or PII"
+
+    result = redact_tool_call_arguments(
+        tool_name,
+        {**arguments, "note": raw_payload},
+        telemetry=tel,
+    )
+
+    assert "note" not in result
+    assert result[REDACTED_UNKNOWN_ARGUMENTS_FIELD] == REDACTED_UNKNOWN_ARGUMENT_KEY
+    assert raw_payload not in str(result)
+    for key, value in arguments.items():
+        assert result[key] == value
 
 
 # ---------------------------------------------------------------------------

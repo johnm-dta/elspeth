@@ -2124,6 +2124,16 @@ class TestToolDefinitions:
             assert "discard" in description, tool_name
             assert "Any other value, including 'quarantine', must match a configured output/sink name." in description, tool_name
 
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["list_blobs", "list_composer_blobs", "get_blob_metadata", "inspect_source"],
+    )
+    def test_blob_discovery_schemas_forbid_extra_arguments(self, tool_name: str) -> None:
+        """Blob discovery tools persist arguments; their LLM-facing schemas must reject extra keys."""
+        definition = next(defn for defn in get_tool_definitions() if defn["name"] == tool_name)
+
+        assert definition["parameters"]["additionalProperties"] is False
+
     def test_upsert_node_trigger_schema_documents_end_of_source_only_shape(self) -> None:
         """Aggregation trigger schema must expose the end-of-source-only shape."""
         upsert_node = next(defn for defn in get_tool_definitions() if defn["name"] == "upsert_node")

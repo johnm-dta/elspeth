@@ -734,6 +734,7 @@ _INSPECT_SOURCE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
 )
 

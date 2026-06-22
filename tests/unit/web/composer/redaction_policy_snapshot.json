@@ -40,7 +40,7 @@
     "shape": "type_driven"
   },
   "get_blob_metadata": {
-    "hash": "e8e798584c161c69129ca96b8b1b52335a18409d2ebe820df1c29766990e734d",
+    "hash": "a23646a977dd6ecad697ec1751aa3d8f773967d096c8abca52f718a25ede6e12",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
@@ -65,17 +65,17 @@
     "shape": "declarative"
   },
   "inspect_source": {
-    "hash": "5059b1a7101259b0a44d4da9f1ea4f2fa4599052614d2a4429ba73267e7ef7bd",
+    "hash": "e71978cb2466da71f91b2f7a484151b94b81fc2b6b0d513b396e8036ae1128fb",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
   "list_blobs": {
-    "hash": "10c660e563118c6eeb85a5ba0e2f0ce44f154a6b5c60f9691dc85013ff0996de",
+    "hash": "760fe0fb617a34f3969665f3007366e1c7bcb1793c2656bd5aa14587dc2553f1",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
   "list_composer_blobs": {
-    "hash": "bb080f67d70ae3e37cb7b2fc1ec8c490a94eb476b81c1eb3d34acfbc78714ea5",
+    "hash": "45dc291568c8115c91348c25447d575eb3e4ba9e546910245bd3eb19289b70c2",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },

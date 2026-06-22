@@ -262,7 +262,7 @@ _LIST_BLOBS_DECLARATION = ToolDeclaration(
     handler=_handle_list_blobs,
     kind=ToolKind.BLOB_DISCOVERY,
     description="List uploaded/created files (blobs) in this session with metadata.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 )
 
 
@@ -293,7 +293,7 @@ _LIST_COMPOSER_BLOBS_DECLARATION = ToolDeclaration(
         "List ready blobs available for audited inline-content authoring. "
         "Returns only blob_id, mime_type, size_bytes, content_hash, and filename; never content bytes."
     ),
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 )
 
 
@@ -325,6 +325,7 @@ _GET_BLOB_METADATA_DECLARATION = ToolDeclaration(
             "blob_id": {"type": "string", "description": "Blob ID."},
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
 )
 

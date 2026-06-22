@@ -201,8 +201,10 @@ def _entry_hash(name: str, entry: ToolRedaction) -> dict[str, Any]:
                 else None
             ),
         }
-        if policy.known_argument_keys:
+        if policy.known_argument_keys or policy.redact_unknown_argument_keys:
             canon_payload["known_argument_keys"] = sorted(policy.known_argument_keys)
+        if policy.redact_unknown_argument_keys:
+            canon_payload["redact_unknown_argument_keys"] = True
         sensitive_path_count = len(policy.sensitive_argument_keys) + len(policy.sensitive_response_keys)
 
     canon = json.dumps(canon_payload, sort_keys=True, separators=(",", ":"))

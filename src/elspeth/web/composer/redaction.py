@@ -41,7 +41,7 @@ REDACTED_UNKNOWN_RESPONSE_KEY = "<redacted-unknown-response-key>"
 # are removed too; they are LLM-controlled text and may themselves carry
 # sensitive payload. Most declarative tools still preserve historical
 # passthrough behavior; tools that persist untyped, LLM-supplied argument dicts
-# can opt into this fail-closed mode.
+# can opt into this fail-closed mode with redact_unknown_argument_keys=True.
 REDACTED_UNKNOWN_ARGUMENT_KEY = "<redacted-unknown-argument-key>"
 REDACTED_UNKNOWN_ARGUMENTS_FIELD = "_unknown_arguments"
 
@@ -659,9 +659,11 @@ class ToolRedactionPolicy:
        — the allowlist defends against response-shape drift; unknown keys at
        persistence time are fail-closed redacted with a fixed sentinel.
 
-    5. **``known_argument_keys`` covers ``sensitive_argument_keys`` when set** —
-       the argument allowlist is opt-in for legacy compatibility, but once a
-       policy declares it, every sensitive argument key must also be known.
+    5. **``known_argument_keys`` covers ``sensitive_argument_keys`` when set or
+       when ``redact_unknown_argument_keys`` is enabled** — the argument
+       allowlist is opt-in for legacy compatibility, but once a policy uses it
+       to fail-close unknown arguments, every sensitive argument key must also
+       be known.
 
     **Response-walker fail-closed behavior for declarative entries:**
 
@@ -703,6 +705,7 @@ class ToolRedactionPolicy:
     argument_summarizers: Mapping[str, Callable[[Any], str]] = field(default_factory=dict)
     handles_no_sensitive_data: bool = False
     handles_no_sensitive_data_reason_struct: HandlesNoSensitiveDataReason | None = None
+    redact_unknown_argument_keys: bool = False
 
     def __post_init__(self) -> None:
         # Validators run BEFORE freeze_fields so they read mutable state.
@@ -717,7 +720,7 @@ class ToolRedactionPolicy:
             )
 
         orphan_sensitive_arguments = set(self.sensitive_argument_keys) - set(self.known_argument_keys)
-        if self.known_argument_keys and orphan_sensitive_arguments:
+        if (self.known_argument_keys or self.redact_unknown_argument_keys) and orphan_sensitive_arguments:
             raise ValueError(
                 f"sensitive_argument_keys {sorted(orphan_sensitive_arguments)} are not declared in "
                 "known_argument_keys; the opt-in argument allowlist must cover every sensitive argument key."
@@ -1775,9 +1778,11 @@ def _redact_via_policy(
         string '<redacted>'.").
       * Argument key NOT in sensitive_argument_keys → passthrough by default
         for legacy declarative entries. If ``policy.known_argument_keys`` is
-        declared, keys outside that allowlist are removed and replaced with a
-        generic REDACTED_UNKNOWN_ARGUMENT_KEY marker under
-        REDACTED_UNKNOWN_ARGUMENTS_FIELD.
+        declared or ``policy.redact_unknown_argument_keys`` is enabled, keys
+        outside the allowlist are removed and replaced with a generic
+        REDACTED_UNKNOWN_ARGUMENT_KEY marker under
+        REDACTED_UNKNOWN_ARGUMENTS_FIELD. The boolean allows a closed empty
+        argument surface for no-argument tools.
 
     Walker atomicity (rev-3 W8b / rev-4 W8b): the output dict is built in a
     local variable and only returned on success.  A mid-walk raise leaves no
@@ -1789,7 +1794,7 @@ def _redact_via_policy(
     # Non-sensitive keys are passthrough unless the policy opts into a closed
     # argument allowlist.
     redacted: dict[str, Any] = dict(arguments)
-    if policy.known_argument_keys:
+    if policy.known_argument_keys or policy.redact_unknown_argument_keys:
         known_argument_keys = set(policy.known_argument_keys)
         unknown_keys = [key for key in arguments if key not in known_argument_keys]
         for key in unknown_keys:
@@ -1860,7 +1865,8 @@ def redact_tool_call_arguments(
       keys are summarized (via ``policy.argument_summarizers[key]``) or
       sentinel-substituted (``REDACTED_SENSITIVE_NO_SUMMARIZER``).  Keys
       not in ``sensitive_argument_keys`` are passthrough unless the policy
-      declares ``known_argument_keys``; in that case unknown argument key names
+      declares ``known_argument_keys`` or enables
+      ``redact_unknown_argument_keys``; in that case unknown argument key names
       are removed and replaced with a generic ``REDACTED_UNKNOWN_ARGUMENT_KEY``
       marker under ``REDACTED_UNKNOWN_ARGUMENTS_FIELD``.
 
@@ -2265,9 +2271,9 @@ _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
 _LIST_BLOBS_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("session blob inventory — id/filename/mime_type/size_bytes per blob, no raw content",),
     why_arguments_safe=(
-        "list_blobs accepts no arguments — the JSON schema at tools.py:1329 declares an "
-        "empty properties object with empty required, so the LLM cannot place any value "
-        "on this surface; the handler enumerates the session's blob inventory directly."
+        "list_blobs accepts no arguments — the JSON schema declares an empty properties "
+        "object with additionalProperties=false, and redaction strips any unknown keys "
+        "before persistence; the handler enumerates the session inventory directly."
     ),
     why_responses_safe=(
         "Response is the blob-inventory list — operator-uploaded filenames, mime_types, "
@@ -2281,9 +2287,9 @@ _LIST_COMPOSER_BLOBS_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("session blob inventory — id/filename/mime_type/size_bytes/content_hash per ready blob, no raw content",),
     why_arguments_safe=(
         "list_composer_blobs accepts no arguments — its JSON schema declares an "
-        "empty properties object with empty required, so the LLM cannot place any "
-        "payload on this surface; the handler enumerates ready blobs from the "
-        "session-scoped inventory."
+        "empty properties object with additionalProperties=false, and redaction strips "
+        "any unknown keys before persistence; the handler enumerates ready blobs from "
+        "the session-scoped inventory."
     ),
     why_responses_safe=(
         "Response is the ADR-025 H4 visibility shape — blob_id, mime_type, "
@@ -2299,7 +2305,7 @@ _GET_BLOB_METADATA_REASON = HandlesNoSensitiveDataReason(
     why_arguments_safe=(
         "get_blob_metadata accepts a single blob_id scalar string selecting one inventory "
         "row; blob_ids are UUIDs assigned by the composer service and contain no operator "
-        "payload; the handler indexes a session-scoped lookup and rejects unknown ids."
+        "payload; the schema and redaction allowlist reject or strip any other argument keys."
     ),
     why_responses_safe=(
         "Response is the single-blob metadata row — id, filename, mime_type, size_bytes, "
@@ -2539,7 +2545,7 @@ _INSPECT_SOURCE_REASON = HandlesNoSensitiveDataReason(
     why_arguments_safe=(
         "inspect_source accepts a single blob_id scalar string selecting one inventory "
         "row; the handler reads at most 8 KiB and parses at most 100 rows, returning only "
-        "structural facts; the JSON schema at tools.py:1505-1513 has no other properties."
+        "structural facts; the schema and redaction allowlist reject or strip any other keys."
     ),
     why_responses_safe=(
         "Response is the SourceInspectionFacts struct — observed headers, inferred scalar "
@@ -2921,18 +2927,22 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         # _BLOB_DISCOVERY_TOOLS, 5 entries (4 declarative + 1 type-driven).
         "list_blobs": ToolRedaction(
             policy=ToolRedactionPolicy(
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_LIST_BLOBS_REASON,
             )
         ),
         "list_composer_blobs": ToolRedaction(
             policy=ToolRedactionPolicy(
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_LIST_COMPOSER_BLOBS_REASON,
             )
         ),
         "get_blob_metadata": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("blob_id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_GET_BLOB_METADATA_REASON,
             )
@@ -2943,6 +2953,8 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         ),
         "inspect_source": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("blob_id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_INSPECT_SOURCE_REASON,
             )

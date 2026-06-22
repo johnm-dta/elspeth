@@ -1641,6 +1641,46 @@ describe("sessionStore", () => {
       expect(enterGuided).toHaveBeenCalledTimes(1);
       expect(usePreferencesStore.getState().loaded).toBe(true);
     });
+
+    it("drops delayed guided default when active session changes before prefs resolve", async () => {
+      const apiClient = await import("@/api/client");
+      const { usePreferencesStore } = await import("@/stores/preferencesStore");
+      const prefs = deferred<"guided" | "freeform">();
+      vi.spyOn(usePreferencesStore.getState(), "resolveDefaultMode").mockReturnValue(prefs.promise);
+      (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        id: "sess-delayed-default",
+        title: "untitled",
+        created_at: "2026-05-14T00:00:00Z",
+        updated_at: "2026-05-14T00:00:00Z",
+      });
+      const enterGuided = vi
+        .spyOn(useSessionStore.getState(), "enterGuided")
+        .mockResolvedValue();
+
+      const createPromise = useSessionStore.getState().createSession();
+      await vi.waitFor(() => {
+        expect(useSessionStore.getState().activeSessionId).toBe("sess-delayed-default");
+      });
+
+      useSessionStore.setState({
+        activeSessionId: "sess-existing",
+        sessions: [
+          {
+            id: "sess-existing",
+            title: "existing",
+            created_at: "2026-05-13T00:00:00Z",
+            updated_at: "2026-05-13T00:00:00Z",
+          },
+          ...useSessionStore.getState().sessions,
+        ],
+      });
+      prefs.resolve("guided");
+      await createPromise;
+
+      expect(enterGuided).not.toHaveBeenCalled();
+      expect(useSessionStore.getState().activeSessionId).toBe("sess-existing");
+      expect(useSessionStore.getState().error).toBeNull();
+    });
   });
 });
 

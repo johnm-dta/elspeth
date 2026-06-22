@@ -366,6 +366,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     try {
       const mode = await usePreferencesStore.getState().resolveDefaultMode();
       if (mode === "guided") {
+        if (get().activeSessionId !== session.id) {
+          return;
+        }
         await get().enterGuided();
       }
     } catch {

@@ -1442,13 +1442,16 @@ def compute_proof_diagnostics(
                     )
                     field_resolution_failed = True
             if missing_declared and source.on_validation_failure == "discard":
+                observed_header_count = len(facts.observed_headers or ())
                 diagnostics.append(
                     _blocking_diagnostic(
                         code="csv_source_blob_header_mismatch",
                         message=(
                             f"CSV source declares required field(s) {list(missing_declared)} "
-                            f"but the bound blob's header parses as {list(facts.observed_headers or ())}, "
-                            "with no overlapping field names. Every row will fail validation; "
+                            f"but the bound blob's parsed header has {observed_header_count} column(s) "
+                            "with no overlapping field names. Header values are redacted because "
+                            "headerless CSV input can make the first data row look like headers. "
+                            "Every row will fail validation; "
                             "with on_validation_failure='discard', the run will terminate empty. "
                             "Either prepend a header row containing the declared field names or set "
                             "source options.columns to those names for headerless CSV input."
@@ -1463,7 +1466,8 @@ def compute_proof_diagnostics(
                             "source": "blob",
                             "blob_id": str(blob_id),
                             "declared_required_fields": list(missing_declared),
-                            "observed_headers": list(facts.observed_headers or ()),
+                            "observed_header_count": observed_header_count,
+                            "observed_headers_redacted": True,
                             "source_plugin": source.plugin,
                         },
                     )

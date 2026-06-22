@@ -181,6 +181,12 @@ def test_csv_blob_without_header_and_no_declared_overlap_blocks(schema_mode: str
     matching = [item for item in diagnostics if item["code"] == _HEADER_MISMATCH_CODE]
     assert matching
     assert matching[0]["severity"] == "blocking"
+    diagnostic_blob = repr(matching[0])
+    assert "https://www.finance.gov.au" not in diagnostic_blob
+    assert "https://www.ato.gov.au" not in diagnostic_blob
+    assert matching[0]["evidence_locator"]["observed_header_count"] == 1
+    assert matching[0]["evidence_locator"]["observed_headers_redacted"] is True
+    assert "observed_headers" not in matching[0]["evidence_locator"]
     assert data["is_valid"] is False
 
 

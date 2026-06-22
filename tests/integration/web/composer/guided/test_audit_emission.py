@@ -168,6 +168,13 @@ def _extract_guided_invocations(client: TestClient, session_id: str) -> dict[str
     return result
 
 
+def _assert_payload_ref_retrievable(client: TestClient, *, payload_ref: str, expected_hash: str) -> None:
+    assert payload_ref, "guided audit payload refs must be non-empty"
+    assert payload_ref == expected_hash
+    stored = client.app.state.payload_store.retrieve(payload_ref)
+    assert stored, "guided audit payload ref must retrieve stored canonical payload bytes"
+
+
 # ---------------------------------------------------------------------------
 # Scenario drivers
 # ---------------------------------------------------------------------------
@@ -382,6 +389,52 @@ class TestRecipeMatchAuditEmission:
         assert len(guided_invocations["guided_turn_answered"]) >= 1, (
             f"expected at least one guided_turn_answered event; got none. All guided events: {guided_invocations}"
         )
+
+    def test_recipe_accept_guided_turn_events_carry_retrievable_payload_refs(self, composer_test_client: TestClient) -> None:
+        """Guided turn audit rows must carry payload-store refs for replayability."""
+        session_id = _create_session(composer_test_client)
+        recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
+        output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
+
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
+
+        _respond(
+            composer_test_client,
+            session_id,
+            chosen=["accept"],
+            edited_values={
+                "recipe_name": offered_recipe,
+                "slots": {
+                    **payload["prefilled"],
+                    "source_blob_id": blob_id,
+                    "classifier_template": "Classify: {{ row['text'] }}",
+                    "model": "anthropic/claude-3.5-sonnet",
+                    "api_key_secret": "OPENROUTER_API_KEY",
+                    "required_input_fields": ["text"],
+                    "label_field": "category",
+                    "output_path": output_path,
+                },
+            },
+        )
+
+        guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
+        emitted = guided_invocations["guided_turn_emitted"]
+        answered = guided_invocations["guided_turn_answered"]
+        assert emitted
+        assert answered
+        for event in emitted:
+            _assert_payload_ref_retrievable(
+                composer_test_client,
+                payload_ref=event["payload_payload_id"],
+                expected_hash=event["payload_hash"],
+            )
+        for event in answered:
+            _assert_payload_ref_retrievable(
+                composer_test_client,
+                payload_ref=event["response_payload_id"],
+                expected_hash=event["response_hash"],
+            )
 
     def test_recipe_accept_emits_step_advanced_events(self, composer_test_client: TestClient) -> None:
         """guided_step_advanced fires at least once across the full recipe-accept lifecycle."""

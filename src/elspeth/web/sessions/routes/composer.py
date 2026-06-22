@@ -115,6 +115,7 @@ from ._helpers import (
     _state_data_from_composer_state,
     _state_from_record,
     _state_response,
+    _store_guided_audit_payload,
     _summarize_guided_response,
     _validate_control_signal,
     _validate_step_indices,
@@ -1783,6 +1784,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         raise InvariantError(
                             "GET guided: turn is not None but payload_hash is None — stable_hash derivation skipped despite turn being present."
                         )
+                    payload_payload_id = _store_guided_audit_payload(getattr(request.app.state, "payload_store", None), turn["payload"])
                     new_guided, _new_record, turn_type, payload_hash = _append_server_turn_record(
                         guided,
                         current_step=current_step,
@@ -1828,7 +1830,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         step=current_step,
                         turn_type=turn_type,
                         payload_hash=payload_hash,
-                        payload_payload_id="",  # No payload store for server-emitted turns yet.
+                        payload_payload_id=payload_payload_id,
                         emitter="server",
                         composition_version=new_state.version,
                         actor=user.user_id,
@@ -2403,7 +2405,7 @@ def register_composer_routes(router: APIRouter) -> None:
                         step=current_step,
                         turn_type=current_turn_type,
                         payload_hash=emitted_payload_hash,
-                        payload_payload_id="",
+                        payload_payload_id=_store_guided_audit_payload(getattr(request.app.state, "payload_store", None), turn["payload"]),
                         emitter="server",
                         composition_version=state.version,
                         actor=user.user_id,
@@ -2459,7 +2461,7 @@ def register_composer_routes(router: APIRouter) -> None:
                     step=current_step,
                     turn_type=current_turn_type,
                     response_hash=response_hash,
-                    response_payload_id="",
+                    response_payload_id=_store_guided_audit_payload(getattr(request.app.state, "payload_store", None), turn_response),
                     control_signal=body.control_signal,
                     composition_version=state.version,
                     actor=user.user_id,
@@ -2584,6 +2586,7 @@ def register_composer_routes(router: APIRouter) -> None:
                             session_engine=session_engine,
                             session_id=str(session_id),
                             blob_service=request.app.state.blob_service,
+                            payload_store=getattr(request.app.state, "payload_store", None),
                             model=settings.composer_model,
                             temperature=settings.composer_temperature,
                             seed=settings.composer_seed,
@@ -3020,7 +3023,9 @@ def register_composer_routes(router: APIRouter) -> None:
                             step=GuidedStep.STEP_1_SOURCE,
                             turn_type=TurnType.SCHEMA_FORM,
                             response_hash=response_hash,
-                            response_payload_id="",
+                            response_payload_id=_store_guided_audit_payload(
+                                getattr(request.app.state, "payload_store", None), turn_response
+                            ),
                             control_signal=None,
                             composition_version=state.version,
                             actor=user.user_id,
@@ -3050,7 +3055,9 @@ def register_composer_routes(router: APIRouter) -> None:
                             step=GuidedStep.STEP_2_SINK,
                             turn_type=next_turn_type,
                             payload_hash=next_payload_hash,
-                            payload_payload_id="",
+                            payload_payload_id=_store_guided_audit_payload(
+                                getattr(request.app.state, "payload_store", None), next_turn["payload"]
+                            ),
                             emitter="server",
                             composition_version=state.version,
                             actor=user.user_id,

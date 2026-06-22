@@ -2558,6 +2558,16 @@ def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, 
         ) from exc
 
 
+def _store_guided_audit_payload(payload_store: Any, payload: Mapping[str, Any]) -> str:
+    """Persist a guided turn/response payload and return its content hash."""
+    if payload_store is None:
+        raise InvariantError("Guided audit payload store is not configured.")
+    payload_ref = payload_store.store(canonical_json(payload).encode("utf-8"))
+    if not isinstance(payload_ref, str) or not payload_ref:
+        raise InvariantError("Guided audit payload store returned an invalid content hash.")
+    return payload_ref
+
+
 async def _dispatch_guided_respond(
     *,
     state: CompositionState,
@@ -2572,6 +2582,7 @@ async def _dispatch_guided_respond(
     session_engine: Any,
     session_id: str,
     blob_service: BlobServiceProtocol,
+    payload_store: Any,
     model: str,
     temperature: float | None,
     seed: int | None,
@@ -2666,7 +2677,7 @@ async def _dispatch_guided_respond(
                 step=current_step,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -2808,7 +2819,7 @@ async def _dispatch_guided_respond(
                 step=GuidedStep.STEP_2_SINK,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -2912,7 +2923,7 @@ async def _dispatch_guided_respond(
             step=GuidedStep.STEP_2_SINK,
             turn_type=TurnType(next_turn["type"]),
             payload_hash=stable_hash(next_turn["payload"]),
-            payload_payload_id="",
+            payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
             emitter="server",
             composition_version=state.version,
             actor=user_id,
@@ -2944,7 +2955,7 @@ async def _dispatch_guided_respond(
                 step=current_step,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -3043,7 +3054,7 @@ async def _dispatch_guided_respond(
                 step=current_step,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -3100,7 +3111,7 @@ async def _dispatch_guided_respond(
                 step=GuidedStep.STEP_2_5_RECIPE_MATCH,
                 turn_type=TurnType(next_turn["type"]),
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -3156,7 +3167,7 @@ async def _dispatch_guided_respond(
             step=GuidedStep.STEP_3_TRANSFORMS,
             turn_type=TurnType.PROPOSE_CHAIN,
             payload_hash=stable_hash(next_turn["payload"]),
-            payload_payload_id="",
+            payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
             emitter="server",
             composition_version=state.version,
             actor=user_id,
@@ -3326,7 +3337,7 @@ async def _dispatch_guided_respond(
                 step=GuidedStep.STEP_3_TRANSFORMS,
                 turn_type=TurnType.PROPOSE_CHAIN,
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -3387,7 +3398,7 @@ async def _dispatch_guided_respond(
                     step=GuidedStep.STEP_3_TRANSFORMS,
                     turn_type=TurnType.PROPOSE_CHAIN,
                     payload_hash=stable_hash(next_turn["payload"]),
-                    payload_payload_id="",
+                    payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                     emitter="server",
                     composition_version=state.version,
                     actor=user_id,
@@ -3435,7 +3446,7 @@ async def _dispatch_guided_respond(
                     step=GuidedStep.STEP_3_TRANSFORMS,
                     turn_type=TurnType.SCHEMA_FORM,
                     payload_hash=stable_hash(next_turn["payload"]),
-                    payload_payload_id="",
+                    payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                     emitter="server",
                     composition_version=state.version,
                     actor=user_id,
@@ -3648,7 +3659,7 @@ async def _dispatch_guided_respond(
                 step=GuidedStep.STEP_3_TRANSFORMS,
                 turn_type=TurnType.PROPOSE_CHAIN,
                 payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id="",
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
                 emitter="server",
                 composition_version=state.version,
                 actor=user_id,
@@ -3886,6 +3897,7 @@ __all__ = [
     "_state_data_from_composer_state",
     "_state_from_record",
     "_state_response",
+    "_store_guided_audit_payload",
     "_summarize_guided_response",
     "_validate_blob_ref_submission",
     "_validate_control_signal",

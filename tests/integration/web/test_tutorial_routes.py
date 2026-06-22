@@ -18,6 +18,7 @@ from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.tutorial_run_routes import create_tutorial_run_router
 from elspeth.web.composer.tutorial_service import tutorial_model_id
 from elspeth.web.config import WebSettings
+from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import PreferencesService
 from elspeth.web.preferences.tutorial_cache import CANONICAL_SEED_PROMPT, TutorialCache, TutorialCacheEntry, tutorial_cache_key
@@ -69,6 +70,7 @@ def _app(tmp_path: Path) -> FastAPI:
     tutorial_cache_dir = settings.tutorial_cache_dir
     assert tutorial_cache_dir is not None
     app.state.tutorial_cache = TutorialCache(cache_dir=tutorial_cache_dir)
+    app.state.rate_limiter = ComposerRateLimiter(limit=settings.composer_rate_limit_per_minute)
 
     identity = UserIdentity(user_id="alice", username="alice")
 
@@ -173,6 +175,42 @@ def test_post_run_cache_hit_creates_current_session_run_and_audit_story(tmp_path
     assert story_body["llm_call_count"] == 0
     assert story_body["seeded_from_cache"] is True
     assert story_body["cache_key"] == cache_key
+
+
+def test_post_run_rate_limiter_blocks_cache_miss_before_live_execution(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    app.state.rate_limiter = ComposerRateLimiter(limit=1)
+    _seed_canonical_cache(app)
+    cache_hit_session_id = _seed_session_with_state(app, match_canonical_cache=True)
+    cache_miss_session_id = _seed_session_with_state(app)
+
+    class _ExplodingExecutionService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def execute(self, *_args: object, **_kwargs: object) -> UUID:
+            self.calls += 1
+            raise AssertionError("live tutorial execution should have been throttled before execute()")
+
+    execution_service = _ExplodingExecutionService()
+    app.state.execution_service = execution_service
+    client = TestClient(app)
+
+    cache_hit = client.post(
+        "/api/tutorial/run",
+        json={"session_id": str(cache_hit_session_id), "prompt": CANONICAL_SEED_PROMPT},
+    )
+    assert cache_hit.status_code == 200
+    assert cache_hit.json()["seeded_from_cache"] is True
+
+    throttled = client.post(
+        "/api/tutorial/run",
+        json={"session_id": str(cache_miss_session_id), "prompt": "run the tutorial live"},
+    )
+
+    assert throttled.status_code == 429
+    assert throttled.json()["detail"]["error_type"] == "rate_limited"
+    assert execution_service.calls == 0
 
 
 def test_audit_story_missing_audit_db_raises_without_creating_file(tmp_path: Path) -> None:

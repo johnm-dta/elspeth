@@ -93,6 +93,7 @@ _FILE_BACKED_TEMPLATE_OPTION_KEYS = frozenset(
         "system_prompt_file",
     }
 )
+_STRUCTURAL_OPTION_KEYS = frozenset({"schema", "schema_config"})
 
 
 def _validate_max_length(value: str, *, field_label: str, max_length: int) -> str:
@@ -2247,7 +2248,25 @@ def _expand_template_files(
     return result
 
 
-def _lowercase_schema_keys(obj: Any, *, _preserve_nested: bool = False, _in_sinks: bool = False) -> Any:
+def _merge_dicts_preserving_env_override(base: dict[Any, Any], override: dict[Any, Any]) -> dict[Any, Any]:
+    """Merge normalized duplicate dict keys, with override values winning."""
+    merged = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_dicts_preserving_env_override(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _lowercase_schema_keys(
+    obj: Any,
+    *,
+    _preserve_nested: bool = False,
+    _in_sinks: bool = False,
+    _in_options: bool = False,
+) -> Any:
     """Lowercase dictionary keys for Pydantic schema matching, preserving user data.
 
     Dynaconf returns keys in UPPERCASE when they come from environment variables,
@@ -2269,15 +2288,22 @@ def _lowercase_schema_keys(obj: Any, *, _preserve_nested: bool = False, _in_sink
         _preserve_nested: Internal flag - when True, stop lowercasing keys
              (we're inside an 'options' or 'routes' dict).
         _in_sinks: Internal flag - when True, we're processing sink name keys.
+        _in_options: Internal flag - when True, we're processing the immediate
+             plugin options dict, where known structural option keys may be
+             supplied by uppercase environment variable segments.
 
     Returns:
         The input with schema-level dict keys lowercased, but user data preserved.
     """
     if isinstance(obj, dict):
-        result = {}
+        result: dict[Any, Any] = {}
+        env_structural_option_keys: set[str] = set()
         for k, v in obj.items():
+            is_env_structural_option_key = _in_options and isinstance(k, str) and k.isupper() and k.lower() in _STRUCTURAL_OPTION_KEYS
             # Determine the new key
-            if _preserve_nested:
+            if is_env_structural_option_key:
+                new_key = k.lower()
+            elif _preserve_nested:
                 # Inside options: preserve all keys exactly
                 new_key = k
             elif _in_sinks:
@@ -2289,32 +2315,54 @@ def _lowercase_schema_keys(obj: Any, *, _preserve_nested: bool = False, _in_sink
                 new_key = k.lower()
 
             # Determine how to process children
-            if _preserve_nested:
+            if is_env_structural_option_key:
+                # Env vars spell nested segments in uppercase. Within known
+                # structural option blocks such as schema, treat those segments
+                # as schema keys rather than case-sensitive user data.
+                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=False, _in_options=False)
+            elif _preserve_nested:
                 # Already inside options/routes: stay in preserve mode, ignore special keys
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False)
+                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False, _in_options=False)
             elif new_key == "options":
                 # Options: preserve everything inside (user data)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False)
+                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False, _in_options=True)
             elif new_key == "routes":
                 # Routes: preserve everything inside (user-defined route labels)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False)
+                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False, _in_options=False)
             elif new_key == "branches":
                 # Branches: preserve everything inside (user-defined coalesce branch names)
-                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False)
+                child = _lowercase_schema_keys(v, _preserve_nested=True, _in_sinks=False, _in_options=False)
             elif new_key == "sinks":
                 # Entering sinks dict: next level has sink name keys
-                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=True)
+                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=True, _in_options=False)
             elif _in_sinks:
                 # At sink name level: value is SinkSettings, resume normal lowercasing
-                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=False)
+                child = _lowercase_schema_keys(v, _preserve_nested=False, _in_sinks=False, _in_options=False)
             else:
                 # Normal recursion
-                child = _lowercase_schema_keys(v, _preserve_nested=_preserve_nested, _in_sinks=False)
+                child = _lowercase_schema_keys(v, _preserve_nested=_preserve_nested, _in_sinks=False, _in_options=False)
 
-            result[new_key] = child
+            if new_key in result:
+                if is_env_structural_option_key:
+                    if isinstance(result[new_key], dict) and isinstance(child, dict):
+                        result[new_key] = _merge_dicts_preserving_env_override(result[new_key], child)
+                    else:
+                        result[new_key] = child
+                    env_structural_option_keys.add(new_key)
+                elif isinstance(new_key, str) and new_key in env_structural_option_keys:
+                    if isinstance(child, dict) and isinstance(result[new_key], dict):
+                        result[new_key] = _merge_dicts_preserving_env_override(child, result[new_key])
+                else:
+                    result[new_key] = child
+            else:
+                result[new_key] = child
+                if is_env_structural_option_key:
+                    env_structural_option_keys.add(new_key)
         return result
     if isinstance(obj, list):
-        return [_lowercase_schema_keys(item, _preserve_nested=_preserve_nested, _in_sinks=_in_sinks) for item in obj]
+        return [
+            _lowercase_schema_keys(item, _preserve_nested=_preserve_nested, _in_sinks=_in_sinks, _in_options=_in_options) for item in obj
+        ]
     return obj
 
 

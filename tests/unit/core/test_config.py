@@ -226,6 +226,69 @@ sources:
         assert "output" in settings.sinks
         assert settings.sinks["output"].plugin == "csv"
 
+    def test_load_env_override_lowercases_structural_schema_option_keys(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Environment overrides under options.schema must reach runtime schema config."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+
+""")
+        monkeypatch.setenv("ELSPETH_SOURCES__PRIMARY__OPTIONS__SCHEMA__MODE", "observed")
+
+        settings = load_settings(config_file)
+
+        assert settings.sources["primary"].options == {"schema": {"mode": "observed"}}
+        assert "SCHEMA" not in settings.sources["primary"].options
+
+    def test_load_env_override_merges_with_existing_schema_option(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Environment overrides for options.schema fields must override YAML schema fields."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  primary:
+    plugin: csv
+    on_success: output
+    options:
+      schema:
+        mode: fixed
+        fields:
+          - name: customer_id
+            type: str
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+
+""")
+        monkeypatch.setenv("ELSPETH_SOURCES__PRIMARY__OPTIONS__SCHEMA__MODE", "flexible")
+
+        settings = load_settings(config_file)
+
+        assert settings.sources["primary"].options["schema"] == {
+            "mode": "flexible",
+            "fields": [{"name": "customer_id", "type": "str"}],
+        }
+        assert "SCHEMA" not in settings.sources["primary"].options
+
     def test_load_validates_schema(self, tmp_path: Path) -> None:
         from elspeth.core.config import load_settings
 
@@ -1622,6 +1685,37 @@ gates:
         assert gate.routes == {"High": "urgent", "Medium": "standard", "Low": "archive"}
         assert "High" in gate.routes
         assert "high" not in gate.routes
+
+    def test_load_settings_preserves_schema_route_label(self, tmp_path: Path) -> None:
+        """Route labels named SCHEMA are user data, not plugin schema options."""
+        from elspeth.core.config import load_settings
+
+        config_file = tmp_path / "settings.yaml"
+        config_file.write_text("""
+sources:
+  primary:
+    plugin: csv
+    on_success: priority_router
+sinks:
+  output:
+    plugin: csv
+    on_write_failure: discard
+  schema_sink:
+    plugin: csv
+    on_write_failure: discard
+gates:
+  - name: priority_router
+    input: source_out
+    condition: "row['priority']"
+    routes:
+      SCHEMA: schema_sink
+      fallback: output
+""")
+
+        settings = load_settings(config_file)
+
+        assert settings.gates[0].routes == {"SCHEMA": "schema_sink", "fallback": "output"}
+        assert "schema" not in settings.gates[0].routes
 
 
 class TestCoalesceSettings:
@@ -4281,6 +4375,32 @@ class TestLowercaseSchemaKeysBranchPreservation:
         # Values inside branches must also be preserved
         assert branches["SentimentPath"] == "sentiment_out"
         assert branches["EntityPath"] == "entity_out"
+
+    def test_schema_branch_key_is_preserved(self) -> None:
+        """A branch named SCHEMA is user data, not plugin schema config."""
+        from elspeth.core.config import _lowercase_schema_keys
+
+        config = {
+            "COALESCE": [
+                {
+                    "NAME": "merge_results",
+                    "BRANCHES": {
+                        "SCHEMA": "schema_out",
+                        "fallback": "fallback_out",
+                    },
+                    "POLICY": "require_all",
+                    "MERGE": "select",
+                    "SELECT_BRANCH": "SCHEMA",
+                    "ON_SUCCESS": "output",
+                }
+            ]
+        }
+        result = _lowercase_schema_keys(config)
+
+        coalesce = result["coalesce"][0]
+        assert coalesce["branches"] == {"SCHEMA": "schema_out", "fallback": "fallback_out"}
+        assert coalesce["select_branch"] == "SCHEMA"
+        assert "schema" not in coalesce["branches"]
 
     def test_load_settings_preserves_coalesce_branch_names(self, tmp_path: Path) -> None:
         """Full config loading preserves mixed-case coalesce branch names."""

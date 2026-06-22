@@ -11,8 +11,8 @@ from pathlib import Path
 
 from elspeth_lints.core.protocols import RuleContext
 from elspeth_lints.rules.plugin_contract.component_type import RULE as COMPONENT_TYPE_RULE
-from elspeth_lints.rules.plugin_contract.plugin_hashes import RULE as PLUGIN_HASHES_RULE
 from elspeth_lints.rules.plugin_contract.plugin_hashes.rule import (
+    EXPECTED_PLUGIN_COUNT,
     PluginHashesRule,
     compute_source_file_hash,
 )
@@ -296,7 +296,7 @@ def test_plugin_hashes_reports_missing_source_file_hash(tmp_path: Path) -> None:
     )
 
     findings = list(
-        PLUGIN_HASHES_RULE.analyze(
+        PluginHashesRule(min_plugins=0).analyze(
             ast.Module(body=[], type_ignores=[]),
             tmp_path,
             RuleContext(root=tmp_path),
@@ -320,7 +320,7 @@ def test_plugin_hashes_reports_missing_hash_for_module_constant_name(tmp_path: P
         """,
     )
 
-    findings = scan_plugin_hashes_root(tmp_path)
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
 
     assert [finding.rule_id for finding in findings] == ["PH2"]
     assert "DynamicSource" in findings[0].message
@@ -329,14 +329,14 @@ def test_plugin_hashes_reports_missing_hash_for_module_constant_name(tmp_path: P
 def test_plugin_hashes_passes_on_correct_hashes(tmp_path: Path) -> None:
     _write_hashed_plugin(tmp_path, class_name="GoodSource", name="good", version="1.0.0")
 
-    assert scan_plugin_hashes_root(tmp_path) == []
+    assert scan_plugin_hashes_root(tmp_path, min_plugins=0) == []
 
 
 def test_plugin_hashes_reports_stale_hash(tmp_path: Path) -> None:
     plugin = _write_hashed_plugin(tmp_path, class_name="GoodSource", name="good", version="1.0.0")
     plugin.write_text(plugin.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
 
-    findings = scan_plugin_hashes_root(tmp_path)
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
 
     assert [finding.rule_id for finding in findings] == ["PH3"]
     assert "stale source_file_hash" in findings[0].message
@@ -352,7 +352,7 @@ def test_plugin_hashes_reports_missing_plugin_version(tmp_path: Path) -> None:
         """,
     )
 
-    findings = scan_plugin_hashes_root(tmp_path)
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
 
     assert [finding.rule_id for finding in findings] == ["PH1", "PH3"]
     assert "no version declaration" in findings[0].message
@@ -373,6 +373,26 @@ def test_plugin_hashes_enforces_minimum_discovery_count(tmp_path: Path) -> None:
     assert "DISCOVERY ERROR" in findings[0].message
 
 
+def test_plugin_hashes_default_rule_enforces_expected_discovery_count(tmp_path: Path) -> None:
+    findings = list(
+        PluginHashesRule().analyze(
+            ast.Module(body=[], type_ignores=[]),
+            tmp_path,
+            RuleContext(root=tmp_path),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["plugin_contract.plugin_hashes"]
+    assert f"expected at least {EXPECTED_PLUGIN_COUNT}" in findings[0].message
+
+
+def test_plugin_hashes_default_scan_enforces_expected_discovery_count(tmp_path: Path) -> None:
+    findings = scan_plugin_hashes_root(tmp_path)
+
+    assert [finding.rule_id for finding in findings] == ["plugin_contract.plugin_hashes"]
+    assert f"expected at least {EXPECTED_PLUGIN_COUNT}" in findings[0].message
+
+
 def test_plugin_hashes_ignores_excluded_helper_files(tmp_path: Path) -> None:
     _write(
         tmp_path / "plugins" / "sources" / "base.py",
@@ -382,7 +402,7 @@ def test_plugin_hashes_ignores_excluded_helper_files(tmp_path: Path) -> None:
         """,
     )
 
-    assert scan_plugin_hashes_root(tmp_path) == []
+    assert scan_plugin_hashes_root(tmp_path, min_plugins=0) == []
 
 
 def test_plugin_hashes_json_mode_succeeds_on_current_codebase(

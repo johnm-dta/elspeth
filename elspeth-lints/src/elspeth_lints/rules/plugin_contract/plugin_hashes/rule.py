@@ -60,7 +60,7 @@ class PluginAttributes:
 class PluginHashesRule:
     """Detect missing or stale plugin version/hash declarations."""
 
-    min_plugins: int = 0
+    min_plugins: int = EXPECTED_PLUGIN_COUNT
     id: str = RULE_ID
     scope: RuleScope = RuleScope.WHOLE_REPO
     metadata: RuleMetadata = RULE_METADATA
@@ -71,7 +71,7 @@ class PluginHashesRule:
         return scan_root(context.root, min_plugins=self.min_plugins)
 
 
-def scan_root(root: Path, *, min_plugins: int = 0) -> list[Finding]:
+def scan_root(root: Path, *, min_plugins: int = EXPECTED_PLUGIN_COUNT) -> list[Finding]:
     """Scan plugin files for PH1/PH2/PH3 findings."""
     plugin_files = discover_plugin_files(root)
     plugin_count = sum(len(extract_plugin_attributes(path)) for path in plugin_files)

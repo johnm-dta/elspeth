@@ -273,6 +273,14 @@ McpRuntimePreflight = Callable[[CompositionState], Awaitable[ValidationResult]]
 SessionScopeProvider = Callable[[], str]
 
 
+class _McpClientSafeToolError(Exception):
+    """Exception text intentionally safe for MCP transport error framing."""
+
+
+def _mcp_client_safe_tool_error(exc: Exception) -> _McpClientSafeToolError:
+    return _McpClientSafeToolError(f"Tool error: {type(exc).__name__}")
+
+
 async def _mcp_preview_runtime_preflight(
     state: CompositionState,
     *,
@@ -704,7 +712,7 @@ def create_server(
                     )
                 except Exception as exc:
                     _capture_plugin_crash(exc)
-                    raise
+                    raise _mcp_client_safe_tool_error(exc) from exc
 
                 _captured = preview_preflight
 

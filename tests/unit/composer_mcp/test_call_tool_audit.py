@@ -393,9 +393,12 @@ async def test_preview_runtime_preflight_failure_records_before_transport_error(
             server.request_handlers,
             "preview_pipeline",
             {},
-        )
+    )
 
-    assert response.root.isError is True
+    call_result = response.root
+    assert call_result.isError is True
+    assert call_result.content[0].text == "Tool error: RuntimeError"
+    assert "synthetic runtime preflight bug" not in call_result.content[0].text
     assert len(probe.invocations) == 1
     inv = probe.invocations[0]
     assert inv.status == ComposerToolStatus.PLUGIN_CRASH
@@ -431,7 +434,12 @@ async def test_preview_runtime_preflight_validation_error_is_plugin_crash_not_ar
             {},
         )
 
-    assert response.root.isError is True
+    call_result = response.root
+    assert call_result.isError is True
+    assert call_result.content[0].text == "Tool error: ValidationError"
+    assert "input_value" not in call_result.content[0].text
+    assert "enabled" not in call_result.content[0].text
+    assert "yes" not in call_result.content[0].text
     assert len(probe.invocations) == 1
     inv = probe.invocations[0]
     assert inv.status == ComposerToolStatus.PLUGIN_CRASH
@@ -467,7 +475,10 @@ async def test_preview_runtime_preflight_missing_settings_hash_is_plugin_crash_n
             {},
         )
 
-    assert response.root.isError is True
+    call_result = response.root
+    assert call_result.isError is True
+    assert call_result.content[0].text == "Tool error: ValueError"
+    assert "runtime_preflight_settings_hash" not in call_result.content[0].text
     assert len(probe.invocations) == 1
     inv = probe.invocations[0]
     assert inv.status == ComposerToolStatus.PLUGIN_CRASH

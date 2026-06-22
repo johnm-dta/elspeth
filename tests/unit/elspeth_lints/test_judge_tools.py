@@ -383,7 +383,11 @@ def _install_tool_fake_sdk(
         async def query(self, prompt: object, session_id: str = "default") -> None:
             if capture is not None:
                 capture["prompt"] = prompt
-                if hasattr(prompt, "__aiter__"):
+                try:
+                    _aiter = cast(AsyncIterable[object], prompt).__aiter__
+                except AttributeError:
+                    pass
+                else:
                     capture["prompt_messages"] = [item async for item in cast(AsyncIterable[object], prompt)]
 
         async def receive_response(self) -> AsyncIterator[object]:
@@ -441,7 +445,7 @@ def test_tool_mode_builds_streaming_hook_guarded_options(monkeypatch: pytest.Mon
     # Tool mode must use the SDK's streaming-input prompt shape; with a plain
     # string prompt the SDK does not invoke PreToolUse hooks for Read/Grep/Glob.
     assert not isinstance(capture["prompt"], str)
-    assert hasattr(capture["prompt"], "__aiter__")
+    _aiter = cast(AsyncIterable[object], capture["prompt"]).__aiter__
     prompt_messages = capture["prompt_messages"]
     assert len(prompt_messages) == 1
     prompt_message = cast(dict[str, object], prompt_messages[0])

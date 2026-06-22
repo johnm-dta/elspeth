@@ -33,7 +33,8 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterable, AsyncIterator, Callable
+from typing import cast
 
 import pytest
 
@@ -267,7 +268,7 @@ def test_blinded_agent_transport_uses_fail_closed_no_tool_permissions(monkeypatc
     assert capture["used_client"] is True
     assert capture["disconnected"] is True
     assert not isinstance(capture["prompt"], str)
-    assert hasattr(capture["prompt"], "__aiter__")
+    _aiter = cast(AsyncIterable[object], capture["prompt"]).__aiter__
     matcher = opts["hooks"]["PreToolUse"][0]
     hook = matcher.hooks[0]
     decision = asyncio.run(hook({"tool_name": "FutureTool", "tool_input": {"path": "/etc/passwd"}}, None, None))

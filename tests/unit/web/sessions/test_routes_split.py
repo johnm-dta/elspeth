@@ -30,7 +30,7 @@ def test_session_routes_package_preserves_legacy_patch_seams() -> None:
 
     assert callable(routes._dispatch_guided_respond)
     assert callable(routes._persist_tool_invocations)
-    assert hasattr(routes, "slog")
+    _slog = routes.slog
     assert callable(routes.step_advance)
 
 

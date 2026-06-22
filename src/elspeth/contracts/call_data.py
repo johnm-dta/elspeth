@@ -124,8 +124,8 @@ def _require_http_status_code(value: object, field_name: str, *, optional: bool 
     require_int(value, field_name, optional=optional, min_value=100)
     if value is not None:
         assert isinstance(value, int)
-    if value is not None and value > 599:
-        raise ValueError(f"{field_name} must be <= 599, got {value!r}")
+    if value is not None and value > 999:
+        raise ValueError(f"{field_name} must be <= 999, got {value!r}")
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,6 +3,8 @@ import { useAuthStore } from "./authStore";
 import { useBlobStore } from "./blobStore";
 import { usePreferencesStore } from "./preferencesStore";
 import { useSecretsStore } from "./secretsStore";
+import { useShareableReviewStore } from "./shareableReviewStore";
+import * as shareableReviewsApi from "../api/shareableReviews";
 import { resetStore } from "@/test/store-helpers";
 
 vi.mock("@/api/client", () => ({
@@ -18,6 +20,7 @@ describe("authStore account-scoped store reset", () => {
     resetStore(useBlobStore);
     resetStore(usePreferencesStore);
     resetStore(useSecretsStore);
+    useShareableReviewStore.getState().reset();
     localStorage.clear();
     vi.clearAllMocks();
   });
@@ -99,6 +102,110 @@ describe("authStore account-scoped store reset", () => {
       secrets: [],
       isLoading: false,
       error: null,
+    });
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: false,
+      latestResponse: null,
+      sessionIdForResponse: null,
+      error: null,
+      inFlight: false,
+    });
+  });
+
+  it("logout clears a minted share-review token before another account can see it", async () => {
+    vi.spyOn(shareableReviewsApi, "markReadyForReview").mockResolvedValueOnce({
+      token: "alice-share-token",
+      share_url: "/#/shared/alice-share-token",
+      expires_at: "2026-06-19T00:00:00+00:00",
+      payload_digest: "sha256:" + "ab".repeat(32),
+    });
+    useAuthStore.setState({
+      token: "token-for-alice",
+      user: {
+        user_id: "alice",
+        username: "alice",
+        display_name: "Alice",
+        email: null,
+        groups: [],
+      },
+      isLoading: false,
+    });
+    await useShareableReviewStore.getState().openAndMark("alice-session");
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: true,
+      latestResponse: expect.objectContaining({
+        token: "alice-share-token",
+        share_url: "/#/shared/alice-share-token",
+      }),
+      sessionIdForResponse: "alice-session",
+    });
+
+    await useAuthStore.getState().logout();
+
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: false,
+      latestResponse: null,
+      sessionIdForResponse: null,
+      error: null,
+      inFlight: false,
+    });
+  });
+
+  it("logout prevents an in-flight share-review response from repopulating the store", async () => {
+    let resolveMint: (
+      response: Awaited<ReturnType<typeof shareableReviewsApi.markReadyForReview>>,
+    ) => void = () => {};
+    const pendingMint = new Promise<
+      Awaited<ReturnType<typeof shareableReviewsApi.markReadyForReview>>
+    >((resolve) => {
+      resolveMint = resolve;
+    });
+    vi.spyOn(shareableReviewsApi, "markReadyForReview").mockReturnValueOnce(
+      pendingMint,
+    );
+    useAuthStore.setState({
+      token: "token-for-alice",
+      user: {
+        user_id: "alice",
+        username: "alice",
+        display_name: "Alice",
+        email: null,
+        groups: [],
+      },
+      isLoading: false,
+    });
+
+    const mintPromise =
+      useShareableReviewStore.getState().openAndMark("alice-session");
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: true,
+      inFlight: true,
+      sessionIdForResponse: "alice-session",
+    });
+
+    await useAuthStore.getState().logout();
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: false,
+      latestResponse: null,
+      sessionIdForResponse: null,
+      error: null,
+      inFlight: false,
+    });
+
+    resolveMint({
+      token: "late-alice-share-token",
+      share_url: "/#/shared/late-alice-share-token",
+      expires_at: "2026-06-19T00:00:00+00:00",
+      payload_digest: "sha256:" + "cd".repeat(32),
+    });
+    await mintPromise;
+
+    expect(useShareableReviewStore.getState()).toMatchObject({
+      dialogOpen: false,
+      latestResponse: null,
+      sessionIdForResponse: null,
+      error: null,
+      inFlight: false,
     });
   });
 });

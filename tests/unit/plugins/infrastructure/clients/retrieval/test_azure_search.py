@@ -599,6 +599,67 @@ class TestAzureSearchProviderReadiness:
         assert call_headers["Authorization"] == "Bearer managed-identity-token-123"
         assert "api-key" not in call_headers
 
+    def test_managed_identity_missing_azure_identity_raises_retrieval_error(self) -> None:
+        """Optional Azure dependency absence must be normalized at the retrieval boundary."""
+        import builtins
+
+        config = AzureSearchProviderConfig(
+            endpoint="https://test.search.windows.net",
+            index="test-index",
+            use_managed_identity=True,
+        )
+        provider = AzureSearchProvider(
+            config=config,
+            execution=MagicMock(),
+            run_id="run-1",
+            telemetry_emit=MagicMock(),
+        )
+        real_import = builtins.__import__
+
+        def fail_azure_identity_import(name: str, *args: Any, **kwargs: Any) -> Any:
+            if name == "azure.identity":
+                raise ImportError("No module named 'azure.identity'")
+            return real_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=fail_azure_identity_import),
+            pytest.raises(RetrievalError, match="azure-identity is not installed") as exc_info,
+        ):
+            provider._auth_headers()
+
+        assert not exc_info.value.retryable
+        assert provider._managed_identity_credential is None
+
+    def test_managed_identity_readiness_token_failure_raises_retrieval_error(self) -> None:
+        """Readiness token failures propagate as RetrievalError for transform on_start handling."""
+        from azure.core.exceptions import ClientAuthenticationError
+
+        config = AzureSearchProviderConfig(
+            endpoint="https://test.search.windows.net",
+            index="test-index",
+            use_managed_identity=True,
+        )
+        provider = AzureSearchProvider(
+            config=config,
+            execution=MagicMock(),
+            run_id="run-1",
+            telemetry_emit=MagicMock(),
+        )
+        auth_error = ClientAuthenticationError("DefaultAzureCredential failed")
+        mock_credential = MagicMock()
+        mock_credential.get_token.side_effect = auth_error
+
+        with (
+            patch("azure.identity.DefaultAzureCredential", return_value=mock_credential),
+            patch.object(provider, "_readiness_get") as mock_get,
+            pytest.raises(RetrievalError, match="Azure managed identity token acquisition failed") as exc_info,
+        ):
+            provider.check_readiness()
+
+        assert not exc_info.value.retryable
+        assert exc_info.value.__cause__ is auth_error
+        mock_get.assert_not_called()
+
     def test_readiness_uses_pinned_connection_url_with_host_and_sni(self) -> None:
         provider = self._make_provider()
         safe_request = SSRFSafeRequest(
@@ -823,6 +884,53 @@ class TestExecuteSearchHTTP:
         request_headers = route.calls.last.request.headers
         assert request_headers["Authorization"] == "Bearer managed-identity-token-123"
         assert "api-key" not in request_headers
+
+    def test_execute_search_managed_identity_token_failure_raises_retrieval_error(self) -> None:
+        from azure.core.exceptions import ClientAuthenticationError
+
+        provider = self._make_managed_identity_provider()
+        auth_error = ClientAuthenticationError("DefaultAzureCredential failed")
+        mock_credential = MagicMock()
+        mock_credential.get_token.side_effect = auth_error
+
+        with (
+            patch("azure.identity.DefaultAzureCredential", return_value=mock_credential),
+            respx.mock,
+        ):
+            route = respx.post(self.PINNED_SEARCH_URL).mock(return_value=httpx.Response(200, json={"value": []}))
+
+            with pytest.raises(RetrievalError, match="Azure managed identity token acquisition failed") as exc_info:
+                provider._execute_search("test query", top_k=5, state_id="s1", token_id="t1")
+
+        assert not exc_info.value.retryable
+        assert exc_info.value.__cause__ is auth_error
+        assert not route.called
+
+    def test_managed_identity_credential_is_cached_and_closed(self) -> None:
+        provider = self._make_managed_identity_provider()
+        response_body = {
+            "value": [
+                {"@search.score": 5.0, "content": "Result 1", "id": "doc1"},
+            ]
+        }
+        mock_token = MagicMock()
+        mock_token.token = "managed-identity-token-123"
+        mock_credential = MagicMock()
+        mock_credential.get_token.return_value = mock_token
+
+        with (
+            patch("azure.identity.DefaultAzureCredential", return_value=mock_credential) as credential_cls,
+            respx.mock,
+        ):
+            respx.post(self.PINNED_SEARCH_URL).mock(return_value=httpx.Response(200, json=response_body))
+
+            provider._execute_search("first query", top_k=5, state_id="s1", token_id="t1")
+            provider._execute_search("second query", top_k=5, state_id="s2", token_id="t2")
+            provider.close()
+
+        credential_cls.assert_called_once_with()
+        assert mock_credential.get_token.call_count == 2
+        mock_credential.close.assert_called_once_with()
 
     def test_execute_search_updates_audit_context_with_token(self) -> None:
         provider = self._make_provider()

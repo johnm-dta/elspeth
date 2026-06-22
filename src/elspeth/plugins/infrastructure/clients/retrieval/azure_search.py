@@ -165,6 +165,7 @@ class AzureSearchProvider:
         # skip counts in audit records without changing the protocol.
         self.last_skipped_count: int = 0
         self.last_skipped_reasons: list[dict[str, Any]] = []
+        self._managed_identity_credential: Any | None = None
 
         # Shared HTTP client for connection pooling. Created once, reused
         # across all search() calls. state_id is updated per-call.
@@ -185,12 +186,31 @@ class AzureSearchProvider:
         if self._config.api_key:
             return {"api-key": self._config.api_key}
         if self._config.use_managed_identity:
-            from azure.identity import DefaultAzureCredential
+            credential = self._get_managed_identity_credential()
+            try:
+                from azure.core.exceptions import AzureError
 
-            credential = DefaultAzureCredential()
-            token = credential.get_token(_AZURE_SEARCH_TOKEN_SCOPE)
+                token = credential.get_token(_AZURE_SEARCH_TOKEN_SCOPE)
+            except AzureError as exc:
+                raise RetrievalError(
+                    f"Azure managed identity token acquisition failed for {self._config.endpoint} index {self._config.index!r}: {exc}",
+                    retryable=False,
+                ) from exc
             return {"Authorization": f"Bearer {token.token}"}
         return {}
+
+    def _get_managed_identity_credential(self) -> Any:
+        if self._managed_identity_credential is None:
+            try:
+                from azure.identity import DefaultAzureCredential
+            except ImportError as exc:
+                raise RetrievalError(
+                    "Azure managed identity token acquisition failed: azure-identity is not installed. "
+                    "Install elspeth with the 'azure' extra or use api_key authentication.",
+                    retryable=False,
+                ) from exc
+            self._managed_identity_credential = DefaultAzureCredential()
+        return self._managed_identity_credential
 
     def search(
         self,
@@ -503,4 +523,12 @@ class AzureSearchProvider:
 
     def close(self) -> None:
         """Release the shared HTTP client and its connection pool."""
-        self._http_client.close()
+        try:
+            self._http_client.close()
+        finally:
+            credential = self._managed_identity_credential
+            self._managed_identity_credential = None
+            if credential is not None:
+                close = getattr(credential, "close", None)
+                if callable(close):
+                    close()

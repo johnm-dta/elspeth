@@ -41,6 +41,13 @@ def _step(job: dict[str, Any], step_name: str) -> dict[str, Any]:
     raise AssertionError(f"Missing CI step {step_name!r}")
 
 
+def _step_index(job: dict[str, Any], step_name: str) -> int:
+    for index, step in enumerate(job["steps"]):
+        if step.get("name") == step_name:
+            return index
+    raise AssertionError(f"Missing CI step {step_name!r}")
+
+
 def test_python_matrix_ci_does_not_hard_disable_xdist() -> None:
     """Remote Python test lanes must leave xdist available instead of forcing ``-n0``."""
     workflow = _ci_workflow()
@@ -223,6 +230,29 @@ def test_static_analysis_signed_allowlist_steps_handle_trusted_and_fork_prs() ->
         assert "github.event.pull_request.head.repo.full_name != github.repository" in verify_mode
         assert "shape-only-when-key-missing" in verify_mode
         assert "required" in verify_mode
+
+
+def test_static_analysis_fork_prs_reject_unverified_signed_allowlist_edits() -> None:
+    """Fork PRs must not use keyless shape-only CI to forge signed allowlist entries."""
+    workflow = _ci_workflow()
+    static_analysis = workflow["jobs"]["static-analysis"]
+
+    step = _step(static_analysis, "Reject unverified fork PR signed allowlist edits")
+    assert (
+        step.get("if") == "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}"
+    )
+
+    run = _step_run(static_analysis, "Reject unverified fork PR signed allowlist edits")
+    assert "git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}" in run
+    assert "check-judge-coverage" in run
+    assert "--forbid-unverified-judge-metadata" in run
+    assert "--allowlist-root config/cicd/enforce_tier_model" in run
+    assert "--allowlist-root config/cicd/enforce_trust_boundary_honesty" in run
+    assert "--baseline-ref ${{ github.event.pull_request.base.sha }}" in run
+
+    gate_index = _step_index(static_analysis, "Reject unverified fork PR signed allowlist edits")
+    assert gate_index < _step_index(static_analysis, "Run trust-tier elspeth-lints rule")
+    assert gate_index < _step_index(static_analysis, "Run trust-boundary honesty-gate elspeth-lints rules")
 
 
 def test_trust_tier_ci_failure_points_to_signature_diagnosis_command() -> None:

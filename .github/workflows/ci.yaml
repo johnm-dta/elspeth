@@ -77,6 +77,22 @@ jobs:
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv sync --frozen --all-extras
 
+      - name: Reject unverified fork PR signed allowlist edits
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        working-directory: ${{ env.CI_CHECKOUT_PATH }}
+        run: |
+          git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check-judge-coverage \
+            --baseline-ref ${{ github.event.pull_request.base.sha }} \
+            --allowlist-root config/cicd/enforce_tier_model \
+            --repo-root . \
+            --forbid-unverified-judge-metadata
+          PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check-judge-coverage \
+            --baseline-ref ${{ github.event.pull_request.base.sha }} \
+            --allowlist-root config/cicd/enforce_trust_boundary_honesty \
+            --repo-root . \
+            --forbid-unverified-judge-metadata
+
       - name: Check code style (ruff)
         working-directory: ${{ env.CI_CHECKOUT_PATH }}
         run: uv run ruff check src/ tests/ scripts/ examples/ elspeth-lints/src/

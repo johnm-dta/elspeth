@@ -46,6 +46,12 @@ judge metadata cluster and its ``key`` / ``file_fingerprint`` / ``ast_path``
 binding no longer matches any judged baseline binding for the same
 discriminator.
 
+In fork PR CI the HMAC key is unavailable, so a "complete" newly-signed entry
+is still only shape-valid. ``forbid_unverified_judge_metadata`` lets that lane
+reuse this diff logic while rejecting fresh judged records outright; unchanged
+baseline entries remain inspectable in shape-only mode, but forks cannot add or
+re-sign entries that the runner cannot cryptographically verify.
+
 Boundary discipline: this module routes directories into C1 only when
 they contain the standard judge-covered ``allow_hits:`` shape parsed by
 ``elspeth_lints.core.allowlist._parse_allow_hits``. Newly-added
@@ -83,6 +89,7 @@ from elspeth_lints.core.allowlist_io import (
 UNRECOGNIZED_ENTRY_SHAPE = "UNRECOGNIZED_ENTRY_SHAPE"
 PER_FILE_RULE_REQUIRES_JUDGE = "PER_FILE_RULE_REQUIRES_JUDGE"
 JUDGE_METADATA_MUTATED = "JUDGE_METADATA_MUTATED"
+UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC = "UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC"
 _ALLOWLIST_ENTRY_KEYS = frozenset({"allow_hits", "allow_classes", "entries", "per_file_rules"})
 _JUDGE_COVERED_ENTRY_KEYS = frozenset({"allow_hits", "per_file_rules"})
 
@@ -158,6 +165,7 @@ def check_judge_coverage(
     allowlist_root: Path,
     baseline_ref: str,
     repo_root: Path,
+    forbid_unverified_judge_metadata: bool = False,
 ) -> dict[str, JudgeCoverageReport]:
     """Diff every judge-covered allowlist under ``allowlist_root``.
 
@@ -179,18 +187,22 @@ def check_judge_coverage(
     if not repo_root.is_dir():
         raise JudgeCoverageError(f"--repo-root {repo_root} is not a directory")
 
+    if allowlist_root.name.startswith("enforce_"):
+        candidate_dirs = [allowlist_root]
+    else:
+        candidate_dirs = sorted(
+            entry_dir for entry_dir in allowlist_root.iterdir() if entry_dir.is_dir() and entry_dir.name.startswith("enforce_")
+        )
+
     reports: dict[str, JudgeCoverageReport] = {}
-    for entry_dir in sorted(allowlist_root.iterdir()):
-        if not entry_dir.is_dir():
-            continue
-        if not entry_dir.name.startswith("enforce_"):
-            continue
+    for entry_dir in candidate_dirs:
         if not _directory_has_allowlist_entries(entry_dir):
             continue
         reports[entry_dir.name] = check_one_directory(
             allowlist_dir=entry_dir,
             baseline_ref=baseline_ref,
             repo_root=repo_root,
+            forbid_unverified_judge_metadata=forbid_unverified_judge_metadata,
         )
     return reports
 
@@ -200,6 +212,7 @@ def check_one_directory(
     allowlist_dir: Path,
     baseline_ref: str,
     repo_root: Path,
+    forbid_unverified_judge_metadata: bool = False,
 ) -> JudgeCoverageReport:
     """Diff the allow_hits entries in one enforce_* directory."""
     head_entries, head_per_file_rules, shape_violations = _load_head_from_disk(allowlist_dir)
@@ -239,6 +252,8 @@ def check_one_directory(
             if not _judge_metadata_matches_any_baseline(entry, baseline_matches):
                 if _is_fresh_judge_record_after_binding_drift(entry, baseline_matches):
                     new_count += 1
+                    if forbid_unverified_judge_metadata:
+                        violations.append(_unverified_judge_metadata_violation(entry))
                     continue
                 violations.append(
                     JudgeCoverageViolation(
@@ -278,6 +293,8 @@ def check_one_directory(
                     missing_fields=missing,
                 )
             )
+        elif forbid_unverified_judge_metadata and _judge_metadata_payload(entry) is not None:
+            violations.append(_unverified_judge_metadata_violation(entry))
     for per_file_entry in head_per_file_rules:
         if _per_file_rule_discriminator(per_file_entry) in baseline_per_file_discriminators:
             grandfathered_count += 1
@@ -477,6 +494,15 @@ def _missing_judge_fields(entry: AllowlistEntry) -> tuple[str, ...]:
     if entry.judge_metadata_signature is None:
         missing.append("judge_metadata_signature")
     return tuple(missing)
+
+
+def _unverified_judge_metadata_violation(entry: AllowlistEntry) -> JudgeCoverageViolation:
+    """Return the keyless-fork violation for a new signed allowlist entry."""
+    return JudgeCoverageViolation(
+        entry_key=entry.key,
+        source_file=entry.source_file,
+        missing_fields=(UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,),
+    )
 
 
 # =========================================================================

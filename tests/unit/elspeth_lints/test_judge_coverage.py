@@ -47,6 +47,7 @@ from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH
 from elspeth_lints.core.judge_coverage import (
     JUDGE_METADATA_MUTATED,
     PER_FILE_RULE_REQUIRES_JUDGE,
+    UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,
     JudgeCoverageError,
     JudgeCoverageReport,
     _discriminator,
@@ -604,6 +605,123 @@ def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path) -> None:
     assert report.new_entry_count == 1
     assert report.violations == ()
     assert report.passes
+
+
+def test_e2e_keyless_fork_mode_rejects_new_signed_entry(tmp_path: Path) -> None:
+    """Fork PRs cannot prove a newly-signed entry is authentic without the HMAC key."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial: empty allowlist")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:forged:fp=dddddddddddddddd
+          owner: fork-contributor
+          reason: forged signed entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: fake rationale from fork PR
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    _commit(tmp_path, "fork PR: add forged judged entry")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        forbid_unverified_judge_metadata=True,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,)
+    assert not report.passes
+
+
+def test_e2e_keyless_fork_mode_grandfathers_unchanged_signed_entry(tmp_path: Path) -> None:
+    """Fork PRs can inspect an existing signed entry without accepting new signatures."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:existing:fp=dddddddddddddddd
+          owner: alice
+          reason: existing judged entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: previously accepted rationale
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    baseline = _commit(tmp_path, "initial: signed allowlist entry")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        forbid_unverified_judge_metadata=True,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 1
+    assert report.new_entry_count == 0
+    assert report.violations == ()
+    assert report.passes
+
+
+def test_check_judge_coverage_accepts_single_enforce_directory_root(tmp_path: Path) -> None:
+    """CI can point the fork-only gate at one signed allowlist directory."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n")
+    baseline = _commit(tmp_path, "initial: empty allowlist")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: web/x.py:R5:forged:fp=dddddddddddddddd
+          owner: fork-contributor
+          reason: forged signed entry
+          safety: contained
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '2026-05-23T12:00:00+00:00'
+          judge_model: anthropic/claude-opus-4-7
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: fake rationale from fork PR
+          file_fingerprint: '0000000000000000000000000000000000000000000000000000000000000000'
+          ast_path: body[0]
+          judge_metadata_signature: '{_FAKE_JUDGE_METADATA_SIGNATURE}'
+    """)
+    )
+    _commit(tmp_path, "fork PR: add forged judged entry")
+
+    reports = check_judge_coverage(
+        allowlist_root=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        forbid_unverified_judge_metadata=True,
+    )
+
+    assert set(reports) == {"enforce_tier_model"}
+    report = reports["enforce_tier_model"]
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (UNVERIFIED_JUDGE_METADATA_WITHOUT_HMAC,)
 
 
 def test_e2e_grandfathered_judge_metadata_mutation_is_flagged(tmp_path: Path) -> None:
@@ -1342,7 +1460,7 @@ def test_git_commands_force_c_locale(tmp_path: Path, monkeypatch: pytest.MonkeyP
     """Git subprocesses run with ``LC_ALL=C`` and do not depend on localized stderr."""
     calls: list[dict[str, str]] = []
 
-    def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def fake_run(*args, **kwargs):
         calls.append(kwargs.get("env", {}))
         return subprocess.CompletedProcess(args[0], 0, stdout="", stderr="")
 

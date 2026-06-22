@@ -852,9 +852,19 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("config/cicd"),
         help=(
-            "Directory whose 'enforce_*' subdirectories are checked. Default: "
-            "config/cicd. Non-empty legacy entry shapes without an 'allow_hits:' "
-            "block produce UNRECOGNIZED_ENTRY_SHAPE violations."
+            "Directory whose 'enforce_*' subdirectories are checked, or one "
+            "'enforce_*' directory to check directly. Default: config/cicd. "
+            "Non-empty legacy entry shapes without an 'allow_hits:' block produce "
+            "UNRECOGNIZED_ENTRY_SHAPE violations."
+        ),
+    )
+    check_coverage.add_argument(
+        "--forbid-unverified-judge-metadata",
+        action="store_true",
+        help=(
+            "Fail complete newly-signed allow_hits entries instead of trusting their "
+            "signature shape. Use in fork PR CI, where the HMAC key is unavailable "
+            "and new signatures cannot be recomputed."
         ),
     )
     check_coverage.add_argument(
@@ -4144,6 +4154,7 @@ def _run_check_judge_coverage(args: argparse.Namespace) -> int:
             allowlist_root=args.allowlist_root,
             baseline_ref=args.baseline_ref,
             repo_root=args.repo_root,
+            forbid_unverified_judge_metadata=args.forbid_unverified_judge_metadata,
         )
     except JudgeCoverageError as exc:
         sys.stderr.write(f"check-judge-coverage: cannot run: {exc}\n")
@@ -4163,7 +4174,7 @@ def _run_check_judge_coverage(args: argparse.Namespace) -> int:
     if total_violations == 0:
         return 0
 
-    sys.stdout.write("\nNew entries missing required judge metadata:\n")
+    sys.stdout.write("\nNew entries missing required judge metadata or carrying unverified signatures:\n")
     for dir_name in sorted(reports):
         report = reports[dir_name]
         if not report.violations:

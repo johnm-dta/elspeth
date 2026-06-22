@@ -4216,17 +4216,14 @@ class ComposerServiceImpl:
                 continue
             blocking = not guidance.strip().upper().startswith("CLEAN")
             return AdvisorCheckpointVerdict(ok=True, blocking=blocking, findings_text=guidance.strip())
-        # Include the exception CLASS name so an operator-facing blocked message
-        # distinguishes a genuine programming bug (AttributeError/KeyError/
-        # TypeError re-raised by the call core) from a transient transport/config
-        # failure (timeout/auth). The catch breadth is deliberately UNCHANGED —
-        # fail-closed is preserved and CancelledError still escapes as
-        # BaseException; the crash-loud-vs-fail-closed polarity is deferred to the
-        # operator (spec §13). Only the diagnostic text is sharpened.
+        # Keep fail-closed semantics but do not carry provider SDK text into
+        # findings_text. The END gate folds findings_text into ValidationError
+        # and the returned assistant message, so rendering str(last_exc) here
+        # would bypass the route-level provider-error redaction policy.
         return AdvisorCheckpointVerdict(
             ok=False,
             blocking=False,
-            findings_text=f"{type(last_exc).__name__}: {last_exc}" if last_exc else "advisor unavailable",
+            findings_text=_ADVISOR_UNAVAILABLE_USER_DETAIL if last_exc else "advisor unavailable",
         )
 
     async def _maybe_run_early_checkpoint(
@@ -4941,6 +4938,7 @@ _ADVISOR_SIGNOFF_BLOCKED_CODE: Final[str] = "advisor_signoff_blocked"
 # Mirrors the orphan gate's check-name convention so the synthetic fail-closed
 # result names a stable check the UI/audit can key on.
 _ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME: Final[ValidationCheckName] = CHECK_ADVISOR_SIGNOFF
+_ADVISOR_UNAVAILABLE_USER_DETAIL: Final[str] = "advisor model was unavailable after retry"
 
 
 def _advisor_signoff_blocked_validation(*, reason: str, findings: str) -> ValidationResult:

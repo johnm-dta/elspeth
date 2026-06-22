@@ -440,6 +440,34 @@ async def test_end_gate_unavailable_fails_closed(make_service, clean_runnable_st
 
 
 @pytest.mark.asyncio
+async def test_end_gate_unavailable_redacts_raw_provider_exception(make_service, clean_runnable_state):
+    """Advisor provider failures fail closed without returning raw SDK text."""
+    service = make_service()
+    raw_provider_detail = "provider 502 from https://internal-provider.example/v1 request_id=req-secret api_key=sk-live-secret"
+    service._call_advisor_with_audit = AsyncMock(side_effect=RuntimeError(raw_provider_detail))
+
+    outcome = await drive_try_terminate(service, clean_runnable_state, advisor_checkpoint_passes_used=0)
+
+    assert outcome.action == "return"
+    assert outcome.result.runtime_preflight.is_valid is False
+    exposed_surfaces = [
+        outcome.result.message,
+        outcome.result.runtime_preflight.errors[0].message,
+        outcome.result.runtime_preflight.errors[0].suggestion or "",
+        outcome.result.runtime_preflight.checks[0].detail,
+        outcome.result.runtime_preflight.readiness.blockers[0].detail,
+        outcome.result.runtime_preflight.model_dump_json(),
+    ]
+    for text in exposed_surfaces:
+        assert "sk-live-secret" not in text
+        assert "internal-provider.example" not in text
+        assert "request_id=req-secret" not in text
+        assert "RuntimeError" not in text
+    assert "advisor model was unavailable after retry" in outcome.result.message
+    assert service._call_advisor_with_audit.await_count >= 2
+
+
+@pytest.mark.asyncio
 async def test_advisor_budget_does_not_consume_repair_budget(make_service, clean_runnable_state):
     """Gate-order invariant: a flagged advisor repair-continue increments
     advisor_passes_delta, NOT repair_turns_delta."""

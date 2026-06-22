@@ -467,6 +467,30 @@ class TestSetSource:
         assert second.updated_state.sources["orders"].plugin == "json"
         assert "source:orders" in second.affected_nodes
 
+    @pytest.mark.parametrize("source_name", ("Orders", "on_success", " "))
+    def test_set_source_invalid_source_name_raises_arg_error(self, source_name: str) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "set_source",
+                {
+                    "source_name": source_name,
+                    "plugin": "csv",
+                    "on_success": "rows",
+                    "options": {"path": "/data/orders.csv", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                },
+                state,
+                catalog,
+            )
+
+        assert exc_info.value.argument == "source_name"
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
     def test_named_source_patch_and_clear_target_only_selected_source(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -3280,6 +3304,35 @@ class TestBlobTools:
         assert result.updated_state.sources["orders"].plugin == "csv"
         assert result.updated_state.sources["orders"].options["blob_ref"] == self.blob_id
         assert result.affected_nodes == ("source:orders",)
+
+    @pytest.mark.parametrize(
+        "source_name",
+        ("Orders", "on_success", " "),
+    )
+    def test_set_source_from_blob_invalid_source_name_raises_arg_error(self, source_name: str) -> None:
+        """Invalid blob source names are LLM argument errors, not plugin crashes."""
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "set_source_from_blob",
+                {
+                    "blob_id": self.blob_id,
+                    "source_name": source_name,
+                    "on_success": "orders_rows",
+                    "options": {"schema": {"mode": "observed"}},
+                },
+                state,
+                catalog,
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+        assert exc_info.value.argument == "source_name"
+        assert isinstance(exc_info.value.__cause__, ValueError)
 
     def test_set_source_from_plain_text_blob_uses_text_source(self) -> None:
         """text/plain blob should auto-resolve to the 'text' source plugin."""

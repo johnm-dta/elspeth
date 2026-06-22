@@ -32,6 +32,7 @@ from elspeth.web.composer.source_inspection import (
 from elspeth.web.composer.state import (
     CompositionState,
     SourceSpec,
+    validate_composer_source_name,
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
@@ -292,6 +293,18 @@ def _source_component_id(source_name: str) -> str:
     return "source" if source_name == "source" else f"source:{source_name}"
 
 
+def _validate_source_name_argument(source_name: str) -> None:
+    """Raise ARG_ERROR for invalid LLM-supplied source names."""
+    try:
+        validate_composer_source_name(source_name)
+    except ValueError as exc:
+        raise ToolArgumentError(
+            argument="source_name",
+            expected="a valid composer source name",
+            actual_type="str",
+        ) from exc
+
+
 def _resolve_source_blob(
     *,
     blob_id: str,
@@ -433,6 +446,7 @@ def _execute_set_source(
     plugin = validated.plugin
     options = validated.options
     source_name = validated.source_name
+    _validate_source_name_argument(source_name)
 
     # Validate plugin exists in catalog
     plugin_error = _validate_plugin_name(context.catalog, "source", plugin)
@@ -521,6 +535,9 @@ def _execute_set_source_from_blob(
             actual_type=type(exc).__name__,
         ) from exc
 
+    source_name = validated.source_name
+    _validate_source_name_argument(source_name)
+
     on_vf = validated.on_validation_failure if validated.on_validation_failure is not None else _DEFAULT_SOURCE_VALIDATION_FAILURE
     resolved = _resolve_source_blob(
         blob_id=validated.blob_id,
@@ -542,7 +559,6 @@ def _execute_set_source_from_blob(
         options=resolved.options,
         on_validation_failure=on_vf,
     )
-    source_name = validated.source_name
     new_state = state.with_named_source(source_name, source)
     data = _vf_destination_note(new_state, on_vf) or {}
     return _mutation_result(new_state, (_source_component_id(source_name),), data={**data, "source_blob": resolved.payload})

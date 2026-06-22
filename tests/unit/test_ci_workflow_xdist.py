@@ -14,6 +14,7 @@ from elspeth.testing.pytest_xdist_auto import pytest_cmdline_main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
+ACTIONLINT_CONFIG = REPO_ROOT / ".github" / "actionlint.yaml"
 JUDGE_GATES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "enforce-allowlist-judge-gates.yaml"
 _SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|"})
 
@@ -285,6 +286,33 @@ def test_static_analysis_runs_composer_skill_inventory_drift_gate() -> None:
     run = _step_run(static_analysis, "Check composer skill tool inventory")
 
     assert "scripts/cicd/generate_skill_inventory.py --check" in run
+
+
+def test_static_analysis_runs_actionlint_with_repo_policy_config() -> None:
+    """Workflow syntax and self-hosted runner labels must be checked in CI."""
+    workflow = _ci_workflow()
+    static_analysis = workflow["jobs"]["static-analysis"]
+
+    step = _step(static_analysis, "Check GitHub workflows (actionlint)")
+    assert step["shell"] == "bash"
+    env = step.get("env")
+    assert isinstance(env, dict), "actionlint step must pin version and checksum"
+    assert env["ACTIONLINT_VERSION"] == "1.7.12"
+    assert env["ACTIONLINT_SHA256"] == "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+
+    run = _step_run(static_analysis, "Check GitHub workflows (actionlint)")
+    assert "sha256sum -c -" in run
+    assert "-config-file .github/actionlint.yaml" in run
+    assert ".github/workflows/*.yml" in run
+    assert ".github/workflows/*.yaml" in run
+
+
+def test_actionlint_policy_declares_self_hosted_runner_labels() -> None:
+    policy = _workflow(ACTIONLINT_CONFIG)
+
+    labels = policy["self-hosted-runner"]["labels"]
+
+    assert {"nyx-ci", "trusted"} <= set(labels)
 
 
 def test_static_analysis_signed_allowlist_steps_handle_trusted_and_fork_prs() -> None:

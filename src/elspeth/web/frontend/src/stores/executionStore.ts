@@ -81,10 +81,6 @@ let wsConnection: WebSocketConnection | null = null;
 let validationRequestSeq = 0;
 let executionRequestSeq = 0;
 
-function currentCompositionVersion(): number | null {
-  return useSessionStore.getState().compositionState?.version ?? null;
-}
-
 function shouldApplyValidationResult(
   sessionId: string,
   expectedVersion: number | null,
@@ -337,10 +333,15 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
 
   async validate(sessionId: string, options: ValidateOptions = {}) {
     const requestSeq = ++validationRequestSeq;
-    const expectedVersion = options.expectedVersion ?? currentCompositionVersion();
+    const compositionState = useSessionStore.getState().compositionState;
+    const expectedVersion = options.expectedVersion ?? compositionState?.version ?? null;
+    const stateId = compositionState?.id;
     set({ isValidating: true, validationResult: null, error: null });
     try {
-      const result = await api.validatePipeline(sessionId);
+      const result =
+        stateId === undefined
+          ? await api.validatePipeline(sessionId)
+          : await api.validatePipeline(sessionId, stateId);
       if (requestSeq !== validationRequestSeq) return false;
       if (!shouldApplyValidationResult(sessionId, expectedVersion)) {
         set({ isValidating: false });
@@ -379,12 +380,13 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
       return null;
     }
     const requestSeq = ++executionRequestSeq;
+    const stateId = useSessionStore.getState().compositionState?.id;
     set({ isExecuting: true, error: null });
     try {
       const { run_id } =
-        fanoutAck === undefined
+        fanoutAck === undefined && stateId === undefined
           ? await api.executePipeline(sessionId)
-          : await api.executePipeline(sessionId, fanoutAck);
+          : await api.executePipeline(sessionId, fanoutAck, stateId);
       if (!shouldApplyExecutionResult(sessionId, requestSeq)) {
         if (requestSeq === executionRequestSeq) {
           set({ isExecuting: false });

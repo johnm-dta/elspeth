@@ -1157,6 +1157,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
 
     const recoveredState = recoveryError.partial_state;
+    if (
+      recoveryError.partial_state_save_failed === true ||
+      typeof recoveredState.id !== "string" ||
+      recoveredState.id.trim() === ""
+    ) {
+      set({
+        error:
+          "Recovered draft was not saved on the server. Discard recovery and retry the composer step.",
+      });
+      return { applied: false, needsConfirmation: false };
+    }
     getExecutionStore().clearValidation();
     set((state) => {
       const nodeStillExists =

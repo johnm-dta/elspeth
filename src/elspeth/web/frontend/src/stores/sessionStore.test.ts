@@ -1056,6 +1056,29 @@ describe("sessionStore", () => {
       expect(clearValidationMock).toHaveBeenCalledTimes(1);
     });
 
+    it("refuses to apply a recovered state that was not saved server-side", () => {
+      const current = makeCompositionState(1, ["current"]);
+      const recovered = { ...makeCompositionState(2, ["recovered"]), id: "" };
+      const recoveryError: ComposerRecoveryError = {
+        ...makeRecoveryError(recovered),
+        partial_state_save_failed: true,
+      };
+      useSessionStore.setState({
+        compositionState: current,
+        recoveryError,
+        recoveryStartedCompositionVersion: 1,
+      });
+
+      const result = useSessionStore.getState().applyRecoveredState();
+
+      const state = useSessionStore.getState();
+      expect(result).toEqual({ applied: false, needsConfirmation: false });
+      expect(state.compositionState).toBe(current);
+      expect(state.recoveryError).toBe(recoveryError);
+      expect(state.error).toMatch(/not saved on the server/i);
+      expect(clearValidationMock).not.toHaveBeenCalled();
+    });
+
     it("requires confirmation when current version differs from compose-start version", () => {
       const recovered = makeCompositionState(3, ["next"]);
       useSessionStore.setState({

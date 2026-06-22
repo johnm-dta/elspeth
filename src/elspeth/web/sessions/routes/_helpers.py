@@ -533,6 +533,12 @@ def _state_response(
     )
 
 
+def _recovery_partial_state_response(state: CompositionStateRecord) -> dict[str, Any]:
+    """Serialize the persisted recovery state, including its server identity."""
+
+    return _state_response(state).model_dump(mode="json")
+
+
 def _interpretation_event_response(event: InterpretationEventRecord) -> InterpretationEventResponse:
     """Project an :class:`InterpretationEventRecord` to its wire shape.
 
@@ -1747,8 +1753,7 @@ async def _handle_convergence_error(
                 provenance="convergence_persist",
             )
             persisted_state_id = partial_record.id
-            state_d = exc.partial_state.to_dict()
-            response_body["partial_state"] = redact_source_storage_path(state_d)
+            response_body["partial_state"] = _recovery_partial_state_response(partial_record)
         except SQLAlchemyError as save_err:
             # Full SQLAlchemyError family — ``IntegrityError`` alone would
             # let ``OperationalError`` (lock timeout / pool disconnect /
@@ -1891,6 +1896,7 @@ async def _handle_plugin_crash(
                 provenance="plugin_crash_persist",
             )
             persisted_state_id_pc = partial_record.id
+            response_body["partial_state"] = _recovery_partial_state_response(partial_record)
         except SQLAlchemyError as save_err:
             # Full SQLAlchemyError family — a narrow ``IntegrityError``
             # catch would let ``OperationalError`` / ``ProgrammingError`` /
@@ -2124,6 +2130,7 @@ async def _handle_runtime_preflight_failure(
                 provenance="preflight_persist",
             )
             persisted_state_id_rpf = partial_record.id
+            response_body["partial_state"] = _recovery_partial_state_response(partial_record)
         except SQLAlchemyError as save_err:
             # See sibling helpers for redaction rationale (exc_info
             # omitted; class name only on the response body).

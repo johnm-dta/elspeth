@@ -807,8 +807,14 @@ export async function getPluginSchema(
  */
 export async function validatePipeline(
   sessionId: string,
+  stateId?: string,
 ): Promise<ValidationResult> {
-  const response = await fetch(`/api/sessions/${sessionId}/validate`, {
+  const params = new URLSearchParams();
+  if (stateId) {
+    params.set("state_id", stateId);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  const response = await fetch(`/api/sessions/${sessionId}/validate${query}`, {
     method: "POST",
     headers: authHeaders("application/json"),
   });
@@ -823,7 +829,13 @@ export async function validatePipeline(
 export async function executePipeline(
   sessionId: string,
   fanoutAck?: ExecutionFanoutAck,
+  stateId?: string,
 ): Promise<{ run_id: string }> {
+  const params = new URLSearchParams();
+  if (stateId) {
+    params.set("state_id", stateId);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
   const init: RequestInit = {
     method: "POST",
     headers: authHeaders("application/json"),
@@ -831,7 +843,7 @@ export async function executePipeline(
   if (fanoutAck) {
     init.body = JSON.stringify({ fanout_ack_token: fanoutAck.token });
   }
-  const response = await fetch(`/api/sessions/${sessionId}/execute`, init);
+  const response = await fetch(`/api/sessions/${sessionId}/execute${query}`, init);
   return parseResponse<{ run_id: string }>(response);
 }
 

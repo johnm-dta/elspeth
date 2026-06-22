@@ -57,7 +57,7 @@ describe("executionStore.validate", () => {
     resetInterpretationStore();
     useSessionStore.setState({
       activeSessionId: "session-1",
-      compositionState: { version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
     } as never);
   });
 
@@ -77,6 +77,7 @@ describe("executionStore.validate", () => {
     await useExecutionStore.getState().validate("session-1");
 
     const state = useExecutionStore.getState();
+    expect(validatePipeline).toHaveBeenCalledWith("session-1", "state-1");
     expect(state.validationResult).toEqual(result);
     expect(state.isValidating).toBe(false);
   });
@@ -315,7 +316,10 @@ describe("executionStore.execute", () => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     resetInterpretationStore();
-    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+    } as never);
   });
 
   it("drops a late start success after the active session changes", async () => {
@@ -527,7 +531,10 @@ describe("executionStore fanout guard", () => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     resetInterpretationStore();
-    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+    } as never);
   });
 
   const guard = {
@@ -562,7 +569,11 @@ describe("executionStore fanout guard", () => {
 
     const state = useExecutionStore.getState();
     expect(runId).toBeNull();
-    expect(executePipeline).toHaveBeenCalledWith("session-1");
+    expect(executePipeline).toHaveBeenCalledWith(
+      "session-1",
+      undefined,
+      "state-1",
+    );
     expect(state.pendingFanoutGuard).toEqual(guard);
     expect(state.pendingFanoutSessionId).toBe("session-1");
     expect(state.isExecuting).toBe(false);
@@ -585,10 +596,14 @@ describe("executionStore fanout guard", () => {
 
     const state = useExecutionStore.getState();
     expect(runId).toBe("run-1");
-    expect(executePipeline).toHaveBeenLastCalledWith("session-1", {
-      accepted: true,
-      token: "ack-line-explode",
-    });
+    expect(executePipeline).toHaveBeenLastCalledWith(
+      "session-1",
+      {
+        accepted: true,
+        token: "ack-line-explode",
+      },
+      "state-1",
+    );
     expect(state.pendingFanoutGuard).toBeNull();
     expect(state.pendingFanoutSessionId).toBeNull();
     expect(state.activeRunId).toBe("run-1");

@@ -42,7 +42,7 @@ from elspeth.web.execution.schemas import (
     ValidationReadiness,
     ValidationResult,
 )
-from elspeth.web.sessions.protocol import RunAlreadyActiveError
+from elspeth.web.sessions.protocol import CompositionStateRecord, RunAlreadyActiveError
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -55,6 +55,28 @@ def _ready_readiness() -> ValidationReadiness:
 
 def _blocked_readiness() -> ValidationReadiness:
     return ValidationReadiness(authoring_valid=False, execution_ready=False, completion_ready=False, blockers=[])
+
+
+def _composition_state_record(
+    *,
+    session_id: UUID,
+    state_id: UUID,
+    version: int = 7,
+) -> CompositionStateRecord:
+    return CompositionStateRecord(
+        id=state_id,
+        session_id=session_id,
+        version=version,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata_={"name": None, "description": None},
+        is_valid=True,
+        validation_errors=None,
+        created_at=datetime.now(UTC),
+        derived_from_state_id=None,
+        sources={},
+    )
 
 
 def _request_for_app(app: FastAPI) -> Request:
@@ -240,6 +262,78 @@ class TestValidateEndpoint:
             resp = await client.post(f"/api/sessions/{uuid4()}/validate")
             assert resp.status_code == 200
             svc.validate.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_validate_state_id_delegates_to_validate_state(self) -> None:
+        """An explicit state_id validates that reviewed snapshot, not latest."""
+        session_id = uuid4()
+        state_id = uuid4()
+        svc = MagicMock()
+        svc.validate = AsyncMock()
+        svc.validate_state = AsyncMock(
+            return_value=ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness())
+        )
+        app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_state = AsyncMock(
+            return_value=_composition_state_record(session_id=session_id, state_id=state_id)
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/api/sessions/{session_id}/validate",
+                params={"state_id": str(state_id)},
+            )
+            assert resp.status_code == 200
+
+        svc.validate.assert_not_awaited()
+        svc.validate_state.assert_awaited_once()
+        validated_state = svc.validate_state.await_args.args[0]
+        assert validated_state.version == 7
+
+    @pytest.mark.asyncio
+    async def test_validate_state_id_hides_missing_state(self) -> None:
+        """Missing state_id returns the same 404 shape as inaccessible states."""
+        session_id = uuid4()
+        state_id = uuid4()
+        svc = MagicMock()
+        svc.validate = AsyncMock()
+        svc.validate_state = AsyncMock()
+        app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_state = AsyncMock(side_effect=ValueError("missing"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/api/sessions/{session_id}/validate",
+                params={"state_id": str(state_id)},
+            )
+
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "State not found"}
+        svc.validate.assert_not_awaited()
+        svc.validate_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_validate_state_id_hides_cross_session_state(self) -> None:
+        """Cross-session state_id returns the same 404 shape as missing states."""
+        session_id = uuid4()
+        state_id = uuid4()
+        svc = MagicMock()
+        svc.validate = AsyncMock()
+        svc.validate_state = AsyncMock()
+        app = _create_test_app(execution_service=svc)
+        app.state.session_service.get_state = AsyncMock(
+            return_value=_composition_state_record(session_id=uuid4(), state_id=state_id)
+        )
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                f"/api/sessions/{session_id}/validate",
+                params={"state_id": str(state_id)},
+            )
+
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "State not found"}
+        svc.validate.assert_not_awaited()
+        svc.validate_state.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_invalid_pipeline_returns_200_with_errors(self) -> None:

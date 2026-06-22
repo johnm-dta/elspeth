@@ -74,6 +74,7 @@ from elspeth.web.execution.schemas import (
 )
 from elspeth.web.execution.websocket_ticket import WebSocketTicketStore
 from elspeth.web.paths import allowed_sink_directories
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
     RunEventRecord,
@@ -435,12 +436,27 @@ def create_execution_router() -> APIRouter:
     async def validate_session_pipeline(
         session_id: UUID,
         request: Request,
+        state_id: UUID | None = None,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
         service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
+        session_service: SessionServiceProtocol = Depends(_get_session_service),  # noqa: B008
     ) -> ValidationResult:
         """Dry-run validation using real engine code paths."""
         await verify_session_ownership(session_id, user, request)
-        result = await service.validate(session_id, user_id=user.user_id)
+        if state_id is None:
+            result = await service.validate(session_id, user_id=user.user_id)
+            return result
+        try:
+            state_record = await session_service.get_state(state_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="State not found") from exc
+        if state_record.session_id != session_id:
+            raise HTTPException(status_code=404, detail="State not found")
+        result = await service.validate_state(
+            state_from_record(state_record),
+            user_id=user.user_id,
+            session_id=session_id,
+        )
         return result
 
     @router.post(

@@ -3508,6 +3508,9 @@ class TestRecomposeConvergencePartialState:
         detail = recompose_resp.json()["detail"]
         assert detail["error_type"] == "convergence"
         assert "partial_state" in detail
+        persisted_id, persisted_version = _read_persisted_state_identity(service, session_id)
+        assert detail["partial_state"]["id"] == persisted_id
+        assert detail["partial_state"]["version"] == persisted_version
 
     def test_recompose_convergence_without_partial_state(self, tmp_path) -> None:
         """When convergence error has no partial state (no mutations),
@@ -7652,6 +7655,20 @@ def _read_persisted_provenance(service: SessionServiceImpl, session_id: str) -> 
     return row[0]
 
 
+def _read_persisted_state_identity(service: SessionServiceImpl, session_id: str) -> tuple[str, int]:
+    """Read id/version for the session's most-recent state row."""
+
+    from sqlalchemy import text
+
+    with service._engine.begin() as conn:
+        row = conn.execute(
+            text("SELECT id, version FROM composition_states WHERE session_id = :sid ORDER BY version DESC LIMIT 1"),
+            {"sid": session_id},
+        ).fetchone()
+    assert row is not None, f"no composition_states row for session {session_id}"
+    return str(row[0]), int(row[1])
+
+
 def test_handle_convergence_error_persists_convergence_persist_provenance(tmp_path: Path) -> None:
     """``_handle_convergence_error`` must persist captured ``partial_state``
     with ``provenance='convergence_persist'`` so an auditor counting
@@ -7729,6 +7746,10 @@ def test_handle_plugin_crash_persists_plugin_crash_persist_provenance(tmp_path: 
     )
     assert response.status_code == 500
 
+    detail = response.json()["detail"]
+    persisted_id, persisted_version = _read_persisted_state_identity(service, session_id)
+    assert detail["partial_state"]["id"] == persisted_id
+    assert detail["partial_state"]["version"] == persisted_version
     assert _read_persisted_provenance(service, session_id) == "plugin_crash_persist"
 
 
@@ -7790,6 +7811,10 @@ def test_handle_runtime_preflight_failure_persists_preflight_persist_provenance(
     )
     assert response.status_code == 500
 
+    detail = response.json()["detail"]
+    persisted_id, persisted_version = _read_persisted_state_identity(service, session_id)
+    assert detail["partial_state"]["id"] == persisted_id
+    assert detail["partial_state"]["version"] == persisted_version
     assert _read_persisted_provenance(service, session_id) == "preflight_persist"
 
 

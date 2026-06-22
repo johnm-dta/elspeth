@@ -214,7 +214,10 @@ describe("sessionStore — guided-mode fields and actions", () => {
     // Pre-seed: if previously loaded guided state exists it should be
     // preserved on error (same convention as selectSession lines 207-209:
     // set error, don't clobber fields that already loaded).
-    useSessionStore.setState({ guidedSession: sampleGuidedSession });
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      guidedSession: sampleGuidedSession,
+    });
 
     await useSessionStore.getState().startGuided("sess-1");
 
@@ -316,6 +319,44 @@ describe("sessionStore — guided-mode fields and actions", () => {
     await expect(useSessionStore.getState().reenterGuided()).rejects.toThrow(
       "reenterGuided called without active session",
     );
+  });
+
+  it("reenterGuided: drops failure when active session changes before rejection", async () => {
+    const { reenterGuided } = await import("@/api/client");
+
+    let rejectReenter!: (reason?: unknown) => void;
+    (reenterGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise<GetGuidedResponse>((_resolve, reject) => {
+        rejectReenter = reject;
+      }),
+    );
+
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      guidedSession: sampleExitedGuidedSession,
+      guidedNextTurn: null,
+      guidedTerminal: sampleExitedGuidedSession.terminal,
+      error: null,
+    });
+
+    const reenterPromise = useSessionStore.getState().reenterGuided();
+
+    useSessionStore.setState({
+      activeSessionId: "sess-B",
+      guidedSession: null,
+      guidedNextTurn: null,
+      guidedTerminal: null,
+      error: null,
+    });
+
+    rejectReenter(new Error("network down for stale session"));
+    await reenterPromise;
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toBeNull();
+    expect(state.guidedNextTurn).toBeNull();
+    expect(state.guidedTerminal).toBeNull();
+    expect(state.error).toBeNull();
   });
 
   // ── enterGuided unified entry point (default-freeform switch button) ──────
@@ -453,6 +494,44 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedNextTurn).toBeNull();
     expect(state.guidedTerminal).toBeNull();
     expect(state.compositionState).toBeNull();
+  });
+
+  it("startGuided: drops failure when active session changes before rejection", async () => {
+    const { getGuided } = await import("@/api/client");
+
+    let rejectGuided!: (reason?: unknown) => void;
+    (getGuided as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      new Promise<GetGuidedResponse>((_resolve, reject) => {
+        rejectGuided = reject;
+      }),
+    );
+
+    useSessionStore.setState({
+      activeSessionId: "sess-A",
+      guidedSession: sampleGuidedSession,
+      guidedNextTurn: sampleNextTurn,
+      guidedTerminal: null,
+      error: null,
+    });
+
+    const startPromise = useSessionStore.getState().startGuided("sess-A");
+
+    useSessionStore.setState({
+      activeSessionId: "sess-B",
+      guidedSession: null,
+      guidedNextTurn: null,
+      guidedTerminal: null,
+      error: null,
+    });
+
+    rejectGuided(new Error("network down for stale session"));
+    await startPromise;
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toBeNull();
+    expect(state.guidedNextTurn).toBeNull();
+    expect(state.guidedTerminal).toBeNull();
+    expect(state.error).toBeNull();
   });
 
   // ── Test 10: respondGuided stale-fetch guard (Codex #4) ──────────────────

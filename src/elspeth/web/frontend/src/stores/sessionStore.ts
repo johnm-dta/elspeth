@@ -1212,6 +1212,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         compositionState: response.composition_state,
       });
     } catch {
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
       // Error path: set error string, leave existing guided state alone.
       // Mirrors selectSession lines 207-209: set error, don't clobber fields
       // that were already loaded. The caller can inspect error to decide whether
@@ -1277,6 +1280,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error: null,
       });
     } catch {
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
       set({ error: "Failed to re-enter guided mode. Please try again." });
     }
   },

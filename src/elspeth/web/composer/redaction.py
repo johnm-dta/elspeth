@@ -2159,22 +2159,26 @@ _DIFF_PIPELINE_REASON = HandlesNoSensitiveDataReason(
 # ---------------------------------------------------------------------------
 
 
-def _summarize_set_metadata_patch(patch: dict[str, Any]) -> str:
+def _summarize_set_metadata_patch(patch: object) -> str:
     """Summarizer for ``set_metadata.patch``.
 
-    The patch carries only ``name`` and ``description`` fields per the JSON
-    schema at tools.py:826-838 — both operator-facing labels with no plugin
-    options, no path references, and no credential markers.  The summarizer
-    returns a canonical-JSON encoding of the keys present so the audit trail
-    records which metadata fields the LLM mutated without preserving the raw
-    free-text values verbatim (a follow-up plugin may decide they ARE policy-
-    sensitive even though the current schema treats them as labels).
+    The patch accepts only ``name`` and ``description`` fields per the tool
+    schema — both operator-facing labels with no plugin options, no path
+    references, and no credential markers.  The summarizer records only that
+    allowlisted field names were present. Unknown patch keys are collapsed to
+    a generic marker because key names are LLM-controlled text and may
+    themselves carry secrets.
 
     Contract (spec §4.2.6, §9 RSK-03):
       * MUST NOT raise on any reachable input value.
       * MUST return ``str``.
     """
-    keys = sorted(patch.keys())
+    if not isinstance(patch, Mapping):
+        return "<metadata-patch:invalid>"
+    allowed_keys = {"description", "name"}
+    keys = sorted(key for key in patch if isinstance(key, str) and key in allowed_keys)
+    if any(key not in allowed_keys for key in patch):
+        keys.append("unknown")
     return f"<metadata-patch:{','.join(keys)}>" if keys else "<metadata-patch:empty>"
 
 
@@ -2182,8 +2186,9 @@ _UPSERT_EDGE_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — edge id, endpoints, kind, label — none are payload-bearing",),
     why_arguments_safe=(
         "upsert_edge accepts only graph-topology scalars (id, from_node, to_node, edge_type, "
-        "optional label); none are LLM-supplied option payload and the JSON schema enforces "
-        "edge_type via an enum so the dispatch surface cannot carry sensitive material."
+        "optional label); the manifest argument allowlist preserves those structural fields "
+        "and replaces unexpected LLM-supplied argument keys with the fixed unknown-argument "
+        "sentinel before audit persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary plus the edge id list "
@@ -2197,8 +2202,9 @@ _REMOVE_NODE_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — single node id selector identifying the deletion target",),
     why_arguments_safe=(
         "remove_node accepts only a single scalar id string naming the node to delete; "
-        "the JSON schema at tools.py:803-808 has no other properties, so the LLM cannot "
-        "place any payload on this surface; the handler indexes by id only."
+        "the manifest argument allowlist preserves that selector and replaces unexpected "
+        "LLM-supplied argument keys with the fixed unknown-argument sentinel before audit "
+        "persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary for the post-removal "
@@ -2212,8 +2218,9 @@ _REMOVE_EDGE_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — single edge id selector identifying the deletion target",),
     why_arguments_safe=(
         "remove_edge accepts only a single scalar id string naming the edge to delete; "
-        "the JSON schema at tools.py:814-819 has no other properties, so the LLM cannot "
-        "place any payload on this surface; the handler indexes by edge id only."
+        "the manifest argument allowlist preserves that selector and replaces unexpected "
+        "LLM-supplied argument keys with the fixed unknown-argument sentinel before audit "
+        "persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary for the post-removal "
@@ -2227,8 +2234,9 @@ _REMOVE_OUTPUT_REASON = HandlesNoSensitiveDataReason(
     sensitive_data_locations=("graph topology — single sink_name selector identifying the output to remove",),
     why_arguments_safe=(
         "remove_output accepts only a single scalar sink_name string naming the output "
-        "to delete; the JSON schema at tools.py:877-882 has no other properties, so the "
-        "LLM cannot place any payload on this surface; the handler indexes by name only."
+        "to delete; the manifest argument allowlist preserves that selector and replaces "
+        "unexpected LLM-supplied argument keys with the fixed unknown-argument sentinel "
+        "before audit persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary for the post-removal "
@@ -2243,7 +2251,8 @@ _CLEAR_SOURCE_REASON = HandlesNoSensitiveDataReason(
     why_arguments_safe=(
         "clear_source accepts only an optional source_name selector. Source names are "
         "structural composer identifiers, not plugin options, file paths, source content, "
-        "or credentials."
+        "or credentials; the manifest argument allowlist replaces unexpected LLM-supplied "
+        "argument keys with the fixed unknown-argument sentinel before audit persistence."
     ),
     why_responses_safe=(
         "Response is the structural ToolResult — validation summary describing the "
@@ -2833,12 +2842,31 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         # _MUTATION_TOOLS remaining, 8 declarative entries.
         "upsert_node": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=(
+                    "id",
+                    "node_type",
+                    "input",
+                    "plugin",
+                    "on_success",
+                    "on_error",
+                    "options",
+                    "condition",
+                    "routes",
+                    "fork_to",
+                    "branches",
+                    "policy",
+                    "merge",
+                    "trigger",
+                    "output_mode",
+                    "expected_output_count",
+                ),
                 sensitive_argument_keys=("options", "routes", "trigger"),
                 argument_summarizers={
                     "options": _summarize_set_source_options,
                     "routes": _summarize_set_source_options,
                     "trigger": _summarize_set_source_options,
                 },
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
                 # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
                 # and the failure branches reachable from _execute_upsert_node:
@@ -2858,38 +2886,56 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         ),
         "upsert_edge": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=(
+                    "id",
+                    "from_node",
+                    "to_node",
+                    "edge_type",
+                    "label",
+                ),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_UPSERT_EDGE_REASON,
             )
         ),
         "remove_node": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_REMOVE_NODE_REASON,
             )
         ),
         "remove_edge": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_REMOVE_EDGE_REASON,
             )
         ),
         "remove_output": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("sink_name",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_REMOVE_OUTPUT_REASON,
             )
         ),
         "clear_source": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("source_name",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_CLEAR_SOURCE_REASON,
             )
         ),
         "set_metadata": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("patch",),
                 sensitive_argument_keys=("patch",),
                 argument_summarizers={"patch": _summarize_set_metadata_patch},
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
                 # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428).
                 # _execute_set_metadata always calls _mutation_result with no data and no
@@ -2905,8 +2951,15 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         ),
         "set_output": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=(
+                    "sink_name",
+                    "plugin",
+                    "options",
+                    "on_write_failure",
+                ),
                 sensitive_argument_keys=("options",),
                 argument_summarizers={"options": _summarize_set_source_options},
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
                 # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
                 # and the failure branches reachable from _execute_set_output:

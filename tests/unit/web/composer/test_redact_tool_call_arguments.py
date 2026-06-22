@@ -472,6 +472,118 @@ def test_blob_discovery_unknown_argument_keys_are_sentinelised(
         assert result[key] == value
 
 
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "passthrough_keys", "summarized_keys"),
+    [
+        ("clear_source", {"source_name": "source"}, ("source_name",), ()),
+        ("remove_node", {"id": "normalize_rows"}, ("id",), ()),
+        ("remove_edge", {"id": "e_fetch_to_clean"}, ("id",), ()),
+        (
+            "upsert_edge",
+            {
+                "id": "e_fetch_to_clean",
+                "from_node": "fetch",
+                "to_node": "clean",
+                "edge_type": "on_success",
+                "label": "clean rows",
+            },
+            ("id", "from_node", "to_node", "edge_type", "label"),
+            (),
+        ),
+        ("remove_output", {"sink_name": "records_out"}, ("sink_name",), ()),
+        (
+            "upsert_node",
+            {
+                "id": "normalize_rows",
+                "node_type": "transform",
+                "input": "raw_rows",
+                "plugin": "normalize",
+                "on_success": "clean_rows",
+                "on_error": "failed_rows",
+                "options": {"path": "INNER_MUTATION_VALUE"},
+                "condition": "row['enabled']",
+                "routes": {"true": "clean_rows", "false": "discard"},
+                "fork_to": ["audit_rows"],
+                "branches": {"left": "clean_rows", "right": "audit_rows"},
+                "policy": "all",
+                "merge": "prefer_left",
+                "trigger": {"count": 10},
+                "output_mode": "transform",
+                "expected_output_count": 1,
+            },
+            (
+                "id",
+                "node_type",
+                "input",
+                "plugin",
+                "on_success",
+                "on_error",
+                "condition",
+                "fork_to",
+                "branches",
+                "policy",
+                "merge",
+                "output_mode",
+                "expected_output_count",
+            ),
+            ("options", "routes", "trigger"),
+        ),
+        ("set_metadata", {"patch": {"name": "pipeline", "description": "INNER_MUTATION_VALUE"}}, (), ("patch",)),
+        (
+            "set_output",
+            {
+                "sink_name": "records_out",
+                "plugin": "json",
+                "options": {"path": "INNER_MUTATION_VALUE"},
+                "on_write_failure": "discard",
+            },
+            ("sink_name", "plugin", "on_write_failure"),
+            ("options",),
+        ),
+    ],
+)
+def test_mutation_declarative_unknown_argument_keys_are_sentinelised(
+    tool_name: str,
+    arguments: dict[str, object],
+    passthrough_keys: tuple[str, ...],
+    summarized_keys: tuple[str, ...],
+) -> None:
+    """Mutation tool args are persisted; unexpected LLM keys must fail closed."""
+    tel = NoopRedactionTelemetry()
+    raw_payload = "RAW_EXTRA_MUTATION_ARGUMENT_PAYLOAD"
+
+    result = redact_tool_call_arguments(
+        tool_name,
+        {**arguments, "unauthorized_payload": raw_payload},
+        telemetry=tel,
+    )
+
+    assert "unauthorized_payload" not in result
+    assert result[REDACTED_UNKNOWN_ARGUMENTS_FIELD] == REDACTED_UNKNOWN_ARGUMENT_KEY
+    assert raw_payload not in str(result)
+
+    for key in passthrough_keys:
+        assert result[key] == arguments[key]
+    for key in summarized_keys:
+        assert key in result
+        assert result[key] != arguments[key]
+
+
+def test_set_metadata_patch_summary_redacts_unknown_patch_key_names() -> None:
+    """Nested metadata patch keys are LLM-controlled and must not echo raw."""
+    tel = NoopRedactionTelemetry()
+    raw_key = "sk-live-secret-as-patch-key"
+
+    result = redact_tool_call_arguments(
+        "set_metadata",
+        {"patch": {"name": "pipeline", raw_key: "value"}},
+        telemetry=tel,
+    )
+
+    assert result["patch"] == "<metadata-patch:name,unknown>"
+    assert raw_key not in str(result)
+
+
 # ---------------------------------------------------------------------------
 # Failure modes: missing manifest, summarizer raises, summarizer non-str
 # ---------------------------------------------------------------------------

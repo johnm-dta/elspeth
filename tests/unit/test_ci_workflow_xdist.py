@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +15,7 @@ from elspeth.testing.pytest_xdist_auto import pytest_cmdline_main
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
 JUDGE_GATES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "enforce-allowlist-judge-gates.yaml"
+_SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|"})
 
 
 def _workflow(path: Path) -> dict[str, Any]:
@@ -48,18 +50,94 @@ def _step_index(job: dict[str, Any], step_name: str) -> int:
     raise AssertionError(f"Missing CI step {step_name!r}")
 
 
+def _pytest_args(run: str) -> list[str]:
+    lexer = shlex.shlex(run.replace("\\\n", " "), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    lexer.commenters = "#"
+    tokens = list(lexer)
+    for index in range(len(tokens)):
+        if tokens[index : index + 3] == ["uv", "run", "pytest"]:
+            start = index + 3
+        elif tokens[index : index + 5] == ["uv", "run", "python", "-m", "pytest"]:
+            start = index + 5
+        else:
+            continue
+
+        args: list[str] = []
+        for token in tokens[start:]:
+            if token in _SHELL_CONTROL_TOKENS:
+                break
+            args.append(token)
+        return args
+    raise AssertionError("Missing pytest invocation")
+
+
+def _pytest_numprocesses_values(run: str) -> list[str]:
+    values: list[str] = []
+    args = _pytest_args(run)
+    for index, arg in enumerate(args):
+        if arg == "-n" and index + 1 < len(args):
+            values.append(args[index + 1])
+        elif arg.startswith("-n") and arg != "-n":
+            values.append(arg[2:])
+        elif arg == "--numprocesses" and index + 1 < len(args):
+            values.append(args[index + 1])
+        elif arg.startswith("--numprocesses="):
+            values.append(arg.split("=", 1)[1])
+    return values
+
+
+@pytest.mark.parametrize(
+    ("flag_args", "expected"),
+    (
+        ("-n0", "0"),
+        ("-n 0", "0"),
+        ("--numprocesses 0", "0"),
+        ("--numprocesses=0", "0"),
+        ("-nauto", "auto"),
+        ("-n auto", "auto"),
+        ("--numprocesses auto", "auto"),
+        ("--numprocesses=auto", "auto"),
+    ),
+)
+def test_pytest_numprocesses_values_tokenizes_supported_cli_forms(flag_args: str, expected: str) -> None:
+    run = f"uv run pytest tests/ {flag_args}"
+
+    assert _pytest_numprocesses_values(run) == [expected]
+
+
+@pytest.mark.parametrize(
+    ("run", "expected_args"),
+    (
+        ("uv run pytest tests/ -n 0|| status=$?", ["tests/", "-n", "0"]),
+        ("uv run pytest tests/ -n auto&& echo done", ["tests/", "-n", "auto"]),
+        ("uv run pytest tests/ --numprocesses=auto; echo done", ["tests/", "--numprocesses=auto"]),
+    ),
+)
+def test_pytest_args_stop_at_attached_shell_control_operators(run: str, expected_args: list[str]) -> None:
+    assert _pytest_args(run) == expected_args
+
+
 def test_python_matrix_ci_does_not_hard_disable_xdist() -> None:
-    """Remote Python test lanes must leave xdist available instead of forcing ``-n0``."""
+    """Remote Python test lanes must leave xdist available instead of forcing ``-n 0``."""
     workflow = _ci_workflow()
     test_job = workflow["jobs"]["test"]
 
     coverage_run = _step_run(test_job, "Run tests with coverage")
     no_coverage_run = _step_run(test_job, "Run tests without coverage")
 
-    assert "-n0" not in coverage_run
-    assert "--numprocesses=0" not in coverage_run
-    assert "-n0" not in no_coverage_run
-    assert "--numprocesses=0" not in no_coverage_run
+    assert "0" not in _pytest_numprocesses_values(coverage_run)
+    assert "0" not in _pytest_numprocesses_values(no_coverage_run)
+
+
+def test_integration_lane_does_not_force_parallel_xdist() -> None:
+    """Integration lane stays sequential by omitting explicit xdist process flags."""
+    workflow = _ci_workflow()
+    integration_job = workflow["jobs"]["integration"]
+
+    run = _step_run(integration_job, "Run integration tests")
+
+    assert _pytest_numprocesses_values(run) == []
 
 
 def test_python_matrix_documents_coverage_lane_choice() -> None:

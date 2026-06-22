@@ -3555,11 +3555,12 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
     v1 entries bind the whole-file ``file_fingerprint``: any byte edit
     anywhere in the source file invalidates the binding at load time and
     forces an operator-only re-sign. v2 entries bind only the enclosing-
-    scope ``scope_fingerprint``, so an unrelated edit elsewhere in the file
-    no longer churns the entry. This command migrates the byte-drifted-but-
-    scope-stable v1 entries to v2 WITHOUT re-running the (paid) LLM judge:
-    the judge already inspected and accepted this exact suppressed node, and
-    the suppressed node is unchanged, so re-judging would add no information.
+    scope ``scope_fingerprint``, so later unrelated edits elsewhere in the
+    file no longer churn the entry. This command migrates ONLY byte-fresh v1
+    entries to v2 WITHOUT re-running the (paid) LLM judge: the old
+    ``file_fingerprint`` must still match live source bytes, so the judge's
+    accepted verdict/rationale is carried forward only for the exact source
+    file it originally signed.
 
     Two INDEPENDENT gates run per v1 entry — they are not conflated:
 
@@ -3572,20 +3573,19 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
       integrity failure STOPS THE WHOLE RUN (not a per-entry skip): the
       offending entry is reported as TAMPERED and nothing is written.
 
+    * **Byte-freshness gate:** the entry's stored v1 ``file_fingerprint``
+      must match the live source file bytes. A mismatch means the judge
+      verdict was produced for an older file and must not be re-signed
+      against the current ``scope_fingerprint`` without re-justification.
+
     * **Relevance gate:** the entry's canonical key must locate a live
       finding in a fresh scan of ``--root``. If it does, the suppressed
       node is unchanged (the judge's inspection still applies) and the
       entry is migrated. If it does not, the entry is already stale and is
       refused (re-justify required) — left untouched.
-
-    We deliberately do NOT gate on byte-freshness (``file_fingerprint`` ==
-    live source hash). That would refuse exactly the byte-drifted-but-scope-
-    stable entries this command exists to relieve. Selection is
-    ``judge_signature_version in (None, 1)``; the integrity gate proves no
-    tampering; the relevance gate proves the suppressed node is unchanged.
-    Byte equality is irrelevant to either.
     """
     from elspeth_lints.core.allowlist import (
+        _compute_file_fingerprint,
         _file_path_from_canonical_key,
         _judge_metadata_hmac_key,
         _verify_judge_metadata_signature_at_load,
@@ -3637,12 +3637,12 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
     # Load WITHOUT source_root. With source_root set, the loader fires BOTH
     # the v1 file_fingerprint live-source gate AND the HMAC signature gate
     # (allowlist._parse_allow_hits: ``if source_root is not None and
-    # judge_verdict is not None``). We are deliberately migrating byte-
-    # drifted-but-scope-stable entries, so the file_fingerprint live gate
-    # must NOT block us. But loading without source_root ALSO skips the HMAC
-    # check — therefore this command MUST verify each v1 signature itself
-    # (the integrity gate below) before re-signing, or it would launder
-    # tampering into a clean v2 signature.
+    # judge_verdict is not None``). We still need a source-less load so we can
+    # enumerate stale v1 entries, report them as re-justify refusals, and keep
+    # unrelated valid entries migratable. Because source-less load also skips
+    # the HMAC check, this command MUST verify each v1 signature itself (the
+    # integrity gate below) before re-signing, or it would launder tampering
+    # into a clean v2 signature.
     try:
         allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids, source_root=None)
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
@@ -3678,7 +3678,7 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
         return cached
 
     migrated: list[str] = []  # canonical keys migrated (or would-migrate under --dry-run)
-    refused: list[tuple[str, str]] = []  # (key, reason) for relevance-gate refusals
+    refused: list[tuple[str, str]] = []  # (key, reason) for re-justify refusals
 
     # ---- Pass 1: integrity gate over EVERY selected v1 entry ----------------
     # The integrity gate runs to completion across all entries BEFORE any
@@ -3713,7 +3713,7 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
             )
             return 1
 
-    # ---- Pass 2: relevance gate + re-sign, then ONE atomic write per file ---
+    # ---- Pass 2: byte freshness + relevance + re-sign, then ONE write/file ---
     # Reached only when every selected v1 entry's existing signature verified.
     # We resolve every entry's v2 rewrite spec first and group the specs by
     # their source YAML file; the actual writes happen in a final per-file
@@ -3741,6 +3741,20 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
             continue
         except SourceExcerptPathOutsideRootError as exc:
             refused.append((entry.key, f"source path escapes --root ({exc}) → re-justify required"))
+            continue
+
+        live_file_fingerprint = _compute_file_fingerprint(target_file)
+        if entry.file_fingerprint is None:
+            refused.append((entry.key, "v1 entry has no file_fingerprint → re-justify required"))
+            continue
+        if entry.file_fingerprint != live_file_fingerprint:
+            refused.append(
+                (
+                    entry.key,
+                    "v1 file_fingerprint does not match live source bytes "
+                    f"(stored {entry.file_fingerprint[:12]}..., live {live_file_fingerprint[:12]}...) → re-justify required",
+                )
+            )
             continue
 
         findings = _findings_for_file(target_file)
@@ -3843,13 +3857,13 @@ def _emit_migrate_report(
 
     ``migrated`` lists the keys that were re-signed as v2 (or, under
     ``--dry-run``, would be) — the success surface, written to stdout.
-    ``refused`` lists ``(key, reason)`` pairs for relevance-gate refusals
-    (already-stale entries needing re-justify). Refusals are actionable
-    NON-success output and the command exits non-zero on any refusal, so
-    they go to STDERR — otherwise ``2>/dev/null`` would hide the very lines
-    that explain why the run failed. (The integrity-gate tampering path
+    ``refused`` lists ``(key, reason)`` pairs for entries that failed the
+    byte-freshness or relevance gates and therefore need re-justify. Refusals
+    are actionable NON-success output and the command exits non-zero on any
+    refusal, so they go to STDERR — otherwise ``2>/dev/null`` would hide the
+    very lines that explain why the run failed. (The integrity-gate tampering path
     already reports to stderr and stops the run before this is reached, so
-    the only refusals surfaced here are stale entries.)
+    this report only surfaces per-entry re-justify refusals.)
     """
     verb = "WOULD migrate" if args.dry_run else "migrated"
     sys.stdout.write(f"migrate-judge-scope (owner={args.owner}, dry_run={args.dry_run})\n")

@@ -2,12 +2,15 @@
 
 This command mechanically re-signs currently-VALID v1 (whole-file
 ``file_fingerprint``) judge-gated allowlist entries as v2 (enclosing-scope
-``scope_fingerprint``) WITHOUT re-running the LLM judge. It applies two
+``scope_fingerprint``) WITHOUT re-running the LLM judge. It applies three
 independent gates per v1 entry:
 
 * an **integrity gate** that verifies the entry's EXISTING v1
   ``judge_metadata_signature`` with the operator HMAC key (a mismatch is
   tampering and STOPS the whole run), and
+* a **byte-freshness gate** that requires the stored v1
+  ``file_fingerprint`` to match live source bytes before the old judge verdict
+  can be carried forward, and
 * a **relevance gate** that re-locates the suppressed finding by canonical
   key in a fresh scan of the source tree (no live finding ⇒ already stale
   ⇒ refuse-and-continue, "re-justify required").
@@ -62,6 +65,20 @@ _DRIFTED_SOURCE = '''\
 class Widget:
     def describe(self) -> str:
         return "no dict.get here"
+'''
+
+# The finding node stays byte-identical and at the same AST path, so the
+# canonical finding key still resolves, but the enclosing function body changed
+# after the judged line. A migration must not re-sign the old judge verdict
+# against this new scope.
+_SAME_FINDING_CHANGED_SCOPE_SOURCE = '''\
+"""Synthetic module used in migrate-judge-scope tests."""
+
+
+class Widget:
+    def lookup(self, payload: dict) -> str:
+        return payload.get("name", "anonymous")
+        unreachable = "scope changed after the judged finding"
 '''
 
 # A second finding-producing file in the same module dir, so a single
@@ -440,6 +457,39 @@ def test_migrate_refuses_and_reports_already_stale_v1_entry(
     captured = capsys.readouterr()
     report = captured.out + captured.err
     assert "re-justify" in report.lower()
+
+
+def test_migrate_refuses_same_finding_when_v1_file_fingerprint_is_stale(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root, target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    yaml_path, key = _write_valid_v1_entry(allowlist_dir, source_root=root)
+    before = yaml_path.read_text(encoding="utf-8")
+
+    original_finding = _live_widget_finding(root)
+    target.write_text(_SAME_FINDING_CHANGED_SCOPE_SOURCE, encoding="utf-8")
+    changed_finding = _live_widget_finding(root)
+    changed_key = changed_finding.canonical_key
+    if callable(changed_key):
+        changed_key = changed_key()
+    assert changed_key == key
+    assert changed_finding.ast_path == original_finding.ast_path
+    assert changed_finding.scope_fingerprint != original_finding.scope_fingerprint
+
+    exit_code = _run_migrate(root, allowlist_dir)
+    assert exit_code != 0
+
+    after = yaml_path.read_text(encoding="utf-8")
+    assert after == before
+    assert "file_fingerprint:" in after
+    assert "judge_signature_version: 2" not in after
+
+    captured = capsys.readouterr()
+    report = (captured.out + captured.err).lower()
+    assert "file_fingerprint" in report
+    assert "re-justify" in report
 
 
 # =====================================================================

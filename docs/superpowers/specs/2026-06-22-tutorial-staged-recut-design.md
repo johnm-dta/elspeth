@@ -60,9 +60,18 @@
   (3) **Fork strip seam corrected** — the verbatim `composer_meta` copy is in
   **`sessions/service.py:5076` (and a second copy at `:5153`)**, NOT `composer/service.py`
   (5007 lines); the route-layer blob-rewrite save (`sessions/routes/sessions.py:489`)
-  only fires when `rewritten=True`, and the canonical `inline_blob` source has no
-  `blob_ref` → `rewritten=False`, so the strip MUST happen inside `fork_session`, not the
-  blob-rewrite path. "Single chokepoint" was wrong.
+  only re-saves the copied state when `rewritten=True`, **but even when it fires it
+  preserves `composer_meta` verbatim (`sessions/routes/sessions.py:479-480`) and never
+  strips the profile** — so the strip MUST happen inside `fork_session`, where the
+  profile is actually copied, not the blob-rewrite path. "Single chokepoint" was wrong.
+  (**Rationale correction — see the `blob_ref` two-objects note in §4.1.** The earlier
+  claim "the canonical `inline_blob` source has no `blob_ref` → `rewritten=False`" is
+  FALSE: a materialised `inline_blob` source carries `source.options["blob_ref"]`
+  (`composer/tools/sessions.py:425`), and the fork blob-rewrite reads/rewrites exactly
+  that key (`sessions/routes/sessions.py:397,437,443`) → `rewritten=True` for the
+  canonical source. The strip-in-`fork_session` decision is operator-blessed and
+  **independent of `rewritten`**; the load-bearing fact is the preserved-`composer_meta`
+  re-save at `:479-480`, NOT a `blob_ref`-absent premise.)
   (4) Accuracy: `REQUEST_ADVISOR` (`_helpers.py:3342`) is a real chain re-solve, **not**
   a no-op; `_build_checkpoint_arguments` is at `service.py:4083` (not 4108); B1's orphan
   gate is unreachable from the guided dispatch path (not "only inside
@@ -323,14 +332,20 @@ field** (D14). The default (empty) profile sets all to live-guided behaviour.
   pointed at the wrong file). There are **two** verbatim copies there
   (`sessions/service.py:5076` and `:5153`); the route-layer blob-rewrite re-save
   (`sessions/routes/sessions.py:489`, "fork inherits the operational provenance") is a
-  **conditional third path** that only fires when `rewritten=True`. **The canonical
-  `inline_blob` URL source has no `blob_ref`, so `rewritten=False` and the blob-rewrite
-  save never runs for the canonical tutorial** — therefore the strip CANNOT live only in
-  the blob-rewrite path; it must happen inside `fork_session` (covering both `:5076` and
-  `:5153`). Rule: **reset `GuidedSession.profile` to the empty/canonical profile inside
-  `fork_session` before persisting the forked record**, unless the fork is an explicit
-  tutorial continuation. (Resume of a tutorial's *own* session correctly preserves the
-  profile — that is the intended round-trip, not a leak.)
+  **conditional third path** that only fires when `rewritten=True`. **Correction (was a
+  false premise — see the two-objects `blob_ref` note in §5/B4):** the canonical
+  materialised source DOES carry `source.options["blob_ref"]`
+  (`composer/tools/sessions.py:425`), and the blob-rewrite path reads/rewrites exactly
+  that key (`sessions/routes/sessions.py:397,437,443`), so `rewritten=True` for the
+  canonical tutorial. **But the blob-rewrite re-save preserves `composer_meta` verbatim
+  (`sessions/routes/sessions.py:479-480`) and never strips the profile** — so the strip
+  STILL cannot live in the blob-rewrite path; it must happen inside `fork_session`
+  (covering both `:5076` and `:5153`), where `composer_meta`/`profile` is actually
+  copied. The strip-in-`fork_session` decision is operator-blessed and **independent of
+  `rewritten`**. Rule: **reset `GuidedSession.profile` to the empty/canonical profile
+  inside `fork_session` before persisting the forked record**, unless the fork is an
+  explicit tutorial continuation. (Resume of a tutorial's *own* session correctly
+  preserves the profile — that is the intended round-trip, not a leak.)
 - **Duplicate-submission / concurrency (D16).** Inherited guarantees (state them so
   the plan doesn't reinvent them): all guided mutations are serialized per-session by
   `compose_lock` (`_helpers.py:212`); duplicate `/guided/respond` is naturally
@@ -494,7 +509,7 @@ real FLAG:
 |---|---|---|---|
 | CLEAN | COMPLETED | — | — |
 | FLAGGED | None | yes — `findings_text`; "resolve & re-confirm" | **fail-closed non-runnable** (`_advisor_signoff_blocked_validation`); "resolve & re-run" — **no bypass** |
-| MALFORMED / unparseable | None | yes — folds into not-CLEAN→flagged at `service.py:4217`; same as FLAGGED | **fail-closed non-runnable** — **no bypass** |
+| MALFORMED / unparseable | None | yes — `_run_advisor_checkpoint` re-raises the parse error -> caught at `service.py:4210` -> `ok=False, failure_class="malformed"`; `classify_signoff_verdict` routes `failure_class=="malformed"` to the FLAGGED path, NOT the UNAVAILABLE escape | **fail-closed non-runnable** — **no bypass** |
 | UNAVAILABLE / timeout (after bounded retry) | None | yes — "advisor sign-off could not be obtained; retry" | **differentiated escape:** offer "complete without sign-off (advisor unreachable)" — an **audited operator-acknowledged** completion, gated on `reason="unavailable"` ONLY, **never** reachable from a FLAG |
 
 Timeout is an UNAVAILABLE sub-case (caught + retried inside `_run_advisor_checkpoint`,
@@ -540,17 +555,50 @@ canonical pipeline is: an **`inline_blob` source** carrying rows of `{url: ...}`
 → **jsonl** sink. (Validated artifact: `tutorial.spec.ts:54-90`; the parallel real
 example `examples/chaosweb/settings.yaml` uses a `csv` source with a url column.)
 
+> **`blob_ref` — two distinct objects; do not conflate (AUTHORITATIVE).** "The
+> canonical `inline_blob` source" names TWO different things in this spec, and they
+> have OPPOSITE `blob_ref` facts. Pin which one each claim is about:
+>
+> 1. **The wire/display source** — what the frontend fixture and chat prose call
+>    `plugin: "inline_blob"` (`tutorial.spec.ts:56`). This is an authoring alias, not
+>    a registered source plugin. It is the fork-strip prose's loose shorthand.
+> 2. **The materialised `SourceResolved` / composed `SourceSpec`** — what `set_pipeline`
+>    actually produces from `source.inline_blob`. The backend persists the inline blob
+>    as a real blob row and binds a registered source plugin via `_MIME_TO_SOURCE`
+>    (`composer/tools/sources.py:146`: `application/json → json`, `text/csv → csv`), AND
+>    **unconditionally writes `source.options["blob_ref"]` = the new blob UUID**
+>    (`composer/tools/sessions.py:425`, inside the `if inline_blob is not None` branch).
+>    So `SourceResolved.plugin ∈ {json, csv}` (never the literal `"inline_blob"`, never
+>    `web_scrape`) **and `source.options["blob_ref"]` IS present** at `match_recipe` time.
+>
+> **Recipe-match (§4.1) keys on object 2 and the `blob_ref` IS present** — so the
+> `blob_ref`-gated predicate (mirroring `_classify_predicate`) matches the canonical
+> source, the recipe-apply fires, and the zero-LLM claim holds. This is the
+> authoritative invariant for §4.1/B4; the predicate test must pin object 2 against the
+> materialised state (`composer/tools/sessions.py:420-427`).
+>
+> **The fork-strip prose's `blob_ref`-absent shorthand was about neither object's
+> reality and is FALSE** — corrected at §0 rev-4 note (3) and §4.1 finding 10: the
+> materialised source has `blob_ref`, so the route blob-rewrite's `rewritten=True`, but
+> the strip-in-`fork_session` decision does not depend on that — it depends on
+> `fork_session` being where `composer_meta`/`profile` is copied. Whenever this spec
+> says "the canonical `inline_blob` source has no `blob_ref`", read it as the corrected
+> "`composer_meta`/`profile` is copied verbatim in `fork_session`, so the strip must
+> live there" — the `blob_ref` clause is struck.
+
 Today every recipe gates on `source.plugin == csv` (`recipe_match.py:186`
 `_is_csv`; `composer/recipes.py:219/314/469`), so `match_recipe` returns `None` and
 the dispatcher falls through to the live chain solver (`_helpers.py:3112` — rev 4; `:3107`
 is the preceding comment, `solve_chain_with_auto_drop`). Add:
 
-1. A predicate in `composer/guided/recipe_match.py` matching the **URL-row SOURCE
-   plugin** (`inline_blob`) + single jsonl output + the url-column/required-fields
-   signal — it must **not** reference `web_scrape` as a source. (Resolve the exact
-   registered source-plugin name when implementing — `inline_blob` materialises to
-   a concrete row source — and pin it with a test against the canonical composed
-   state.)
+1. A predicate in `composer/guided/recipe_match.py` matching the **materialised
+   URL-row SOURCE plugin** (`json`/`csv` per the two-objects note above — NOT the
+   `inline_blob` authoring alias) **gated on `source.options["blob_ref"]`** (present
+   for the canonical source per `composer/tools/sessions.py:425`, same blob-presence
+   discipline as `_classify_predicate`) + single jsonl output + the
+   url-column/required-fields signal — it must **not** reference `web_scrape` as a
+   source. Pin it with a test against the canonical composed state
+   (`composer/tools/sessions.py:420-427`: plugin ∈ {json, csv}, `blob_ref` present).
 2. A `RecipeSpec` in `composer/recipes.py` whose `_build_*` deterministically emits
    the full chain above, **naming the head source node**, and **stages the
    `kind="pipeline_decision"` raw-HTML cleanup requirement on the `field_mapper`
@@ -769,9 +817,14 @@ pipeline still applies. No long-lived feature flag.
   - **Profile lifecycle (finding 10; rev 4):** fork a tutorial-profile session → the forked
     `GuidedSession.profile` is the **empty** profile (no tutorial seed/coaching/
     bookends); an ordinary guided fork is unaffected. **Critical case:** fork a tutorial
-    session whose source is the canonical **`inline_blob` (no `blob_ref`, `rewritten=False`)**
-    — assert the strip still applies, proving it lives in `fork_session`
-    (`sessions/service.py`, both `:5076` and `:5153`), not the conditional blob-rewrite save.
+    session whose source is the canonical materialised URL source — which **DOES** carry
+    `source.options["blob_ref"]` (`composer/tools/sessions.py:425`), so the route
+    blob-rewrite re-save **fires (`rewritten=True`)** — and assert the strip **still
+    applies anyway**, proving it lives in `fork_session` (`sessions/service.py`, both
+    `:5076` and `:5153`) and is **independent of the blob-rewrite path** (which preserves
+    `composer_meta` verbatim, `sessions/routes/sessions.py:479-480`, and never strips).
+    This is a *stronger* invariant than the rev-4 prose's now-struck `rewritten=False`
+    premise: it proves the strip survives even on the path that DOES re-save the state.
   - **Terminal-stamp invariant (rev 4 — high implementation risk):** after BOTH
     `handle_step_2_5_recipe_apply` and `handle_step_3_chain_accept`, assert
     `session.terminal is None` AND `session.step == STEP_4_WIRE` — neither completion seam
@@ -855,9 +908,13 @@ pipeline still applies. No long-lived feature flag.
   works because the pass counter is **persisted** (D16). Size budgets to avoid the 300s timeout.
 - **Profile leak (finding 10; rev 4):** `composer_meta` is copied verbatim on fork — the
   seam is **`sessions/service.py` `fork_session`** (`:5076` AND `:5153`), NOT
-  `composer/service.py`; the canonical `inline_blob` source skips the route blob-rewrite
-  save (`rewritten=False`), so strip the profile inside `fork_session` or the tutorial
-  state leaks into ordinary sessions.
+  `composer/service.py`. The route blob-rewrite re-save (`sessions/routes/sessions.py:489`)
+  **does** fire for the canonical source (its materialised options carry `blob_ref`,
+  `composer/tools/sessions.py:425` → `rewritten=True`), but it preserves `composer_meta`
+  verbatim (`:479-480`) and never strips the profile — so strip the profile inside
+  `fork_session` (independent of `rewritten`) or the tutorial state leaks into ordinary
+  sessions. (The earlier "`rewritten=False`" rationale is struck — see §5/B4 two-objects
+  `blob_ref` note.)
 - **Migration:** purge `sessions.db` + bump `SESSION_SCHEMA_EPOCH`; **user secrets are
   destroyed** with it; follow `docs/runbooks/staging-session-db-recreation.md`
   (single-DB path; back up the full `-wal/-shm/-journal` set first).

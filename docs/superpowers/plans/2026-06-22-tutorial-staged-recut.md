@@ -52,7 +52,7 @@ elspeth-lints trust-tier static analysis + wardline taint gate; pytest + ruff + 
   - `uv run ruff format --check src/ tests/ scripts/ examples/ elspeth-lints/src/`
   - `uv run mypy src/ elspeth-lints/src/`
   - `PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules trust_tier.tier_model,trust_boundary.tests,trust_boundary.scope,trust_boundary.tier,'composer/*' --root src/elspeth`
-  - `.venv/bin/python scripts/cicd/check_slot_type_cross_language.py` (SlotType / guided.ts mirror gate — this work edits `guided.ts`)
+  - `uv run python scripts/cicd/check_slot_type_cross_language.py` (SlotType / guided.ts mirror gate — this work edits `guided.ts`)
   - targeted `pytest` over the new guided/tutorial/recipe test files
   - frontend (run from `src/elspeth/web/frontend`): `npm run typecheck`, `npm test -- --run`, `npm run build`, `npm run test:e2e` (+ `test:e2e:staging`)
   - `wardline scan . --fail-on ERROR` (exit 0 clean / 1 gate tripped / 2 tool error) — B1/B3/recipe touch externally-fed advisor/user-text trust boundaries; fix at the boundary, not the sink. See `.agents/skills/wardline-gate/SKILL.md`.
@@ -85,7 +85,7 @@ async def run_signoff_checkpoint(
     progress: ComposerProgressSink | None = None,
 ) -> AdvisorCheckpointVerdict: ...
 ```
-Add to the `ComposerService` Protocol; `ComposerServiceImpl` delegates to the existing private `_run_advisor_checkpoint(phase="end", ...)`. `AdvisorCheckpointVerdict` shape is UNCHANGED: `@dataclass(frozen=True, slots=True)` with `ok: bool`, `blocking: bool`, `findings_text: str` (verdict-class differentiation in D13 is derived from `(ok, blocking)`: CLEAN = `ok and not blocking`; FLAGGED/MALFORMED = `ok and blocking`; UNAVAILABLE/timeout = `not ok`).
+Add to the `ComposerService` Protocol; `ComposerServiceImpl` delegates to the existing private `_run_advisor_checkpoint(phase="end", ...)`. `AdvisorCheckpointVerdict` gains a `failure_class: Literal["none","unavailable","malformed"] = "none"` field (added in P5.3): the existing `_run_advisor_checkpoint` collapses EVERY exception — timeout/auth/transport AND malformed/parse — to `ok=False` (service.py:4210-4230), so `(ok, blocking)` ALONE cannot separate a malformed response (must fail-closed) from a transport outage (may take the audited escape). Verdict classes for D13: CLEAN = `ok and not blocking`; FLAGGED = `ok and blocking` (fail-closed); MALFORMED = `not ok and failure_class=="malformed"` (**fail-closed, no escape**); UNAVAILABLE = `not ok and failure_class=="unavailable"` (escape only at budget-exhaustion).
 
 ### Schema version constants
 - `GUIDED_SESSION_SCHEMA_VERSION` (`composer/guided/state_machine.py:41`): **5 → 6**.
@@ -192,7 +192,7 @@ All commands run from the worktree root
 
 - [ ] **Step 2: Run the test to confirm import failure.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_profile.py -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_profile.py -q
   ```
   Expected: collection error `ModuleNotFoundError: No module named 'elspeth.web.composer.guided.profile'`.
 
@@ -272,8 +272,28 @@ All commands run from the worktree root
 
       @classmethod
       def from_dict(cls, d: dict[str, Any]) -> WorkflowProfile:
-          """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data."""
+          """Reconstruct from a plain dict.  Tier 1 strict — crashes on bad data.
+
+          Strict means: (a) reject UNKNOWN keys — a forked/tampered profile blob must
+          not smuggle fields past the closed schema; (b) reject type mismatches on the
+          server-owned gate bools — a present-but-mistyped value (e.g. the JSON string
+          "false", which is truthy) must NOT silently flip the advisor gate. Missing
+          keys already raise via direct-key access below.
+          """
+          _allowed = {"entry_seed", "coaching", "advisor_checkpoints", "recipe_match", "bookends"}
+          extra = set(d) - _allowed
+          if extra:
+              raise InvariantError(f"WorkflowProfile.from_dict: unexpected keys {sorted(extra)!r}")
           try:
+              # `isinstance(x, bool)` excludes 1/0 (bool is an int subclass), so a stray
+              # numeric/string for a gate is rejected rather than silently coerced.
+              for _k in ("coaching", "advisor_checkpoints", "recipe_match", "bookends"):
+                  if not isinstance(d[_k], bool):
+                      raise InvariantError(
+                          f"WorkflowProfile.from_dict: {_k} must be bool, got {type(d[_k]).__name__}"
+                      )
+              if d["entry_seed"] is not None and not isinstance(d["entry_seed"], str):
+                  raise InvariantError("WorkflowProfile.from_dict: entry_seed must be str | None")
               return cls(
                   entry_seed=d["entry_seed"],
                   coaching=d["coaching"],
@@ -281,7 +301,7 @@ All commands run from the worktree root
                   recipe_match=d["recipe_match"],
                   bookends=d["bookends"],
               )
-          except (KeyError, ValueError, TypeError) as exc:
+          except KeyError as exc:
               raise InvariantError(f"WorkflowProfile.from_dict: malformed record {d!r}") from exc
 
 
@@ -320,7 +340,7 @@ All commands run from the worktree root
 
 - [ ] **Step 4: Run the test to confirm it passes.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_profile.py -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_profile.py -q
   ```
   Expected: `8 passed`.
 
@@ -380,13 +400,27 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
           # An empty dict must crash, never silently fabricate a profile.
           with pytest.raises(InvariantError, match=r"WorkflowProfile\.from_dict"):
               WorkflowProfile.from_dict({})
+
+      def test_from_dict_rejects_unknown_key(self) -> None:
+          # A forked/tampered blob with an injected field must be rejected, not
+          # silently ignored — the closed schema is the tamper boundary.
+          d = {**TUTORIAL_PROFILE.to_dict(), "stages": ["smuggled"]}
+          with pytest.raises(InvariantError, match=r"unexpected keys"):
+              WorkflowProfile.from_dict(d)
+
+      def test_from_dict_rejects_non_bool_advisor_checkpoints(self) -> None:
+          # The JSON string "false" is TRUTHY — a present-but-mistyped gate must
+          # raise, never silently flip the server-owned advisor gate.
+          d = {**TUTORIAL_PROFILE.to_dict(), "advisor_checkpoints": "false"}
+          with pytest.raises(InvariantError, match=r"advisor_checkpoints must be bool"):
+              WorkflowProfile.from_dict(d)
   ```
 
 - [ ] **Step 2: Run the full profile suite to confirm green.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_profile.py -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_profile.py -q
   ```
-  Expected: `14 passed`.
+  Expected: `16 passed`.
 
 - [ ] **Step 3: Commit.**
   ```bash
@@ -431,7 +465,7 @@ constant — no double-edit of the same lines.
 
 - [ ] **Step 2: Run the state-machine version tests to confirm they now fail.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_state_machine.py -k "schema_version" -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_state_machine.py -k "schema_version" -q
   ```
   Expected: 2 failures —
   `test_guided_session_schema_version_bumped_for_inspection_facts` and
@@ -450,7 +484,7 @@ constant — no double-edit of the same lines.
 
 - [ ] **Step 4: Run the same selection to confirm pass.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_state_machine.py -k "schema_version" -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_state_machine.py -k "schema_version" -q
   ```
   Expected: `3 passed` (the two bumped tests + the still-valid v4 rejection test).
 
@@ -479,9 +513,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 - Produces:
   - `GuidedSession.profile: WorkflowProfile = EMPTY_PROFILE` (new frozen field).
   - `GuidedSession.advisor_checkpoint_passes_used: int = 0` (new frozen field).
+  - `GuidedSession.advisor_signoff_escape_offered: bool = False` (new frozen field — D5/B2: persists whether the last END sign-off terminal was a genuine-OUTAGE escape OFFER, so a later request's "complete without sign-off (advisor unreachable)" acknowledgement is honoured WITHOUT re-calling the provider, and so a FLAGGED/MALFORMED-exhausted terminal can never be acknowledged into a bypass. Written by `run_wire_signoff`, P5.5).
   - `GuidedSession.initial(cls, profile: WorkflowProfile = EMPTY_PROFILE) -> GuidedSession` (new signature).
-  - `to_dict` adds keys `"profile"` (→ `self.profile.to_dict()`) and `"advisor_checkpoint_passes_used"`.
-  - `from_dict` reads `d["profile"]` (via `WorkflowProfile.from_dict`) and `d["advisor_checkpoint_passes_used"]` (direct-key, `int(...)`).
+  - `to_dict` adds keys `"profile"` (→ `self.profile.to_dict()`), `"advisor_checkpoint_passes_used"`, and `"advisor_signoff_escape_offered"`.
+  - `from_dict` reads `d["profile"]` (via `WorkflowProfile.from_dict`), `d["advisor_checkpoint_passes_used"]` (direct-key, `int(...)`), and `d["advisor_signoff_escape_offered"]` (direct-key, `bool(...)`).
 
 - [ ] **Step 1: Write the failing new-field tests.**
   Append to `tests/unit/web/composer/guided/test_state_machine.py` (inside the
@@ -500,6 +535,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
           sess = GuidedSession.initial()
           assert sess.profile == EMPTY_PROFILE
           assert sess.advisor_checkpoint_passes_used == 0
+          assert sess.advisor_signoff_escape_offered is False
 
       def test_initial_accepts_profile_argument(self) -> None:
           sess = GuidedSession.initial(profile=TUTORIAL_PROFILE)
@@ -516,11 +552,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
           sess = dataclasses.replace(
               GuidedSession.initial(profile=TUTORIAL_PROFILE),
               advisor_checkpoint_passes_used=2,
+              advisor_signoff_escape_offered=True,
           )
           restored = GuidedSession.from_dict(sess.to_dict())
           assert restored == sess
           assert restored.profile == TUTORIAL_PROFILE
           assert restored.advisor_checkpoint_passes_used == 2
+          assert restored.advisor_signoff_escape_offered is True
 
       def test_roundtrip_with_empty_profile(self) -> None:
           sess = GuidedSession.initial()
@@ -547,7 +585,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 2: Run the new tests to confirm failure.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_state_machine.py::TestGuidedSessionProfileFields -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_state_machine.py::TestGuidedSessionProfileFields -q
   ```
   Expected: failures —
   `test_initial_defaults_to_empty_profile` raises `AttributeError: 'GuidedSession' object has no attribute 'profile'`;
@@ -618,13 +656,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 8: Run the new tests to confirm pass.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_state_machine.py::TestGuidedSessionProfileFields -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_state_machine.py::TestGuidedSessionProfileFields -q
   ```
   Expected: `8 passed`.
 
 - [ ] **Step 9: Run the FULL state-machine module to confirm no existing round-trip regressed.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_state_machine.py -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_state_machine.py -q
   ```
   Expected: all pass (the pre-existing `test_guided_session_roundtrip_*` tests
   call `GuidedSession.initial()`, which now defaults `profile=EMPTY_PROFILE` /
@@ -689,7 +727,7 @@ profile. This task only widens the seam + proves threading.
 
 - [ ] **Step 2: Run to confirm failure.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_initial_composition_state_profile.py -q
+  uv run python -m pytest tests/unit/web/sessions/routes/test_initial_composition_state_profile.py -q
   ```
   Expected: `test_threads_tutorial_profile` fails with
   `TypeError: _initial_composition_state_with_guided_session() got an unexpected keyword argument 'profile'`.
@@ -721,13 +759,13 @@ profile. This task only widens the seam + proves threading.
 
 - [ ] **Step 5: Run to confirm pass.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_initial_composition_state_profile.py -q
+  uv run python -m pytest tests/unit/web/sessions/routes/test_initial_composition_state_profile.py -q
   ```
   Expected: `2 passed`.
 
 - [ ] **Step 6: Run the existing helper callers to confirm no no-arg regression.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/sessions/ tests/unit/web/composer/guided/ -q
+  uv run python -m pytest tests/unit/web/sessions/ tests/unit/web/composer/guided/ -q
   ```
   Expected: all pass (existing no-arg call sites unchanged; default profile == prior behaviour).
 
@@ -776,6 +814,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
       """
       eng = create_session_engine("sqlite:///:memory:")
       with eng.begin() as conn:
+          # A user table is REQUIRED here: initialize_session_schema treats a
+          # table-less DB as FRESH (runs metadata.create_all, then re-stamps the
+          # CURRENT epoch) and the stale-epoch guard never runs — so without this
+          # CREATE TABLE the test passes vacuously (DID NOT RAISE) even post-bump.
+          # A user table routes us down the existing-DB (validate, never recreate)
+          # branch where _assert_schema_sentinels checks the stamped epoch. Mirrors
+          # test_schema.py:124-130's CREATE TABLE pattern.
+          conn.execute(text("CREATE TABLE sessions (id VARCHAR PRIMARY KEY)"))
           # Stamp the ELSP application_id (so we hit the "ours but stale" branch,
           # not the "not ELSPETH" branch) + the prior epoch onto the file.
           conn.execute(text(f"PRAGMA application_id = {SESSION_DB_APPLICATION_ID}"))
@@ -791,7 +837,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 2: Run to confirm failure.**
   ```bash
-  .venv/bin/python -m pytest "tests/unit/web/sessions/test_schema.py::test_initialize_session_schema_rejects_epoch_22_database" -q
+  uv run python -m pytest "tests/unit/web/sessions/test_schema.py::test_initialize_session_schema_rejects_epoch_22_database" -q
   ```
   Expected: FAIL — `DID NOT RAISE <class 'SessionSchemaError'>` (with epoch still
   22, a 22-stamped DB matches the current epoch and is accepted).
@@ -832,7 +878,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 5: Run the boot fail-close test + the two pinning tests to confirm pass.**
   ```bash
-  .venv/bin/python -m pytest \
+  uv run python -m pytest \
     "tests/unit/web/sessions/test_schema.py::test_initialize_session_schema_rejects_epoch_22_database" \
     "tests/unit/web/sessions/test_blob_inline_resolutions_schema.py::test_blob_inline_resolutions_schema_epoch_is_23" \
     "tests/unit/web/sessions/test_interpretation_events_table.py::test_proposal_provenance_schema_cohort_epoch_is_23" -q
@@ -841,7 +887,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 6: Run the whole sessions schema test surface to confirm no other `== 22` left red.**
   ```bash
-  .venv/bin/python -m pytest tests/unit/web/sessions/ -q -k "schema or epoch or interpretation_events or blob_inline"
+  uv run python -m pytest tests/unit/web/sessions/ -q -k "schema or epoch or interpretation_events or blob_inline"
   ```
   Expected: all pass. If any other test references the literal `22` for the
   session epoch, it surfaces here — fix it to `23` in the same task (do NOT defer
@@ -871,7 +917,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Lint the files this phase touched.**
   ```bash
-  .venv/bin/ruff check \
+  uv run ruff check \
     src/elspeth/web/composer/guided/profile.py \
     src/elspeth/web/composer/guided/state_machine.py \
     src/elspeth/web/sessions/routes/_helpers.py \
@@ -884,7 +930,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 2: Type-check the changed source modules.**
   ```bash
-  .venv/bin/mypy \
+  uv run mypy \
     src/elspeth/web/composer/guided/profile.py \
     src/elspeth/web/composer/guided/state_machine.py \
     src/elspeth/web/sessions/routes/_helpers.py \
@@ -896,7 +942,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 3: Run the full P0 test surface.**
   ```bash
-  .venv/bin/python -m pytest \
+  uv run python -m pytest \
     tests/unit/web/composer/guided/test_profile.py \
     tests/unit/web/composer/guided/test_state_machine.py \
     tests/unit/web/sessions/routes/test_initial_composition_state_profile.py \
@@ -1548,11 +1594,15 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 
 **Files:**
 - Modify `src/elspeth/web/frontend/src/types/guided.ts:18-39` (`TurnType` + `GuidedStep` unions)
+- Modify `src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx` (the `never`-exhaustive switch on `turn.type`)
+- Modify `src/elspeth/web/frontend/src/components/chat/guided/GuidedHistory.tsx` (`STEP_LABELS: Record<GuidedStep,…>` + `TURN_TYPE_LABELS: Record<TurnType,…>`)
+- Modify `src/elspeth/web/frontend/src/components/chat/guided/GuidedChatHistory.tsx` (`STEP_LABELS: Record<GuidedStep,…>`)
+- Modify `src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx` (`GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep,…>` + `GUIDED_STEP_PURPOSES: Record<GuidedStep,…>`)
 
 **Interfaces:**
 - Produces: TS `TurnType` union gains `"confirm_wiring"`; TS `GuidedStep` union gains `"step_4_wire"`.
 - Consumes: nothing new — these are hand-written mirrors of the Python StrEnums (source-of-truth comment at `guided.ts:5-7`).
-- Note: the `WireStageData` TS type + the `interpretation_review` dead-case removal are **P3.T2** / **P4.T2**; P1 only mirrors the two enum members so the union stays total and `npm run typecheck` stays green when later phases dispatch on `"step_4_wire"` / `"confirm_wiring"`.
+- Note: widening the two unions WITHOUT updating their exhaustive consumers in the SAME slice BREAKS `npm run typecheck` — every `Record<TurnType,…>` / `Record<GuidedStep,…>` total-key map raises a missing-key error (TS2741) and the `never`-exhaustiveness assertion in `GuidedTurn.tsx` fails to narrow. There are **six** such consumers (GuidedTurn `never` switch; GuidedHistory `STEP_LABELS` + `TURN_TYPE_LABELS`; GuidedChatHistory `STEP_LABELS`; ChatPanel `GUIDED_CHAT_PLACEHOLDERS` + `GUIDED_STEP_PURPOSES`), so this task widens the unions AND extends all six together. The `WireStageData` TS type is **P3.T2** and the `interpretation_review` dead-case removal is **P4.T2**; the real `confirm_wiring`→`WireStageTurn` render replaces the placeholder added here once WireStageTurn exists (**P2.7**).
 
 - [ ] **Step 1: Add the new members to the TS unions.**
   Edit `guided.ts:18-28` (TurnType union), appending the new member after
@@ -1587,16 +1637,45 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
     | "step_4_wire";
   ```
 
-- [ ] **Step 2: Typecheck the frontend.**
+- [ ] **Step 2: Extend the six exhaustive consumers in the SAME slice (required for typecheck).**
+  a) `GuidedTurn.tsx` (the `never`-exhaustive switch on `turn.type`, ~line 153) — add a `confirm_wiring` case BEFORE `default:` so `const _exhaustive: never = turn.type` still narrows. The real `<WireStageTurn>` render is wired in P2.7; here it is a placeholder (WireStageTurn does not exist yet in P1):
+  ```tsx
+      case "confirm_wiring":
+        // Placeholder — real WireStageTurn render is wired in P2.7. This case only
+        // keeps the union total so the `never` assertion in `default:` compiles.
+        return null;
+  ```
+  b) `GuidedHistory.tsx` — add the new key to BOTH total-key maps:
+  ```tsx
+      // in STEP_LABELS: Record<GuidedStep, string>
+      step_4_wire: "Wire",
+      // in TURN_TYPE_LABELS: Record<TurnType, string>
+      confirm_wiring: "Confirm wiring",
+  ```
+  c) `GuidedChatHistory.tsx` — add to its `STEP_LABELS: Record<GuidedStep, string>`:
+  ```tsx
+      step_4_wire: "Wire",
+  ```
+  d) `ChatPanel.tsx` — add the new step to BOTH `Record<GuidedStep, string>` maps:
+  ```tsx
+      // in GUIDED_CHAT_PLACEHOLDERS
+      step_4_wire: "Confirm how the steps connect, then continue.",
+      // in GUIDED_STEP_PURPOSES
+      step_4_wire: "Review and confirm the wiring between your pipeline steps.",
+  ```
+
+- [ ] **Step 3: Typecheck the frontend.**
   ```
   npm --prefix src/elspeth/web/frontend run typecheck
   ```
-  Expected: PASS (no new TS errors; the unions are wider but no exhaustive switch
-  yet dispatches on the new members — those land in P3/P4).
+  Expected: PASS — but ONLY because Step 2 extended every exhaustive consumer.
+  Widening the unions alone does NOT typecheck: each `Record<TurnType,…>` /
+  `Record<GuidedStep,…>` total-key map raises TS2741 (missing key) and the
+  `never`-exhaustiveness assertion in `GuidedTurn.tsx` fails to narrow.
 
-- [ ] **Step 3: Run the SlotType / guided.ts mirror-drift gate.**
+- [ ] **Step 4: Run the SlotType / guided.ts mirror-drift gate.**
   ```
-  .venv/bin/python scripts/cicd/check_slot_type_cross_language.py
+  uv run python scripts/cicd/check_slot_type_cross_language.py
   ```
   Expected: PASS (this gate checks `SlotType` Literal vs the `RecipeSlotInput`
   interface, which P1 does not touch — confirm the guided.ts edit did not break
@@ -1981,7 +2060,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 - [ ] **Step 4: Frontend typecheck + the mirror gate (final).**
   ```
   npm --prefix src/elspeth/web/frontend run typecheck
-  .venv/bin/python scripts/cicd/check_slot_type_cross_language.py
+  uv run python scripts/cicd/check_slot_type_cross_language.py
   ```
   Expected: both PASS.
 
@@ -2007,15 +2086,15 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 > **`from`/`to`** — NOT `from_id`/`to_id`. The render reconstructs edges from connection
 > labels (NEVER `state.edges` — guided passes `edges=[]`) and overlays `edge_contracts`
 > keyed by `(from, to)`. B6: after any wire-stage reconciliation the confirm gate
-> re-evaluates `validate().is_valid` AND re-runs the P4 surfacing pass.
+> re-evaluates `validate().is_valid` AND re-runs the P3 surfacing pass.
 >
 > **Dependencies on other phases (must land first):** P1 owns
 > `GuidedStep.STEP_4_WIRE`, `TurnType.CONFIRM_WIRING`, the `emitters.py` `_ORDER`
 > tuple entry for `STEP_4_WIRE` (consumed by `_step_index`), and the `guided.ts`
 > `GuidedStep`/`TurnType` union strings. This phase's emitter calls
 > `_step_index(GuidedStep.STEP_4_WIRE)` and stamps `TurnType.CONFIRM_WIRING.value`;
-> both must exist. The P4 surfacing entry point `_surface_pending_interpretation_reviews`
-> is consumed by the B6 re-surface step (P2.7) — until P4 lands, the re-surface call
+> both must exist. The P3 surfacing entry point `_surface_pending_interpretation_reviews`
+> is consumed by the B6 re-surface step (P2.7) — until P3 lands, the re-surface call
 > is threaded as a passed-in callback so this phase stays independently testable.
 
 ---
@@ -2317,8 +2396,8 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
       )
       out = OutputSpec(
           name="jsonl_out",
-          plugin="jsonl",
-          options={"path": "out.jsonl"},
+          plugin="json",
+          options={"path": "out.jsonl", "format": "jsonl"},
           on_write_failure="raise",
       )
       return CompositionState(
@@ -2343,7 +2422,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
           assert node_by_id["scrape"]["on_success"] == "scraped"
           assert node_by_id["mapper"]["input"] == "scraped"
           assert node_by_id["mapper"]["on_success"] == "main"
-          assert topo["outputs"] == [{"sink_name": "jsonl_out", "plugin": "jsonl"}]
+          assert topo["outputs"] == [{"sink_name": "jsonl_out", "plugin": "json"}]
 
       def test_topology_node_subset_drops_options(self) -> None:
           topo = _build_wire_topology(_canonical_state())
@@ -2639,8 +2718,8 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
           )
           out = OutputSpec(
               name="jsonl_out",
-              plugin="jsonl",
-              options={"path": "out.jsonl"},
+              plugin="json",
+              options={"path": "out.jsonl", "format": "jsonl"},
               on_write_failure="raise",
           )
           state = CompositionState(
@@ -2722,7 +2801,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
               fork_to: null,
             },
           ],
-          outputs: [{ sink_name: "jsonl_out", plugin: "jsonl" }],
+          outputs: [{ sink_name: "jsonl_out", plugin: "json" }],
         },
         edge_contracts: [
           {
@@ -2798,7 +2877,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
   `npm test -- --run src/types/guided.test.ts`
   Expected: the `WireStageData` describe block passes.
 - [ ] **Step 5: Run the SlotType / guided.ts mirror gate (from repo root).**
-  `.venv/bin/python scripts/cicd/check_slot_type_cross_language.py`
+  `uv run python scripts/cicd/check_slot_type_cross_language.py`
   Expected: exit 0 (the `RecipeSlotInput` interface is untouched; adding `WireStageData`
   does not affect the SlotType mirror).
 - [ ] **Step 6: Commit.**
@@ -2874,7 +2953,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
             fork_to: null,
           },
         ],
-        outputs: [{ sink_name: "jsonl_out", plugin: "jsonl" }],
+        outputs: [{ sink_name: "jsonl_out", plugin: "json" }],
       },
       edge_contracts: [
         {
@@ -2927,6 +3006,16 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
         <WireStageTurn data={canonicalData()} onConfirm={() => {}} confirmDisabled={true} />,
       );
       expect(screen.getByRole("button", { name: /confirm wiring/i })).toBeDisabled();
+    });
+
+    it("conveys edge status as TEXT, not colour alone (WCAG 1.4.1)", () => {
+      render(<WireStageTurn data={canonicalData()} onConfirm={() => {}} confirmDisabled={false} />);
+      // scrape->mapper is satisfied=true; source->scrape is satisfied=null. Each
+      // must render a text status token, not only a --ok/--unchecked CSS class, so
+      // the state is visible to screen readers and colour-blind users (an edge with
+      // satisfied===false and empty missing_fields is otherwise colour-only).
+      expect(screen.getByText(/\(connected\)/)).toBeInTheDocument();
+      expect(screen.getByText(/\(contract unchecked\)/)).toBeInTheDocument();
     });
   });
   ```
@@ -3048,6 +3137,18 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
               }
             >
               {e.from} &rarr; {e.to}
+              {/* Status as TEXT, not colour alone (WCAG 1.4.1): an edge with
+                  satisfied===false and empty missing_fields is otherwise
+                  distinguishable only by the --unsatisfied CSS class, invisible to
+                  screen readers and colour-blind users. */}
+              <span className="wire-stage__edge-status">
+                {" "}
+                {e.satisfied === null
+                  ? "(contract unchecked)"
+                  : e.satisfied
+                    ? "(connected)"
+                    : "(not satisfied)"}
+              </span>
               {e.missing_fields.length > 0 && (
                 <span className="wire-stage__missing">
                   {" "}
@@ -3087,7 +3188,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 
 **Interfaces:**
 - Consumes: `CompositionState` (post-reconciliation), `build_step_4_wire_turn` (P2.4),
-  a `resurface` callback `Callable[[CompositionState], None]` (the P4 surfacing pass,
+  a `resurface` callback `Callable[[CompositionState], None]` (the P3 surfacing pass,
   passed in so this phase is independently testable)
 - Produces:
   ```python
@@ -3106,8 +3207,8 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 
 > B6: after any wire-stage reconciliation (`upsert_node`/`set_pipeline` for a
 > `field_mapper` insert or a schema-relax-to-flexible) the confirm gate MUST
-> re-evaluate `validate().is_valid` AND re-run the P4 surfacing pass on the
-> post-mutation state. The `resurface` callback is the P4
+> re-evaluate `validate().is_valid` AND re-run the P3 surfacing pass on the
+> post-mutation state. The `resurface` callback is the P3
 > `_surface_pending_interpretation_reviews` (bound at the dispatcher). The function
 > returns the freshly-built wire turn (so a stale advisory card cannot persist) and
 > the `is_valid` flag the dispatcher uses to gate the confirm.
@@ -3177,7 +3278,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 
       After any ``upsert_node`` / ``set_pipeline`` reconciliation at the wire stage
       (a ``field_mapper`` insert or a schema relax), the confirm gate must (1) re-run
-      the P4 interpretation surfacing pass on the POST-mutation state — never trust
+      the P3 interpretation surfacing pass on the POST-mutation state — never trust
       transform-commit-time results at the wire terminal — and (2) rebuild the wire
       turn from a fresh ``validate()`` so a cosmetically-stale advisory card cannot
       persist. Returns ``(rebuilt STEP_4_WIRE turn, validate().is_valid)``.
@@ -3600,7 +3701,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   `uv run mypy src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer.py`
   Expected: `Success: no issues found`.
 - [ ] **Step 4: SlotType / guided.ts mirror gate.**
-  `.venv/bin/python scripts/cicd/check_slot_type_cross_language.py`
+  `uv run python scripts/cicd/check_slot_type_cross_language.py`
   Expected: exit 0.
 - [ ] **Step 5: Frontend gates (from `src/elspeth/web/frontend`).**
   `npm run typecheck && npm test -- --run src/types/guided.test.ts src/components/chat/guided/WireStageTurn.test.tsx && npm run build`
@@ -5712,6 +5813,22 @@ EOF
 > The predicate keys on that resolved plugin + a `url`-column signal + a single
 > jsonl output, gated on `blob_ref` (mirroring `_classify_predicate`,
 > `recipe_match.py:205`).
+>
+> **`blob_ref` IS present at match time (the load-bearing fact for §4.1).** When
+> `set_pipeline` composes the canonical seed from `source.inline_blob`, it persists the
+> inline blob as a real blob row AND **unconditionally writes
+> `source.options["blob_ref"]` = the new blob UUID** (`composer/tools/sessions.py:425`,
+> inside the `if inline_blob is not None` branch; the same `SourceSpec.options` is what
+> `match_recipe` reads). So the `blob_ref` gate is satisfied for the canonical source —
+> the predicate matches, `match_recipe` returns the recipe, and §4.1's zero-LLM compose
+> fires. The end-to-end proof is **Task P4.2 Step 4b**
+> (`test_canonical_seed_materialised_source_matches_web_scrape_recipe`), which drives the
+> exact materialised shape through `match_recipe`. (NB: this `source.options["blob_ref"]`
+> — a plain UUID string — is a DIFFERENT object from the `{"mode": "inline_content",
+> "blob_ref": ...}` widened marker the fork blob-rewrite recurses for
+> (`sessions/routes/sessions.py:128`); see the spec's two-objects `blob_ref` note in
+> §5/B4. Do not let the spec's loose "inline_blob source has no blob_ref" fork-strip
+> shorthand mislead this predicate — at match time, `blob_ref` is present.)
 
 > **Resolved fact (pinned by Task P4.2).** There is **no** registered `llm_rate`
 > plugin (`grep -rn 'name = "llm_rate"'` → empty; only `llm` at
@@ -5779,7 +5896,7 @@ EOF
   ```
   Run-to-fail:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::TestCanonicalSourcePluginIsResolved -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::TestCanonicalSourcePluginIsResolved -q
   ```
   Expected failure: `ImportError: cannot import name '_URL_ROW_SOURCE_PLUGINS' from 'elspeth.web.composer.guided.recipe_match'`.
 
@@ -5847,7 +5964,7 @@ EOF
   ```
   Run-to-pass:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::TestCanonicalSourcePluginIsResolved -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::TestCanonicalSourcePluginIsResolved -q
   ```
   Expected: `2 passed`.
 
@@ -5936,7 +6053,7 @@ EOF
   ```
   Run-to-fail:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::TestWebScrapePredicate -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::TestWebScrapePredicate -q
   ```
   Expected: `5 passed` (the predicate already exists from Step 2 — this step pins
   its behaviour; if any assertion is red, fix the predicate before proceeding).
@@ -5957,7 +6074,7 @@ EOF
   ```
   Run-to-fail:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::test_web_scrape_predicate_registered_last -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::test_web_scrape_predicate_registered_last -q
   ```
   Expected failure: `assert 'web-scrape-llm-rate-jsonl' in [...]` → KeyError/AssertionError
   (also note: `_web_scrape_slot_resolver` does not exist yet — that lands in P4.2;
@@ -5994,7 +6111,7 @@ EOF
   ```
   Run-to-pass:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_recipe_match.py -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_recipe_match.py -q
   ```
   Expected: all pass (existing classify/split tests + the new ones).
   Note: `match_recipe` (recipe_match.py:371) will now raise `InvariantError`
@@ -6005,8 +6122,8 @@ EOF
 
 - [ ] **Step 6: Lint + commit.**
   ```
-  .venv/bin/python -m ruff check src/elspeth/web/composer/guided/recipe_match.py tests/unit/web/composer/guided/test_recipe_match.py
-  .venv/bin/python -m ruff format src/elspeth/web/composer/guided/recipe_match.py tests/unit/web/composer/guided/test_recipe_match.py
+  uv run python -m ruff check src/elspeth/web/composer/guided/recipe_match.py tests/unit/web/composer/guided/test_recipe_match.py
+  uv run python -m ruff format src/elspeth/web/composer/guided/recipe_match.py tests/unit/web/composer/guided/test_recipe_match.py
   git add src/elspeth/web/composer/guided/recipe_match.py tests/unit/web/composer/guided/test_recipe_match.py
   git commit -m "feat(composer/recipe-match): add web-scrape URL-row source predicate (D11/P4.1)
 
@@ -6151,7 +6268,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   ```
   Run-to-fail:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/test_recipes.py::TestWebScrapeRecipeBuild tests/unit/web/composer/test_recipes.py::TestRecipeRegistry::test_registered_recipes -q
+  uv run python -m pytest tests/unit/web/composer/test_recipes.py::TestWebScrapeRecipeBuild tests/unit/web/composer/test_recipes.py::TestRecipeRegistry::test_registered_recipes -q
   ```
   Expected failure: `RecipeValidationError: recipe 'web-scrape-llm-rate-jsonl' is
   not registered` (and the registry-set assertion is red).
@@ -6274,7 +6391,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
                       "fingerprint_field": fingerprint_field,
                       "format": "markdown",
                       "http": {
-                          "abuse_contact": "compliance@example.com",
+                          # OPERATOR: abuse_contact ships as a wire-visible HTTP header to every
+                          # scraped third party — it MUST be a real, monitored, operator-owned inbox.
+                          # Defaults to the DTA canonical-seed address (mirrors
+                          # tutorial_cache.CANONICAL_SEED_PROMPT); non-DTA operators MUST override it.
+                          # RFC-reserved / placeholder domains are hard-rejected by
+                          # state.py:_validate_web_scrape_abuse_contact_not_reserved (severity=high).
+                          "abuse_contact": "noreply@dta.gov.au",
                           "scraping_reason": "Regulatory monitoring (tutorial canonical pipeline)",
                       },
                   },
@@ -6362,7 +6485,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   ```
   Run-to-pass:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/test_recipes.py::TestWebScrapeRecipeBuild tests/unit/web/composer/test_recipes.py::TestRecipeRegistry -q
+  uv run python -m pytest tests/unit/web/composer/test_recipes.py::TestWebScrapeRecipeBuild tests/unit/web/composer/test_recipes.py::TestRecipeRegistry -q
   ```
   Expected: all pass.
 
@@ -6386,15 +6509,73 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   ```
   Run-to-pass:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::test_match_recipe_returns_web_scrape_match_for_url_source -q
+  uv run python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::test_match_recipe_returns_web_scrape_match_for_url_source -q
+  ```
+  Expected: `1 passed`.
+
+- [ ] **Step 4b: Trace the REAL canonical-seed materialised shape through `match_recipe`
+  (run-to-pass).** Step 4 used the abstract `_make_url_json_source()` fixture; this test
+  pins that the fixture's shape is the one the backend *actually* produces for the
+  canonical `inline_blob` seed, so the §4.1 "zero-LLM canonical compose via recipe-match"
+  lever provably fires for the real tutorial source. The canonical seed
+  (`tutorial_cache.CANONICAL_SEED_PROMPT`; frontend `tutorial.spec.ts:56` `plugin:
+  "inline_blob"`, rows of `{url: ...}`) is composed via `set_pipeline` with
+  `source.inline_blob`; the backend persists the inline blob and binds a registered
+  source plugin via `_MIME_TO_SOURCE` (`application/json → json`) **and unconditionally
+  writes `source.options["blob_ref"]`** (`composer/tools/sessions.py:420-427`, inside the
+  `if inline_blob is not None` branch). So the materialised `SourceResolved` is
+  `plugin="json"`, `options={"blob_ref": <uuid>, "path": ...}`, observed `url` column —
+  exactly the `_make_url_json_source()` shape. Append to `test_recipe_match.py`:
+  ```python
+  def test_canonical_seed_materialised_source_matches_web_scrape_recipe() -> None:
+      """§4.1 zero-LLM lever: the REAL canonical tutorial seed, materialised by
+      set_pipeline(source.inline_blob), matches the web_scrape recipe.
+
+      Provenance pin — the materialised source shape this test encodes is what
+      ``_execute_set_pipeline`` produces for the canonical ``inline_blob`` URL seed
+      (``composer/tools/sessions.py:420-427``): an ``application/json`` inline blob
+      binds the registered ``json`` source plugin via ``_MIME_TO_SOURCE``
+      (``composer/tools/sources.py:146``) AND writes ``source.options["blob_ref"]``
+      = the persisted blob UUID UNCONDITIONALLY in the ``if inline_blob is not None``
+      branch. So ``SourceResolved.plugin == "json"`` (never the ``"inline_blob"``
+      authoring alias, never ``"web_scrape"``) and ``blob_ref`` IS present at
+      ``match_recipe`` time — the predicate's blob-presence gate is satisfied and the
+      recipe fires. If this assertion ever flips to None, the zero-LLM canonical
+      compose is broken; do NOT relax the predicate — fix the materialisation or the
+      fixture so the two agree.
+      """
+      from elspeth.web.composer.guided.recipe_match import match_recipe
+
+      # The materialised canonical source, byte-faithful to sessions.py:420-427:
+      # json plugin + path + blob_ref overlay + observed url column.
+      canonical_source = SourceResolved(
+          plugin="json",  # _MIME_TO_SOURCE["application/json"] -> "json"
+          options={
+              "path": "composer_blobs/canonical-url-list.json",
+              "blob_ref": "a1b2c3d4-0000-0000-0000-000000000099",  # sessions.py:425
+          },
+          observed_columns=("url",),
+          sample_rows=({"url": "https://www.dta.gov.au"},),
+      )
+      canonical_sink = _make_single_jsonl_sink()
+
+      result = match_recipe(canonical_source, canonical_sink)
+      assert result is not None, "canonical seed must match the web_scrape recipe (zero-LLM §4.1)"
+      assert result.recipe_name == "web-scrape-llm-rate-jsonl"
+      # The slot resolver derives source_blob_id from the materialised blob_ref.
+      assert result.slots["source_blob_id"] == canonical_source.options["blob_ref"]
+  ```
+  Run-to-pass:
+  ```
+  uv run python -m pytest tests/unit/web/composer/guided/test_recipe_match.py::test_canonical_seed_materialised_source_matches_web_scrape_recipe -q
   ```
   Expected: `1 passed`.
 
 - [ ] **Step 5: Lint + mypy + commit.**
   ```
-  .venv/bin/python -m ruff check src/elspeth/web/composer/recipes.py tests/unit/web/composer/test_recipes.py tests/unit/web/composer/guided/test_recipe_match.py
-  .venv/bin/python -m ruff format src/elspeth/web/composer/recipes.py tests/unit/web/composer/test_recipes.py tests/unit/web/composer/guided/test_recipe_match.py
-  .venv/bin/python -m mypy src/elspeth/web/composer/recipes.py
+  uv run python -m ruff check src/elspeth/web/composer/recipes.py tests/unit/web/composer/test_recipes.py tests/unit/web/composer/guided/test_recipe_match.py
+  uv run python -m ruff format src/elspeth/web/composer/recipes.py tests/unit/web/composer/test_recipes.py tests/unit/web/composer/guided/test_recipe_match.py
+  uv run python -m mypy src/elspeth/web/composer/recipes.py
   git add src/elspeth/web/composer/recipes.py src/elspeth/web/composer/guided/recipe_match.py tests/unit/web/composer/test_recipes.py tests/unit/web/composer/guided/test_recipe_match.py
   git commit -m "feat(composer/recipes): add web-scrape-llm-rate-jsonl recipe (D11/P4.2)
 
@@ -6524,7 +6705,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   Run-to-fail (the helper imports may need adjusting if `OutputSpec`/`SourceSpec`
   fields differ — confirm at write time against `state.py:119/287`):
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/test_web_scrape_recipe_contract.py::test_built_recipe_passes_blocking_cleanup_contract -q
+  uv run python -m pytest tests/unit/web/composer/test_web_scrape_recipe_contract.py::test_built_recipe_passes_blocking_cleanup_contract -q
   ```
   Expected: PASS once the helper compiles. If `composition_review_contract_error`
   returns a non-None string, the field_mapper requirement staging in P4.2 is wrong
@@ -6568,7 +6749,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   ```
   Run-to-fail then run-to-pass:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/test_web_scrape_recipe_contract.py -q
+  uv run python -m pytest tests/unit/web/composer/test_web_scrape_recipe_contract.py -q
   ```
   Expected: PASS. If the advisory is absent, the recipe accidentally suppressed it
   (e.g. wrong plugin name on the rating node, or it staged a
@@ -6603,14 +6784,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   ```
   Run-to-pass:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/test_web_scrape_recipe_contract.py -q
+  uv run python -m pytest tests/unit/web/composer/test_web_scrape_recipe_contract.py -q
   ```
   Expected: all pass.
 
 - [ ] **Step 4: Lint + commit.**
   ```
-  .venv/bin/python -m ruff check tests/unit/web/composer/test_web_scrape_recipe_contract.py
-  .venv/bin/python -m ruff format tests/unit/web/composer/test_web_scrape_recipe_contract.py
+  uv run python -m ruff check tests/unit/web/composer/test_web_scrape_recipe_contract.py
+  uv run python -m ruff format tests/unit/web/composer/test_web_scrape_recipe_contract.py
   git add tests/unit/web/composer/test_web_scrape_recipe_contract.py
   git commit -m "test(composer/recipes): pin web-scrape recipe contract + re-polarized shield (D11/P4.3)
 
@@ -6694,15 +6875,15 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   ```
   Run-to-fail/pass:
   ```
-  .venv/bin/python -m pytest tests/unit/web/composer/test_web_scrape_recipe_zero_llm.py -q
+  uv run python -m pytest tests/unit/web/composer/test_web_scrape_recipe_zero_llm.py -q
   ```
   Expected: PASS (the build is pure). If the patch target import path is wrong,
   fix the dotted path against `test_compose_loop_llm_audit.py:186`; do not skip.
 
 - [ ] **Step 2: Lint + commit.**
   ```
-  .venv/bin/python -m ruff check tests/unit/web/composer/test_web_scrape_recipe_zero_llm.py
-  .venv/bin/python -m ruff format tests/unit/web/composer/test_web_scrape_recipe_zero_llm.py
+  uv run python -m ruff check tests/unit/web/composer/test_web_scrape_recipe_zero_llm.py
+  uv run python -m ruff format tests/unit/web/composer/test_web_scrape_recipe_zero_llm.py
   git add tests/unit/web/composer/test_web_scrape_recipe_zero_llm.py
   git commit -m "test(composer/recipes): zero-LLM gate for web-scrape recipe build (D11/P4.4)
 
@@ -6726,7 +6907,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Run the full P4 test slice (run-to-pass).**
   ```
-  .venv/bin/python -m pytest \
+  uv run python -m pytest \
     tests/unit/web/composer/guided/test_recipe_match.py \
     tests/unit/web/composer/test_recipes.py \
     tests/unit/web/composer/test_web_scrape_recipe_contract.py \
@@ -6737,9 +6918,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 2: Lint + format + mypy over the touched source (run-to-pass).**
   ```
-  .venv/bin/python -m ruff check src/elspeth/web/composer/recipes.py src/elspeth/web/composer/guided/recipe_match.py
-  .venv/bin/python -m ruff format --check src/elspeth/web/composer/recipes.py src/elspeth/web/composer/guided/recipe_match.py
-  .venv/bin/python -m mypy src/elspeth/web/composer/recipes.py src/elspeth/web/composer/guided/recipe_match.py
+  uv run python -m ruff check src/elspeth/web/composer/recipes.py src/elspeth/web/composer/guided/recipe_match.py
+  uv run python -m ruff format --check src/elspeth/web/composer/recipes.py src/elspeth/web/composer/guided/recipe_match.py
+  uv run python -m mypy src/elspeth/web/composer/recipes.py src/elspeth/web/composer/guided/recipe_match.py
   ```
   Expected: `All checks passed!`, format clean, mypy `Success: no issues found`.
 
@@ -6748,7 +6929,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   `api_key` `{secret_ref}` — confirm no new trust-tier displacement and no taint
   finding:
   ```
-  PYTHONPATH=elspeth-lints/src .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model,'composer/*' --root src/elspeth/web/composer/recipes.py
+  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules trust_tier.tier_model,'composer/*' --root src/elspeth/web/composer/recipes.py
   wardline scan src/elspeth/web/composer/recipes.py src/elspeth/web/composer/guided/recipe_match.py --fail-on ERROR
   ```
   Expected: elspeth-lints check passes (the recipe builder is a pure function over
@@ -6834,7 +7015,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
       assert inspect.iscoroutinefunction(ComposerService.run_signoff_checkpoint)
   ```
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_protocol.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_protocol.py -q`
   Expected failure: `AttributeError: type object 'ComposerService' has no attribute 'run_signoff_checkpoint'` (the `hasattr` assertion fails).
 - [ ] **Step 3: Add the TYPE_CHECKING imports to protocol.py.**
   In `src/elspeth/web/composer/protocol.py`, the `TYPE_CHECKING` block currently reads:
@@ -6876,7 +7057,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
           ...
   ```
 - [ ] **Step 5: Run to pass.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_protocol.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_protocol.py -q`
   Expected: `1 passed`.
 - [ ] **Step 6: Commit.**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add src/elspeth/web/composer/protocol.py tests/unit/web/composer/test_run_signoff_checkpoint_protocol.py && git commit -m "feat(composer): declare public run_signoff_checkpoint Protocol method (P5.1)
@@ -7001,7 +7182,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
       assert service._run_advisor_checkpoint.await_args.kwargs["progress"] is None
   ```
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_impl.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_impl.py -q`
   Expected failure: `AttributeError: 'ComposerServiceImpl' object has no attribute 'run_signoff_checkpoint'`.
 - [ ] **Step 3: Add the delegation method.**
   In `src/elspeth/web/composer/service.py`, directly ABOVE `async def _run_advisor_checkpoint(` (currently at :4176), insert:
@@ -7034,10 +7215,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   ```
   (Note: `BufferingRecorder`, `ComposerProgressSink`, `CompositionState`, and `AdvisorCheckpointVerdict` are all already in scope in service.py — `BufferingRecorder` via the `composer.audit` import at :62, `AdvisorCheckpointVerdict` is defined in-module at :4664, `ComposerProgressSink`/`CompositionState` are module imports used throughout.)
 - [ ] **Step 4: Run to pass.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_impl.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_impl.py -q`
   Expected: `2 passed`.
 - [ ] **Step 5: Run the existing advisor-checkpoint suite to confirm no regression.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/test_advisor_checkpoint.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/test_advisor_checkpoint.py -q`
   Expected: all existing tests still `passed` (the impl only adds a method).
 - [ ] **Step 6: Commit.**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add src/elspeth/web/composer/service.py tests/unit/web/composer/test_run_signoff_checkpoint_impl.py && git commit -m "feat(composer): implement run_signoff_checkpoint delegating to END checkpoint (P5.2)
@@ -7049,6 +7230,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 ### Task P5.3: Add the verdict-class classifier + redirect helper (`classify_signoff_verdict`)
 
 **Files:**
+- Modify: `src/elspeth/web/composer/service.py` — add a `failure_class` field to `AdvisorCheckpointVerdict` (:4664) and set it in `_run_advisor_checkpoint`'s `except` path (:4207-4230). See Step 1a. WITHOUT this the classifier below cannot tell a malformed response from a transport outage (both are currently `ok=False`), so malformed would fail OPEN into the escape — the D4/B2 defect.
 - Create: `src/elspeth/web/composer/guided/signoff.py` (new pure module — no `self`, importable by both `_helpers.py` and tests; mirrors how `_advisor_signoff_blocked_validation` is module-scope data with no `self` dependency)
 - Create: `tests/unit/web/composer/guided/test_signoff_classifier.py`
 
@@ -7057,17 +7239,51 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   - `class SignoffOutcome(StrEnum)` with members `COMPLETE = "complete"`, `REVISE = "revise"`, `BLOCKED_FLAGGED = "blocked_flagged"`, `BLOCKED_UNAVAILABLE = "blocked_unavailable"`, `ESCAPE_UNAVAILABLE = "escape_unavailable"`.
   - `@dataclass(frozen=True, slots=True) class SignoffDecision` with fields `outcome: SignoffOutcome`, `reason: str | None`, `findings_text: str`, `passes_delta: int`.
   - `def classify_signoff_verdict(verdict: AdvisorCheckpointVerdict, *, passes_used: int, max_passes: int) -> SignoffDecision`.
-- Consumes: `AdvisorCheckpointVerdict` (`composer/service.py:4664`).
+- Consumes: `AdvisorCheckpointVerdict` (`composer/service.py:4664`), now carrying `failure_class: Literal["none","unavailable","malformed"]` (added in Step 1a).
 
-Decision logic (D13 matrix; `is_last_pass = (passes_used + 1) >= max_passes`):
+Decision logic (D13 matrix; `is_last_pass = (passes_used + 1) >= max_passes`). CRITICAL: `_run_advisor_checkpoint` collapses EVERY exception to `ok=False` (including a re-raised malformed/parse error), so the classifier MUST split `not verdict.ok` on `verdict.failure_class` — `(ok, blocking)` alone cannot tell malformed (fail-closed) from a transport outage (escapable):
 - CLEAN (`verdict.ok and not verdict.blocking`) → `COMPLETE` (reason `None`, `passes_delta=1`).
-- FLAGGED/MALFORMED (`verdict.ok and verdict.blocking`):
+- FLAGGED (`verdict.ok and verdict.blocking`) — a quality verdict, fail-closed:
   - not last pass → `REVISE` (`passes_delta=1`, findings carried).
   - last pass → `BLOCKED_FLAGGED` (`reason="exhausted"`, `passes_delta=1`).
-- UNAVAILABLE (`not verdict.ok`):
+- MALFORMED (`not verdict.ok and verdict.failure_class == "malformed"`) — fail-closed exactly like FLAGGED, **never** the escape:
+  - not last pass → `REVISE`; last pass → `BLOCKED_FLAGGED` (`reason="exhausted"`).
+- UNAVAILABLE (`not verdict.ok and verdict.failure_class == "unavailable"`) — genuine outage:
   - not last pass → `REVISE` (`passes_delta=1`, findings carried — re-emit "advisor could not be reached; retry").
   - last pass → `ESCAPE_UNAVAILABLE` (`reason="unavailable"`, `passes_delta=1`) — the differentiated audited escape is *offered*; whether the caller stamps COMPLETED-without-signoff vs `BLOCKED_UNAVAILABLE` depends on the user's acknowledgement (Task P5.5). `BLOCKED_UNAVAILABLE` is the not-acknowledged terminal.
 
+- [ ] **Step 1a: Add `failure_class` to `AdvisorCheckpointVerdict` + classify the exception in `_run_advisor_checkpoint` (`service.py`).**
+  In `AdvisorCheckpointVerdict` (`service.py:4664`) add a defaulted field (`Literal` is already imported in service.py):
+  ```python
+      failure_class: Literal["none", "unavailable", "malformed"] = "none"
+  ```
+  The default keeps every existing construction valid (CLEAN/FLAGGED set `ok=True` and never read it). In `_run_advisor_checkpoint` (`service.py:4207-4230`) the `except Exception` retry loop currently returns `ok=False` for EVERY exception class — replace the final exhausted-retries return with a classified one:
+  ```python
+      # The call core re-raises typed LLM errors. A parse/validation/shape error is a
+      # MALFORMED verdict (fail-closed at the END gate, D13); timeout/auth/transport is
+      # a genuine UNAVAILABLE outage (escapable at budget-exhaustion). Unrecognised
+      # errors default to the SAFER class (malformed) — fail-closed by default.
+      _unavailable = (TimeoutError, ConnectionError)
+      _malformed = (ValueError, KeyError, TypeError, AttributeError)  # JSONDecodeError is a ValueError
+      if isinstance(last_exc, _unavailable) or type(last_exc).__name__ in {
+          "APITimeoutError", "APIConnectionError", "AuthenticationError", "RateLimitError",
+      }:
+          failure_class = "unavailable"
+      elif isinstance(last_exc, _malformed):
+          failure_class = "malformed"
+      else:
+          failure_class = "malformed"  # fail-closed default for an unclassified error
+      return AdvisorCheckpointVerdict(
+          ok=False,
+          blocking=False,
+          failure_class=failure_class,
+          findings_text=f"{type(last_exc).__name__}: {last_exc}" if last_exc else "advisor unavailable",
+      )
+  ```
+  Resolve the EXACT provider exception types against the live LLM client when implementing — the name set above is a transport-class allowlist; everything not on it fails closed as `malformed`. Update `tests/unit/web/composer/test_advisor_checkpoint.py` if it constructs `AdvisorCheckpointVerdict` positionally.
+- [ ] **Step 1b: Confirm the verdict field exists.**
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -c "from elspeth.web.composer.service import AdvisorCheckpointVerdict; print(AdvisorCheckpointVerdict(ok=False, blocking=False, failure_class='malformed', findings_text='x').failure_class)"`
+  Expected: prints `malformed`.
 - [ ] **Step 1: Write the failing classifier test.**
   Create `tests/unit/web/composer/guided/test_signoff_classifier.py`:
   ```python
@@ -7091,7 +7307,17 @@ Decision logic (D13 matrix; `is_last_pass = (passes_used + 1) >= max_passes`):
 
 
   def _unavailable() -> AdvisorCheckpointVerdict:
-      return AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="TimeoutError: deadline")
+      return AdvisorCheckpointVerdict(
+          ok=False, blocking=False, failure_class="unavailable", findings_text="TimeoutError: deadline"
+      )
+
+
+  def _malformed() -> AdvisorCheckpointVerdict:
+      # The advisor returned output the call core could not parse -> re-raised ->
+      # caught -> ok=False with failure_class="malformed". Must FAIL CLOSED (D4/B2).
+      return AdvisorCheckpointVerdict(
+          ok=False, blocking=False, failure_class="malformed", findings_text="ValueError: unparseable verdict"
+      )
 
 
   def test_clean_completes() -> None:
@@ -7126,13 +7352,28 @@ Decision logic (D13 matrix; `is_last_pass = (passes_used + 1) >= max_passes`):
       assert d.reason == "unavailable"
 
 
+  def test_malformed_revises_while_budget_remains() -> None:
+      d = classify_signoff_verdict(_malformed(), passes_used=0, max_passes=3)
+      assert d.outcome is SignoffOutcome.REVISE
+      assert d.passes_delta == 1
+
+
+  def test_malformed_fails_closed_on_last_pass_never_escapes() -> None:
+      # D4/B2 regression: a MALFORMED verdict (ok=False) must NOT take the
+      # UNAVAILABLE escape — it fails closed exactly like a FLAG.
+      d = classify_signoff_verdict(_malformed(), passes_used=2, max_passes=3)
+      assert d.outcome is SignoffOutcome.BLOCKED_FLAGGED
+      assert d.outcome is not SignoffOutcome.ESCAPE_UNAVAILABLE
+      assert d.reason == "exhausted"
+
+
   def test_flagged_never_yields_an_escape() -> None:
       # A FLAG can never reach the unavailable escape — only BLOCKED_FLAGGED.
       d = classify_signoff_verdict(_flagged(), passes_used=2, max_passes=3)
       assert d.outcome is not SignoffOutcome.ESCAPE_UNAVAILABLE
   ```
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/guided/test_signoff_classifier.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/guided/test_signoff_classifier.py -q`
   Expected failure: `ModuleNotFoundError: No module named 'elspeth.web.composer.guided.signoff'`.
 - [ ] **Step 3: Create the classifier module.**
   Create `src/elspeth/web/composer/guided/signoff.py`:
@@ -7210,14 +7451,30 @@ Decision logic (D13 matrix; `is_last_pass = (passes_used + 1) >= max_passes`):
           return SignoffDecision(outcome=SignoffOutcome.COMPLETE, reason=None, findings_text=findings, passes_delta=1)
 
       if verdict.ok and verdict.blocking:
-          # FLAGGED / MALFORMED (MALFORMED folds into not-CLEAN -> flagged upstream).
+          # FLAGGED — a quality verdict. Fail-closed, no bypass.
           if is_last_pass:
               return SignoffDecision(
                   outcome=SignoffOutcome.BLOCKED_FLAGGED, reason="exhausted", findings_text=findings, passes_delta=1
               )
           return SignoffDecision(outcome=SignoffOutcome.REVISE, reason=None, findings_text=findings, passes_delta=1)
 
-      # not verdict.ok -> UNAVAILABLE / timeout (infra, never a quality verdict).
+      # not verdict.ok: the advisor call did not return a usable verdict. NOTE:
+      # _run_advisor_checkpoint collapses EVERY exception to ok=False (service.py:
+      # 4210-4230) — INCLUDING a MALFORMED/unparseable response the call core
+      # re-raised. So (ok, blocking) ALONE cannot tell malformed from a transport
+      # outage; we MUST split on verdict.failure_class. D13 requires malformed to
+      # FAIL CLOSED (no bypass, never the audited escape); only a genuine OUTAGE may
+      # take the budget-exhausted escape.
+      if verdict.failure_class == "malformed":
+          # Treat exactly like FLAGGED — malformed output must NEVER be classified
+          # as "advisor unreachable" and must NEVER reach ESCAPE_UNAVAILABLE.
+          if is_last_pass:
+              return SignoffDecision(
+                  outcome=SignoffOutcome.BLOCKED_FLAGGED, reason="exhausted", findings_text=findings, passes_delta=1
+              )
+          return SignoffDecision(outcome=SignoffOutcome.REVISE, reason=None, findings_text=findings, passes_delta=1)
+
+      # failure_class == "unavailable": a genuine transport/auth/timeout outage.
       if is_last_pass:
           return SignoffDecision(
               outcome=SignoffOutcome.ESCAPE_UNAVAILABLE, reason="unavailable", findings_text=findings, passes_delta=1
@@ -7225,8 +7482,8 @@ Decision logic (D13 matrix; `is_last_pass = (passes_used + 1) >= max_passes`):
       return SignoffDecision(outcome=SignoffOutcome.REVISE, reason=None, findings_text=findings, passes_delta=1)
   ```
 - [ ] **Step 4: Run to pass.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/guided/test_signoff_classifier.py -q`
-  Expected: `6 passed`.
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/guided/test_signoff_classifier.py -q`
+  Expected: `8 passed`.
 - [ ] **Step 5: Commit.**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add src/elspeth/web/composer/guided/signoff.py tests/unit/web/composer/guided/test_signoff_classifier.py && git commit -m "feat(composer/guided): add pure D13 sign-off verdict classifier (P5.3)
 
@@ -7294,7 +7551,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
       assert param.default is None
   ```
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_dispatch_guided_respond_service_handle.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/sessions/routes/test_dispatch_guided_respond_service_handle.py -q`
   Expected failure: `AssertionError: assert 'composer_service' in {...}` (params absent).
 - [ ] **Step 3: Add the import + params to the dispatcher.**
   In `src/elspeth/web/sessions/routes/_helpers.py`, ensure `ComposerService` is importable for the annotation. If it is not already imported, add at the top of the existing composer-imports block:
@@ -7318,10 +7575,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
                       )
   ```
 - [ ] **Step 5: Run to pass + confirm the route still imports.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_dispatch_guided_respond_service_handle.py -q && .venv/bin/python -c "import elspeth.web.sessions.routes.composer"`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/sessions/routes/test_dispatch_guided_respond_service_handle.py -q && uv run python -c "import elspeth.web.sessions.routes.composer"`
   Expected: `1 passed`, then a clean import (no output, exit 0).
 - [ ] **Step 6: Run the existing guided-respond route + wire-dispatch suites to confirm no caller breakage.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web tests/integration/web/composer/guided/test_wire_dispatch.py -q -k "guided_respond or dispatch_guided or wire"`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web tests/integration/web/composer/guided/test_wire_dispatch.py -q -k "guided_respond or dispatch_guided or wire"`
   Expected: existing tests `passed`. Because both new params take safe defaults,
   the P2.9 `tests/integration/web/composer/guided/test_wire_dispatch.py::_dispatch`
   helper (which constructs `_dispatch_guided_respond(...)` WITHOUT `composer_service`
@@ -7363,6 +7620,7 @@ Behaviour:
 
   from __future__ import annotations
 
+  import dataclasses
   from unittest.mock import AsyncMock
 
   import pytest
@@ -7415,7 +7673,7 @@ Behaviour:
   @pytest.mark.asyncio
   async def test_flagged_last_pass_blocks_no_bypass() -> None:
       session = GuidedSession.initial()
-      session = session.__class__(**{**session.__dict__, "advisor_checkpoint_passes_used": 2})
+      session = dataclasses.replace(session, advisor_checkpoint_passes_used=2)
       svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: bad"))
       new_session, decision = await run_wire_signoff(
           session=session, state=_state(), session_id="s1", recorder=None,
@@ -7429,7 +7687,7 @@ Behaviour:
   @pytest.mark.asyncio
   async def test_budget_already_spent_does_not_recall_provider() -> None:
       session = GuidedSession.initial()
-      session = session.__class__(**{**session.__dict__, "advisor_checkpoint_passes_used": 3})
+      session = dataclasses.replace(session, advisor_checkpoint_passes_used=3)
       svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
       new_session, decision = await run_wire_signoff(
           session=session, state=_state(), session_id="s1", recorder=None,
@@ -7443,7 +7701,7 @@ Behaviour:
   @pytest.mark.asyncio
   async def test_unavailable_last_pass_offers_escape_when_unacknowledged() -> None:
       session = GuidedSession.initial()
-      session = session.__class__(**{**session.__dict__, "advisor_checkpoint_passes_used": 2})
+      session = dataclasses.replace(session, advisor_checkpoint_passes_used=2)
       svc = _service(AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="TimeoutError"))
       new_session, decision = await run_wire_signoff(
           session=session, state=_state(), session_id="s1", recorder=None,
@@ -7456,7 +7714,7 @@ Behaviour:
   @pytest.mark.asyncio
   async def test_unavailable_acknowledged_completes_with_unavailable_reason() -> None:
       session = GuidedSession.initial()
-      session = session.__class__(**{**session.__dict__, "advisor_checkpoint_passes_used": 2})
+      session = dataclasses.replace(session, advisor_checkpoint_passes_used=2)
       svc = _service(AdvisorCheckpointVerdict(ok=False, blocking=False, findings_text="TimeoutError"))
       new_session, decision = await run_wire_signoff(
           session=session, state=_state(), session_id="s1", recorder=None,
@@ -7472,22 +7730,66 @@ Behaviour:
   async def test_acknowledged_unavailable_never_bypasses_a_flag() -> None:
       # A FLAG on the last pass with acknowledged_unavailable=True must still BLOCK.
       session = GuidedSession.initial()
-      session = session.__class__(**{**session.__dict__, "advisor_checkpoint_passes_used": 2})
+      session = dataclasses.replace(session, advisor_checkpoint_passes_used=2)
       svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: bad"))
       new_session, decision = await run_wire_signoff(
           session=session, state=_state(), session_id="s1", recorder=None,
           composer_service=svc, max_passes=3, acknowledged_unavailable=True,
       )
       assert decision.outcome is SignoffOutcome.BLOCKED_FLAGGED
+
+
+  @pytest.mark.asyncio
+  async def test_exhausted_with_acknowledged_outage_completes_cross_request() -> None:
+      # D5/B2 regression: the escape is OFFERED on the final pass (one request) and
+      # ACKNOWLEDGED on a LATER request, by which time passes_used == max_passes. The
+      # persisted escape_offered marker lets the acknowledgement COMPLETE rather than
+      # dead-end to BLOCKED_FLAGGED — and the provider is NOT re-called at exhaustion.
+      session = dataclasses.replace(
+          GuidedSession.initial(),
+          advisor_checkpoint_passes_used=3,
+          advisor_signoff_escape_offered=True,
+      )
+      svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
+      new_session, decision = await run_wire_signoff(
+          session=session, state=_state(), session_id="s1", recorder=None,
+          composer_service=svc, max_passes=3, acknowledged_unavailable=True,
+      )
+      assert decision.outcome is SignoffOutcome.COMPLETE
+      assert decision.reason == "unavailable"
+      svc.run_signoff_checkpoint.assert_not_awaited()
+
+
+  @pytest.mark.asyncio
+  async def test_exhausted_acknowledged_but_prior_was_flag_stays_blocked() -> None:
+      # The acknowledgement must NEVER bypass a FLAG: a FLAGGED/MALFORMED-exhausted
+      # terminal leaves escape_offered=False, so acknowledging it stays BLOCKED.
+      session = dataclasses.replace(
+          GuidedSession.initial(),
+          advisor_checkpoint_passes_used=3,
+          advisor_signoff_escape_offered=False,
+      )
+      svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
+      new_session, decision = await run_wire_signoff(
+          session=session, state=_state(), session_id="s1", recorder=None,
+          composer_service=svc, max_passes=3, acknowledged_unavailable=True,
+      )
+      assert decision.outcome is SignoffOutcome.BLOCKED_FLAGGED
+      svc.run_signoff_checkpoint.assert_not_awaited()
   ```
-  > Test-construction note: `session.__class__(**{**session.__dict__, ...})`
-  > rebuilds the frozen `GuidedSession` with a bumped counter; it depends on
-  > the P0 field `advisor_checkpoint_passes_used` existing. If P0 has not
-  > landed, Step 2 fails with `TypeError: __init__() got an unexpected keyword
-  > argument 'advisor_checkpoint_passes_used'` — that is the cross-phase
-  > dependency surfacing, not a defect in this task.
+  > Test-construction note: `dataclasses.replace(session, advisor_checkpoint_passes_used=N)`
+  > rebuilds the frozen `GuidedSession` with a bumped counter. `GuidedSession`
+  > is `@dataclass(frozen=True, slots=True)`, so it has **no `__dict__`**; a
+  > `session.__class__(**{**session.__dict__, ...})` reconstruction would raise
+  > `AttributeError: 'GuidedSession' object has no attribute '__dict__'`, which
+  > is why `dataclasses.replace` (the correct idiom for slotted frozen
+  > dataclasses) is used. The call depends on the P0 field
+  > `advisor_checkpoint_passes_used` existing; if P0 has not landed, Step 2
+  > fails with `TypeError: __init__() got an unexpected keyword argument
+  > 'advisor_checkpoint_passes_used'` — that is the cross-phase dependency
+  > surfacing, not a defect in this task.
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/guided/test_wire_signoff_runner.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/guided/test_wire_signoff_runner.py -q`
   Expected failure: `ImportError: cannot import name 'run_wire_signoff' from 'elspeth.web.composer.guided.signoff'`.
 - [ ] **Step 3: Append the runner to `signoff.py`.**
   Add to the TYPE_CHECKING block in `src/elspeth/web/composer/guided/signoff.py`:
@@ -7532,9 +7834,24 @@ Behaviour:
 
       passes_used = session.advisor_checkpoint_passes_used
       if passes_used >= max_passes:
-          # Budget spent on a prior request: do not re-call the provider. The
-          # most recent pass already decided the terminal; a stale re-submit
-          # fails closed (no bypass). FLAGGED-exhausted is the safe terminal.
+          # Budget spent on a prior request: do not re-call the provider.
+          if acknowledged_unavailable and session.advisor_signoff_escape_offered:
+              # The prior budget-exhausting terminal was a genuine UNAVAILABLE
+              # escape OFFER (persisted marker) and the user has now acknowledged
+              # "complete without sign-off (advisor unreachable)". Honour it as the
+              # audited COMPLETE-with-reason="unavailable". This can NEVER bypass a
+              # FLAG: a FLAGGED-exhausted (or MALFORMED-exhausted) terminal leaves
+              # escape_offered=False, so an acknowledgement there falls through to
+              # BLOCKED below. The acknowledgement arrives on a SEPARATE
+              # /guided/respond request than the one that emitted the offer — which
+              # is exactly why this cross-request marker is required (D5/B2).
+              return session, SignoffDecision(
+                  outcome=SignoffOutcome.COMPLETE,
+                  reason="unavailable",
+                  findings_text="Advisor unreachable; completed without sign-off (acknowledged).",
+                  passes_delta=0,
+              )
+          # Otherwise fail closed (no bypass). FLAGGED-exhausted is the safe terminal.
           return session, SignoffDecision(
               outcome=SignoffOutcome.BLOCKED_FLAGGED,
               reason="exhausted",
@@ -7552,13 +7869,18 @@ Behaviour:
       new_session = dataclasses.replace(
           session,
           advisor_checkpoint_passes_used=passes_used + decision.passes_delta,
+          # Persist whether THIS terminal was a genuine-outage escape OFFER, so a
+          # later request carrying the user's acknowledgement (handled above) can
+          # honour it without re-calling the provider — and so a FLAGGED-exhausted
+          # terminal (escape_offered=False) can never be acknowledged into a bypass.
+          advisor_signoff_escape_offered=(decision.outcome is SignoffOutcome.ESCAPE_UNAVAILABLE),
       )
 
       if decision.outcome is SignoffOutcome.ESCAPE_UNAVAILABLE and acknowledged_unavailable:
-          # Audited "complete without sign-off (advisor unreachable)" — ONLY
-          # reachable from a sustained UNAVAILABLE, never from a FLAG. COMPLETE
-          # carries reason="unavailable" so the caller records the DISTINCT
-          # audit event (vs reason=None for a CLEAN sign-off).
+          # Same-request acknowledgement (user pre-acknowledged before the final
+          # pass): audited "complete without sign-off (advisor unreachable)". ONLY
+          # reachable from a genuine UNAVAILABLE, never a FLAG or MALFORMED (neither
+          # produces ESCAPE_UNAVAILABLE, by classifier construction).
           decision = SignoffDecision(
               outcome=SignoffOutcome.COMPLETE,
               reason="unavailable",
@@ -7569,8 +7891,8 @@ Behaviour:
       return new_session, decision
   ```
 - [ ] **Step 4: Run to pass.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/guided/test_wire_signoff_runner.py -q`
-  Expected: `6 passed`.
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/guided/test_wire_signoff_runner.py -q`
+  Expected: `8 passed`.
 - [ ] **Step 5: Commit.**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add src/elspeth/web/composer/guided/signoff.py tests/unit/web/composer/guided/test_wire_signoff_runner.py && git commit -m "feat(composer/guided): persisted-counter-bound wire sign-off runner (P5.5)
 
@@ -7701,7 +8023,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   > `step=GuidedStep.STEP_4_WIRE`, `history=(<a CONFIRM_WIRING TurnRecord>,)`,
   > and `profile=<arg>`.
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py -q`
   Expected failure: depending on P0–P3 landed state, either an `ImportError` for `EMPTY_PROFILE`/`STEP_4_WIRE`/`make_wire_ready_session_and_state` (cross-phase dep not yet present) or, once those exist, `AssertionError: advisor must NOT be called` / `terminal is None` (the gate logic not yet inserted).
 - [ ] **Step 3: Replace the P2.9 confirm body with the profile-gated sign-off.**
   In `src/elspeth/web/sessions/routes/_helpers.py`, inside the `if current_turn_type is TurnType.CONFIRM_WIRING:` sub-branch of the `if current_step is GuidedStep.STEP_4_WIRE:` block (P2.9-created), REPLACE the P2.9 body — which called `handle_step_4_wire_confirm(...)` and let *it* stamp COMPLETED unconditionally on a valid pipeline — with the profile-gated form below. Keep the SAME validate-gate semantics: run `state.validate()` first and re-emit the wire turn (terminal stays `None`) on an invalid pipeline, THEN profile-branch. (Do NOT call `handle_step_4_wire_confirm` here any more — its unconditional stamp would race the tutorial-profile gate; the validate check moves inline so the gate owns the stamp.)
@@ -7795,10 +8117,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   >   `stable_hash`, `emit_turn_emitted`, `_replace` are already imported in
   >   `_helpers.py` (used by the sibling STEP_3 branch).
 - [ ] **Step 4: Run to pass.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py -q`
   Expected: `3 passed`.
 - [ ] **Step 5: Run the wider guided-dispatch + advisor suites for no regression.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/test_advisor_checkpoint.py tests/unit/web/composer/guided -q -k "signoff or wire or advisor"`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/test_advisor_checkpoint.py tests/unit/web/composer/guided -q -k "signoff or wire or advisor"`
   Expected: all `passed`.
 - [ ] **Step 6: Commit.**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add src/elspeth/web/sessions/routes/_helpers.py tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py && git commit -m "feat(web/sessions): profile-gate the STEP_4_WIRE terminal on the advisor sign-off (P5.6)
@@ -7873,7 +8195,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
       assert result.readiness.completion_ready is False
   ```
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_wire_signoff_audit_and_blocked.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/sessions/routes/test_wire_signoff_audit_and_blocked.py -q`
   Expected failure: `ImportError: cannot import name 'signoff_audit_event_name' from 'elspeth.web.composer.guided.signoff'`.
 - [ ] **Step 3: Add the audit-name resolver to `signoff.py`.**
   Append to `src/elspeth/web/composer/guided/signoff.py`:
@@ -7984,7 +8306,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   >   reading `recorder.invocations()[-1].tool_name` after a dispatch (the
   >   `BufferingRecorder.invocations()` accessor, `composer/audit.py:226`).
 - [ ] **Step 6: Run to pass.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_wire_signoff_audit_and_blocked.py tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/sessions/routes/test_wire_signoff_audit_and_blocked.py tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py -q`
   Expected: all `passed` (audit-name tests + the P5.6 gate tests still green).
 - [ ] **Step 7: Commit.**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add src/elspeth/web/composer/guided/signoff.py src/elspeth/web/composer/guided/audit.py src/elspeth/web/sessions/routes/_helpers.py tests/unit/web/sessions/routes/test_wire_signoff_audit_and_blocked.py && git commit -m "feat(web/sessions): differentiated sign-off audit names + fail-closed blocked findings (P5.7)
@@ -8095,7 +8417,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   > so the existing STEP_3 re-solve branch is reachable. (P3 owns the wire
   > fixture; if absent, build it locally per P5.6's note.)
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_request_advisor_escape.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/sessions/routes/test_request_advisor_escape.py -q`
   Expected failure: the wire-stage `REQUEST_ADVISOR` branch does not exist yet, so `next_turn` is `None`/`run_signoff_checkpoint` is not awaited → `AssertionError: Expected 'run_signoff_checkpoint' to have been awaited once` (or an unhandled control → 400).
 - [ ] **Step 3: Add the wire-stage `REQUEST_ADVISOR` branch.**
   In `src/elspeth/web/sessions/routes/_helpers.py`, at the TOP of the `if current_step is GuidedStep.STEP_4_WIRE:` branch (before the plain confirm handling from P5.6), add:
@@ -8149,10 +8471,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   > `max_passes` threading decision from P5.6 (settings kwarg vs service
   > settings) is reused here so both wire-stage advisor calls share the bound.
 - [ ] **Step 4: Run to pass.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/sessions/routes/test_request_advisor_escape.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/sessions/routes/test_request_advisor_escape.py -q`
   Expected: `2 passed`.
 - [ ] **Step 5: Confirm the STEP_3 re-solve suite is untouched.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web -q -k "step_3 and (advisor or reject or re_solve or chain)"`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web -q -k "step_3 and (advisor or reject or re_solve or chain)"`
   Expected: existing STEP_3 chain re-solve tests still `passed`.
 - [ ] **Step 6: Commit.**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add src/elspeth/web/sessions/routes/_helpers.py tests/unit/web/sessions/routes/test_request_advisor_escape.py && git commit -m "feat(web/sessions): wire-stage REQUEST_ADVISOR whole-pipeline escape, step-3 re-solve preserved (P5.8)
@@ -8198,7 +8520,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
       assert "operator-configured" in description
   ```
 - [ ] **Step 2: Run to fail.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/tools/test_advisor_tool_prose.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/tools/test_advisor_tool_prose.py -q`
   Expected failure: `AssertionError: assert 'Disabled by default' not in '...Disabled by default; only available when the operator has explicitly enabled it.'`.
 - [ ] **Step 3: Fix the prose.**
   In `src/elspeth/web/composer/tools/_dispatch.py`, in the `_REQUEST_ADVISOR_HINT_DEFINITION`
@@ -8212,7 +8534,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
             "independently of this on-demand escape."
   ```
 - [ ] **Step 4: Run to pass.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/tools/test_advisor_tool_prose.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/tools/test_advisor_tool_prose.py -q`
   Expected: `1 passed`.
 - [ ] **Step 5: Refresh the plugin/tool source hash if the gate requires it, then commit.**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add src/elspeth/web/composer/tools/_dispatch.py tests/unit/web/composer/tools/test_advisor_tool_prose.py && git commit -m "docs(composer): correct stale 'Disabled by default' advisor prose (P5.9)
@@ -8226,16 +8548,16 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 **Files:** none (verification only).
 
 - [ ] **Step 1: ruff on every file this phase touched.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/ruff check src/elspeth/web/composer/protocol.py src/elspeth/web/composer/service.py src/elspeth/web/composer/guided/signoff.py src/elspeth/web/composer/tools/_dispatch.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer.py`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run ruff check src/elspeth/web/composer/protocol.py src/elspeth/web/composer/service.py src/elspeth/web/composer/guided/signoff.py src/elspeth/web/composer/tools/_dispatch.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer.py`
   Expected: `All checks passed!`.
 - [ ] **Step 2: mypy on the new module + the touched route helper.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/mypy src/elspeth/web/composer/guided/signoff.py src/elspeth/web/composer/protocol.py`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run mypy src/elspeth/web/composer/guided/signoff.py src/elspeth/web/composer/protocol.py`
   Expected: `Success: no issues found`.
 - [ ] **Step 3: Run the full phase test set.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_protocol.py tests/unit/web/composer/test_run_signoff_checkpoint_impl.py tests/unit/web/composer/guided/test_signoff_classifier.py tests/unit/web/composer/guided/test_wire_signoff_runner.py tests/unit/web/sessions/routes/test_dispatch_guided_respond_service_handle.py tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py tests/unit/web/sessions/routes/test_wire_signoff_audit_and_blocked.py tests/unit/web/sessions/routes/test_request_advisor_escape.py tests/unit/web/composer/tools/test_advisor_tool_prose.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/test_run_signoff_checkpoint_protocol.py tests/unit/web/composer/test_run_signoff_checkpoint_impl.py tests/unit/web/composer/guided/test_signoff_classifier.py tests/unit/web/composer/guided/test_wire_signoff_runner.py tests/unit/web/sessions/routes/test_dispatch_guided_respond_service_handle.py tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py tests/unit/web/sessions/routes/test_wire_signoff_audit_and_blocked.py tests/unit/web/sessions/routes/test_request_advisor_escape.py tests/unit/web/composer/tools/test_advisor_tool_prose.py -q`
   Expected: all `passed` (the full P5 suite green together).
 - [ ] **Step 4: Run the inherited advisor-checkpoint regression suite.**
-  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && .venv/bin/python -m pytest tests/unit/web/composer/test_advisor_checkpoint.py -q`
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -m pytest tests/unit/web/composer/test_advisor_checkpoint.py -q`
   Expected: all `passed` — the freeform compose-loop END gate is untouched by this phase (the new public method is a thin façade; the wire gate is a separate dispatch surface).
 - [ ] **Step 5: wardline trust-boundary scan (the gate touches external-input-adjacent route code).**
   `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && wardline scan src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/composer/guided/signoff.py --fail-on ERROR`
@@ -8359,7 +8681,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 - Produces: `export interface WorkflowProfile { coaching: boolean; bookends: boolean; recipe_match: boolean; advisor_checkpoints: boolean }`; `GuidedSession.profile: WorkflowProfile | null`.
 
 - [ ] **Step 1: Write the failing Vitest test.**
-  Append to `frontend/src/types/__tests__/guided.test.ts` (create the file if absent — it is a pure type-shape assertion; see Step 3 for the import surface):
+  Append to `frontend/src/types/guided.test.ts` (create the file if absent — it is a pure type-shape assertion; see Step 3 for the import surface):
   ```typescript
   import { describe, it, expect } from "vitest";
   import type { WorkflowProfile, GuidedSession } from "@/types/guided";
@@ -8381,7 +8703,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   });
   ```
 - [ ] **Step 2: Run to fail.**
-  From `src/elspeth/web/frontend`: `npm test -- --run src/types/__tests__/guided.test.ts`
+  From `src/elspeth/web/frontend`: `npm test -- --run src/types/guided.test.ts`
   Expected failure: TS compile error `Module '"@/types/guided"' has no exported member 'WorkflowProfile'`.
 - [ ] **Step 3: Add the `WorkflowProfile` interface.**
   In `frontend/src/types/guided.ts`, immediately before `export interface GuidedSession {` (:89), insert:
@@ -8406,13 +8728,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
     profile: WorkflowProfile | null;
   ```
 - [ ] **Step 5: Run to pass.**
-  From `src/elspeth/web/frontend`: `npm test -- --run src/types/__tests__/guided.test.ts`
+  From `src/elspeth/web/frontend`: `npm test -- --run src/types/guided.test.ts`
   Expected: `1 passed`.
 - [ ] **Step 6: Typecheck (guards the new optional field against existing GuidedSession literals).**
   From `src/elspeth/web/frontend`: `npm run typecheck`
   Expected: passes, OR fails at existing object-literal construction sites that build a `GuidedSession` without `profile`. If it fails there, those are mock/fixture sites — add `profile: null` to each. Re-run until clean. (`profile` is required on the TS side, mirroring the always-present wire field — `null`, never absent.)
 - [ ] **Step 7: Commit.**
-  `git add src/elspeth/web/frontend/src/types/guided.ts src/elspeth/web/frontend/src/types/__tests__/guided.test.ts && git commit -m "feat(frontend): mirror WorkflowProfile on TS GuidedSession
+  `git add src/elspeth/web/frontend/src/types/guided.ts src/elspeth/web/frontend/src/types/guided.test.ts && git commit -m "feat(frontend): mirror WorkflowProfile on TS GuidedSession
 
 P6.2 — WorkflowProfile interface (coaching/bookends/recipe_match/
 advisor_checkpoints) + GuidedSession.profile: WorkflowProfile | null.
@@ -8853,7 +9175,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 - Produces: `export async function startGuidedSession(sessionId: string, profileKind: "live" | "tutorial"): Promise<GetGuidedResponse>`.
 
 - [ ] **Step 1: Write the failing Vitest test.**
-  Append to `frontend/src/api/__tests__/client.test.ts` (the client test suite; if a guided-client test file already exists, append there — grep for `getGuided` to find it):
+  Append to `frontend/src/api/client.guided.test.ts` (the client test suite; if a guided-client test file already exists, append there — grep for `getGuided` to find it):
   ```typescript
   import { describe, it, expect, vi, afterEach } from "vitest";
   import { startGuidedSession } from "@/api/client";
@@ -8894,7 +9216,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   });
   ```
 - [ ] **Step 2: Run to fail.**
-  From `src/elspeth/web/frontend`: `npm test -- --run src/api/__tests__/client.test.ts`
+  From `src/elspeth/web/frontend`: `npm test -- --run src/api/client.guided.test.ts`
   Expected: TS compile error `Module '"@/api/client"' has no exported member 'startGuidedSession'`.
 - [ ] **Step 3: Add `startGuidedSession` to `client.ts`.**
   Immediately after the `getGuided` function (ends ~:607, before `respondGuided`), insert:
@@ -8920,13 +9242,13 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   }
   ```
 - [ ] **Step 4: Run to pass.**
-  From `src/elspeth/web/frontend`: `npm test -- --run src/api/__tests__/client.test.ts`
+  From `src/elspeth/web/frontend`: `npm test -- --run src/api/client.guided.test.ts`
   Expected: `1 passed` (plus pre-existing client tests still green).
 - [ ] **Step 5: Typecheck.**
   From `src/elspeth/web/frontend`: `npm run typecheck`
   Expected: clean.
 - [ ] **Step 6: Commit.**
-  `git add src/elspeth/web/frontend/src/api/client.ts src/elspeth/web/frontend/src/api/__tests__/client.test.ts && git commit -m "feat(frontend): startGuidedSession client (closed-enum profile)
+  `git add src/elspeth/web/frontend/src/api/client.ts src/elspeth/web/frontend/src/api/client.guided.test.ts && git commit -m "feat(frontend): startGuidedSession client (closed-enum profile)
 
 P6.5 — POST /guided/start with profile discriminator; returns GetGuidedResponse.
 
@@ -8943,18 +9265,27 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 - Consumes: `EMPTY_PROFILE` (P0, `composer/guided/profile.py`), `deep_thaw` (already imported `service.py:37`).
 - Produces: `def _strip_guided_profile_in_meta(composer_meta: Mapping[str, Any] | None) -> dict[str, Any] | None` — returns a copy of `composer_meta` whose `["guided_session"]["profile"]` is replaced with `EMPTY_PROFILE.to_dict()`; passes `None`/no-guided-session through unchanged.
 
-- [ ] **Step 1: Write the failing service-level test (covers the no-blob_ref inline_blob case — proves the strip is in `fork_session`, not the blob-rewrite path).**
+- [ ] **Step 1: Write the failing service-level test (covers the REAL materialised
+  canonical source — proves the strip is in `fork_session`, independent of the
+  blob-rewrite path).**
   Append to `tests/unit/web/sessions/test_fork.py` (inside `class TestForkSession`):
   ```python
       @pytest.mark.asyncio
       async def test_fork_strips_tutorial_profile_from_guided_session(self, service) -> None:
           """Forking a tutorial-profile guided session yields the EMPTY profile.
 
-          Critical case (finding 10, rev 4): the source is the canonical
-          ``inline_blob`` URL list with NO ``blob_ref`` (rewritten=False), so the
-          route-layer blob-rewrite save never fires — proving the strip lives in
-          ``fork_session`` (both the :5076 persist copy and the :5153 return copy),
-          not the conditional blob-rewrite path.
+          Critical case (finding 10, rev 4 — CORRECTED). The canonical tutorial
+          source MATERIALISES (set_pipeline from ``source.inline_blob``) to a real
+          ``json`` source whose ``options`` carry ``blob_ref``
+          (``composer/tools/sessions.py:425``), so the route-layer blob-rewrite save
+          DOES fire (``rewritten=True``). This fixture uses that real shape on
+          purpose: it proves the strip survives EVEN on the path that re-saves the
+          state — because the blob-rewrite re-save preserves ``composer_meta``
+          verbatim (``sessions/routes/sessions.py:479-480``) and never strips the
+          profile. The strip therefore lives in ``fork_session`` (both the :5076
+          persist copy and the :5153 return copy) and is independent of
+          ``rewritten``. (The earlier "no blob_ref => rewritten=False" framing was a
+          false premise — see the spec's two-objects ``blob_ref`` note in §5/B4.)
           """
           from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
           from elspeth.web.composer.guided.state_machine import GuidedSession
@@ -8964,11 +9295,17 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
           state = await service.save_composition_state(
               session.id,
               CompositionStateData(
-                  # Canonical inline_blob URL source — NO blob_ref => rewritten=False.
+                  # Materialised canonical URL source (sessions.py:420-427): a real
+                  # ``json`` plugin with ``blob_ref`` in options => rewritten=True.
+                  # The blob-rewrite save fires but preserves composer_meta verbatim,
+                  # so the profile strip must still come from fork_session.
                   sources={
                       "urls": {
-                          "plugin": "inline_blob",
-                          "options": {"format": "jsonl", "data": '{"url": "https://example.gov/a"}'},
+                          "plugin": "json",
+                          "options": {
+                              "path": "composer_blobs/canonical-url-list.json",
+                              "blob_ref": "a1b2c3d4-0000-0000-0000-000000000099",
+                          },
                       }
                   },
                   is_valid=True,
@@ -9040,9 +9377,15 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
       ``composer_meta`` is copied VERBATIM on fork (fork_session :5076 persist
       copy + :5153 return copy). A tutorial profile (canonical seed, coaching,
       advisor checkpoints, bookends) must NOT leak into an ordinary forked
-      session (finding 10, rev 4). The canonical ``inline_blob`` source has no
-      ``blob_ref`` so the route-layer blob-rewrite save (rewritten=False) never
-      runs — therefore the strip MUST live here, inside ``fork_session``.
+      session (finding 10, rev 4). The route-layer blob-rewrite save preserves
+      ``composer_meta`` verbatim (``sessions/routes/sessions.py:479-480``) and
+      never strips the profile — and it is route-layer, not part of this service
+      method — so the strip MUST live here, inside ``fork_session``, where the
+      ``composer_meta`` copies actually happen. (The earlier "canonical source has
+      no blob_ref => rewritten=False" rationale was a false premise; the
+      materialised canonical source DOES carry ``blob_ref`` — see the spec's
+      two-objects ``blob_ref`` note in §5/B4 — but the seam decision does not
+      depend on ``rewritten``.)
 
       Operates at the dict level (not full GuidedSession.from_dict/to_dict) so it
       is resilient to a stale-but-loadable blob: it replaces only the
@@ -9073,8 +9416,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
           # Profile strip (finding 10, rev 4): never let a tutorial WorkflowProfile
           # leak into a forked session. Computed once, used by BOTH verbatim
           # composer_meta copies below (the :5076 persist copy and the :5153 return
-          # copy). The canonical inline_blob source has rewritten=False, so the
-          # route blob-rewrite save never fires — the strip must live here.
+          # copy). The route-layer blob-rewrite save preserves composer_meta
+          # verbatim and never strips the profile (and is not in this service
+          # method's path), so the strip must live here — independent of rewritten.
           forked_composer_meta = (
               _strip_guided_profile_in_meta(source_state_record.composer_meta)
               if source_state_record is not None
@@ -9096,8 +9440,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 
 P6.6 — _strip_guided_profile_in_meta resets guided_session.profile to EMPTY at
 BOTH verbatim composer_meta copies in fork_session (:5076 persist + :5153 return).
-Canonical inline_blob source (no blob_ref, rewritten=False) skips the route
-blob-rewrite save, so the strip must live in fork_session. Closes finding 10.
+The route blob-rewrite save preserves composer_meta verbatim and never strips the
+profile (and is route-layer, not part of fork_session), so the strip must live in
+fork_session — independent of rewritten. Closes finding 10.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 
@@ -9212,7 +9557,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   ```
 - [ ] **Step 7: Frontend typecheck + the mirror gate.**
   From `src/elspeth/web/frontend`: `npm run typecheck` (expected clean).
-  From the repo root: `.venv/bin/python scripts/cicd/check_slot_type_cross_language.py` (the SlotType / guided.ts mirror gate — this work edits `guided.ts`; expected: passes, since `step_index` is a request field, not a `SlotType`/`TurnType`/`GuidedStep` enum member).
+  From the repo root: `uv run python scripts/cicd/check_slot_type_cross_language.py` (the SlotType / guided.ts mirror gate — this work edits `guided.ts`; expected: passes, since `step_index` is a request field, not a `SlotType`/`TurnType`/`GuidedStep` enum member).
 - [ ] **Step 8: Commit.**
   `git add src/elspeth/web/sessions/schemas.py src/elspeth/web/sessions/routes/composer.py src/elspeth/web/frontend/src/types/guided.ts tests/unit/web/sessions/test_guided_start.py && git commit -m "feat(sessions): optimistic-concurrency step_index 409 on /guided/respond
 
@@ -9246,7 +9591,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
   From `src/elspeth/web/frontend`: `npm run typecheck && npm test -- --run && npm run build`
   Expected: all green.
 - [ ] **Step 6: SlotType / guided.ts mirror gate + wardline.**
-  Repo root: `.venv/bin/python scripts/cicd/check_slot_type_cross_language.py` (expected pass) and `wardline scan . --fail-on ERROR` (expected exit 0; P6 touches the profile/start trust boundary — confirm the closed-enum discriminator + server-constructed profile keeps the taint flow clean; fix at the boundary if a finding lands).
+  Repo root: `uv run python scripts/cicd/check_slot_type_cross_language.py` (expected pass) and `wardline scan . --fail-on ERROR` (expected exit 0; P6 touches the profile/start trust boundary — confirm the closed-enum discriminator + server-constructed profile keeps the taint flow clean; fix at the boundary if a finding lands).
 - [ ] **Step 7: Final commit (only if Steps 2/3 required a formatting/type touch-up; otherwise skip).**
   `git add -A && git commit -m "chore(sessions): P6 verification sweep — ruff/mypy/lints/frontend green
 
@@ -9830,8 +10175,11 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
     beforeEach(() => {
       startGuidedSessionMock.mockReset().mockResolvedValue(undefined);
       startGuidedMock.mockReset().mockResolvedValue(undefined);
+      // Start with NO active session so the test exercises the real production
+      // path: TutorialGuidedShell must itself bind activeSessionId (D3/B4). A
+      // pre-set activeSessionId here would mask a shell that forgot to bind it.
       useSessionStore.setState({
-        activeSessionId: "sess-1",
+        activeSessionId: null,
         guidedSession: null,
         startGuided: startGuidedMock,
       } as never);
@@ -9845,6 +10193,9 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
         expect(startGuidedSessionMock).toHaveBeenCalledWith("sess-1", "tutorial"),
       );
       expect(startGuidedMock).toHaveBeenCalledWith("sess-1");
+      // The shell must have bound the store's activeSessionId; otherwise
+      // startGuided discards its payload and ChatPanel renders the empty surface.
+      expect(useSessionStore.getState().activeSessionId).toBe("sess-1");
     });
 
     it("renders the real ChatPanel guided surface", async () => {
@@ -9925,6 +10276,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
       }
       startedRef.current = true;
       void (async () => {
+        // Bind the store's activeSessionId to this tutorial session BEFORE
+        // startGuided. startGuided (sessionStore.ts) DISCARDS its fetched guided
+        // payload unless get().activeSessionId === the requested id, and ChatPanel
+        // renders the empty-session surface (chat-panel--empty) whenever
+        // activeSessionId is null — so without this bind the embedded guided
+        // ChatPanel never mounts. Mirrors the binding the now-deleted
+        // TutorialTurn2Describe performed after createSession.
+        useSessionStore.setState({ activeSessionId: sessionId });
         await startGuidedSession(sessionId, "tutorial");
         await startGuided(sessionId);
       })();
@@ -10261,7 +10620,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 6: Run the `SlotType` / `guided.ts` mirror gate (this branch edits guided.ts upstream; re-run here to confirm no drift).**
   ```bash
-  .venv/bin/python scripts/cicd/check_slot_type_cross_language.py
+  uv run python scripts/cicd/check_slot_type_cross_language.py
   ```
   Expected: exit 0 (no SlotType / guided.ts mirror drift).
 
@@ -10308,14 +10667,14 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 2: Confirm the corrected prose + the P5.9 guard test are present.**
   ```bash
-  cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && grep -n "operator-configured" src/elspeth/web/composer/tools/_dispatch.py && .venv/bin/python -m pytest tests/unit/web/composer/tools/test_advisor_tool_prose.py -q
+  cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && grep -n "operator-configured" src/elspeth/web/composer/tools/_dispatch.py && uv run python -m pytest tests/unit/web/composer/tools/test_advisor_tool_prose.py -q
   ```
   Expected: the grep prints the `operator-configured` line and the prose guard
   test is `1 passed`.
 
 - [ ] **Step 3: Check the broader dispatch suite for any OTHER test still pinning the old phrase.**
   ```bash
-  cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && grep -rn "Disabled by default" tests/ ; .venv/bin/python -m pytest tests/unit/web/composer/tools/test_dispatch.py -q
+  cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && grep -rn "Disabled by default" tests/ ; uv run python -m pytest tests/unit/web/composer/tools/test_dispatch.py -q
   ```
   Expected: the grep prints **nothing** and `test_dispatch.py` is all `passed`.
   If the grep hits a stale assertion in `test_dispatch.py`, update its expected
@@ -10396,6 +10755,33 @@ Adds the 0.7.0 single-DB (SESSION_SCHEMA_EPOCH 22->23) cutover section, a
 PRAGMA user_version==23 + fresh-session-reaches-COMPLETED smoke verification,
 and hardened secret-archive steps (wal_checkpoint(TRUNCATE) before cp -a;
 destroy/secure the archive + secret_key rotation note at deploy-window end).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
+  ```
+
+---
+
+### Task P7.9b: Bump package version 0.6.0 → 0.7.0 + relock
+
+**Files:**
+- Modify: `pyproject.toml:3` (`version`)
+- Modify: `uv.lock` (regenerated)
+
+**Interfaces:** none.
+
+The spec/plan target version is **0.7.0** (pre-release), but `pyproject.toml` still reads `version = "0.6.0"`. Land the bump with the migration/runbook cutover so the shipped artifact carries the right version (CI runs `uv sync --frozen`, so a stale lock fails the build).
+
+- [ ] **Step 1: Bump the version.**
+  In `pyproject.toml` line 3: `version = "0.6.0"` → `version = "0.7.0"`.
+- [ ] **Step 2: Regenerate the lock.**
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv lock`
+  (refreshes the `[[package]] name = "elspeth"` pin).
+- [ ] **Step 3: Verify.**
+  `cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && uv run python -c "import importlib.metadata as m; print(m.version('elspeth'))"`
+  Expected: `0.7.0`.
+- [ ] **Step 4: Commit.**
+  ```bash
+  cd /home/john/elspeth/.claude/worktrees/tutorial-staged-recut && git add pyproject.toml uv.lock && git commit -m "chore: bump version 0.6.0 -> 0.7.0
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   ```

@@ -46,7 +46,6 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
-    REDACTED_BLOB_SOURCE_PATH,
     SetPipelineArgumentsModel,
     redact_tool_call_arguments,
 )
@@ -1086,15 +1085,12 @@ _CANARY_TRIGGER = "CANARY-NODE-TRIGGER-DO-NOT-LEAK"
 
 
 def test_redaction_substitutes_source_options_via_summarizer() -> None:
-    """``source.options`` is replaced by the canonical-JSON redacted form
+    """``source.options`` is replaced by the canonical-JSON shape summary
     (:func:`_summarize_set_source_options`).
 
     Uniformity-with-set_source contract: ``set_pipeline`` shares the
-    summarizer with ``set_source`` and ``set_source_from_blob``.  When
-    ``options`` contains both ``path`` and ``blob_ref``,
-    :func:`redact_source_storage_path` substitutes the internal path with
-    :data:`REDACTED_BLOB_SOURCE_PATH` before the summarizer JSON-encodes
-    the result.
+    summarizer with ``set_source`` and ``set_source_from_blob``. The summary
+    preserves option shape but replaces scalar values before JSON encoding.
     """
     tel = NoopRedactionTelemetry()
     args = {
@@ -1113,7 +1109,10 @@ def test_redaction_substitutes_source_options_via_summarizer() -> None:
     assert redacted["source"]["on_success"] == "rows"
     # options collapses to the summarizer's str output.
     assert isinstance(redacted["source"]["options"], str)
-    assert REDACTED_BLOB_SOURCE_PATH in redacted["source"]["options"]
+    assert json.loads(redacted["source"]["options"]) == {
+        "blob_ref": "<redacted-option-value>",
+        "path": "<redacted-option-value>",
+    }
     # The canary path MUST NOT appear anywhere in the redacted output.
     serialized = json.dumps(redacted, sort_keys=True)
     assert _CANARY_PATH not in serialized
@@ -1199,9 +1198,11 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
     }
     redacted = redact_tool_call_arguments("set_pipeline", args, telemetry=tel)
     # ``options`` (Sensitive ``dict[str, Any]``) collapses to a str — the
-    # summarizer's canonical-JSON output.
+    # summarizer's canonical-JSON shape output.
     assert isinstance(redacted["nodes"][0]["options"], str)
     assert isinstance(redacted["outputs"][0]["options"], str)
+    assert json.loads(redacted["nodes"][0]["options"]) == {"prompt_template": "<redacted-option-value>"}
+    assert json.loads(redacted["outputs"][0]["options"]) == {"path": "<redacted-option-value>"}
     # ``routes`` and ``trigger`` pass through with their original shapes
     # — structurally exempt under §4.4.2 (closed-list scalar element types).
     assert redacted["nodes"][0]["routes"] == {"true": _CANARY_ROUTES}
@@ -1216,19 +1217,14 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
         "count": None,
         "timeout_seconds": None,
     }
-    # NB: the path-redacting summarizer does NOT redact arbitrary keys
-    # (only ``path`` + ``blob_ref`` pairs), so the canary values DO
-    # appear inside the summarized JSON-string by design.  The test
-    # therefore asserts the structural shape: the option-field type is no
-    # longer ``dict`` once redaction runs, and the routes/trigger fields
-    # remain typed Python containers (not collapsed strings).
+    # Option canaries are removed by the shared option summarizer. Routes and
+    # triggers remain typed Python containers and keep their structural scalar
+    # values under the F3 contract.
     serialized = json.dumps(redacted, sort_keys=True)
-    # Every canary appears exactly ONCE in the serialised output — inside
-    # its own field, not at any other surface.
-    assert serialized.count(_CANARY_NODE_OPT) == 1
+    assert _CANARY_NODE_OPT not in serialized
+    assert _CANARY_OUTPUT_OPT not in serialized
     assert serialized.count(_CANARY_ROUTES) == 1
     assert serialized.count(_CANARY_TRIGGER) == 1
-    assert serialized.count(_CANARY_OUTPUT_OPT) == 1
 
 
 # ---------------------------------------------------------------------------

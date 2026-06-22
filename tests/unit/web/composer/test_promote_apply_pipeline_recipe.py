@@ -32,7 +32,6 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
-    REDACTED_BLOB_SOURCE_PATH,
     ApplyPipelineRecipeArgumentsModel,
     redact_tool_call_arguments,
 )
@@ -204,12 +203,8 @@ _CANARY_TEMPLATE = "CANARY-APPLY-RECIPE-TEMPLATE-DO-NOT-LEAK"
 def test_redaction_substitutes_slots_via_summarizer() -> None:
     """``slots`` collapses to the summarizer's canonical-JSON output.
 
-    :func:`_summarize_set_source_options` applies
-    :func:`redact_source_storage_path` to the wrapped ``{"source":
-    {"options": slots}}`` shape: when ``slots`` contains both ``path``
-    and ``blob_ref``, the path is substituted with
-    :data:`REDACTED_BLOB_SOURCE_PATH`.  Other keys pass through verbatim
-    inside the JSON-string output.
+    The shared option summarizer preserves slot shape but replaces scalar
+    values before producing the JSON-string output.
     """
     tel = NoopRedactionTelemetry()
     args = {
@@ -224,7 +219,10 @@ def test_redaction_substitutes_slots_via_summarizer() -> None:
     assert redacted["recipe_name"] == "classify-rows-llm-jsonl"
     # slots collapses to the summarizer str output.
     assert isinstance(redacted["slots"], str)
-    assert REDACTED_BLOB_SOURCE_PATH in redacted["slots"]
+    assert json.loads(redacted["slots"]) == {
+        "blob_ref": "<redacted-option-value>",
+        "path": "<redacted-option-value>",
+    }
     # The canary path MUST NOT appear in the redacted output.
     serialized = json.dumps(redacted, sort_keys=True)
     assert _CANARY_PATH not in serialized
@@ -232,17 +230,12 @@ def test_redaction_substitutes_slots_via_summarizer() -> None:
     assert tel.manifest_dispatch_calls == [{"tool_name": "apply_pipeline_recipe", "shape": "type_driven"}]
 
 
-def test_redaction_preserves_non_path_slot_keys_inside_summary() -> None:
-    """Non-path slot keys pass through the summarizer verbatim by design.
+def test_redaction_preserves_non_path_slot_shape_inside_summary() -> None:
+    """Non-path slot shape is preserved while scalar values are redacted.
 
-    The path-redacting summarizer (:func:`redact_source_storage_path`) is
-    content-agnostic — it acts only when both ``path`` AND ``blob_ref``
-    are present.  Other slot keys (``provider``, ``model``,
-    ``classifier_template``) appear verbatim inside the summarizer's
-    canonical-JSON output string.  This is acceptable for Wave 3: the
-    structural Sensitive marker prevents un-redacted dict materialisation
-    on the audit boundary, and Task 16 may introduce a recipe-aware
-    summarizer that also redacts the template string.
+    The structural Sensitive marker prevents un-redacted dict materialisation
+    on the audit boundary. The shared option summarizer keeps slot keys for
+    audit shape but replaces values such as providers and templates.
     """
     tel = NoopRedactionTelemetry()
     args: dict[str, Any] = {
@@ -255,13 +248,12 @@ def test_redaction_preserves_non_path_slot_keys_inside_summary() -> None:
     redacted = redact_tool_call_arguments("apply_pipeline_recipe", args, telemetry=tel)
     # slots is the summarizer's str output (a JSON object string).
     assert isinstance(redacted["slots"], str)
-    # The template canary appears EXACTLY ONCE — inside the slots
-    # summary string — and NOT at any other surface.
+    assert json.loads(redacted["slots"]) == {
+        "classifier_template": "<redacted-option-value>",
+        "provider": "<redacted-option-value>",
+    }
     serialized = json.dumps(redacted, sort_keys=True)
-    assert serialized.count(_CANARY_TEMPLATE) == 1
-    # No path-blob_ref pair => no REDACTED_BLOB_SOURCE_PATH substitution
-    # (mirroring the Task 4 set_source pass-through pin).
-    assert REDACTED_BLOB_SOURCE_PATH not in redacted["slots"]
+    assert _CANARY_TEMPLATE not in serialized
 
 
 def test_apply_recipe_crashes_on_set_pipeline_contract_violation(monkeypatch: pytest.MonkeyPatch) -> None:

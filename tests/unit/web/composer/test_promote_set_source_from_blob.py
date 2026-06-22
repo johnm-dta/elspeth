@@ -29,7 +29,6 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.redaction import (
     MANIFEST,
-    REDACTED_BLOB_SOURCE_PATH,
     SetSourceFromBlobArgumentsModel,
     redact_tool_call_arguments,
 )
@@ -374,14 +373,11 @@ _CANARY = "CANARY-SET-SOURCE-FROM-BLOB-PATH-DO-NOT-LEAK"
 
 
 def test_redaction_substitutes_options_via_summarizer() -> None:
-    """``options`` is replaced by the canonical-JSON redacted form
-    (:func:`_summarize_set_source_options`).
+    """``options`` is replaced by the canonical-JSON shape summary.
 
     Uniformity-with-set_source contract: both source-binding tools share
-    the same summarizer.  When ``options`` contains both ``path`` and
-    ``blob_ref``, :func:`redact_source_storage_path` substitutes the
-    internal path with :data:`REDACTED_BLOB_SOURCE_PATH` before the
-    summarizer JSON-encodes the result.
+    the same summarizer.  The summary must preserve shape without echoing
+    plugin option values such as paths, blob refs, or credentials.
     """
     tel = NoopRedactionTelemetry()
     args = {
@@ -393,11 +389,12 @@ def test_redaction_substitutes_options_via_summarizer() -> None:
     # Structural keys preserved.
     assert redacted["blob_id"] == "some-blob-id"
     assert redacted["on_success"] == "out"
-    # options is now the summarizer's str output (canonical JSON of the
-    # redacted dict).
+    # options is now the summarizer's str output.
     assert isinstance(redacted["options"], str)
-    # blob_ref triggers redact_source_storage_path → path becomes the sentinel.
-    assert REDACTED_BLOB_SOURCE_PATH in redacted["options"]
+    assert json.loads(redacted["options"]) == {
+        "blob_ref": "<redacted-option-value>",
+        "path": "<redacted-option-value>",
+    }
     # The canary value MUST NOT appear in the redacted dict OR its JSON form.
     serialized = json.dumps(redacted, sort_keys=True)
     assert _CANARY not in serialized
@@ -405,15 +402,8 @@ def test_redaction_substitutes_options_via_summarizer() -> None:
     assert tel.manifest_dispatch_calls == [{"tool_name": "set_source_from_blob", "shape": "type_driven"}]
 
 
-def test_redaction_passes_through_when_no_blob_ref() -> None:
-    """Without ``blob_ref``, :func:`redact_source_storage_path` is a no-op.
-
-    The Sensitive substitution still happens (options becomes the
-    summarizer's str return), but the path inside the JSON-encoded summary
-    is the original path verbatim — mirroring the
-    :func:`test_redact_passes_through_when_no_blob_ref` pin established by
-    Task 4 for ``set_source``.
-    """
+def test_redaction_hides_paths_without_blob_ref() -> None:
+    """Path values are redacted even when no blob_ref marker is present."""
     tel = NoopRedactionTelemetry()
     args = {
         "blob_id": "id",
@@ -422,8 +412,8 @@ def test_redaction_passes_through_when_no_blob_ref() -> None:
     }
     redacted = redact_tool_call_arguments("set_source_from_blob", args, telemetry=tel)
     assert isinstance(redacted["options"], str)
-    assert "/tmp/data.csv" in redacted["options"]
-    assert REDACTED_BLOB_SOURCE_PATH not in redacted["options"]
+    assert json.loads(redacted["options"]) == {"path": "<redacted-option-value>"}
+    assert "/tmp/data.csv" not in redacted["options"]
 
 
 # ---------------------------------------------------------------------------

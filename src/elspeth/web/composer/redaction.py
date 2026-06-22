@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import json
 from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from types import MappingProxyType, UnionType
 from typing import Annotated, Any, Union, get_args, get_origin
@@ -28,6 +29,7 @@ from elspeth.contracts.freeze import freeze_fields
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
 
 REDACTED_BLOB_SOURCE_PATH = "<redacted-blob-source-path>"
+_REDACTED_OPTION_VALUE = "<redacted-option-value>"
 
 # Fixed sentinel for response keys that appear in the input but are not
 # declared in the manifest entry's known_response_keys or
@@ -805,28 +807,38 @@ class ToolRedaction:
             )
 
 
-def _summarize_set_source_options(options: dict[str, Any]) -> str:
+def _summarize_option_shape(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {str(key): _summarize_option_shape(child) for key, child in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, (list, tuple)):
+        return [_summarize_option_shape(item) for item in value]
+    if isinstance(value, AbstractSet):
+        return sorted((_summarize_option_shape(item) for item in value), key=repr)
+    return _REDACTED_OPTION_VALUE
+
+
+def _summarize_set_source_options(options: object) -> str:
     """Summarizer for ``set_source.options`` (spec §4.2.6).
 
-    Wraps the existing :func:`redact_source_storage_path` helper so the
-    redacted view of options is computed via the same path-blob-ref logic
-    used by the legacy state-serialization redactor.  The output is the
-    canonical JSON form of the redacted options dict so it is reusable as
-    a hashable / loggable scalar in audit records.
+    Produces canonical JSON for the option payload's shape: mapping keys,
+    nested mappings, and sequence lengths are preserved, but every scalar
+    value is replaced before serialization. Plugin options are an open,
+    plugin-defined surface and routinely carry filesystem paths, source
+    object locators, prompt text, and credential material such as connection
+    strings, SAS tokens, API keys, and client secrets. Therefore the summary
+    must not rely on per-plugin sensitive-key knowledge or on the blob_ref
+    path-only redactor.
 
     Contract (spec §4.2.6, §9 RSK-03):
       * MUST NOT raise on any reachable input value.
       * MUST return ``str``.
 
-    ``default=str`` on :func:`json.dumps` ensures RSK-03 holds for values
-    that survive Pydantic coercion but are not natively JSON-serialisable
-    (``datetime``, ``bytes``, ``UUID``) — a future schema that admits
-    those types via :class:`typing.Any` would otherwise raise
-    :class:`TypeError` at the summarizer boundary.
+    ``default=str`` on :func:`json.dumps` is retained as a final defensive
+    guard for unusual mapping keys or container shapes; reachable scalar
+    values are substituted before dumps sees them.
     """
-    redacted = redact_source_storage_path({"source": {"options": options}})
     return json.dumps(
-        redacted["source"]["options"],
+        _summarize_option_shape(options) if isinstance(options, Mapping) else "<invalid-options>",
         sort_keys=True,
         separators=(",", ":"),
         default=str,
@@ -1010,16 +1022,10 @@ class SetSourceFromBlobArgumentsModel(BaseModel):
     ``arguments.get("options", {})``.  We mirror that absent-equals-empty
     semantics with ``Field(default_factory=dict)`` rather than declaring
     ``options: dict | None = None``.  Reason: the summarizer needs to
-    handle a real ``dict`` value (the existing
-    :func:`_summarize_set_source_options` does
-    ``redact_source_storage_path({"source": {"options": options}})``,
-    which expects ``options`` to be a dict-or-None and treats absence as
-    "no redaction needed").  A ``None`` value reaches the summarizer and
-    produces ``"null"`` in the redacted view — a meaningless audit signal
-    that does not match the runtime semantics (the handler treats an
-    absent slot as ``{}``).  Defaulting to ``{}`` preserves "absent = no
-    options" at the argument boundary AND records it accurately on the
-    audit side as an empty-options dict.
+    handle a real mapping value and should record an absent slot as an
+    empty option shape, not as a separate ``None`` shape.  Defaulting to
+    ``{}`` preserves "absent = no options" at the argument boundary AND
+    records it accurately on the audit side as an empty-options dict.
 
     ``plugin`` and ``on_validation_failure`` keep ``str | None = None``
     because the handler distinguishes their absent semantics: ``plugin``
@@ -1151,24 +1157,25 @@ class CreateBlobArgumentsModel(BaseModel):
 #     summarizer :func:`_summarize_inline_blob_content` already used by
 #     ``create_blob`` / ``update_blob`` (uniformity-across-blob-payload-tools
 #     contract).
-#   * ``nodes[*].options``, ``nodes[*].routes``, ``nodes[*].trigger``, and
-#     ``outputs[*].options`` ARE ``Sensitive[dict]`` with
+#   * ``nodes[*].options`` and ``outputs[*].options`` ARE ``Sensitive[dict]`` with
 #     :func:`_summarize_set_source_options` — the adequacy guard (§4.4.2)
 #     fails closed on inspection-resistant ``dict[str, Any]`` field types
 #     without Sensitive marking, and the LLM-supplied dicts routinely
-#     carry secret-ref markers, filesystem paths, and prompt-template
-#     payloads.  Reusing the source-side summarizer is structurally safe
-#     because :func:`redact_source_storage_path` is content-agnostic (it
-#     applies path-blob_ref redaction when present and leaves every other
-#     key verbatim); a future node-shape-aware summarizer may also redact
-#     the LLM template field.
+#     carry secret-ref markers, filesystem paths, credential material, and
+#     prompt-template payloads.  Reusing the source-side summarizer is
+#     structurally safe because it records option shape while replacing all
+#     scalar values before persistence; future tool-specific summarizers may
+#     preserve more non-sensitive structure.
+#   * ``nodes[*].routes`` and ``nodes[*].trigger`` are structurally typed
+#     models/dicts with closed scalar leaf types, so they are validated and
+#     walked directly rather than collapsed by the option summarizer.
 #
 # Walker coverage at the persistence boundary:
 # ``walk_model_schema`` descends into ``list[NestedModel]`` so the Sensitive markers on the nested option
 # dicts are discoverable from the outer :class:`SetPipelineArgumentsModel`.
-# This produces five Sensitive paths in the model walk:
+# This produces four Sensitive paths in the model walk:
 # ``source.options``, ``source.inline_blob.content``, ``nodes[*].options``,
-# ``nodes[*].routes``, ``nodes[*].trigger``, ``outputs[*].options``.
+# ``outputs[*].options``.
 # ---------------------------------------------------------------------------
 
 
@@ -1321,19 +1328,17 @@ class _PipelineNodeModel(BaseModel):
     Without a Sensitive annotation the adequacy guard (§4.4.2) fails
     closed on the inspection-resistant ``dict[str, Any]`` field type;
     with the annotation the persistence boundary collapses the field to
-    the path-redacting canonical-JSON summary that
+    the canonical-JSON shape summary that
     :func:`_summarize_set_source_options` already supplies for source-
     side options.
 
-    The summarizer is reused (NOT a new node-specific one) because
-    :func:`redact_source_storage_path` is content-agnostic: it walks the
-    incoming dict, replaces ``path`` values when an adjacent ``blob_ref``
-    is present, and leaves every other key verbatim.  That behaviour is
-    correct for ``nodes[*].options`` too — if a node's options happen to
-    carry a ``path`` + ``blob_ref`` pair (e.g., a future blob-aware
-    transform), the redaction applies. Future work may
-    introduce a node-shape-aware summarizer that also redacts the LLM
-    prompt template field.
+    The summarizer is reused (NOT a new node-specific one) because it is
+    option-surface agnostic: it preserves mapping keys and nested container
+    shape while replacing every scalar value. That behaviour is correct for
+    ``nodes[*].options`` too because plugin options may carry credentials,
+    paths, prompts, or future plugin-defined sensitive fields. Future work
+    may introduce a node-shape-aware summarizer that preserves more
+    non-sensitive structure.
 
     ``routes`` and ``trigger`` typing
     ---------------------------------
@@ -1350,12 +1355,12 @@ class _PipelineNodeModel(BaseModel):
     away.
 
     These two fields previously carried a Sensitive marker that satisfied
-    the adequacy guard MECHANICALLY but did no actual redaction (the shared
-    content-agnostic summarizer passes them through verbatim).  Replacing
-    the ``dict[str, Any]`` types with structural typings drops the markers
-    and strengthens boundary validation (e.g., ``routes: {"true": 42}`` is
-    now rejected at Pydantic validation instead of silently passing through
-    to become an audit fact).  See F3 in
+    the adequacy guard MECHANICALLY while losing useful route/trigger
+    structure behind a generic option summary. Replacing the
+    ``dict[str, Any]`` types with structural typings drops the markers and
+    strengthens boundary validation (e.g., ``routes: {"true": 42}`` is now
+    rejected at Pydantic validation instead of silently passing through to
+    become an audit fact).  See F3 in
     ``docs/composer/evidence/composer-phase-2-followup-prompt-F1-F6.md``.
     """
 
@@ -1466,13 +1471,12 @@ class ApplyPipelineRecipeArgumentsModel(BaseModel):
 
     Marking ``slots`` :class:`Sensitive` with
     :func:`_summarize_set_source_options` collapses the dict to the
-    canonical-JSON form with path-blob_ref redaction applied.  The
-    summarizer is reused (NOT a recipe-specific one) for the same
-    structural reasons as :class:`_PipelineNodeModel.options` —
-    :func:`redact_source_storage_path` is content-agnostic and applies
-    when the relevant keys are present, leaving everything else verbatim.
-    A future recipe-shape-aware summarizer may
-    also redacts the template-string slot.
+    canonical-JSON shape summary. The summarizer is reused (NOT a
+    recipe-specific one) for the same structural reasons as
+    :class:`_PipelineNodeModel.options`: recipe slots may carry paths,
+    secret names, blob ids, or prompt templates, so scalar values are not
+    persisted. A future recipe-shape-aware summarizer may preserve more
+    non-sensitive structure.
 
     Empty-string semantic check on ``recipe_name``
     ----------------------------------------------
@@ -1522,18 +1526,17 @@ class SetPipelineArgumentsModel(BaseModel):
 
     Sensitive marker surface
     ------------------------
-    Six paths carry :class:`Sensitive` markers (see module-level note above):
+    Four paths carry :class:`Sensitive` markers (see module-level note above):
       * ``source.options`` — :func:`_summarize_set_source_options`.
       * ``source.inline_blob.content`` — :func:`_summarize_inline_blob_content`.
       * ``nodes[*].options`` — :func:`_summarize_set_source_options`.
-      * ``nodes[*].routes`` — :func:`_summarize_set_source_options`.
-      * ``nodes[*].trigger`` — :func:`_summarize_set_source_options`.
       * ``outputs[*].options`` — :func:`_summarize_set_source_options`.
 
     The adequacy guard (§4.4.2) fails closed on any ``dict[str, Any]`` or
     ``Any``-typed field without a Sensitive marker, which mechanically
-    enforces that every LLM-supplied options/routes/trigger surface is
-    redacted at the persistence boundary.
+    enforces that every LLM-supplied open option surface is redacted at the
+    persistence boundary. Routes and triggers use structural closed-leaf
+    types instead.
 
     ``extra="forbid"`` is required (rev-2 M.1) at every level — the
     outer model AND every nested sub-model.  Misrouted argument shapes
@@ -1568,10 +1571,9 @@ class SetPipelineArgumentsModel(BaseModel):
 # inspection-resistant — the guard fails closed on that shape.  Wrapping
 # ``patch`` with :class:`Sensitive` and :func:`_summarize_set_source_options`
 # is mandatory, and reusing the source-side summarizer is structurally sound
-# because :func:`redact_source_storage_path` is content-agnostic (it applies
-# path-blob_ref redaction when the relevant keys are present; all other keys
-# pass through verbatim).  Uniformity with the Waves 2-3 source/node/output
-# options surfaces is an explicit design goal.
+# because it records option shape while replacing scalar values. Uniformity
+# with the Waves 2-3 source/node/output options surfaces is an explicit
+# design goal.
 #
 # ``patch_node_options`` adds a ``node_id: str`` selector; the routing-key
 # guard (_node_routing_option_patch_error) is a SEMANTIC check on patch
@@ -2151,11 +2153,11 @@ _DIFF_PIPELINE_REASON = HandlesNoSensitiveDataReason(
 # tuple.
 #
 # Reuse of :func:`_summarize_set_source_options` is structurally sound: the
-# helper is content-agnostic — it applies path-blob_ref redaction when the
-# relevant keys are present and leaves everything else verbatim — so it
-# applies to upsert_node options, set_output options, and the trigger/routes
-# slots without modification.  The same reuse rationale is documented in
-# detail on :class:`_PipelineNodeModel.options` and :class:`_PipelineOutputModel.options`.
+# helper is content-agnostic over option-like dicts because it preserves
+# shape while replacing scalar values, so it applies to upsert_node options,
+# set_output options, and trigger/routes slots without modification.  The
+# same reuse rationale is documented in detail on
+# :class:`_PipelineNodeModel.options` and :class:`_PipelineOutputModel.options`.
 # ---------------------------------------------------------------------------
 
 

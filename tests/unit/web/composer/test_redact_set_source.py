@@ -87,7 +87,8 @@ def test_set_source_argument_model_rejects_extra_fields() -> None:
 def test_redact_substitutes_options_via_summarizer() -> None:
     """Sensitive[options] is replaced by the summarizer string at the top level.
 
-    The summarizer returns canonical JSON of the redacted options dict.
+    The summarizer returns canonical JSON of the options shape with scalar
+    values redacted.
     Because Sensitive() substitutes the ENTIRE marked value, the top-level
     ``options`` slot in the redacted output is a string (the summarizer
     return), not a dict.  This is the load-bearing shape contract: the
@@ -107,21 +108,18 @@ def test_redact_substitutes_options_via_summarizer() -> None:
     assert redacted["on_validation_failure"] == "discard"
     # Sensitive substitution: options is now the summarizer's str output.
     assert isinstance(redacted["options"], str)
-    # blob_ref triggered redact_source_storage_path → path is the sentinel.
-    assert REDACTED_BLOB_SOURCE_PATH in redacted["options"]
+    assert json.loads(redacted["options"]) == {
+        "blob_ref": "<redacted-option-value>",
+        "path": "<redacted-option-value>",
+    }
     # The original internal path MUST NOT appear in the summary.
     assert "/internal/blob/path.csv" not in redacted["options"]
     # Telemetry recorded the manifest dispatch with the type-driven shape.
     assert tel.manifest_dispatch_calls == [{"tool_name": "set_source", "shape": "type_driven"}]
 
 
-def test_redact_passes_through_when_no_blob_ref() -> None:
-    """Without blob_ref, redact_source_storage_path is a no-op on options.
-
-    The Sensitive substitution still happens (options becomes the
-    summarizer's str return), but the path inside the JSON-encoded summary
-    is the original path verbatim.
-    """
+def test_redact_source_options_summary_hides_paths_without_blob_ref() -> None:
+    """Source option summaries must not preserve raw paths without blob_ref."""
     tel = NoopRedactionTelemetry()
     args = {
         "plugin": "csv",
@@ -131,8 +129,37 @@ def test_redact_passes_through_when_no_blob_ref() -> None:
     }
     redacted = redact_tool_call_arguments("set_source", args, telemetry=tel)
     assert isinstance(redacted["options"], str)
-    assert "/tmp/data.csv" in redacted["options"]
-    assert REDACTED_BLOB_SOURCE_PATH not in redacted["options"]
+    assert "/tmp/data.csv" not in redacted["options"]
+
+
+def test_redact_source_options_summary_hides_credential_values() -> None:
+    """Credential-bearing source plugin option values must not survive."""
+    tel = NoopRedactionTelemetry()
+    raw_connection_string = "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=KEYVALUE;EndpointSuffix=core.windows.net"
+    raw_sas_token = "sig=abcdefghijklmnopqrstuvwxyz1234567890"
+    raw_client_secret = "client-secret-value"
+    raw_path = "container/private/customer.csv"
+    args = {
+        "plugin": "azure_blob",
+        "options": {
+            "connection_string": raw_connection_string,
+            "sas_token": raw_sas_token,
+            "client_secret": raw_client_secret,
+            "container": "private-container",
+            "blob_path": raw_path,
+        },
+        "on_success": "rows",
+        "on_validation_failure": "discard",
+    }
+
+    redacted = redact_tool_call_arguments("set_source", args, telemetry=tel)
+    serialized = json.dumps(redacted, sort_keys=True)
+
+    assert isinstance(redacted["options"], str)
+    assert raw_connection_string not in serialized
+    assert raw_sas_token not in serialized
+    assert raw_client_secret not in serialized
+    assert raw_path not in serialized
 
 
 def test_redact_source_storage_path_masks_file_shape_when_blob_ref_present() -> None:
@@ -198,12 +225,8 @@ def test_serialization_boundary_canary_not_in_json_output() -> None:
     :func:`json.dumps` before writing to ``chat_messages.tool_calls``.  This
     test verifies the canary never survives that serialization — even
     though :func:`json.dumps` would otherwise re-emit the canary if it
-    appeared anywhere in the dict.  Because the summarizer wraps the
-    canary inside ``redact_source_storage_path``, and because the only
-    sensitive options field that gets sentinel-replaced is ``path`` when
-    ``blob_ref`` is also present, the canary is exposed in the absence of
-    ``blob_ref``.  We therefore include ``blob_ref`` so the canary value
-    is genuinely substituted.
+    appeared anywhere in the dict. The source-option summarizer substitutes
+    scalar option values before serialization, independent of blob_ref.
     """
     args = {
         "plugin": "csv",

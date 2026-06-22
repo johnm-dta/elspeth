@@ -18,6 +18,7 @@ from elspeth.contracts.coalesce_metadata import collision_value_fingerprint as _
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.formatters import dataclass_to_dict, serialize_datetime
+from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import (
     OPERATION_STATUS_VALUES,
     OPERATION_TYPE_VALUES,
@@ -1032,7 +1033,13 @@ def _validate_readonly_sql(sql: str) -> None:
             raise ValueError(f"Query contains forbidden keyword: {keyword}")
 
 
-def query(db: LandscapeDB, factory: RecorderFactory, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def query(
+    db: LandscapeDB,
+    factory: RecorderFactory,
+    sql: str,
+    params: dict[str, Any] | None = None,
+    limit: int = MCP_QUERY_DEFAULT_LIMIT,
+) -> list[dict[str, Any]]:
     """Execute a read-only SQL query.
 
     Args:
@@ -1040,6 +1047,7 @@ def query(db: LandscapeDB, factory: RecorderFactory, sql: str, params: dict[str,
         factory: Recorder factory
         sql: SQL query (must be a single SELECT or WITH...SELECT)
         params: Optional query parameters
+        limit: Maximum rows to return
 
     Returns:
         Query results as list of dicts
@@ -1047,6 +1055,12 @@ def query(db: LandscapeDB, factory: RecorderFactory, sql: str, params: dict[str,
     Raises:
         ValueError: If query fails read-only validation
     """
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise TypeError(f"query limit must be integer, got {type(limit).__name__}")
+    if limit < 1:
+        raise ValueError(f"query limit must be >= 1, got {limit}")
+    if limit > MCP_RESULT_LIMIT_MAX:
+        raise ValueError(f"query limit must be <= {MCP_RESULT_LIMIT_MAX}, got {limit}")
     _validate_readonly_sql(sql)
 
     from sqlalchemy import text
@@ -1054,7 +1068,7 @@ def query(db: LandscapeDB, factory: RecorderFactory, sql: str, params: dict[str,
     with db.read_only_connection() as conn:
         result = conn.execute(text(sql), params or {})
         columns = list(result.keys())
-        rows = result.fetchall()
+        rows = result.fetchmany(limit)
 
     if len(columns) != len(set(columns)):
         from collections import Counter

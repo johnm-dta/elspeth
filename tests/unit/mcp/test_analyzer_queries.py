@@ -1305,6 +1305,43 @@ class TestQueryDuplicateColumns:
         assert "b_run_id" in results[0]
 
 
+class TestQueryResultLimit:
+    """Regression coverage for bounded raw MCP query results."""
+
+    def test_query_uses_fetchmany_not_fetchall(self) -> None:
+        """Raw query must not materialize every selected row before limiting."""
+        from elspeth.mcp.analyzers.queries import query
+
+        class FakeResult:
+            def keys(self) -> list[str]:
+                return ["value"]
+
+            def fetchall(self) -> list[tuple[int]]:
+                raise AssertionError("query() must use fetchmany(limit), not fetchall()")
+
+            def fetchmany(self, size: int) -> list[tuple[int]]:
+                assert size == 2
+                return [(1,), (2,)]
+
+        class FakeConnection:
+            def __enter__(self) -> FakeConnection:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def execute(self, _statement: object, _params: dict[str, object]) -> FakeResult:
+                return FakeResult()
+
+        class FakeDB:
+            def read_only_connection(self) -> FakeConnection:
+                return FakeConnection()
+
+        results = query(cast(Any, FakeDB()), cast(Any, object()), "SELECT value FROM rows", limit=2)
+
+        assert results == [{"value": 1}, {"value": 2}]
+
+
 # ===========================================================================
 # get_node_states include_context tests
 # ===========================================================================

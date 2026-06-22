@@ -34,6 +34,7 @@ from mcp.types import TextContent, Tool
 from elspeth.contracts.enums import RunStatus
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.mcp.analyzer import LandscapeAnalyzer
+from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import OPERATION_STATUS_VALUES, OPERATION_TYPE_VALUES
 
 __all__ = [
@@ -47,6 +48,19 @@ logger = logging.getLogger(__name__)
 
 _MCP_STATUS_TOOL_NAME = "get_mcp_status"
 _MCP_SCHEMA_FAILURE_PREFIX = "Landscape MCP server cannot open the configured audit database."
+_MCP_INT_ARG_MAXIMUMS = {"limit": MCP_RESULT_LIMIT_MAX}
+
+
+def _schema_properties_with_int_bounds(args: "_ArgSpec", schema_properties: Mapping[str, Any]) -> MappingProxyType[str, Any]:
+    """Return schema properties with validation bounds advertised."""
+    properties: dict[str, Any] = {name: dict(prop) for name, prop in schema_properties.items()}
+    for field_name, minimum in args.optional_int_min:
+        if field_name in properties:
+            properties[field_name]["minimum"] = minimum
+    for field_name, maximum in _MCP_INT_ARG_MAXIMUMS.items():
+        if any(field_name == candidate for candidate, _default in args.optional_int) and field_name in properties:
+            properties[field_name]["maximum"] = maximum
+    return MappingProxyType(properties)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +91,7 @@ class _ToolDef:
     schema_properties: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "schema_properties", MappingProxyType(dict(self.schema_properties)))
+        object.__setattr__(self, "schema_properties", _schema_properties_with_int_bounds(self.args, self.schema_properties))
 
 
 _TOOLS: dict[str, _ToolDef] = {
@@ -310,15 +324,19 @@ _TOOLS: dict[str, _ToolDef] = {
         description="Execute a read-only SQL query against the audit database (SELECT only)",
         args=_ArgSpec(
             required_str=("sql",),
+            optional_int=(("limit", MCP_QUERY_DEFAULT_LIMIT),),
             optional_dict=("params",),
+            optional_int_min=(("limit", 1),),
         ),
         handler=lambda a, args: a.query(
             sql=args["sql"],
             params=args["params"],
+            limit=args["limit"],
         ),
         schema_properties={
             "sql": {"type": "string", "description": "SQL SELECT query"},
             "params": {"type": ["object", "null"], "description": "Optional query parameters"},
+            "limit": {"type": "integer", "description": "Max rows to return", "default": MCP_QUERY_DEFAULT_LIMIT},
         },
     ),
     "get_dag_structure": _ToolDef(
@@ -505,6 +523,8 @@ def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             raise TypeError(f"'{name}': '{fname}' must be integer, got {type(val).__name__}")
         if fname in int_mins and val < int_mins[fname]:
             raise ValueError(f"'{name}': '{fname}' must be >= {int_mins[fname]}, got {val}")
+        if fname in _MCP_INT_ARG_MAXIMUMS and val > _MCP_INT_ARG_MAXIMUMS[fname]:
+            raise ValueError(f"'{name}': '{fname}' must be <= {_MCP_INT_ARG_MAXIMUMS[fname]}, got {val}")
         validated[fname] = val
 
     for fname, bool_default in spec.optional_bool:

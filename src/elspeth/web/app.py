@@ -610,17 +610,38 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     pathological memory pressure threshold.
 
     The check is Content-Length-only by design: clients may omit or
-    falsify the header.  Per CLAUDE.md (defensive programming forbidden),
-    the ``int(content_length)`` conversion is *not* wrapped — a malformed
-    header is a client bug and should propagate to Starlette's standard
-    400 handling.  The Pydantic caps remain the contract.
+    falsify the header.  Malformed ``Content-Length`` is rejected here as a
+    deterministic client error before the body is read.  The Pydantic caps
+    remain the contract.
     """
 
     _MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
 
     async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[no-untyped-def]
         content_length = request.headers.get("content-length")
-        if content_length is not None and int(content_length) > self._MAX_BODY_BYTES:
+        if content_length is None:
+            return await call_next(request)
+        if not content_length.isascii() or not content_length.isdecimal():
+            return StarletteResponse(
+                content='{"error": "Invalid Content-Length"}',
+                status_code=400,
+                media_type="application/json",
+            )
+        try:
+            content_length_bytes = int(content_length)
+        except ValueError:
+            return StarletteResponse(
+                content='{"error": "Invalid Content-Length"}',
+                status_code=400,
+                media_type="application/json",
+            )
+        if content_length_bytes < 0:
+            return StarletteResponse(
+                content='{"error": "Invalid Content-Length"}',
+                status_code=400,
+                media_type="application/json",
+            )
+        if content_length_bytes > self._MAX_BODY_BYTES:
             return StarletteResponse(
                 content='{"error": "Request body too large (max 10 MB)"}',
                 status_code=413,

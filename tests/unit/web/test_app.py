@@ -314,6 +314,14 @@ class TestBodySizeLimitMiddleware:
         assert response.status_code == 413
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("content_length", ["not-a-number", "-1", "+1", "1_000"])
+    async def test_rejects_malformed_content_length_without_body_read(self, content_length: str) -> None:
+        response = await self._dispatch_with_content_length(content_length)
+
+        assert response.status_code == 400
+        assert response.body == b'{"error": "Invalid Content-Length"}'
+
+    @pytest.mark.asyncio
     async def test_missing_content_length_stream_passes_through_without_body_read(self) -> None:
         """No Content-Length means the middleware defers to per-route validators."""
 
@@ -346,7 +354,7 @@ class TestBodySizeLimitMiddleware:
 
         assert response.status_code == 204
 
-    async def _dispatch_with_content_length(self, content_length: int) -> StarletteResponse:
+    async def _dispatch_with_content_length(self, content_length: int | str) -> StarletteResponse:
         async def noop_app(scope, receive, send) -> None:
             return None
 

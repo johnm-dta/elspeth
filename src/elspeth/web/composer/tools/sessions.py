@@ -104,7 +104,7 @@ from elspeth.web.interpretation_state import (
     interpretation_sites,
     transform_vague_term_site_tuples,
     vague_term_wiring_count,
-    validate_pipeline_decision_semantics,
+    validate_pipeline_decision_node_semantics,
 )
 from elspeth.web.validation import (
     _reject_credential_shaped_content,
@@ -1306,10 +1306,9 @@ def _assert_affected_component(
                     draft = draft_value if isinstance(draft_value, str) else None
                     break
         try:
-            validate_pipeline_decision_semantics(
-                node_id=node.id,
-                plugin=node.plugin,
-                options=node.options,
+            validate_pipeline_decision_node_semantics(
+                node=node,
+                all_nodes=state.nodes,
                 user_term=user_term,
                 draft=draft,
                 context="request_interpretation_review",

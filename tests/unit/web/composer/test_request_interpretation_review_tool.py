@@ -247,10 +247,55 @@ def _pipeline_decision_review_node(*, node_id: str = "drop_raw_html") -> NodeSpe
     )
 
 
+def _web_scrape_node(
+    *,
+    content_field: str = "content",
+    fingerprint_field: str = "content_fingerprint",
+) -> NodeSpec:
+    return NodeSpec(
+        id="fetch_pages",
+        node_type="transform",
+        plugin="web_scrape",
+        input="rows",
+        on_success="scored_rows",
+        on_error=None,
+        options={
+            "url_field": "url",
+            "content_field": content_field,
+            "fingerprint_field": fingerprint_field,
+        },
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
 def _state_with(node: NodeSpec) -> CompositionState:
     return CompositionState(
         source=None,
         nodes=(node,),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_web_scrape_cleanup(
+    node: NodeSpec,
+    *,
+    content_field: str = "content",
+    fingerprint_field: str = "content_fingerprint",
+) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            _web_scrape_node(content_field=content_field, fingerprint_field=fingerprint_field),
+            replace(node, input="scored_rows"),
+        ),
         edges=(),
         outputs=(),
         metadata=PipelineMetadata(),
@@ -712,6 +757,25 @@ def test_pipeline_decision_boundary_rejects_raw_html_mapping_preservation() -> N
     state = _state_with(replace(node, options=options))
 
     with pytest.raises(ToolArgumentError, match=r"preserves raw HTML/fingerprint field"):
+        _assert_affected_component(state, "drop_raw_html", InterpretationKind.PIPELINE_DECISION, "drop_raw_html_fields")
+
+
+def test_pipeline_decision_boundary_rejects_custom_raw_field_preservation() -> None:
+    node = _pipeline_decision_review_node()
+    options = dict(node.options)
+    options["mapping"] = {
+        "url": "url",
+        "page_body": "page_body",
+        "page_hash": "page_hash",
+        "primary_colours": "primary_colours",
+    }
+    state = _state_with_web_scrape_cleanup(
+        replace(node, options=options),
+        content_field="page_body",
+        fingerprint_field="page_hash",
+    )
+
+    with pytest.raises(ToolArgumentError, match=r"page_body|page_hash"):
         _assert_affected_component(state, "drop_raw_html", InterpretationKind.PIPELINE_DECISION, "drop_raw_html_fields")
 
 

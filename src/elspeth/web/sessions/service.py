@@ -56,7 +56,7 @@ from elspeth.web.interpretation_state import (
     SOURCE_COMPONENT_ID,
     pipeline_decision_artifact_hash,
     prompt_structure_hash_from_options,
-    validate_pipeline_decision_semantics,
+    validate_pipeline_decision_node_semantics,
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow, StatePayload
 from elspeth.web.sessions.models import (
@@ -637,6 +637,25 @@ def _find_interpretation_review_node(
     raise InterpretationNodeMissingError(f"{context}: node {affected_node_id!r} is not present in the composition state's nodes")
 
 
+def _node_specs_from_state_record(state_record: CompositionStateRecord) -> tuple[Any, ...]:
+    from elspeth.web.composer.state import NodeSpec
+
+    return tuple(NodeSpec.from_dict(dict(n)) for n in state_record.nodes or ())
+
+
+def _find_node_spec_from_state_record(
+    state_record: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    context: str,
+) -> tuple[Any, tuple[Any, ...]]:
+    all_nodes_spec = _node_specs_from_state_record(state_record)
+    target = next((n for n in all_nodes_spec if n.id == affected_node_id), None)
+    if target is None:
+        raise InterpretationNodeMissingError(f"{context}: node {affected_node_id!r} is not present in the composition state's nodes")
+    return target, all_nodes_spec
+
+
 def _pipeline_decision_artifact_hash_from_state_record(
     state_record: CompositionStateRecord,
     *,
@@ -652,15 +671,34 @@ def _pipeline_decision_artifact_hash_from_state_record(
     exactly the hash that preflight will recompute later.
     """
 
-    from elspeth.web.composer.state import NodeSpec
-
-    all_nodes_spec: tuple[NodeSpec, ...] = tuple(NodeSpec.from_dict(dict(n)) for n in state_record.nodes or ())
-    target = next((n for n in all_nodes_spec if n.id == affected_node_id), None)
-    if target is None:
-        raise InterpretationNodeMissingError(
-            f"_pipeline_decision_artifact_hash_from_state_record: node {affected_node_id!r} is not present in the composition state's nodes"
-        )
+    target, all_nodes_spec = _find_node_spec_from_state_record(
+        state_record,
+        affected_node_id=affected_node_id,
+        context="_pipeline_decision_artifact_hash_from_state_record",
+    )
     return pipeline_decision_artifact_hash(target, all_nodes_spec, user_term=user_term)
+
+
+def _validate_pipeline_decision_semantics_from_state_record(
+    state_record: CompositionStateRecord,
+    *,
+    affected_node_id: str,
+    user_term: str,
+    draft: str | None,
+    context: str,
+) -> None:
+    target, all_nodes_spec = _find_node_spec_from_state_record(
+        state_record,
+        affected_node_id=affected_node_id,
+        context=context,
+    )
+    validate_pipeline_decision_node_semantics(
+        node=target,
+        all_nodes=all_nodes_spec,
+        user_term=user_term,
+        draft=draft,
+        context=context,
+    )
 
 
 def _matching_pending_requirement_index(
@@ -1288,10 +1326,9 @@ def _resolve_pipeline_decision_review(
         raise InterpretationPlaceholderConsumedError(
             "resolve_interpretation_event: pipeline_decision event draft does not match the node review requirement draft"
         )
-    validate_pipeline_decision_semantics(
-        node_id=affected_node_id,
-        plugin=node["plugin"] if "plugin" in node else None,
-        options=options,
+    _validate_pipeline_decision_semantics_from_state_record(
+        state_record,
+        affected_node_id=affected_node_id,
         user_term=user_term,
         draft=draft,
         context="resolve_interpretation_event",
@@ -2865,10 +2902,9 @@ class SessionServiceImpl:
                         raise ValueError(
                             "create_pending_interpretation_event: pipeline_decision event draft does not match the node review requirement draft"
                         )
-                    validate_pipeline_decision_semantics(
-                        node_id=affected_node_id,
-                        plugin=node["plugin"] if "plugin" in node else None,
-                        options=options,
+                    _validate_pipeline_decision_semantics_from_state_record(
+                        state_record,
+                        affected_node_id=affected_node_id,
                         user_term=user_term,
                         draft=draft,
                         context="create_pending_interpretation_event",

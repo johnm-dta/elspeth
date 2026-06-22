@@ -129,6 +129,7 @@ def validate_pipeline_decision_semantics(
     user_term: str,
     draft: str | None,
     context: str,
+    web_scrape_raw_fields: frozenset[str],
 ) -> None:
     """Validate that reviewed pipeline-shaping decisions match node behavior."""
 
@@ -151,7 +152,7 @@ def validate_pipeline_decision_semantics(
             field_name
             for source_field, target_field in mapping.items()
             for field_name in _validated_mapping_pair(source_field, target_field, context=context, node_id=node_id)
-            if _looks_like_raw_html_field(field_name)
+            if _looks_like_raw_html_field(field_name) or field_name in web_scrape_raw_fields
         }
     )
     if preserved_raw_fields:
@@ -161,13 +162,34 @@ def validate_pipeline_decision_semantics(
         )
 
 
+def validate_pipeline_decision_node_semantics(
+    *,
+    node: NodeSpec,
+    all_nodes: Sequence[NodeSpec],
+    user_term: str,
+    draft: str | None,
+    context: str,
+) -> None:
+    """Validate a pipeline decision using full-state context for raw fields."""
+
+    validate_pipeline_decision_semantics(
+        node_id=node.id,
+        plugin=node.plugin,
+        options=node.options,
+        user_term=user_term,
+        draft=draft,
+        context=context,
+        web_scrape_raw_fields=_web_scrape_raw_fields(all_nodes),
+    )
+
+
 def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | None:
     """Return a composer-facing error for unreviewed or contradictory raw cleanup."""
     web_scrape_raw_fields = _web_scrape_raw_fields(state.nodes)
     if not web_scrape_raw_fields:
         return None
     for node in state.nodes:
-        requirement_error = _raw_html_cleanup_requirement_contract_error(node)
+        requirement_error = _raw_html_cleanup_requirement_contract_error(node, web_scrape_raw_fields=web_scrape_raw_fields)
         if requirement_error is not None:
             return requirement_error
     for node in state.nodes:
@@ -186,7 +208,7 @@ def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | Non
         if preserved_raw_fields:
             continue
         requirements = _requirements(node.options)
-        if _requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION) is None:
+        if _raw_html_cleanup_requirement(requirements) is None:
             return (
                 f"Node {node.id!r} drops web-scrape raw field(s) {sorted(web_scrape_raw_fields)} with "
                 "field_mapper.select_only=true. Stage a pending pipeline_decision interpretation_requirements "
@@ -301,7 +323,11 @@ def _llm_has_shield_recommendation(node: NodeSpec) -> bool:
     return False
 
 
-def _raw_html_cleanup_requirement_contract_error(node: NodeSpec) -> str | None:
+def _raw_html_cleanup_requirement_contract_error(
+    node: NodeSpec,
+    *,
+    web_scrape_raw_fields: frozenset[str],
+) -> str | None:
     try:
         requirements = _requirements(node.options)
     except (KeyError, TypeError, ValueError) as exc:
@@ -321,6 +347,7 @@ def _raw_html_cleanup_requirement_contract_error(node: NodeSpec) -> str | None:
                 user_term=requirement["user_term"],
                 draft=requirement["draft"],
                 context="raw-html cleanup review contract",
+                web_scrape_raw_fields=web_scrape_raw_fields,
             )
         except ValueError as exc:
             return str(exc)
@@ -361,6 +388,17 @@ def _preserved_mapping_fields(mapping: Mapping[str, Any]) -> frozenset[str]:
         if isinstance(target_field, str):
             fields.add(target_field.strip())
     return frozenset(fields)
+
+
+def _raw_html_cleanup_requirement(requirements: Sequence[InterpretationRequirement] | None) -> InterpretationRequirement | None:
+    if requirements is None:
+        return None
+    for requirement in requirements:
+        if InterpretationKind(requirement["kind"]) is not InterpretationKind.PIPELINE_DECISION:
+            continue
+        if _is_raw_html_cleanup_decision(user_term=requirement["user_term"], draft=requirement["draft"]):
+            return requirement
+    return None
 
 
 def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewSite, ...]:
@@ -602,7 +640,7 @@ def _missing_raw_html_cleanup_review_sites(
     if node.plugin != "field_mapper":
         return ()
     requirements = _requirements(node.options)
-    if _requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION) is not None:
+    if _raw_html_cleanup_requirement(requirements) is not None:
         return ()
     if node.options.get("select_only") is not True:
         return ()
@@ -1000,10 +1038,9 @@ def _validate_pipeline_decision_review(node: NodeSpec, all_nodes: Sequence[NodeS
     resolved = _resolved_requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION)
     if resolved is None:
         return
-    validate_pipeline_decision_semantics(
-        node_id=node.id,
-        plugin=node.plugin,
-        options=node.options,
+    validate_pipeline_decision_node_semantics(
+        node=node,
+        all_nodes=all_nodes,
         user_term=resolved["user_term"],
         draft=resolved["draft"],
         context="interpretation_state",

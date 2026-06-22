@@ -366,6 +366,42 @@ def _pipeline_decision_review_node(*, node_id: str = "drop_raw_html") -> dict:
     return state.to_dict()["nodes"][0]
 
 
+def _web_scrape_node(
+    *,
+    content_field: str = "content",
+    fingerprint_field: str = "content_fingerprint",
+) -> dict:
+    state = CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="fetch_pages",
+                node_type="transform",
+                plugin="web_scrape",
+                input="rows",
+                on_success="scored_rows",
+                on_error="stop",
+                options={
+                    "url_field": "url",
+                    "content_field": content_field,
+                    "fingerprint_field": fingerprint_field,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(name="Phase 5b Test", description=""),
+        version=1,
+    )
+    return state.to_dict()["nodes"][0]
+
+
 def _llm_generated_source(*, content_hash: str = "0" * 64, with_authoring: bool = True) -> dict:
     options = {
         "path": "/tmp/generated.csv",
@@ -1675,6 +1711,118 @@ async def test_create_pending_pipeline_decision_rejects_raw_html_mapping_preserv
             model_version="2026-05-01",
             provider="anthropic",
             composer_skill_hash="a" * 64,
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_pending_pipeline_decision_rejects_custom_raw_field_preservation(service) -> None:
+    session_id = uuid4()
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    cleanup_node = _pipeline_decision_review_node(node_id="drop_raw_html")
+    cleanup_node["input"] = "scored_rows"
+    cleanup_node["options"]["mapping"] = {
+        "url": "url",
+        "page_body": "page_body",
+        "page_hash": "page_hash",
+        "primary_colours": "primary_colours",
+    }
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            source=None,
+            nodes=[
+                _web_scrape_node(content_field="page_body", fingerprint_field="page_hash"),
+                cleanup_node,
+            ],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+
+    with pytest.raises(ValueError, match=r"page_body|page_hash"):
+        await service.create_pending_interpretation_event(
+            session_id=session_id,
+            composition_state_id=state.id,
+            affected_node_id="drop_raw_html",
+            tool_call_id="call_bad_custom_raw_cleanup",
+            user_term="drop_raw_html_fields",
+            kind=InterpretationKind.PIPELINE_DECISION,
+            llm_draft="Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+            model_identifier="anthropic/claude-opus-4-7",
+            model_version="2026-05-01",
+            provider="anthropic",
+            composer_skill_hash="a" * 64,
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_pipeline_decision_rejects_custom_raw_field_preservation(service) -> None:
+    session_id = uuid4()
+    event_id = uuid4()
+    now = datetime.now(UTC)
+    with service._engine.begin() as conn:
+        _insert_session(conn, str(session_id))
+    cleanup_node = _pipeline_decision_review_node(node_id="drop_raw_html")
+    cleanup_node["input"] = "scored_rows"
+    cleanup_node["options"]["mapping"] = {
+        "url": "url",
+        "page_body": "page_body",
+        "page_hash": "page_hash",
+        "primary_colours": "primary_colours",
+    }
+    state = await service.save_composition_state(
+        session_id,
+        CompositionStateData(
+            source=None,
+            nodes=[
+                _web_scrape_node(content_field="page_body", fingerprint_field="page_hash"),
+                cleanup_node,
+            ],
+            metadata_={"name": "Phase 5b Test", "description": ""},
+            is_valid=True,
+        ),
+        provenance="tool_call",
+    )
+    with service._engine.begin() as conn:
+        conn.execute(
+            insert(interpretation_events_table).values(
+                id=str(event_id),
+                session_id=str(session_id),
+                composition_state_id=str(state.id),
+                affected_node_id="drop_raw_html",
+                tool_call_id="call_pending_custom_raw_cleanup",
+                user_term="drop_raw_html_fields",
+                kind=InterpretationKind.PIPELINE_DECISION.value,
+                llm_draft="Drop the scraped raw HTML and fingerprint fields before saving the JSON output.",
+                accepted_value=None,
+                choice=InterpretationChoice.PENDING.value,
+                created_at=now,
+                resolved_at=None,
+                actor="composer-llm",
+                model_identifier="anthropic/claude-opus-4-7",
+                model_version="2026-05-01",
+                provider="anthropic",
+                composer_skill_hash="a" * 64,
+                arguments_hash=None,
+                hash_domain_version=None,
+                interpretation_source=InterpretationSource.USER_APPROVED.value,
+                runtime_model_identifier_at_resolve=None,
+                runtime_model_version_at_resolve=None,
+                resolved_prompt_template_hash=None,
+            )
+        )
+
+    with pytest.raises(ValueError, match=r"page_body|page_hash"):
+        await service.resolve_interpretation_event(
+            session_id=session_id,
+            event_id=event_id,
+            choice=InterpretationChoice.ACCEPTED_AS_DRAFTED,
+            amended_value=None,
+            actor="user:alice",
+            runtime_model_identifier=None,
+            runtime_model_version=None,
         )
 
 

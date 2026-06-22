@@ -23,6 +23,7 @@ from elspeth.web.interpretation_state import (
     pipeline_decision_artifact_hash,
     prompt_shield_recommendation_warning_pairs,
     prompt_structure_hash_from_options,
+    raw_html_cleanup_review_contract_error,
     strip_authoring_options,
     vague_term_wiring_count,
 )
@@ -467,6 +468,40 @@ def test_unreviewed_field_mapper_drop_of_web_scrape_raw_fields_blocks_execution(
     assert result.sites[0].kind is InterpretationKind.PIPELINE_DECISION
 
 
+def test_unrelated_pipeline_decision_does_not_satisfy_raw_html_cleanup_review() -> None:
+    state = _state_with_web_scrape_cleanup_node(
+        {
+            "mapping": {
+                "url": "url",
+                "primary_colours": "primary_colours",
+            },
+            "select_only": True,
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": "unrelated-pipeline-decision",
+                    "kind": "pipeline_decision",
+                    "user_term": "some_other_pipeline_choice",
+                    "status": "pending",
+                    "draft": "Approve a different row-shaping decision.",
+                    "event_id": None,
+                    "accepted_value": None,
+                    "accepted_artifact_hash": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        }
+    )
+
+    contract_error = raw_html_cleanup_review_contract_error(state)
+    sites = interpretation_sites(state)
+
+    assert contract_error is not None
+    assert "drop_raw_html_fields" in contract_error
+    assert ("drop_raw_html", "drop_raw_html_fields", InterpretationKind.PIPELINE_DECISION) in (
+        (site.component_id, site.user_term, site.kind) for site in sites
+    )
+
+
 def test_gate_routed_web_scrape_into_llm_warns_without_prompt_shield() -> None:
     # The gate topology routes web_scrape output into the LLM via gate routes,
     # exercising the enhanced _producer_by_output_stream (routes/fork_to). The
@@ -564,6 +599,40 @@ def test_resolved_raw_html_cleanup_decision_rejects_mapping_that_preserves_raw_f
     state = _state_with_cleanup_node(patched_options)
 
     with pytest.raises(ValueError, match="preserves raw HTML/fingerprint field"):
+        materialize_state_for_execution(state)
+
+
+def test_resolved_raw_html_cleanup_decision_rejects_custom_raw_field_preservation() -> None:
+    options = _pipeline_decision_options(status="resolved")
+    options["mapping"] = {
+        "url": "url",
+        "page_body": "page_body",
+        "page_hash": "page_hash",
+        "primary_colours": "primary_colours",
+    }
+    base = _state_with_web_scrape_cleanup_node(options)
+    scrape = replace(
+        base.nodes[0],
+        options={
+            "url_field": "url",
+            "content_field": "page_body",
+            "fingerprint_field": "page_hash",
+        },
+    )
+    mapper = replace(base.nodes[1], id="select_fields")
+    state_without_hash = replace(base, nodes=(scrape, mapper))
+    artifact_hash = pipeline_decision_artifact_hash(
+        state_without_hash.nodes[1],
+        state_without_hash.nodes,
+        user_term=RAW_HTML_CLEANUP_USER_TERM,
+    )
+    requirement = dict(options[INTERPRETATION_REQUIREMENTS_KEY][0])  # type: ignore[index]
+    requirement["accepted_artifact_hash"] = artifact_hash
+    patched_options = dict(options)
+    patched_options[INTERPRETATION_REQUIREMENTS_KEY] = [requirement]
+    state = replace(state_without_hash, nodes=(scrape, replace(mapper, options=patched_options)))
+
+    with pytest.raises(ValueError, match="page_body"):
         materialize_state_for_execution(state)
 
 

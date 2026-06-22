@@ -10,7 +10,6 @@ import type {
   CompositionProposal,
   ApiError,
   ComposerRecoveryError,
-  ValidationResult,
 } from "@/types/api";
 import { isComposerRecoveryError } from "@/types/recovery";
 import type {
@@ -21,8 +20,6 @@ import type {
 } from "@/types/guided";
 import * as api from "@/api/client";
 import {
-  COMPOSE_TIMEOUT_ABORT_REASON,
-  COMPOSE_TIMEOUT_MS,
   COMPOSE_USER_CANCEL_ABORT_REASON,
 } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
@@ -249,7 +246,6 @@ interface SessionState {
   loadInflightMessages: (sessionId: string) => Promise<void>;
   startInflightMessagesPolling: (sessionId: string) => void;
   stopInflightMessagesPolling: (sessionId?: string) => void;
-  sendValidationFeedback: (result: ValidationResult) => Promise<void>;
   retryMessage: (messageId: string, signal?: AbortSignal) => Promise<void>;
   forkFromMessage: (messageId: string, newContent: string) => Promise<void>;
   openRecoveryFromError: (
@@ -952,33 +948,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       return;
     }
     clearInflightMessagesPollTimer();
-  },
-
-  async sendValidationFeedback(result: ValidationResult) {
-    // Format validation errors into a message the LLM can act on.
-    const lines = ["Pipeline validation failed with the following errors:"];
-    for (const err of result.errors) {
-      lines.push(
-        `- [${err.component_type ?? "unknown"}] ${err.component_id ?? "unknown"}: ${err.message}`,
-      );
-      if (err.suggestion) {
-        lines.push(`  Suggestion: ${err.suggestion}`);
-      }
-    }
-    lines.push("", "Please fix these validation errors.");
-    const content = lines.join("\n");
-
-    // Use sendMessage with the same timeout as manual sends.
-    const controller = new AbortController();
-    const timer = setTimeout(
-      () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
-      COMPOSE_TIMEOUT_MS,
-    );
-    try {
-      await get().sendMessage(content, controller.signal);
-    } finally {
-      clearTimeout(timer);
-    }
   },
 
   async retryMessage(messageId: string, signal?: AbortSignal) {

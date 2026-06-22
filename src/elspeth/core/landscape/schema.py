@@ -305,10 +305,12 @@ edges_table = Table(
 #    source_row_index or ingest_sequence from row_index"), but the
 #    prohibition lives in an exception string at one write boundary. The
 #    cache-replay write path (``write_repository.record_synthesised_run``)
-#    intentionally sets all three equal because there is exactly one source;
-#    a future contributor adding a multi-source synthesised-run path could
-#    silently drift. Tracked under filigree elspeth-92afea0d23 (elspeth-lints
-#    rule with the same enforcement status as ``trust_tier.tier_model``).
+#    uses the row-index fallback only for single-source runs; multi-source
+#    synthesised rows must provide explicit source_node_index,
+#    source_row_index, ingest_sequence, and source_data_hash before the
+#    writer inserts them. Tracked under filigree elspeth-92afea0d23
+#    (elspeth-lints rule with the same enforcement status as
+#    ``trust_tier.tier_model``).
 #
 # B. Scheduler lease-ownership transitions (G29). ``token_work_items``
 #    carries the current lease state but not its transition history; a

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -21,6 +22,18 @@ from elspeth.core.landscape.schema import nodes_table, rows_table, run_attributi
 # elspeth.core.landscape.write_repository import SynthesisedNodeSpec``).
 # Canonical location is ``elspeth.contracts.synthesised_audit``.
 __all__ = ["LandscapeWriteRepository", "SynthesisedNodeSpec"]
+
+_ROW_IDENTITY_KEYS = frozenset({"source_node_index", "source_row_index", "ingest_sequence", "source_data_hash"})
+
+
+@dataclass(frozen=True, slots=True)
+class _SynthesisedRowIdentity:
+    """Explicit row provenance for synthesised Landscape rows."""
+
+    source_node_index: int
+    source_row_index: int
+    ingest_sequence: int
+    source_data_hash: str
 
 
 class LandscapeWriteRepository:
@@ -50,14 +63,18 @@ class LandscapeWriteRepository:
         Landscape run id for the replay and records the replay marker
         (``seeded_from_cache``, ``cache_key``) on the run row, plus one
         ``nodes`` row per element of ``node_specs`` carrying the YAML-declared
-        role. Structural invariants (exactly one SOURCE at index 0, at least
-        one SINK) are enforced offensively before any write — a misshapen
-        sequence is a caller bug, not an audit anomaly to silently absorb.
+        role. Structural invariants (one or more leading SOURCE nodes, at
+        least one SINK) are enforced offensively before any write — a
+        misshapen sequence is a caller bug, not an audit anomaly to silently
+        absorb. Single-source cache rows retain the legacy positional identity
+        fallback. Multi-source rows must carry explicit row identity fields
+        (``source_node_index``, ``source_row_index``, ``ingest_sequence``,
+        ``source_data_hash``) so the writer never guesses provenance.
         When requester attribution is supplied, it is written in the same
         transaction as the run row so audit/export queries see cache replays
         the same way they see live executions.
         """
-        self._validate_node_specs(node_specs)
+        source_node_indices = self._validate_node_specs(node_specs)
         validate_run_attribution(initiated_by_user_id=initiated_by_user_id, auth_provider_type=auth_provider_type)
         seeded_from_cache = metadata["seeded_from_cache"]
         cache_key = metadata["cache_key"]
@@ -79,7 +96,7 @@ class LandscapeWriteRepository:
             "pipeline_yaml": pipeline_yaml,
             "metadata": dict(metadata),
         }
-        source_node_id = self._node_id(run_id, 0)
+        source_node_ids_by_index = {index: self._node_id(run_id, index) for index in source_node_indices}
 
         try:
             with self._db.write_connection() as conn:
@@ -139,32 +156,28 @@ class LandscapeWriteRepository:
                             output_contract_json=None,
                         )
                     )
-                # Cache-replay rows: exactly one source per replayed run, so
-                # ``source_row_index = row_index`` (position within the
-                # source) and ``ingest_sequence = row_index`` (monotone
-                # run-wide order). This is *recording reality*, not
-                # fabrication — the cache stores a deterministic single-
-                # source sequence; the three fields are genuinely equal.
-                #
-                # Load-bearing assumption: this path mints exactly ONE
-                # source node (``source_node_id = self._node_id(run_id, 0)``
-                # at the head of this method). A future contributor adding
-                # multi-source cache replay MUST re-derive
-                # ``source_row_index`` per source and ``ingest_sequence``
-                # globally — the equality above is single-source-specific
-                # and would otherwise produce per-source row-index
-                # collisions on the ``UniqueConstraint("run_id",
-                # "ingest_sequence")`` (filigree elspeth-56c3cda89b).
-                for row_index, _row in enumerate(rows):
+                # Single-source cache rows can safely use the legacy
+                # positional identity fallback: source_row_index and
+                # ingest_sequence both equal row_index because there is only
+                # one source. Multi-source rows must carry explicit
+                # provenance and are rejected below if any identity field is
+                # absent or malformed.
+                for row_index, row in enumerate(rows):
+                    row_identity = self._row_identity(
+                        row,
+                        row_index=row_index,
+                        source_node_indices=source_node_indices,
+                        fallback_source_data_hash=source_data_hash,
+                    )
                     conn.execute(
                         rows_table.insert().values(
                             row_id=f"{run_id}-row-{row_index}",
                             run_id=run_id,
-                            source_node_id=source_node_id,
+                            source_node_id=source_node_ids_by_index[row_identity.source_node_index],
                             row_index=row_index,
-                            source_row_index=row_index,
-                            ingest_sequence=row_index,
-                            source_data_hash=source_data_hash,
+                            source_row_index=row_identity.source_row_index,
+                            ingest_sequence=row_identity.ingest_sequence,
+                            source_data_hash=row_identity.source_data_hash,
                             source_data_ref=None,
                             created_at=started_at,
                         )
@@ -181,14 +194,65 @@ class LandscapeWriteRepository:
         return f"{run_id}-n{index}"
 
     @staticmethod
-    def _validate_node_specs(node_specs: Sequence[SynthesisedNodeSpec]) -> None:
+    def _validate_node_specs(node_specs: Sequence[SynthesisedNodeSpec]) -> tuple[int, ...]:
         if len(node_specs) == 0:
             raise LandscapeRecordError("record_synthesised_run requires at least one node spec")
         if node_specs[0].node_type is not NodeType.SOURCE:
             raise LandscapeRecordError(f"record_synthesised_run: first node must be SOURCE, got {node_specs[0].node_type.value}")
-        source_count = sum(1 for spec in node_specs if spec.node_type is NodeType.SOURCE)
-        if source_count != 1:
-            raise LandscapeRecordError(f"record_synthesised_run requires exactly one SOURCE node, got {source_count}")
+        source_indices = tuple(index for index, spec in enumerate(node_specs) if spec.node_type is NodeType.SOURCE)
+        first_non_source_index = next(
+            (index for index, spec in enumerate(node_specs) if spec.node_type is not NodeType.SOURCE), len(node_specs)
+        )
+        if any(index > first_non_source_index for index in source_indices):
+            raise LandscapeRecordError("record_synthesised_run: SOURCE nodes must precede transforms and sinks")
         sink_count = sum(1 for spec in node_specs if spec.node_type is NodeType.SINK)
         if sink_count < 1:
             raise LandscapeRecordError("record_synthesised_run requires at least one SINK node")
+        return source_indices
+
+    @staticmethod
+    def _row_identity(
+        row: Mapping[str, Any],
+        *,
+        row_index: int,
+        source_node_indices: tuple[int, ...],
+        fallback_source_data_hash: str,
+    ) -> _SynthesisedRowIdentity:
+        if len(source_node_indices) == 1:
+            return _SynthesisedRowIdentity(
+                source_node_index=source_node_indices[0],
+                source_row_index=row_index,
+                ingest_sequence=row_index,
+                source_data_hash=fallback_source_data_hash,
+            )
+
+        explicit_keys = _ROW_IDENTITY_KEYS.intersection(row.keys())
+        if not explicit_keys:
+            raise LandscapeRecordError(
+                "record_synthesised_run: multi-source synthesised rows require explicit row identity fields "
+                "source_node_index, source_row_index, ingest_sequence, and source_data_hash"
+            )
+        if explicit_keys != _ROW_IDENTITY_KEYS:
+            missing = sorted(_ROW_IDENTITY_KEYS - explicit_keys)
+            raise LandscapeRecordError(f"record_synthesised_run row identity is incomplete; missing {missing}")
+
+        source_node_index = row["source_node_index"]
+        source_row_index = row["source_row_index"]
+        ingest_sequence = row["ingest_sequence"]
+        row_source_data_hash = row["source_data_hash"]
+        if type(source_node_index) is not int or source_node_index < 0:
+            raise LandscapeRecordError("record_synthesised_run row source_node_index must be a non-negative integer")
+        if source_node_index not in source_node_indices:
+            raise LandscapeRecordError(f"record_synthesised_run row source_node_index {source_node_index} does not reference a SOURCE node")
+        if type(source_row_index) is not int or source_row_index < 0:
+            raise LandscapeRecordError("record_synthesised_run row source_row_index must be a non-negative integer")
+        if type(ingest_sequence) is not int or ingest_sequence < 0:
+            raise LandscapeRecordError("record_synthesised_run row ingest_sequence must be a non-negative integer")
+        if type(row_source_data_hash) is not str or not row_source_data_hash:
+            raise LandscapeRecordError("record_synthesised_run row source_data_hash must be a non-empty string")
+        return _SynthesisedRowIdentity(
+            source_node_index=source_node_index,
+            source_row_index=source_row_index,
+            ingest_sequence=ingest_sequence,
+            source_data_hash=row_source_data_hash,
+        )

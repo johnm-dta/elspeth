@@ -129,6 +129,16 @@ def resolve_dependencies(
     results: list[DependencyRunResult] = []
     for dep in depends_on:
         dep_path = (parent_settings_path.parent / dep.settings).resolve()
+        try:
+            settings_hash = _hash_settings_file(dep_path)
+            settings_hash_error: Exception | None = None
+        except (OSError, ValueError, yaml.YAMLError) as exc:
+            # A failed dependency run does not emit a DependencyRunResult, so
+            # preserve the runner's existing error semantics. A successful run,
+            # however, must have a pre-run settings hash before it can be
+            # recorded as an auditable dependency result.
+            settings_hash = None
+            settings_hash_error = exc
 
         start_ms = time.monotonic_ns() // 1_000_000
         try:
@@ -161,11 +171,19 @@ def resolve_dependencies(
                 reason=f"Dependency pipeline finished with status: {run_result.status.name}",
             )
 
+        if settings_hash is None:
+            assert settings_hash_error is not None
+            raise DependencyFailedError(
+                dependency_name=dep.name,
+                run_id=run_result.run_id,
+                reason=(f"Dependency settings hash failed before execution: {type(settings_hash_error).__name__}: {settings_hash_error}"),
+            ) from settings_hash_error
+
         results.append(
             DependencyRunResult(
                 name=dep.name,
                 run_id=run_result.run_id,
-                settings_hash=_hash_settings_file(dep_path),
+                settings_hash=settings_hash,
                 duration_ms=duration_ms,
                 indexed_at=datetime.now(UTC).isoformat(),
             )

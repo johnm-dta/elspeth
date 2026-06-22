@@ -116,14 +116,18 @@ def test_agent_tool_scope_rejects_nonpositive_turns() -> None:
 
 
 def test_guard_allows_in_root_read(scope: AgentToolScope) -> None:
-    target = str(scope.cwd / "contracts" / "x.py")
-    allowed, _ = _tool_scope_decision(scope, "Read", {"file_path": target})
+    target = scope.cwd / "contracts" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("VALUE = 'not-secret'\n", encoding="utf-8")
+    allowed, _ = _tool_scope_decision(scope, "Read", {"file_path": str(target)})
     assert allowed is True
 
 
 def test_guard_allows_allowlist_dir_read(scope: AgentToolScope) -> None:
     allow_root = next(r for r in scope.allowed_roots if r != scope.cwd)
-    allowed, _ = _tool_scope_decision(scope, "Read", {"file_path": str(allow_root / "web.yaml")})
+    target = allow_root / "web.yaml"
+    target.write_text("allow_hits: []\n", encoding="utf-8")
+    allowed, _ = _tool_scope_decision(scope, "Read", {"file_path": str(target)})
     assert allowed is True
 
 
@@ -152,6 +156,19 @@ def test_guard_fail_closed_on_missing_file_path(scope: AgentToolScope) -> None:
     assert "fail-closed" in reason
 
 
+def test_guard_denies_read_of_source_file_with_scrubbable_secret(scope: AgentToolScope) -> None:
+    target = scope.cwd / "contracts" / "secret.py"
+    target.parent.mkdir(parents=True)
+    planted = "sk-" + ("A" * 48)
+    target.write_text(f'API_KEY = "{planted}"\n', encoding="utf-8")
+
+    allowed, reason = _tool_scope_decision(scope, "Read", {"file_path": str(target)})
+
+    assert allowed is False
+    assert "secret scrubber" in reason
+    assert "source_excerpt.scrub_secrets" in reason
+
+
 def test_guard_denies_non_read_tools(scope: AgentToolScope) -> None:
     for tool, inp in [
         ("Bash", {"command": "cat /etc/passwd"}),
@@ -165,14 +182,25 @@ def test_guard_denies_non_read_tools(scope: AgentToolScope) -> None:
         assert "not permitted" in reason
 
 
-def test_guard_allows_pathless_grep_and_glob(scope: AgentToolScope) -> None:
+def test_guard_allows_pathless_safe_grep_and_glob(scope: AgentToolScope) -> None:
     # No 'path' -> defaults to cwd, which is an allowed root.
-    assert _tool_scope_decision(scope, "Grep", {"pattern": "x"})[0] is True
+    assert _tool_scope_decision(scope, "Grep", {"pattern": "x", "output_mode": "files_with_matches"})[0] is True
+    assert _tool_scope_decision(scope, "Grep", {"pattern": "x", "output_mode": "count"})[0] is True
     assert _tool_scope_decision(scope, "Glob", {"pattern": "**/*.py"})[0] is True
 
 
+def test_guard_denies_grep_content_and_default_output_modes(scope: AgentToolScope) -> None:
+    allowed_content, reason_content = _tool_scope_decision(scope, "Grep", {"pattern": "secret", "output_mode": "content"})
+    allowed_default, reason_default = _tool_scope_decision(scope, "Grep", {"pattern": "secret"})
+
+    assert allowed_content is False
+    assert allowed_default is False
+    assert "unsanitized source bytes" in reason_content
+    assert "unsanitized source bytes" in reason_default
+
+
 def test_guard_denies_out_of_root_grep_path(scope: AgentToolScope) -> None:
-    allowed, _ = _tool_scope_decision(scope, "Grep", {"pattern": "x", "path": "/etc"})
+    allowed, _ = _tool_scope_decision(scope, "Grep", {"pattern": "x", "path": "/etc", "output_mode": "files_with_matches"})
     assert allowed is False
 
 
@@ -206,8 +234,20 @@ def _run_hook(scope: AgentToolScope, payload: dict[str, object]) -> dict[str, An
 
 
 def test_hook_allows_in_root(scope: AgentToolScope) -> None:
-    out = _run_hook(scope, {"tool_name": "Read", "tool_input": {"file_path": str(scope.cwd / "a.py")}})
+    target = scope.cwd / "a.py"
+    target.write_text("VALUE = 'not-secret'\n", encoding="utf-8")
+    out = _run_hook(scope, {"tool_name": "Read", "tool_input": {"file_path": str(target)}})
     assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_hook_denies_scrubbable_secret_read(scope: AgentToolScope) -> None:
+    target = scope.cwd / "secret.py"
+    target.write_text('API_KEY = "sk-' + ("A" * 48) + '"\n', encoding="utf-8")
+
+    out = _run_hook(scope, {"tool_name": "Read", "tool_input": {"file_path": str(target)}})
+
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "source_excerpt.scrub_secrets" in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_hook_denies_out_of_root(scope: AgentToolScope) -> None:

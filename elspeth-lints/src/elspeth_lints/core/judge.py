@@ -1149,11 +1149,13 @@ def _call_openrouter(
 
 # The only tools the investigation mode permits. Everything else (Bash, Write,
 # Edit, Web*, Task, …) is denied by the hook AND listed in ``disallowed_tools``
-# as a redundant first layer. ``Grep`` is included but is the most dangerous —
-# ``output_mode: "content"`` reads file *contents* directly with no ``Read`` —
-# so the hook scopes its ``path`` too (and a pathless Grep is confined to
-# ``cwd``, which is itself an allowed root).
+# as a redundant first layer. ``Read`` is additionally scrubber-gated: any file
+# whose bytes match the source secret scrubber is denied rather than sent to the
+# external agent transport. ``Grep`` is included only for non-content output
+# modes; ``output_mode: "content"`` reads file contents directly with no
+# ``Read`` hook, so the guard denies it fail-closed.
 _TOOL_SCOPE_READONLY_TOOLS: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
+_TOOL_SCOPE_GREP_NON_CONTENT_OUTPUT_MODES: frozenset[str] = frozenset({"count", "files_with_matches"})
 
 # Bound the investigation so a pathological run cannot loop or spend
 # unboundedly. Hitting the cap before a verdict is classified as a failure
@@ -1167,15 +1169,11 @@ _AGENT_TOOL_MODE_DEFAULT_MAX_TURNS: int = 12
 _TOOL_SCOPE_FORBIDDEN_BASENAMES: frozenset[str] = frozenset({".env"})
 
 # Appended to the system prompt ONLY in tool mode, OUTSIDE ``_STATIC_POLICY_BLOCK``
-# so ``JUDGE_POLICY_HASH`` (sha256 of the static block) is unchanged and no
-# corpus re-sign is triggered. Tool mode can now feed a signing justify (the
-# --judge-tools parity change), so the signed ``policy_hash`` CAN accompany a
-# verdict produced under this addendum without capturing it. That is
-# acceptable: the addendum is investigation MECHANICS (read tools, cite what
-# you read), not tier-model verdict CRITERIA — those live in the hashed static
-# block. And reaudit does not gate selection on ``policy_hash``, so a future
-# edit to this addendum cannot silently strand tool-mode-signed entries; they
-# are re-judged (blinded, under openrouter) on the next sweep.
+# so ``JUDGE_POLICY_HASH`` (sha256 of the static block) is unchanged. That is
+# acceptable because the addendum is investigation MECHANICS (read tools, cite
+# what you read), not tier-model verdict CRITERIA — those live in the hashed
+# static block. Signing paths reject tool mode, so this addendum cannot enter a
+# signed allowlist entry's policy hash.
 _TOOL_MODE_ADDENDUM: str = """
 TOOL-AUGMENTED INVESTIGATION MODE (read-only)
 
@@ -1185,6 +1183,12 @@ would-be "block pending more context" by going and looking — e.g. read the
 callers of the function, the definition of a type, or the call site that
 establishes an invariant. You can only read within the project source; writes,
 shell, and network are unavailable.
+
+Security limits: Read may be denied for files that match the project's source
+secret scrubber, and Grep is available only with explicit non-content
+``output_mode`` values: ``files_with_matches`` or ``count``. Omitted/default
+Grep output mode is denied. If a read is denied, decide from the scrubbed
+excerpt and other non-secret files; do not try to recover redacted bytes.
 
 Two rules govern how investigation feeds your verdict:
 
@@ -1287,6 +1291,26 @@ def _tool_scope_candidate_paths(tool_name: str, tool_input: dict[str, Any], cwd:
     return resolved
 
 
+def _read_target_has_secret_redactions(path: Path) -> tuple[bool, str]:
+    """Return whether ``path`` can be safely read by the external agent."""
+    if not path.exists():
+        return False, "target does not exist; no local source bytes to scrub before the tool reports its own read error"
+    if not path.is_file():
+        return True, f"{path} is not a regular file (denied fail-closed)"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return True, f"could not inspect {path} for source-secret redactions (denied fail-closed): {exc}"
+
+    from elspeth_lints.core.source_excerpt import scrub_secrets
+
+    scrubbed = scrub_secrets(raw, path_hint=str(path))
+    if not scrubbed.redactions:
+        return False, "no source-secret redactions"
+    patterns = ", ".join(sorted({record.pattern_name for record in scrubbed.redactions}))
+    return True, f"{path} contains source bytes matched by secret scrubber pattern(s): {patterns}"
+
+
 def _tool_scope_decision(scope: AgentToolScope, tool_name: str, tool_input: dict[str, Any]) -> tuple[bool, str]:
     """Fail-closed allow/deny for one tool call. Pure logic; unit-testable.
 
@@ -1296,6 +1320,13 @@ def _tool_scope_decision(scope: AgentToolScope, tool_name: str, tool_input: dict
     """
     if tool_name not in _TOOL_SCOPE_READONLY_TOOLS:
         return False, (f"tool {tool_name!r} is not permitted in read-only judge-tools mode (allowed: {sorted(_TOOL_SCOPE_READONLY_TOOLS)})")
+    if tool_name == "Grep":
+        output_mode = tool_input.get("output_mode")
+        if output_mode not in _TOOL_SCOPE_GREP_NON_CONTENT_OUTPUT_MODES:
+            return False, (
+                "Grep is permitted only with non-content output_mode values "
+                f"{sorted(_TOOL_SCOPE_GREP_NON_CONTENT_OUTPUT_MODES)}; content/default Grep output can expose unsanitized source bytes"
+            )
     try:
         candidates = _tool_scope_candidate_paths(tool_name, tool_input, scope.cwd)
     except Exception as exc:  # fail closed on any extraction failure
@@ -1305,6 +1336,10 @@ def _tool_scope_decision(scope: AgentToolScope, tool_name: str, tool_input: dict
             return False, f"{cand} is a forbidden file (basename denylist)"
         if not any(cand == r or cand.is_relative_to(r) for r in scope.allowed_roots):
             return False, (f"{cand} is outside the permitted roots {[str(r) for r in scope.allowed_roots]} (read-only judge-tools scope)")
+        if tool_name == "Read":
+            has_redactions, reason = _read_target_has_secret_redactions(cand)
+            if has_redactions:
+                return False, f"{reason}; Read denied so raw bytes cannot bypass source_excerpt.scrub_secrets"
     return True, "in-scope read"
 
 

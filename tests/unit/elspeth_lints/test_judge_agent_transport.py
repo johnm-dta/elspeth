@@ -30,6 +30,7 @@ below reproduces that convention.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from collections.abc import AsyncIterator, Callable
@@ -90,6 +91,7 @@ def _install_fake_sdk(
     is_error: bool = False,
     api_error_status: int | None = None,
     errors: list[str] | None = None,
+    capture: dict[str, object] | None = None,
 ) -> types.ModuleType:
     """Install a minimal fake ``claude_agent_sdk`` into ``sys.modules``.
 
@@ -114,6 +116,14 @@ def _install_fake_sdk(
     class ClaudeAgentOptions:  # mirror SDK name
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
+            if capture is not None:
+                capture["options"] = kwargs
+
+    class HookMatcher:
+        def __init__(self, *, matcher: object = None, hooks: list[object] | None = None, timeout: object = None) -> None:
+            self.matcher = matcher
+            self.hooks = hooks or []
+            self.timeout = timeout
 
     class TextBlock:
         def __init__(self, text: str) -> None:
@@ -156,7 +166,10 @@ def _install_fake_sdk(
     resolved_usage: dict[str, object] | None = {"input_tokens": 200, "cache_read_input_tokens": 50} if isinstance(usage, _Unset) else usage
     resolved_model_usage: dict[str, object] | None = {served: {"input_tokens": 200}} if isinstance(model_usage, _Unset) else model_usage
 
-    async def query(*, prompt: str, options: object) -> AsyncIterator[object]:
+    async def query(*, prompt: object, options: object) -> AsyncIterator[object]:
+        if capture is not None:
+            capture["prompt"] = prompt
+            capture["options_obj"] = options
         if raise_on_query is not None:
             raise raise_on_query
         yield AssistantMessage(content=[TextBlock(text=assistant_text)], error=assistant_error)
@@ -169,7 +182,40 @@ def _install_fake_sdk(
                 errors=errors,
             )
 
+    class ClaudeSDKClient:
+        def __init__(self, options: object = None, transport: object = None) -> None:
+            self.options = options
+            if capture is not None:
+                capture["used_client"] = True
+                capture["options_obj"] = options
+
+        async def __aenter__(self) -> object:
+            return self
+
+        async def __aexit__(self, *exc: object) -> bool:
+            if capture is not None:
+                capture["disconnected"] = True
+            return False
+
+        async def query(self, prompt: object, session_id: str = "default") -> None:
+            if capture is not None:
+                capture["prompt"] = prompt
+            if raise_on_query is not None:
+                raise raise_on_query
+
+        async def receive_response(self) -> AsyncIterator[object]:
+            yield AssistantMessage(content=[TextBlock(text=assistant_text)], error=assistant_error)
+            if emit_result:
+                yield ResultMessage(
+                    usage=resolved_usage,
+                    model_usage=resolved_model_usage,
+                    is_error=is_error,
+                    api_error_status=api_error_status,
+                    errors=errors,
+                )
+
     mod.ClaudeAgentOptions = ClaudeAgentOptions  # type: ignore[attr-defined]
+    mod.HookMatcher = HookMatcher  # type: ignore[attr-defined]
     mod.TextBlock = TextBlock  # type: ignore[attr-defined]
     mod.AssistantMessage = AssistantMessage  # type: ignore[attr-defined]
     mod.ResultMessage = ResultMessage  # type: ignore[attr-defined]
@@ -177,6 +223,7 @@ def _install_fake_sdk(
     mod.CLIConnectionError = CLIConnectionError  # type: ignore[attr-defined]
     mod.CLINotFoundError = CLINotFoundError  # type: ignore[attr-defined]
     mod.ProcessError = ProcessError  # type: ignore[attr-defined]
+    mod.ClaudeSDKClient = ClaudeSDKClient  # type: ignore[attr-defined]
     mod.query = query  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
     return mod
@@ -203,6 +250,29 @@ def test_agent_transport_produces_validated_response(monkeypatch: pytest.MonkeyP
     # a true prompt total >= the cached subset, matching the OpenRouter path.
     assert resp.prompt_tokens_total == 250
     assert resp.prompt_tokens_cached == 50
+
+
+def test_blinded_agent_transport_uses_fail_closed_no_tool_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    capture: dict[str, object] = {}
+    _install_fake_sdk(monkeypatch, assistant_text=_GOOD_JSON, capture=capture)
+
+    call_judge(_request(), transport=TRANSPORT_AGENT)
+
+    opts = capture["options"]
+    assert isinstance(opts, dict)
+    assert opts["allowed_tools"] == []
+    assert {"Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch", "WebFetch"} <= set(opts["disallowed_tools"])
+    assert opts["permission_mode"] == "dontAsk"
+    assert opts["setting_sources"] == []
+    assert capture["used_client"] is True
+    assert capture["disconnected"] is True
+    assert not isinstance(capture["prompt"], str)
+    assert hasattr(capture["prompt"], "__aiter__")
+    matcher = opts["hooks"]["PreToolUse"][0]
+    hook = matcher.hooks[0]
+    decision = asyncio.run(hook({"tool_name": "FutureTool", "tool_input": {"path": "/etc/passwd"}}, None, None))
+    assert decision["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_agent_transport_preserves_none_cached_distinction(monkeypatch: pytest.MonkeyPatch) -> None:

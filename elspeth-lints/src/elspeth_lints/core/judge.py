@@ -1159,7 +1159,7 @@ _TOOL_SCOPE_GREP_NON_CONTENT_OUTPUT_MODES: frozenset[str] = frozenset({"count", 
 
 # Bound the investigation so a pathological run cannot loop or spend
 # unboundedly. Hitting the cap before a verdict is classified as a failure
-# (see ``_drain_agent_query``), never a silent partial.
+# (see ``_consume_agent_messages``), never a silent partial.
 _AGENT_TOOL_MODE_DEFAULT_MAX_TURNS: int = 12
 
 # Basenames that must never be read even if they somehow sit inside an allowed
@@ -1372,6 +1372,21 @@ def _build_pretooluse_scope_hook(scope: AgentToolScope) -> Callable[..., Any]:
     return _hook
 
 
+def _build_pretooluse_deny_all_hook() -> Callable[..., Any]:
+    """Build the blinded-transport hook: no Agent SDK tool call is permitted."""
+
+    async def _hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "the blinded judge transport does not permit tool use",
+            }
+        }
+
+    return _hook
+
+
 async def _one_user_message_stream(text: str) -> AsyncIterator[dict[str, Any]]:
     """A one-item async stream carrying the user prompt.
 
@@ -1393,10 +1408,10 @@ def _call_agent_sdk(
 
     Two modes, selected by ``tool_scope``:
 
-    * ``tool_scope is None`` (default) — the BLINDED, no-tools, single-shot
-      query (design §4.2). No tools are allowed and no project settings are
-      loaded (``setting_sources=[]``), so the judge sees only the excerpt in
-      the prompt — identical to the OpenRouter path.
+    * ``tool_scope is None`` (default) — the BLINDED, no-tools query (design
+      §4.2). No tools are allowed, a deny-all PreToolUse hook fails closed, and
+      no project settings are loaded (``setting_sources=[]``), so the judge sees
+      only the excerpt in the prompt — identical to the OpenRouter path.
     * ``tool_scope`` set — the TOOL-AUGMENTED investigation mode: Read/Grep/Glob
       are available but routed through a fail-closed PreToolUse guard scoped to
       ``tool_scope`` (see ``_build_pretooluse_scope_hook``). Streaming-input is
@@ -1467,19 +1482,38 @@ def _call_agent_sdk(
     prompt_text = "\n\n".join(block["text"] for block in _build_user_message_blocks(request))
 
     if tool_scope is None:
-        # Blinded path — UNCHANGED. No tools, single-shot string prompt; the
-        # judge sees only the excerpt, identical to the OpenRouter path.
+        # Blinded path. No tools: the prompt is a single streamed user message so
+        # the PreToolUse hook fires for SDK auto-approved read tools; the hook is
+        # deny-all and permission_mode="dontAsk" supplies the second fail-closed
+        # layer if hook wiring or a future tool shape drifts.
         options = sdk.ClaudeAgentOptions(
             system_prompt={"type": "preset", "preset": "claude_code", "append": _STATIC_POLICY_BLOCK},
             allowed_tools=[],
-            disallowed_tools=["Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch", "WebFetch"],
+            disallowed_tools=[
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "Grep",
+                "Glob",
+                "LS",
+                "Task",
+                "TodoWrite",
+                "WebSearch",
+                "WebFetch",
+                "NotebookRead",
+                "NotebookEdit",
+            ],
             setting_sources=[],
-            permission_mode="bypassPermissions",
+            permission_mode="dontAsk",
+            hooks={"PreToolUse": [sdk.HookMatcher(hooks=[_build_pretooluse_deny_all_hook()])]},
+            max_turns=1,
         )
-        # Blinded single-shot: the bare ``query()`` helper. The subprocess exits
-        # immediately after the one-turn verdict, before ``asyncio.run`` closes
-        # the loop, so there is nothing for asyncio to reap.
-        drain = _drain_agent_query(sdk, prompt_text, options, model_id)
+        # Blinded path still uses the managed client because streamed prompt
+        # input is required for hook enforcement and the client tears down the
+        # subprocess in-loop.
+        drain = _drain_agent_query_client(sdk, prompt_text, options, model_id, max_turns=1, final_message_only=False)
     else:
         # Tool-augmented path. Read/Grep/Glob are NOT in allowed_tools (that
         # list auto-approves and bypasses the hook); they are left available
@@ -1507,7 +1541,7 @@ def _call_agent_sdk(
         # The client's ``__aexit__`` calls ``disconnect()`` IN-LOOP, terminating
         # the subprocess gracefully before the loop closes, while the async
         # prompt stream keeps the PreToolUse hook active for Read/Grep/Glob.
-        drain = _drain_agent_query_client(sdk, prompt_text, options, model_id, tool_scope.max_turns)
+        drain = _drain_agent_query_client(sdk, prompt_text, options, model_id, max_turns=tool_scope.max_turns, final_message_only=True)
 
     try:
         return asyncio.run(drain)
@@ -1522,7 +1556,7 @@ def _call_agent_sdk(
         # else after configuration is a transport failure. The auth-error
         # discriminator uses the real SDK exception classes (see
         # ``_is_agent_auth_error``); in-band auth failures (AssistantMessage.error)
-        # are mapped inside ``_drain_agent_query`` and re-raised as
+        # are mapped inside ``_consume_agent_messages`` and re-raised as
         # JudgeConfigurationError, which the first except arm above passes through.
         if _is_agent_auth_error(exc):
             raise JudgeConfigurationError(
@@ -1693,31 +1727,23 @@ async def _consume_agent_messages(
     )
 
 
-async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested_model: str) -> _TransportResult:
-    """Blinded single-shot drain: the bare ``query()`` async generator.
+async def _drain_agent_query_client(
+    sdk: Any,
+    prompt_text: str,
+    options: Any,
+    requested_model: str,
+    *,
+    max_turns: int | None,
+    final_message_only: bool,
+) -> _TransportResult:
+    """Drain a streamed Agent SDK query via managed ``ClaudeSDKClient``.
 
-    The one-turn subprocess exits immediately after the verdict, so it is gone
-    before ``asyncio.run`` closes the loop — no managed teardown needed.
-    """
-    return await _consume_agent_messages(
-        sdk,
-        sdk.query(prompt=prompt_text, options=options),
-        requested_model,
-        final_message_only=False,
-        max_turns=None,
-    )
-
-
-async def _drain_agent_query_client(sdk: Any, prompt_text: str, options: Any, requested_model: str, max_turns: int) -> _TransportResult:
-    """Tool-augmented drain via the managed ``ClaudeSDKClient``.
-
-    Investigation keeps the subprocess alive across tool turns. The async-context
-    client connects on enter and ``disconnect()``s on exit — IN the event loop —
-    terminating the subprocess gracefully before ``asyncio.run`` closes the loop.
-    The prompt remains an async message stream because the SDK only invokes
-    PreToolUse hooks for auto-approved read tools in streaming-input mode. The
-    bare ``query()`` generator left that streaming child alive, so loop close
-    SIGKILLed it (-9, "Fatal error in message reader") on the second sweep entry.
+    Any Agent path with PreToolUse hooks needs streaming-input prompt shape. The
+    async-context client connects on enter and ``disconnect()``s on exit — IN the
+    event loop — terminating the subprocess gracefully before ``asyncio.run``
+    closes the loop. The bare ``query()`` generator left a streaming child alive
+    in tool mode, so loop close SIGKILLed it (-9, "Fatal error in message
+    reader") on the second sweep entry.
     """
     async with sdk.ClaudeSDKClient(options=options) as client:
         await client.query(_one_user_message_stream(prompt_text))
@@ -1725,7 +1751,7 @@ async def _drain_agent_query_client(sdk: Any, prompt_text: str, options: Any, re
             sdk,
             client.receive_response(),
             requested_model,
-            final_message_only=True,
+            final_message_only=final_message_only,
             max_turns=max_turns,
         )
 
@@ -1869,7 +1895,7 @@ def _is_agent_auth_error(exc: Exception) -> bool:
     ``JudgeTransportError`` instead) to avoid telling the operator to fix their
     credentials when the real fault is transient. In-band authentication
     failures (``AssistantMessage.error``) are handled separately in
-    ``_drain_agent_query``.
+    ``_consume_agent_messages``.
 
     Match by class NAME (not ``isinstance`` against an imported symbol) so this
     discriminator does not re-import the optional SDK and works against the

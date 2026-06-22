@@ -25,7 +25,7 @@ judge = ["openai>=1.0,<2"]
 # / Agent-SDK credit pool) or ANTHROPIC_API_KEY or Bedrock/Vertex/Azure.
 # Install with:
 #     uv pip install -e ".[judge-agent]"  (from the elspeth-lints/ directory)
-judge-agent = ["claude-agent-sdk>=0.1"]
+judge-agent = ["claude-agent-sdk>=0.2.87"]
 
 [project.scripts]
 elspeth-lints = "elspeth_lints.core.cli:main"

@@ -1043,7 +1043,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "claude-agent-sdk", marker = "extra == 'judge-agent'", specifier = ">=0.1" },
+    { name = "claude-agent-sdk", marker = "extra == 'judge-agent'", specifier = ">=0.2.87" },
     { name = "openai", marker = "extra == 'judge'", specifier = ">=1.0,<2" },
     { name = "python-dotenv", specifier = ">=1.2.2,<2" },
     { name = "pyyaml", specifier = ">=6.0,<7" },

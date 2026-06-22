@@ -246,6 +246,29 @@ class TestReportAssembleRendering:
         body = result.row["report_body"]
         assert body == "<p>alpha</p>\n\n<p>beta</p>"
 
+    def test_html_fragment_escapes_join_with_separator(self) -> None:
+        # join_with is user-controlled config, so html_fragment must render it
+        # as text between escaped paragraphs rather than executable markup.
+        from elspeth.plugins.transforms.report_assemble import ReportAssemble
+
+        transform = ReportAssemble(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "text_field": "line",
+                "format": "html_fragment",
+                "join_with": "</p><script>alert(1)</script><p>",
+            }
+        )
+        ctx = _ctx(batch_size=2)
+
+        result = transform.process([_row({"line": "alpha"}), _row({"line": "beta"})], ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        body = result.row["report_body"]
+        assert body == "<p>alpha</p>&lt;/p&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;p&gt;<p>beta</p>"
+        assert "<script>" not in body
+
     def test_join_with_non_default_applies_to_plain_text(self) -> None:
         # Sanity check: join_with applies as documented for plain_text format.
         from elspeth.plugins.transforms.report_assemble import ReportAssemble

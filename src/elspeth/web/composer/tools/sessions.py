@@ -60,6 +60,7 @@ from elspeth.web.composer.tools._common import (
     _prevalidate_sink,
     _prevalidate_source,
     _prevalidate_transform,
+    _runtime_owned_llm_option_error,
     _semantic_contracts_payload,
     _serialize_edge,
     _serialize_node,
@@ -447,6 +448,13 @@ def _execute_set_pipeline(
         node_type = node.node_type
         node_plugin = node.plugin
         node_options = node.options
+        runtime_owned_error = _runtime_owned_llm_option_error(
+            node_plugin,
+            node_options,
+            tool_name="set_pipeline",
+        )
+        if runtime_owned_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
         credential_error = _credential_wiring_contract_failure(
             state,
             component_id=node_id,

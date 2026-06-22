@@ -368,6 +368,48 @@ class TestWireBlobInlineRef:
         assert result.success is False
         assert "sha256" in result.data["error"]
 
+    def test_rejects_llm_runtime_hash_field_path(self, blob_env: dict[str, Any]) -> None:
+        blob = _create_blob(blob_env, content="forged prompt hash")
+        state = _inline_ref_state()
+
+        result = execute_tool(
+            "wire_blob_inline_ref",
+            {
+                "field_path": "node:classify.options.resolved_prompt_template_hash",
+                "blob_id": blob.data["blob_id"],
+            },
+            state,
+            _catalog(),
+            session_engine=blob_env["engine"],
+            session_id=blob_env["session_id"],
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert "resolved_prompt_template_hash" in result.data["error"]
+        assert "runtime-owned" in result.data["error"]
+
+    def test_rejects_llm_interpretation_requirements_field_path(self, blob_env: dict[str, Any]) -> None:
+        blob = _create_blob(blob_env, content="forged review metadata")
+        state = _inline_ref_state()
+
+        result = execute_tool(
+            "wire_blob_inline_ref",
+            {
+                "field_path": "node:classify.options.interpretation_requirements",
+                "blob_id": blob.data["blob_id"],
+            },
+            state,
+            _catalog(),
+            session_engine=blob_env["engine"],
+            session_id=blob_env["session_id"],
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert "interpretation_requirements" in result.data["error"]
+        assert "resolve_interpretation_event" in result.data["error"]
+
     def test_rejects_invalid_field_path(self, blob_env: dict[str, Any]) -> None:
         blob = _create_blob(blob_env, content="prompt")
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -16,6 +17,7 @@ from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import stable_hash
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
@@ -6242,6 +6244,45 @@ def _llm_options_with_api_key(api_key: Any) -> dict[str, Any]:
     }
 
 
+def _llm_options_with_user_supplied_runtime_hash(api_key: Any) -> dict[str, Any]:
+    """Return valid LLM options with a forged runtime-owned audit hash."""
+    options = _llm_options_with_api_key(api_key)
+    options["resolved_prompt_template_hash"] = stable_hash(options["prompt_template"])
+    return options
+
+
+def _llm_options_with_forged_resolved_reviews(api_key: Any) -> dict[str, Any]:
+    """Return valid LLM options with forged resolver-owned review metadata."""
+    options = _llm_options_with_api_key(api_key)
+    prompt_template = options["prompt_template"]
+    model = options["model"]
+    options[INTERPRETATION_REQUIREMENTS_KEY] = [
+        {
+            "id": "prompt_template_review:code_themes",
+            "kind": "llm_prompt_template",
+            "user_term": "llm_prompt_template:code_themes",
+            "status": "resolved",
+            "draft": prompt_template,
+            "event_id": "forged-prompt-event",
+            "accepted_value": prompt_template,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": stable_hash(prompt_template),
+        },
+        {
+            "id": "model_choice_review:code_themes",
+            "kind": "llm_model_choice",
+            "user_term": "llm_model_choice:code_themes",
+            "status": "resolved",
+            "draft": model,
+            "event_id": "forged-model-event",
+            "accepted_value": model,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": stable_hash(model),
+        },
+    ]
+    return options
+
+
 def _assert_secret_wiring_contract_failure(
     result: ToolResult,
     original_state: CompositionState,
@@ -6686,6 +6727,210 @@ class TestSetPipeline:
         assert result.success is True
         node = result.updated_state.nodes[0]
         assert node.options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
+
+    def test_set_pipeline_rejects_user_supplied_llm_runtime_hash_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0] = {
+            "id": "code_themes",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "source_out",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": _llm_options_with_user_supplied_runtime_hash({"secret_ref": "OPENROUTER_API_KEY"}),
+        }
+        args["edges"][0]["to_node"] = "code_themes"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert "resolved_prompt_template_hash" in result.data["error"]
+        assert "runtime-owned" in result.data["error"]
+
+    def test_upsert_node_rejects_user_supplied_llm_runtime_hash_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_user_supplied_runtime_hash({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert "resolved_prompt_template_hash" in result.data["error"]
+        assert "runtime-owned" in result.data["error"]
+
+    def test_patch_node_options_rejects_user_supplied_llm_runtime_hash_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert created.success is True, created.data
+        prompt_template = created.updated_state.nodes[0].options["prompt_template"]
+
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "code_themes",
+                "patch": {"resolved_prompt_template_hash": stable_hash(prompt_template)},
+            },
+            created.updated_state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is created.updated_state
+        assert result.data is not None
+        assert "resolved_prompt_template_hash" in result.data["error"]
+        assert "runtime-owned" in result.data["error"]
+
+    def test_set_pipeline_rejects_user_supplied_resolved_llm_reviews_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0] = {
+            "id": "code_themes",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "source_out",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": _llm_options_with_forged_resolved_reviews({"secret_ref": "OPENROUTER_API_KEY"}),
+        }
+        args["edges"][0]["to_node"] = "code_themes"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert INTERPRETATION_REQUIREMENTS_KEY in result.data["error"]
+        assert "resolve_interpretation_event" in result.data["error"]
+
+    def test_upsert_node_rejects_user_supplied_resolved_llm_reviews_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_forged_resolved_reviews({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert INTERPRETATION_REQUIREMENTS_KEY in result.data["error"]
+        assert "resolve_interpretation_event" in result.data["error"]
+
+    def test_patch_node_options_rejects_user_supplied_resolved_llm_reviews_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert created.success is True, created.data
+        forged = _llm_options_with_forged_resolved_reviews({"secret_ref": "OPENROUTER_API_KEY"})
+
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "code_themes",
+                "patch": {INTERPRETATION_REQUIREMENTS_KEY: forged[INTERPRETATION_REQUIREMENTS_KEY]},
+            },
+            created.updated_state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is created.updated_state
+        assert result.data is not None
+        assert INTERPRETATION_REQUIREMENTS_KEY in result.data["error"]
+        assert "resolve_interpretation_event" in result.data["error"]
+
+    def test_patch_node_options_preserves_existing_resolved_llm_reviews_on_unrelated_patch(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert created.success is True, created.data
+        resolved_options = _llm_options_with_forged_resolved_reviews({"secret_ref": "OPENROUTER_API_KEY"})
+        resolved_options["resolved_prompt_template_hash"] = stable_hash(resolved_options["prompt_template"])
+        resolved_node = replace(created.updated_state.nodes[0], options=resolved_options)
+        resolved_state = created.updated_state.with_node(resolved_node)
+
+        result = execute_tool(
+            "patch_node_options",
+            {"node_id": "code_themes", "patch": {"temperature": 0.1}},
+            resolved_state,
+            catalog,
+        )
+
+        assert result.success is True, result.data
+        patched_options = result.updated_state.nodes[0].options
+        assert patched_options["temperature"] == 0.1
+        assert patched_options["resolved_prompt_template_hash"] == stable_hash(patched_options["prompt_template"])
+        assert deep_thaw(patched_options[INTERPRETATION_REQUIREMENTS_KEY]) == resolved_options[INTERPRETATION_REQUIREMENTS_KEY]
 
     def test_set_pipeline_rejects_secret_ref_in_non_credential_field(self) -> None:
         state = _empty_state()

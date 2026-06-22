@@ -87,6 +87,17 @@ from elspeth.web.validation import (
 )
 
 _DATA_ERROR_KEY: Final[str] = "error"
+_RUNTIME_OWNED_LLM_OPTION_KEYS: Final[frozenset[str]] = frozenset(
+    {"resolved_prompt_template_hash"}
+)
+_RESOLVER_OWNED_INTERPRETATION_REQUIREMENT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "event_id",
+        "accepted_value",
+        "accepted_artifact_hash",
+        "resolved_prompt_template_hash",
+    }
+)
 
 
 def _pending_interpretation_requirement(
@@ -1375,6 +1386,55 @@ def _mask_pending_interpretation_placeholders_for_authoring_validation(
         "pending interpretation",
         prompt_template,
     )
+
+
+def _runtime_owned_llm_option_error(
+    plugin_name: str | None,
+    options: Mapping[str, Any],
+    *,
+    tool_name: str,
+) -> str | None:
+    """Reject composer-authored writes to runtime-owned LLM audit fields."""
+    if plugin_name != "llm":
+        return None
+    supplied = sorted(key for key in _RUNTIME_OWNED_LLM_OPTION_KEYS if key in options)
+    if supplied:
+        field_names = ", ".join(supplied)
+        return (
+            f"{tool_name} options include runtime-owned LLM option(s): {field_names}. "
+            "These audit-link fields may only be written by resolve_interpretation_event, "
+            "not by composer tool input."
+        )
+
+    requirements_value = options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None
+    if not isinstance(requirements_value, (list, tuple)):
+        return None
+
+    for index, requirement in enumerate(requirements_value):
+        if not isinstance(requirement, Mapping):
+            continue
+        status = requirement["status"] if "status" in requirement else None
+        if status not in (None, "pending"):
+            return (
+                f"{tool_name} options.{INTERPRETATION_REQUIREMENTS_KEY}[{index}] includes "
+                f"resolver-owned status {status!r}. Composer tool input may stage pending "
+                "review requirements only; resolved review metadata may only be written by "
+                "resolve_interpretation_event."
+            )
+        resolver_owned_fields = sorted(
+            field
+            for field in _RESOLVER_OWNED_INTERPRETATION_REQUIREMENT_FIELDS
+            if requirement.get(field) is not None
+        )
+        if resolver_owned_fields:
+            field_names = ", ".join(resolver_owned_fields)
+            return (
+                f"{tool_name} options.{INTERPRETATION_REQUIREMENTS_KEY}[{index}] includes "
+                f"resolver-owned field(s): {field_names}. Composer tool input may stage "
+                "pending review requirements only; resolved review metadata may only be "
+                "written by resolve_interpretation_event."
+            )
+    return None
 
 
 def _secret_ref_placement_error(

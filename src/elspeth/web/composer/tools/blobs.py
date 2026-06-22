@@ -69,11 +69,13 @@ from elspeth.web.composer.tools._common import (
     _discovery_result,
     _failure_result,
     _mutation_result,
+    _runtime_owned_llm_option_error,
 )
 from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
 
 
@@ -375,6 +377,19 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
         found = False
         for node in state.nodes:
             if node.id == node_id:
+                if node.plugin == "llm" and keys[0] == INTERPRETATION_REQUIREMENTS_KEY:
+                    raise ValueError(
+                        "wire_blob_inline_ref cannot write LLM interpretation_requirements; "
+                        "review metadata may only be staged as pending composer input and "
+                        "resolved by resolve_interpretation_event."
+                    )
+                runtime_owned_error = _runtime_owned_llm_option_error(
+                    node.plugin,
+                    {keys[0]: marker},
+                    tool_name="wire_blob_inline_ref",
+                )
+                if runtime_owned_error is not None:
+                    raise ValueError(runtime_owned_error)
                 patched_options = _set_nested_option(dict(deep_thaw(node.options)), keys, marker)
                 new_nodes.append(replace(node, options=patched_options))
                 found = True

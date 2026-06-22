@@ -36,6 +36,7 @@ from elspeth.web.composer.tools._common import (
     _mutation_result,
     _options_with_default_llm_reviews,
     _prevalidate_transform,
+    _runtime_owned_llm_option_error,
     _validate_aggregation_trigger,
     _validate_mutation_arguments,
     _validate_plugin_name,
@@ -411,6 +412,13 @@ def _execute_upsert_node(
     node_type = validated.node_type
     plugin = validated.plugin
     node_options = validated.options
+    runtime_owned_error = _runtime_owned_llm_option_error(
+        plugin,
+        node_options,
+        tool_name="upsert_node",
+    )
+    if runtime_owned_error is not None:
+        return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=node_id,
@@ -712,6 +720,13 @@ def _execute_patch_node_options(
     routing_patch_error = _node_routing_option_patch_error(patch)
     if routing_patch_error is not None:
         return _failure_result(state, routing_patch_error)
+    runtime_owned_error = _runtime_owned_llm_option_error(
+        current.plugin,
+        patch,
+        tool_name="patch_node_options",
+    )
+    if runtime_owned_error is not None:
+        return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
     new_options: Mapping[str, Any] = _apply_merge_patch(current.options, patch)
     new_options = _options_with_default_llm_reviews(
         node_id=node_id,

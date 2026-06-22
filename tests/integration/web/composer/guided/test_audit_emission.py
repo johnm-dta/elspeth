@@ -771,7 +771,7 @@ class TestRejectionPathAuditDrain:
         that triggers the 400 path.  Assert the response is still 400 —
         not 500 from the persist failure.
         """
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -812,7 +812,7 @@ class TestRejectionPathAuditDrain:
         """
         from structlog.testing import capture_logs
 
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -861,7 +861,7 @@ class TestRejectionPathAuditDrain:
         must preserve the original HTTPException instead of surfacing a logger
         pipeline error to the browser.
         """
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)

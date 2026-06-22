@@ -662,7 +662,7 @@ class TestInvariantError500DetailIsSanitized:
         the sentinel content nor the field name ``sample_rows``.
         """
         from elspeth.web.composer.guided.errors import InvariantError
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         self._seed_guided_session(composer_test_client, session_id)
@@ -717,7 +717,7 @@ class TestInvariantError500DetailIsSanitized:
         directly to inject the leaky message.
         """
         from elspeth.web.composer.guided.errors import InvariantError
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         self._seed_guided_session(composer_test_client, session_id)
@@ -790,7 +790,7 @@ class TestI1InvariantErrorStructuredLogging:
         from structlog.testing import capture_logs
 
         from elspeth.web.composer.guided.errors import InvariantError
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -882,7 +882,7 @@ class TestUnwindAuditDispositionFlag:
         fix corrects.
         """
         from elspeth.web.composer.guided.errors import InvariantError
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)

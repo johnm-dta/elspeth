@@ -29,7 +29,7 @@ import structlog
 
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
 from elspeth.web.composer.audit import BufferingRecorder
-from elspeth.web.composer.guided.chat_solver import solve_step_chat
+from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution, maybe_resolve_step_1_source_chat, solve_step_chat
 from elspeth.web.composer.guided.protocol import GuidedStep
 
 slog = structlog.get_logger()
@@ -50,6 +50,22 @@ class StepChatResult:
     status: ComposerChatTurnStatus
     latency_ms: int
     error_class: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class Step1SourceChatResult:
+    """Guarded result of the Step-1 source resolver branch.
+
+    ``source_resolution`` carries a valid ``resolve_source`` tool result. A
+    ``None`` value means the model replied in ordinary prose and the route may
+    continue to the normal guided chat path. ``fallback_chat`` carries the
+    synthetic-unavailable chat result when the resolver itself failed with a
+    transient or malformed model response; in that case the route must not call
+    the model again or commit source state from the invalid tool arguments.
+    """
+
+    source_resolution: Step1SourceChatResolution | None
+    fallback_chat: StepChatResult | None
 
 
 # Synthetic message returned to the user when the LLM is transiently
@@ -88,6 +104,79 @@ def _safe_frame_strings(
             tb = tb.tb_next
         current = current.__cause__
     return tuple(frames)
+
+
+async def resolve_step_1_source_chat_with_auto_drop(
+    *,
+    site: str,
+    session_id: str,
+    user_id: str,
+    model: str,
+    user_message: str,
+    plugin_hint: str | None,
+    temperature: float | None,
+    seed: int | None,
+    recorder: BufferingRecorder | None = None,
+) -> Step1SourceChatResult:
+    """Wrap Step-1 ``resolve_source`` chat with the guided-chat fallback contract."""
+    from litellm.exceptions import APIError as LiteLLMAPIError
+    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+    from litellm.exceptions import (
+        BlockedPiiEntityError,
+        BudgetExceededError,
+        GuardrailInterventionNormalStringError,
+        GuardrailRaisedException,
+    )
+
+    started = time.perf_counter()
+    try:
+        source_resolution = await maybe_resolve_step_1_source_chat(
+            model=model,
+            user_message=user_message,
+            plugin_hint=plugin_hint,
+            temperature=temperature,
+            seed=seed,
+            recorder=recorder,
+        )
+        return Step1SourceChatResult(
+            source_resolution=source_resolution,
+            fallback_chat=None,
+        )
+    except (
+        LiteLLMAPIError,
+        LiteLLMAuthError,
+        LiteLLMBadRequestError,
+        BudgetExceededError,
+        BlockedPiiEntityError,
+        GuardrailRaisedException,
+        GuardrailInterventionNormalStringError,
+        TimeoutError,
+        IndexError,
+        AttributeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.step_1_source_chat_transient_failure",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=GuidedStep.STEP_1_SOURCE.value,
+            exc_class=type(exc).__name__,
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return Step1SourceChatResult(
+            source_resolution=None,
+            fallback_chat=StepChatResult(
+                assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
+                status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
+        )
 
 
 async def solve_step_chat_with_auto_drop(

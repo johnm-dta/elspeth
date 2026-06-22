@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -62,7 +62,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult as ValidationResultModel,
 )
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter
-from elspeth.web.sessions._guided_step_chat import StepChatResult
+from elspeth.web.sessions._guided_step_chat import Step1SourceChatResult, StepChatResult
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import (
     ChatMessageRecord,
@@ -3003,9 +3003,10 @@ class TestMessageRoutes:
                 ),
             ),
             patch(
-                "elspeth.web.sessions.routes.composer.maybe_resolve_step_1_source_chat",
+                "elspeth.web.sessions.routes.composer.resolve_step_1_source_chat_with_auto_drop",
                 new=AsyncMock(
-                    return_value=Step1SourceChatResolution(
+                    return_value=Step1SourceChatResult(
+                        source_resolution=Step1SourceChatResolution(
                         assistant_message="I created the source.",
                         plugin="csv",
                         filename="source.csv",
@@ -3014,6 +3015,8 @@ class TestMessageRoutes:
                         options={"path": "inline://source.csv"},
                         observed_columns=("name", "value"),
                         sample_rows=({"name": raw_row_secret, "value": "1"},),
+                        ),
+                        fallback_chat=None,
                     )
                 ),
             ),
@@ -3033,6 +3036,175 @@ class TestMessageRoutes:
         assert "ToolResult(" not in detail
         assert raw_row_secret not in detail
         assert tool_result_private_detail not in detail
+
+    def test_guided_chat_malformed_source_tool_args_return_synthetic_unavailable(self, tmp_path) -> None:
+        """Malformed Step-1 source resolver tool output must not escape as HTTP 500."""
+        from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+        from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
+
+        app, service = _make_app(tmp_path)
+        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog.list_sources.return_value = [
+            PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+        ]
+        catalog.list_sinks.return_value = []
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="csv",
+            plugin_type="source",
+            description="CSV source",
+            json_schema={"title": "CSV", "type": "object", "properties": {}},
+            knob_schema={"fields": []},
+        )
+        app.state.catalog_service = catalog
+        app.state.blob_service = MagicMock()
+        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
+        app.state.blob_service.create_blob = AsyncMock()
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Guided malformed source tool args"})
+        session_id = uuid.UUID(resp.json()["id"])
+        assert client.get(f"/api/sessions/{session_id}/guided").status_code == 200
+        choose_source_resp = client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"]},
+        )
+        assert choose_source_resp.status_code == 200
+        assert choose_source_resp.json()["next_turn"]["type"] == "schema_form"
+
+        malformed_tool_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="resolve_source",
+                                    arguments="{not-json",
+                                )
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=malformed_tool_response),
+        ):
+            send_resp = client.post(
+                f"/api/sessions/{session_id}/guided/chat",
+                json={"message": "Use this CSV: name,value\\nalice,1", "step_index": "step_1_source"},
+            )
+
+        assert send_resp.status_code == 200
+        body = send_resp.json()
+        assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["next_turn"] is None
+        app.state.blob_service.create_blob.assert_not_called()
+
+        loop = asyncio.new_event_loop()
+        try:
+            persisted = loop.run_until_complete(service.get_messages(session_id, limit=None))
+        finally:
+            loop.close()
+        llm_audit_rows = _llm_call_audit_rows(persisted)
+        assert len(llm_audit_rows) == 1
+        assert llm_audit_rows[0][1]["call"]["status"] == ComposerLLMCallStatus.MALFORMED_RESPONSE.value
+        assert llm_audit_rows[0][1]["call"]["error_class"] == "JSONDecodeError"
+
+    def test_guided_chat_source_plugin_mismatch_returns_synthetic_unavailable(self, tmp_path) -> None:
+        """Step-1 source resolver plugin mismatch must not commit source state."""
+        from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+        from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
+
+        app, service = _make_app(tmp_path)
+        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog.list_sources.return_value = [
+            PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+        ]
+        catalog.list_sinks.return_value = []
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="csv",
+            plugin_type="source",
+            description="CSV source",
+            json_schema={"title": "CSV", "type": "object", "properties": {}},
+            knob_schema={"fields": []},
+        )
+        app.state.catalog_service = catalog
+        app.state.blob_service = MagicMock()
+        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
+        app.state.blob_service.create_blob = AsyncMock()
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Guided source plugin mismatch"})
+        session_id = uuid.UUID(resp.json()["id"])
+        assert client.get(f"/api/sessions/{session_id}/guided").status_code == 200
+        choose_source_resp = client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"chosen": ["csv"]},
+        )
+        assert choose_source_resp.status_code == 200
+
+        valid_but_mismatched_args = json.dumps(
+            {
+                "resolution": "source",
+                "plugin": "json",
+                "filename": "source.csv",
+                "mime_type": "text/csv",
+                "content": "name,value\\nalice,1\\n",
+                "options": {},
+                "observed_columns": ["name", "value"],
+                "sample_rows": [{"name": "alice", "value": "1"}],
+                "assistant_message": "I created the source.",
+            }
+        )
+        mismatched_tool_response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        tool_calls=[
+                            SimpleNamespace(
+                                function=SimpleNamespace(
+                                    name="resolve_source",
+                                    arguments=valid_but_mismatched_args,
+                                )
+                            )
+                        ]
+                    )
+                )
+            ]
+        )
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=mismatched_tool_response),
+        ):
+            send_resp = client.post(
+                f"/api/sessions/{session_id}/guided/chat",
+                json={"message": "Use this JSON file", "step_index": "step_1_source"},
+            )
+
+        assert send_resp.status_code == 200
+        body = send_resp.json()
+        assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["next_turn"] is None
+        app.state.blob_service.create_blob.assert_not_called()
+
+        loop = asyncio.new_event_loop()
+        try:
+            current_state = loop.run_until_complete(service.get_current_state(session_id))
+            persisted = loop.run_until_complete(service.get_messages(session_id, limit=None))
+        finally:
+            loop.close()
+        assert current_state is not None
+        assert not current_state.sources
+        llm_audit_rows = _llm_call_audit_rows(persisted)
+        assert len(llm_audit_rows) == 1
+        assert llm_audit_rows[0][1]["call"]["status"] == ComposerLLMCallStatus.MALFORMED_RESPONSE.value
+        assert llm_audit_rows[0][1]["call"]["error_class"] == "ValueError"
 
     @pytest.mark.asyncio
     async def test_send_message_serializes_concurrent_requests_per_session(self, tmp_path) -> None:

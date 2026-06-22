@@ -137,9 +137,9 @@ from ._helpers import (
     handle_step_1_source,
     insert,
     match_recipe,
-    maybe_resolve_step_1_source_chat,
     record_session_completed,
     record_session_switched,
+    resolve_step_1_source_chat_with_auto_drop,
     run_sync_in_worker,
     slog,
     solve_step_chat_with_auto_drop,
@@ -2768,6 +2768,7 @@ def register_composer_routes(router: APIRouter) -> None:
                     None,
                 )
                 current_turn_type = existing_record_for_chat.turn_type if existing_record_for_chat is not None else None
+                chat_result = None
 
                 if (
                     existing_record_for_chat is not None
@@ -2789,7 +2790,10 @@ def register_composer_routes(router: APIRouter) -> None:
                     if selected_record is not None and selected_record.summary is not None:
                         plugin_hint = selected_record.summary.removeprefix("Selected: ").split(", ", 1)[0]
 
-                    source_resolution = await maybe_resolve_step_1_source_chat(
+                    source_chat_result = await resolve_step_1_source_chat_with_auto_drop(
+                        site="post_guided_chat",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
                         model=settings.composer_model,
                         user_message=body.message,
                         plugin_hint=plugin_hint,
@@ -2797,6 +2801,8 @@ def register_composer_routes(router: APIRouter) -> None:
                         seed=settings.composer_seed,
                         recorder=recorder,
                     )
+                    chat_result = source_chat_result.fallback_chat
+                    source_resolution = source_chat_result.source_resolution
                     if source_resolution is not None:
                         finished_at = datetime.now(UTC)
                         latency_ms = int((_perf_counter() - started_perf) * 1000)
@@ -3012,55 +3018,56 @@ def register_composer_routes(router: APIRouter) -> None:
                 # fires.  The chat handler being inconsistent with
                 # post_guided_respond's InvariantError discipline was the
                 # original gap surfaced by elspeth-obs-ac603d4e03.
-                try:
-                    chat_result = await solve_step_chat_with_auto_drop(
-                        site="post_guided_chat",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        model=settings.composer_model,
-                        step=guided.step,
-                        user_message=body.message,
-                        temperature=settings.composer_temperature,
-                        seed=settings.composer_seed,
-                        recorder=recorder,
-                    )
-                except InvariantError as exc:
-                    finished_at = datetime.now(UTC)
-                    latency_ms = int((_perf_counter() - started_perf) * 1000)
-                    user_turn = ChatTurn(
-                        role=ChatRole.USER,
-                        content=body.message,
-                        seq=guided.chat_turn_seq,
-                        step=guided.step,
-                        ts_iso=finished_at.isoformat(),
-                    )
-                    recorder.record_chat_turn(
-                        ComposerChatTurn(
-                            step=guided.step.value,
-                            initiator=ComposerChatInitiator.USER,
-                            chat_turn_seq=user_turn.seq,
-                            user_message_hash=stable_hash(body.message),
-                            assistant_message_hash=stable_hash(""),
-                            latency_ms=latency_ms,
+                if chat_result is None:
+                    try:
+                        chat_result = await solve_step_chat_with_auto_drop(
+                            site="post_guided_chat",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
                             model=settings.composer_model,
-                            status=ComposerChatTurnStatus.INVARIANT_VIOLATED,
-                            started_at=started_at,
-                            finished_at=finished_at,
-                            error_class=type(exc).__name__,
+                            step=guided.step,
+                            user_message=body.message,
+                            temperature=settings.composer_temperature,
+                            seed=settings.composer_seed,
+                            recorder=recorder,
                         )
-                    )
-                    slog.error(
-                        "guided.invariant_violated",
-                        session_id=str(session_id),
-                        user_id=user.user_id,
-                        exc_class=type(exc).__name__,
-                        site="solve_step_chat",
-                        frames=_safe_frame_strings(exc),
-                    )
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Server invariant violated. See application audit log for diagnostic detail.",
-                    ) from exc
+                    except InvariantError as exc:
+                        finished_at = datetime.now(UTC)
+                        latency_ms = int((_perf_counter() - started_perf) * 1000)
+                        user_turn = ChatTurn(
+                            role=ChatRole.USER,
+                            content=body.message,
+                            seq=guided.chat_turn_seq,
+                            step=guided.step,
+                            ts_iso=finished_at.isoformat(),
+                        )
+                        recorder.record_chat_turn(
+                            ComposerChatTurn(
+                                step=guided.step.value,
+                                initiator=ComposerChatInitiator.USER,
+                                chat_turn_seq=user_turn.seq,
+                                user_message_hash=stable_hash(body.message),
+                                assistant_message_hash=stable_hash(""),
+                                latency_ms=latency_ms,
+                                model=settings.composer_model,
+                                status=ComposerChatTurnStatus.INVARIANT_VIOLATED,
+                                started_at=started_at,
+                                finished_at=finished_at,
+                                error_class=type(exc).__name__,
+                            )
+                        )
+                        slog.error(
+                            "guided.invariant_violated",
+                            session_id=str(session_id),
+                            user_id=user.user_id,
+                            exc_class=type(exc).__name__,
+                            site="solve_step_chat",
+                            frames=_safe_frame_strings(exc),
+                        )
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Server invariant violated. See application audit log for diagnostic detail.",
+                        ) from exc
                 finished_at = datetime.now(UTC)
 
                 # Append both turns (user + assistant) to chat_history with

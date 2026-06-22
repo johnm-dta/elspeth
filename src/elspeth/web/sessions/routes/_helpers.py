@@ -136,7 +136,7 @@ from elspeth.web.execution.validation import validate_pipeline
 from elspeth.web.middleware.rate_limit import ComposerRateLimiter, get_rate_limiter
 from elspeth.web.sessions._auto_title import maybe_auto_title_session
 from elspeth.web.sessions._guided_solve_chain import solve_chain_with_auto_drop
-from elspeth.web.sessions._guided_step_chat import solve_step_chat_with_auto_drop
+from elspeth.web.sessions._guided_step_chat import resolve_step_1_source_chat_with_auto_drop, solve_step_chat_with_auto_drop
 from elspeth.web.sessions.audit_story_models import RunAuditStoryResponse
 from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryService
 from elspeth.web.sessions.converters import state_from_record as _state_from_record
@@ -3940,6 +3940,7 @@ __all__ = [
     "record_session_completed",
     "record_session_switched",
     "redact_source_storage_path",
+    "resolve_step_1_source_chat_with_auto_drop",
     "run_sync_in_worker",
     "scrub_text_for_audit",
     "slog",

@@ -1141,7 +1141,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # Backed by the process-level _PROMETHEUS_READER wired at module import;
     # all OTel counters/histograms registered via metrics.get_meter() feed
     # into this endpoint automatically via the global REGISTRY.
-    @app.get("/metrics", include_in_schema=False)
+    @app.get("/metrics", include_in_schema=False, dependencies=[Depends(get_current_user)])
     def _prometheus_metrics() -> Response:
         # ``generate_latest()`` walks the global REGISTRY; a corrupted
         # collector would raise here and Starlette's default 500 handler
@@ -1151,10 +1151,9 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         # endpoint reads in-memory counter state only, so failure is a
         # telemetry-system failure (operational, not legal) — logged, not
         # audited. A bounded message is safe to log here (unlike the
-        # secret-bearing DB exceptions elsewhere): generate_latest() only
-        # formats global-REGISTRY state, every value of which /metrics
-        # already serves publicly, so the message identifies *which*
-        # collector broke without exposing anything not already public.
+        # secret-bearing DB exceptions elsewhere): the route has already
+        # authenticated before collection, and the bounded message identifies
+        # which collector broke without reading request-controlled input.
         try:
             body = generate_latest()
         except Exception as scrape_exc:

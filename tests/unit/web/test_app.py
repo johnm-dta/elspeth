@@ -198,9 +198,27 @@ class TestHealthEndpoint:
 class TestMetricsEndpoint:
     """Tests for GET /metrics (Prometheus scrape endpoint)."""
 
-    def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
+    @staticmethod
+    def _authed_client(tmp_path) -> TestClient:
+        from elspeth.web.auth.middleware import get_current_user
+        from elspeth.web.auth.models import UserIdentity
+
+        app = create_app(_settings(tmp_path))
+
+        async def _mock_user() -> UserIdentity:
+            return UserIdentity(user_id="metrics-user", username="metrics-user")
+
+        app.dependency_overrides[get_current_user] = _mock_user
+        return TestClient(app)
+
+    def test_metrics_requires_auth(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))
         client = TestClient(app)
+        response = client.get("/metrics")
+        assert response.status_code == 401
+
+    def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
+        client = self._authed_client(tmp_path)
         response = client.get("/metrics")
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/plain")
@@ -212,8 +230,7 @@ class TestMetricsEndpoint:
         (sanctioned telemetry-system-failure logging per CLAUDE.md), carrying
         a bounded detail that identifies which collector broke.
         """
-        app = create_app(_settings(tmp_path))
-        client = TestClient(app)
+        client = self._authed_client(tmp_path)
         boom = RuntimeError("collector 'broken_metric' raised during collect()")
         with (
             patch("elspeth.web.app.generate_latest", side_effect=boom),

@@ -15,16 +15,21 @@ run's parent session.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import hashlib
+import tempfile
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
+from starlette.types import Receive, Scope, Send
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
@@ -46,11 +51,10 @@ from elspeth.web.execution.errors import (
 from elspeth.web.execution.fanout_guard import FANOUT_GUARD_ERROR_TYPE, ExecutionFanoutGuardRequired
 from elspeth.web.execution.outputs import (
     RunOutputsAuditUnavailableError,
-    hash_and_size_of_file,
     load_run_outputs_for_settings,
     path_or_uri_to_filesystem_path,
 )
-from elspeth.web.execution.preview import build_artifact_preview
+from elspeth.web.execution.preview import DEFAULT_ARTIFACT_PREVIEW_BYTE_CAP, build_artifact_preview_from_head
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError
 from elspeth.web.execution.schemas import (
@@ -65,6 +69,7 @@ from elspeth.web.execution.schemas import (
     RunDiagnosticsWorkingView,
     RunEvent,
     RunEventType,
+    RunOutputArtifact,
     RunOutputArtifactPreview,
     RunOutputsResponse,
     RunResultsResponse,
@@ -85,6 +90,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.routes._helpers import _litellm_error_detail
 
 slog = structlog.get_logger()
+_ARTIFACT_SNAPSHOT_CHUNK_SIZE = 1024 * 1024
 
 
 # ── Dependency providers (using app.state, matching existing pattern) ──
@@ -104,6 +110,261 @@ def _get_websocket_ticket_store(app: Any) -> WebSocketTicketStore:
         store = WebSocketTicketStore()
         app.state.websocket_ticket_store = store
     return cast(WebSocketTicketStore, store)
+
+
+@dataclass(frozen=True)
+class _ArtifactFileSnapshot:
+    path: Path
+    size_bytes: int
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class _ArtifactPreviewHeadSnapshot:
+    total_size_bytes: int
+    content_hash: str
+    head_bytes: bytes
+
+
+@dataclass(frozen=True)
+class _ByteRange:
+    start: int
+    end_inclusive: int
+
+    @property
+    def length(self) -> int:
+        return self.end_inclusive - self.start + 1
+
+
+def _artifact_content_drift_http(
+    artifact: RunOutputArtifact,
+    *,
+    actual_size_bytes: int,
+) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error_type": "artifact_content_drift",
+            "path_or_uri": artifact.path_or_uri,
+            "expected_size_bytes": artifact.size_bytes,
+            "actual_size_bytes": actual_size_bytes,
+            "expected_content_hash": artifact.content_hash,
+        },
+    )
+
+
+def _reject_artifact_content_drift(
+    artifact: RunOutputArtifact,
+    *,
+    actual_size_bytes: int,
+    actual_content_hash: str,
+) -> None:
+    if actual_size_bytes != artifact.size_bytes or actual_content_hash != artifact.content_hash:
+        raise _artifact_content_drift_http(
+            artifact,
+            actual_size_bytes=actual_size_bytes,
+        )
+
+
+def _artifact_purged_or_moved_http(artifact: RunOutputArtifact) -> HTTPException:
+    return HTTPException(
+        status_code=410,
+        detail={
+            "error_type": "artifact_purged_or_moved",
+            "path_or_uri": artifact.path_or_uri,
+        },
+    )
+
+
+def _unlink_path(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _download_content_disposition(filename: str) -> str:
+    quoted = quote(filename, safe="")
+    if quoted != filename:
+        return f"attachment; filename*=utf-8''{quoted}"
+    return f'attachment; filename="{filename}"'
+
+
+def _range_not_satisfiable_http(size_bytes: int) -> HTTPException:
+    return HTTPException(
+        status_code=416,
+        detail={"error_type": "range_not_satisfiable"},
+        headers={"Content-Range": f"bytes */{size_bytes}"},
+    )
+
+
+def _parse_single_range(range_header: str | None, *, size_bytes: int) -> _ByteRange | None:
+    if range_header is None:
+        return None
+    if not range_header.startswith("bytes=") or "," in range_header:
+        raise _range_not_satisfiable_http(size_bytes)
+
+    range_spec = range_header.removeprefix("bytes=")
+    start_raw, separator, end_raw = range_spec.partition("-")
+    if separator == "":
+        raise _range_not_satisfiable_http(size_bytes)
+
+    try:
+        if start_raw == "":
+            suffix_length = int(end_raw)
+            if suffix_length <= 0:
+                raise ValueError
+            start = max(size_bytes - suffix_length, 0)
+            end_inclusive = size_bytes - 1
+        else:
+            start = int(start_raw)
+            end_inclusive = size_bytes - 1 if end_raw == "" else int(end_raw)
+    except ValueError:
+        raise _range_not_satisfiable_http(size_bytes) from None
+
+    if size_bytes <= 0 or start < 0 or end_inclusive < start or start >= size_bytes:
+        raise _range_not_satisfiable_http(size_bytes)
+
+    return _ByteRange(
+        start=start,
+        end_inclusive=min(end_inclusive, size_bytes - 1),
+    )
+
+
+def _stream_temp_snapshot(path: Path, *, byte_range: _ByteRange | None = None) -> Iterator[bytes]:
+    try:
+        with path.open("rb") as source:
+            remaining: int | None
+            if byte_range is None:
+                remaining = None
+            else:
+                source.seek(byte_range.start)
+                remaining = byte_range.length
+
+            while remaining is None or remaining > 0:
+                read_size = _ARTIFACT_SNAPSHOT_CHUNK_SIZE if remaining is None else min(_ARTIFACT_SNAPSHOT_CHUNK_SIZE, remaining)
+                chunk = source.read(read_size)
+                if not chunk:
+                    break
+                if remaining is not None:
+                    remaining -= len(chunk)
+                yield chunk
+    finally:
+        _unlink_path(path)
+
+
+class _TempSnapshotStreamingResponse(StreamingResponse):
+    def __init__(
+        self,
+        snapshot_path: Path,
+        *,
+        headers: Mapping[str, str],
+        status_code: int = 200,
+        byte_range: _ByteRange | None = None,
+    ) -> None:
+        self._snapshot_path = snapshot_path
+        super().__init__(
+            _stream_temp_snapshot(snapshot_path, byte_range=byte_range),
+            status_code=status_code,
+            media_type="application/octet-stream",
+            headers=headers,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            _unlink_path(self._snapshot_path)
+
+
+def _copy_artifact_to_temp_snapshot(path: Path, snapshot_dir: Path) -> _ArtifactFileSnapshot:
+    digest = hashlib.sha256()
+    size_bytes = 0
+    temp_path: Path | None = None
+    snapshot_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            prefix="elspeth-run-output-",
+            suffix=".snapshot",
+            delete=False,
+            dir=snapshot_dir,
+        ) as temp_file, path.open("rb") as source:
+            temp_path = Path(temp_file.name)
+            while chunk := source.read(_ARTIFACT_SNAPSHOT_CHUNK_SIZE):
+                size_bytes += len(chunk)
+                digest.update(chunk)
+                temp_file.write(chunk)
+    except Exception:
+        if temp_path is not None:
+            _unlink_path(temp_path)
+        raise
+
+    assert temp_path is not None
+    return _ArtifactFileSnapshot(
+        path=temp_path,
+        size_bytes=size_bytes,
+        content_hash=digest.hexdigest(),
+    )
+
+
+async def _verified_artifact_file_snapshot(
+    resolved: Path,
+    artifact: RunOutputArtifact,
+    *,
+    snapshot_dir: Path,
+) -> _ArtifactFileSnapshot:
+    try:
+        snapshot = await run_sync_in_worker(_copy_artifact_to_temp_snapshot, resolved, snapshot_dir)
+    except FileNotFoundError:
+        raise _artifact_purged_or_moved_http(artifact) from None
+
+    try:
+        _reject_artifact_content_drift(
+            artifact,
+            actual_size_bytes=snapshot.size_bytes,
+            actual_content_hash=snapshot.content_hash,
+        )
+    except HTTPException:
+        _unlink_path(snapshot.path)
+        raise
+
+    return snapshot
+
+
+def _read_artifact_preview_head(path: Path, *, byte_cap: int) -> _ArtifactPreviewHeadSnapshot:
+    digest = hashlib.sha256()
+    total_size_bytes = 0
+    head = bytearray()
+    with path.open("rb") as source:
+        while chunk := source.read(_ARTIFACT_SNAPSHOT_CHUNK_SIZE):
+            total_size_bytes += len(chunk)
+            digest.update(chunk)
+            remaining_head_bytes = byte_cap - len(head)
+            if remaining_head_bytes > 0:
+                head.extend(chunk[:remaining_head_bytes])
+
+    return _ArtifactPreviewHeadSnapshot(
+        total_size_bytes=total_size_bytes,
+        content_hash=digest.hexdigest(),
+        head_bytes=bytes(head),
+    )
+
+
+async def _verified_artifact_preview_head(
+    resolved: Path,
+    artifact: RunOutputArtifact,
+    *,
+    byte_cap: int = DEFAULT_ARTIFACT_PREVIEW_BYTE_CAP,
+) -> _ArtifactPreviewHeadSnapshot:
+    try:
+        snapshot = await run_sync_in_worker(_read_artifact_preview_head, resolved, byte_cap=byte_cap)
+    except FileNotFoundError:
+        raise _artifact_purged_or_moved_http(artifact) from None
+
+    _reject_artifact_content_drift(
+        artifact,
+        actual_size_bytes=snapshot.total_size_bytes,
+        actual_content_hash=snapshot.content_hash,
+    )
+    return snapshot
 
 
 # ── Ownership verification helpers ────────────────────────────────────
@@ -1179,20 +1440,33 @@ def create_execution_router() -> APIRouter:
         # the whole-file SHA-256 for every file-streamable sink, so a whole-file
         # comparison is correct — and catches same-size byte substitution, which
         # a size check alone would miss.
-        actual_hash, actual_size = await run_sync_in_worker(hash_and_size_of_file, resolved)
-        if actual_size != artifact.size_bytes or actual_hash != artifact.content_hash:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error_type": "artifact_content_drift",
-                    "path_or_uri": artifact.path_or_uri,
-                    "expected_size_bytes": artifact.size_bytes,
-                    "actual_size_bytes": actual_size,
-                    "expected_content_hash": artifact.content_hash,
-                },
-            )
+        snapshot = await _verified_artifact_file_snapshot(
+            resolved,
+            artifact,
+            snapshot_dir=Path(request.app.state.settings.data_dir) / ".run-output-snapshots",
+        )
+        try:
+            byte_range = _parse_single_range(request.headers.get("range"), size_bytes=snapshot.size_bytes)
+        except HTTPException:
+            _unlink_path(snapshot.path)
+            raise
 
-        return FileResponse(resolved, filename=resolved.name)
+        response_headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": _download_content_disposition(resolved.name),
+            "Content-Length": str(snapshot.size_bytes if byte_range is None else byte_range.length),
+        }
+        status_code = 200
+        if byte_range is not None:
+            status_code = 206
+            response_headers["Content-Range"] = f"bytes {byte_range.start}-{byte_range.end_inclusive}/{snapshot.size_bytes}"
+
+        return _TempSnapshotStreamingResponse(
+            snapshot.path,
+            headers=response_headers,
+            status_code=status_code,
+            byte_range=byte_range,
+        )
 
     @router.get(
         "/api/runs/{run_id}/outputs/{artifact_id}/preview",
@@ -1300,10 +1574,13 @@ def create_execution_router() -> APIRouter:
                 },
             )
 
-        return await run_sync_in_worker(
-            build_artifact_preview,
+        snapshot = await _verified_artifact_preview_head(resolved, artifact)
+
+        return build_artifact_preview_from_head(
             resolved,
             artifact_id=artifact_id,
+            total_size_bytes=snapshot.total_size_bytes,
+            head_bytes=snapshot.head_bytes,
         )
 
     @router.post(

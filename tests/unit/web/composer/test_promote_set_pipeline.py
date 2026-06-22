@@ -1082,6 +1082,11 @@ _CANARY_OUTPUT_OPT = "CANARY-OUTPUT-OPTIONS-DO-NOT-LEAK"
 _CANARY_INLINE = "CANARY-INLINE-BLOB-CONTENT-DO-NOT-LEAK"
 _CANARY_ROUTES = "CANARY-NODE-ROUTES-DO-NOT-LEAK"
 _CANARY_TRIGGER = "CANARY-NODE-TRIGGER-DO-NOT-LEAK"
+_CANARY_SOURCE_DSN = "CANARY-SET-PIPELINE-SOURCE-DSN-DO-NOT-LEAK"
+_CANARY_SOURCE_API_KEY = "CANARY-SET-PIPELINE-SOURCE-API-KEY-DO-NOT-LEAK"
+_CANARY_NODE_SECRET_REF = "CANARY-SET-PIPELINE-NODE-SECRET-REF-DO-NOT-LEAK"
+_CANARY_NODE_DSN = "CANARY-SET-PIPELINE-NODE-DSN-DO-NOT-LEAK"
+_CANARY_OUTPUT_CREDENTIAL = "CANARY-SET-PIPELINE-OUTPUT-CREDENTIAL-DO-NOT-LEAK"
 
 
 def test_redaction_substitutes_source_options_via_summarizer() -> None:
@@ -1225,6 +1230,76 @@ def test_redaction_substitutes_nested_node_and_output_dicts() -> None:
     assert _CANARY_OUTPUT_OPT not in serialized
     assert serialized.count(_CANARY_ROUTES) == 1
     assert serialized.count(_CANARY_TRIGGER) == 1
+
+
+def test_redaction_redacts_sensitive_set_pipeline_option_values_inside_summaries() -> None:
+    """Source, node, and output option values do not appear in audit redaction."""
+    tel = NoopRedactionTelemetry()
+    args = {
+        "source": {
+            "plugin": "csv",
+            "on_success": "rows",
+            "options": {
+                "path": _CANARY_PATH,
+                "dsn": _CANARY_SOURCE_DSN,
+                "api_key": _CANARY_SOURCE_API_KEY,
+            },
+        },
+        "nodes": [
+            {
+                "id": "classify",
+                "node_type": "transform",
+                "input": "rows",
+                "plugin": "llm",
+                "options": {
+                    "api_key": {"secret_ref": _CANARY_NODE_SECRET_REF},
+                    "prompt_template": _CANARY_NODE_OPT,
+                    "connection_string": _CANARY_NODE_DSN,
+                },
+            }
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "classified",
+                "plugin": "json",
+                "options": {
+                    "path": _CANARY_OUTPUT_OPT,
+                    "credential": _CANARY_OUTPUT_CREDENTIAL,
+                },
+            }
+        ],
+    }
+
+    redacted = redact_tool_call_arguments("set_pipeline", args, telemetry=tel)
+
+    assert json.loads(redacted["source"]["options"]) == {
+        "api_key": "<redacted-option-value>",
+        "dsn": "<redacted-option-value>",
+        "path": "<redacted-option-value>",
+    }
+    assert json.loads(redacted["nodes"][0]["options"]) == {
+        "api_key": {"secret_ref": "<redacted-option-value>"},
+        "connection_string": "<redacted-option-value>",
+        "prompt_template": "<redacted-option-value>",
+    }
+    assert json.loads(redacted["outputs"][0]["options"]) == {
+        "credential": "<redacted-option-value>",
+        "path": "<redacted-option-value>",
+    }
+    serialized = json.dumps(redacted, sort_keys=True)
+    for canary in (
+        _CANARY_PATH,
+        _CANARY_SOURCE_DSN,
+        _CANARY_SOURCE_API_KEY,
+        _CANARY_NODE_SECRET_REF,
+        _CANARY_NODE_OPT,
+        _CANARY_NODE_DSN,
+        _CANARY_OUTPUT_OPT,
+        _CANARY_OUTPUT_CREDENTIAL,
+    ):
+        assert canary not in serialized
+    assert tel.manifest_dispatch_calls == [{"tool_name": "set_pipeline", "shape": "type_driven"}]
 
 
 # ---------------------------------------------------------------------------

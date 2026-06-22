@@ -42,7 +42,7 @@ from elspeth.plugins.infrastructure.clients.llm import (
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
-from elspeth.plugins.transforms.llm.provider import LLMQueryResult, parse_finish_reason
+from elspeth.plugins.transforms.llm.provider import LLMQueryResult, ParsedFinishReason, parse_finish_reason
 from elspeth.plugins.transforms.llm.validation import reject_nonfinite_constant
 
 if TYPE_CHECKING:
@@ -71,6 +71,7 @@ OPENROUTER_APP_REFERER = "https://github.com/johnm-dta/elspeth"
 OPENROUTER_APP_TITLE = "Elspeth"
 """Canonical OpenRouter app display title."""
 
+
 def _http_error_body_text(error: httpx.HTTPStatusError) -> str:
     """Return buffered HTTP error text for internal classification only."""
     try:
@@ -98,6 +99,85 @@ def normalize_openrouter_base_url(value: str) -> str:
     parsed = urlsplit(value)
     path = parsed.path.rstrip("/")
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+
+
+def _validate_chat_completion_response(response: httpx.Response) -> tuple[dict[str, Any], str, TokenUsage, ParsedFinishReason, str]:
+    """Parse and validate an OpenRouter chat-completion response body."""
+    try:
+        data = json.loads(response.content, parse_constant=reject_nonfinite_constant)
+    except (ValueError, TypeError) as e:
+        raise LLMClientError(
+            f"Response is not valid JSON: {e}",
+            retryable=False,
+        ) from e
+
+    if not isinstance(data, dict):
+        raise LLMClientError(
+            f"Empty or missing choices in response: {type(data).__name__}",
+            retryable=False,
+        )
+
+    choices = data.get("choices")
+    if not choices:
+        raise LLMClientError(
+            f"Empty or missing choices in response: {list(data.keys())}",
+            retryable=False,
+        )
+
+    try:
+        content = choices[0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise LLMClientError(
+            f"Malformed response structure: {type(e).__name__}: {e}",
+            retryable=False,
+        ) from e
+
+    if content is None:
+        raise ContentPolicyError("LLM returned null content (likely content-filtered by provider)")
+
+    if not isinstance(content, str):
+        raise LLMClientError(
+            f"Expected string content, got {type(content).__name__}",
+            retryable=False,
+        )
+
+    if not content.strip():
+        raw_fr = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
+        if raw_fr == "tool_calls":
+            raise LLMClientError(
+                "LLM returned tool_calls response (not supported by ELSPETH)",
+                retryable=False,
+            )
+        raise ContentPolicyError(
+            f"LLM returned empty content (finish_reason={raw_fr})",
+        )
+
+    raw_usage = data.get("usage")
+    if isinstance(raw_usage, dict):
+        for usage_key, usage_val in raw_usage.items():
+            if isinstance(usage_val, float) and not math.isfinite(usage_val):
+                raise LLMClientError(
+                    f"Non-finite value in usage.{usage_key}: {usage_val}",
+                    retryable=False,
+                )
+    usage = TokenUsage.from_dict(raw_usage)
+
+    raw_finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
+    finish_reason = parse_finish_reason(str(raw_finish_reason)) if raw_finish_reason is not None else None
+
+    # The provider MUST report which model served the request. Substituting the
+    # requested model would fabricate a Tier-3 datum; callers record/use the
+    # response model as an audited fact.
+    raw_model = data["model"] if "model" in data else None
+    if not isinstance(raw_model, str) or not raw_model.strip():
+        missing_desc = "missing" if raw_model is None else f"{type(raw_model).__name__}/empty"
+        raise LLMClientError(
+            f"LLM response 'model' is {missing_desc}, expected non-empty str. Provider returned malformed data at the Tier 3 boundary.",
+            retryable=False,
+        )
+    response_model = raw_model
+
+    return data, content, usage, finish_reason, response_model
 
 
 class OpenRouterConfig(LLMConfig):
@@ -309,89 +389,7 @@ class OpenRouterLLMProvider:
             except httpx.RequestError as e:
                 raise NetworkError(f"Network error: {e}") from e
 
-            # Parse JSON — reject NaN/Infinity at Tier 3 boundary
-            try:
-                data = json.loads(response.content, parse_constant=reject_nonfinite_constant)
-            except (ValueError, TypeError) as e:
-                raise LLMClientError(
-                    f"Response is not valid JSON: {e}",
-                    retryable=False,
-                ) from e
-
-            # Extract content from choices
-            choices = data.get("choices") if isinstance(data, dict) else None
-            if not choices:
-                raise LLMClientError(
-                    f"Empty or missing choices in response: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}",
-                    retryable=False,
-                )
-
-            try:
-                content = choices[0]["message"]["content"]
-            except (KeyError, IndexError, TypeError) as e:
-                raise LLMClientError(
-                    f"Malformed response structure: {type(e).__name__}: {e}",
-                    retryable=False,
-                ) from e
-
-            # Null content = content filtered by provider
-            if content is None:
-                raise ContentPolicyError("LLM returned null content (likely content-filtered by provider)")
-
-            # Non-string content
-            if not isinstance(content, str):
-                raise LLMClientError(
-                    f"Expected string content, got {type(content).__name__}",
-                    retryable=False,
-                )
-
-            # Empty/whitespace content — provider returned a string but with no
-            # meaningful text. Raise typed error so the transform's except
-            # LLMClientError handler catches it (not ValueError from LLMQueryResult).
-            if not content.strip():
-                raw_fr = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
-                if raw_fr == "tool_calls":
-                    raise LLMClientError(
-                        "LLM returned tool_calls response (not supported by ELSPETH)",
-                        retryable=False,
-                    )
-                raise ContentPolicyError(
-                    f"LLM returned empty content (finish_reason={raw_fr})",
-                )
-
-            # Validate usage (non-finite rejection)
-            raw_usage = data.get("usage")
-            if isinstance(raw_usage, dict):
-                for usage_key, usage_val in raw_usage.items():
-                    if isinstance(usage_val, float) and not math.isfinite(usage_val):
-                        raise LLMClientError(
-                            f"Non-finite value in usage.{usage_key}: {usage_val}",
-                            retryable=False,
-                        )
-            usage = TokenUsage.from_dict(raw_usage)
-
-            # Extract finish reason
-            raw_finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
-            finish_reason = parse_finish_reason(str(raw_finish_reason)) if raw_finish_reason is not None else None
-
-            # Extract model. The provider MUST report which model served the request.
-            # Substituting the requested model would FABRICATE a Tier-3 datum: the
-            # audited `calls` row, the `{response_field}_model` pipeline field, and the
-            # success metadata would all assert a model the provider never reported,
-            # while the recorded raw_response carries no model — two contradictory
-            # sources of truth (CLAUDE.md Data Manifesto: inference from absence is
-            # fabrication, not coercion). Mirror the Azure provider
-            # (_validate_provider_response_model): record + raise so the row routes to
-            # on_error, rather than recording a confident wrong answer.
-            raw_model = data["model"] if isinstance(data, dict) and "model" in data else None
-            if not isinstance(raw_model, str) or not raw_model.strip():
-                missing_desc = "missing" if raw_model is None else f"{type(raw_model).__name__}/empty"
-                raise LLMClientError(
-                    f"LLM response 'model' is {missing_desc}, expected non-empty str. "
-                    f"Provider returned malformed data at the Tier 3 boundary.",
-                    retryable=False,
-                )
-            response_model = raw_model
+            data, content, usage, finish_reason, response_model = _validate_chat_completion_response(response)
 
             result = LLMQueryResult(
                 content=content,
@@ -525,6 +523,7 @@ class OpenRouterLLMProvider:
                 headers={"Content-Type": "application/json"},
             )
             response.raise_for_status()
+            _validate_chat_completion_response(response)
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             detail = _summarize_http_error_body(e)

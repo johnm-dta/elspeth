@@ -87,6 +87,21 @@ def _make_error_response(status_code: int, body: str = '{"error": "test"}') -> h
     )
 
 
+def test_provider_rejects_loopback_http_base_url(
+    mock_recorder: MagicMock,
+    mock_telemetry_emit: MagicMock,
+) -> None:
+    with pytest.raises(ValueError, match="base_url"):
+        OpenRouterLLMProvider(
+            api_key="test-key",
+            base_url="http://127.0.0.1:8199/v1",
+            timeout_seconds=30.0,
+            recorder=mock_recorder,
+            run_id="run-1",
+            telemetry_emit=mock_telemetry_emit,
+        )
+
+
 class TestExecuteQuery:
     """Tests for execute_query method."""
 

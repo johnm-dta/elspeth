@@ -201,7 +201,7 @@ class CatalogValueSource:
     relevance depends on another config field — for example, OpenRouter's
     model catalog is only authoritative when ``base_url`` targets the
     canonical OpenRouter endpoint; if an operator overrides ``base_url``
-    to a chaos test server (or any non-canonical endpoint), the model
+    to a private compatible endpoint (or any non-canonical endpoint), the model
     identifier semantics are owned by that endpoint, not by litellm's
     OpenRouter slug list. Encoding the conditional in the contract keeps
     the walker free of provider-specific knowledge.

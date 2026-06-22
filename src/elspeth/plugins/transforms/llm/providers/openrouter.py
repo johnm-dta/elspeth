@@ -14,7 +14,6 @@ chat-completion semantics.
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import math
 import time
@@ -115,39 +114,6 @@ def normalize_openrouter_base_url(value: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
-def _is_loopback_hostname(hostname: str) -> bool:
-    normalized = hostname.lower().rstrip(".")
-    if normalized == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(normalized).is_loopback
-    except ValueError:
-        return False
-
-
-def _validate_openrouter_base_url(value: str) -> str:
-    """Validate OpenRouter base URLs without blocking local chaos endpoints.
-
-    Real credential-bearing OpenRouter/proxy endpoints must use HTTPS. The
-    documented ChaosLLM examples target loopback HTTP servers with fake keys, so
-    HTTP is allowed only for syntactic loopback hosts and still rejects userinfo.
-    """
-    stripped = value.strip()
-    if not stripped:
-        raise ValueError("base_url must not be empty")
-
-    parsed = urlsplit(stripped)
-    if not parsed.hostname:
-        raise ValueError("base_url must include a hostname")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError("base_url must not contain embedded credentials")
-    if parsed.scheme == "https":
-        return stripped
-    if parsed.scheme == "http" and _is_loopback_hostname(parsed.hostname):
-        return stripped
-    raise ValueError(f"base_url must use HTTPS scheme, got {parsed.scheme!r}")
-
-
 class OpenRouterConfig(LLMConfig):
     """OpenRouter-specific configuration.
 
@@ -176,7 +142,7 @@ class OpenRouterConfig(LLMConfig):
     @field_validator("base_url")
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:
-        return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url", allow_http_loopback=True))
+        return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url"))
 
     # Catalog membership for ``model`` is enforced as a value-source concern,
     # NOT in config construction: the ``CatalogValueSource`` declaration below
@@ -202,8 +168,7 @@ class OpenRouterConfig(LLMConfig):
     # Value-source declaration: ``model`` must appear in the OpenRouter
     # slice of ``litellm.model_list``, BUT only when this config targets
     # the canonical OpenRouter endpoint. When an operator overrides
-    # ``base_url`` (e.g. to a chaos test server like errorworks/chaosllm,
-    # or a private OpenAI-compatible gateway), the model identifier
+    # ``base_url`` (e.g. to a private HTTPS OpenAI-compatible gateway), the model identifier
     # semantics are owned by that endpoint — not by litellm's OpenRouter
     # slug list. The ``applies_when`` predicate keeps the catalog check
     # in lock-step with the actual HTTP boundary the runtime targets.
@@ -253,7 +218,7 @@ class OpenRouterLLMProvider:
             "HTTP-Referer": OPENROUTER_APP_REFERER,
             "X-OpenRouter-Title": OPENROUTER_APP_TITLE,
         }
-        self._base_url = base_url
+        self._base_url = normalize_openrouter_base_url(validate_credential_safe_https_url(base_url, field_name="base_url"))
         self._timeout = timeout_seconds
         self._recorder = recorder
         self._run_id = run_id

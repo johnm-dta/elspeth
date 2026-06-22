@@ -150,7 +150,7 @@ async def test_export_yaml_route_emits_completion_counter(tmp_path: Path) -> Non
     # Baseline.
     assert observed_value(telemetry.session_completed_total) == 0
 
-    with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+    with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
         resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
     assert resp.status_code == 200, resp.text
@@ -213,7 +213,7 @@ async def test_export_yaml_route_runtime_preflight_failure_does_not_emit(tmp_pat
             readiness=_blocked_readiness(),
         )
 
-    with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_fail_preflight):
+    with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_fail_preflight):
         resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
     assert resp.status_code == 409, resp.text

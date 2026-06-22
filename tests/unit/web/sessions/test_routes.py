@@ -1820,10 +1820,11 @@ class TestIDORCoverageDrift:
 
     def test_sessions_routes_ownership_call_sites(self) -> None:
         """sessions/routes/ — _verify_session_ownership inventory."""
-        from elspeth.web.sessions.routes import composer, interpretation, messages, runs, sessions
+        from elspeth.web.sessions.routes import interpretation, messages, runs, sessions
+        from elspeth.web.sessions.routes.composer import compose, guided, proposals, state
 
         found = set()
-        for routes_module in (sessions, composer, messages, runs, interpretation):
+        for routes_module in (sessions, state, proposals, compose, guided, messages, runs, interpretation):
             found.update(_collect_ownership_call_site_identities(routes_module, "_verify_session_ownership"))
         self._assert_inventory(
             "sessions/routes/",
@@ -2904,7 +2905,7 @@ class TestMessageRoutes:
         service.add_message = flaky_add_message  # type: ignore[method-assign]
 
         with patch(
-            "elspeth.web.sessions.routes.composer.solve_step_chat_with_auto_drop",
+            "elspeth.web.sessions.routes.composer.guided.solve_step_chat_with_auto_drop",
             new=AsyncMock(
                 return_value=StepChatResult(
                     assistant_message="Use the source form first.",
@@ -2992,7 +2993,7 @@ class TestMessageRoutes:
 
         with (
             patch(
-                "elspeth.web.sessions.routes.composer.solve_step_chat_with_auto_drop",
+                "elspeth.web.sessions.routes.composer.guided.solve_step_chat_with_auto_drop",
                 new=AsyncMock(
                     return_value=StepChatResult(
                         assistant_message="I can use that source.",
@@ -3003,7 +3004,7 @@ class TestMessageRoutes:
                 ),
             ),
             patch(
-                "elspeth.web.sessions.routes.composer.resolve_step_1_source_chat_with_auto_drop",
+                "elspeth.web.sessions.routes.composer.guided.resolve_step_1_source_chat_with_auto_drop",
                 new=AsyncMock(
                     return_value=Step1SourceChatResult(
                         source_resolution=Step1SourceChatResolution(
@@ -3021,7 +3022,7 @@ class TestMessageRoutes:
                 ),
             ),
             patch(
-                "elspeth.web.sessions.routes.composer.handle_step_1_source",
+                "elspeth.web.sessions.routes.composer.guided.handle_step_1_source",
                 return_value=MagicMock(tool_result=failing_tool_result),
             ),
         ):
@@ -4390,7 +4391,7 @@ sinks:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
 
         assert resp.status_code == 200, resp.text
@@ -4466,7 +4467,7 @@ sinks:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.post(
                 f"/api/sessions/{session.id}/state/yaml",
                 json={"yaml": yaml_text, "source_blob_ids": {"source": str(blob_id)}},
@@ -4609,7 +4610,7 @@ sinks:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
         assert resp.status_code == 200
         body = resp.json()
@@ -4654,7 +4655,7 @@ sinks:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 200
@@ -4723,7 +4724,7 @@ sinks:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
         assert resp.status_code == 200
         assert "field_mapper" in resp.json()["yaml"]
@@ -4795,7 +4796,7 @@ sinks:
         async def _pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=_pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 200
@@ -4859,7 +4860,7 @@ sinks:
                 ],
             )
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
@@ -4894,7 +4895,7 @@ sinks:
                 ],
             )
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
@@ -4922,7 +4923,7 @@ sinks:
         async def pass_preflight(state, *, settings, secret_service, user_id):
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=pass_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=pass_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 200
@@ -4955,7 +4956,7 @@ sinks:
         async def fail_preflight(state, *, settings, secret_service, user_id):
             return failure
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fail_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=fail_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
@@ -4985,7 +4986,7 @@ sinks:
         async def boom(state, *, settings, secret_service, user_id):
             raise TimeoutError(secret_canary)
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=boom):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=boom):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 409
@@ -5043,7 +5044,7 @@ sinks:
             # offensive-programming policy.
             raise AttributeError("'NoneType' object has no attribute 'plugin'")
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=programmer_bug):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=programmer_bug):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         # FastAPI's default 500 handler emits the bare 'Internal Server
@@ -5105,7 +5106,7 @@ sinks:
             assert state.to_dict()["sources"]["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
             return ValidationResult(is_valid=True, checks=[], errors=[])
 
-        with patch("elspeth.web.sessions.routes.composer._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=fake_runtime_preflight):
             resp = client.get(f"/api/sessions/{session.id}/state/yaml")
 
         assert resp.status_code == 200

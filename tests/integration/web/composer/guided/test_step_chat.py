@@ -952,7 +952,7 @@ class TestStepChatServerInvariants:
         Python would otherwise let that secondary logger exception replace
         the in-flight HTTPException from the ``finally`` block.
         """
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _seed_persisted_step1(composer_test_client, session_id)

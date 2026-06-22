@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
@@ -4080,6 +4080,64 @@ class TestUpdateBlobQuota:
                     status="ready",
                 )
             )
+
+    def test_check_blob_quota_locks_session_before_sum(self, monkeypatch) -> None:
+        """Composer blob writers use the same session row serialization guard."""
+        from elspeth.web.composer.tools import blobs as composer_blob_tools
+
+        locked_sessions: list[str] = []
+        original_lock = composer_blob_tools._lock_session_for_blob_quota
+
+        def recording_lock(conn, session_id: str) -> None:
+            locked_sessions.append(session_id)
+            original_lock(conn, session_id)
+
+        monkeypatch.setattr(composer_blob_tools, "_lock_session_for_blob_quota", recording_lock)
+
+        with self.engine.begin() as conn:
+            quota_error = composer_blob_tools._check_blob_quota(
+                conn,
+                self.session_id,
+                additional_bytes=1,
+                quota_bytes=100,
+            )
+
+        assert quota_error is None
+        assert locked_sessions == [self.session_id]
+
+    def test_update_locks_session_before_current_size_delta_read(self, monkeypatch) -> None:
+        """The quota lock must cover the current-size read used for update deltas."""
+        from elspeth.web.composer.tools import blobs as composer_blob_tools
+
+        events: list[str] = []
+        original_lock = composer_blob_tools._lock_session_for_blob_quota
+
+        def recording_lock(conn, session_id: str) -> None:
+            events.append("lock")
+            original_lock(conn, session_id)
+
+        def record_size_read(_conn, _cursor, statement: str, _parameters, _context, _executemany) -> None:
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("select blobs.size_bytes") and "from blobs" in normalized:
+                events.append("size_read")
+
+        monkeypatch.setattr(composer_blob_tools, "_lock_session_for_blob_quota", recording_lock)
+        event.listen(self.engine, "before_cursor_execute", record_size_read)
+        try:
+            result = execute_tool(
+                "update_blob",
+                {"blob_id": self.blob_id, "content": "larger content"},
+                _empty_state(),
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "larger content"),
+            )
+        finally:
+            event.remove(self.engine, "before_cursor_execute", record_size_read)
+
+        assert result.success is True
+        assert events[:2] == ["lock", "size_read"]
 
     def test_update_within_quota_succeeds(self) -> None:
         state = _empty_state()

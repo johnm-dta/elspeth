@@ -46,6 +46,7 @@ from elspeth.web.sessions.models import (
     blobs_table,
     composition_states_table,
     runs_table,
+    sessions_table,
 )
 from elspeth.web.sessions.protocol import CompositionStateRecord
 
@@ -249,6 +250,23 @@ def _assert_blob_run_same_session(
         )
 
 
+def _session_quota_lock_statement(session_id_str: str) -> Any:
+    """Build the per-session row lock used to serialize quota writers."""
+    return select(sessions_table.c.id).where(sessions_table.c.id == session_id_str).with_for_update()
+
+
+def _lock_session_for_blob_quota(conn: Connection, session_id_str: str) -> None:
+    """Lock the owning session row before a quota read/write sequence.
+
+    On PostgreSQL this emits ``SELECT ... FOR UPDATE`` and serializes all
+    same-session blob quota writers. SQLite ignores the row-lock clause, but
+    its coarse write serialization already preserves the current behavior.
+    """
+    locked = conn.execute(_session_quota_lock_statement(session_id_str)).first()
+    if locked is None:
+        raise RuntimeError(f"Blob quota lock target session {session_id_str!r} does not exist")
+
+
 def _guard_blob_row_literals(row: Any) -> None:
     """Validate closed-set blob row fields at the DB read boundary."""
     # Tier 1 read guards — BlobRecord's fields are declared as closed
@@ -366,6 +384,7 @@ class BlobServiceImpl:
         """Enforce session storage quota when a pending blob becomes ready."""
         if status != "ready" or size_bytes is None or size_bytes <= 0:
             return
+        _lock_session_for_blob_quota(conn, session_id_str)
         current_total = conn.execute(
             select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(
                 blobs_table.c.session_id == session_id_str,
@@ -412,10 +431,12 @@ class BlobServiceImpl:
             storage.parent.mkdir(parents=True, exist_ok=True)
             storage.write_bytes(content)
 
-            # Single transaction: quota check + insert (atomic, no TOCTOU)
+            # Single transaction: session row lock + quota check + insert.
             now = self._now()
             try:
                 with self._engine.begin() as conn:
+                    _lock_session_for_blob_quota(conn, session_id_str)
+
                     # Quota check inside the write transaction
                     current_total = conn.execute(
                         select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == session_id_str)

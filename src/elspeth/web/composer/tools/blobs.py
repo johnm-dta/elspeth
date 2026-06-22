@@ -52,6 +52,7 @@ from elspeth.web.blobs.service import (
     _active_run_pipeline_dict,
     _composition_references_blob,
     _guard_blob_row_literals,
+    _lock_session_for_blob_quota,
     content_hash,
     sanitize_filename,
 )
@@ -685,12 +686,15 @@ def _check_blob_quota(
     additional_bytes: int,
     *,
     quota_bytes: int | None = None,
+    session_locked: bool = False,
 ) -> str | None:
     """Check if adding bytes would exceed the session blob quota.
 
     Returns an error message if quota exceeded, None if OK.
     Runs inside an existing transaction for TOCTOU safety.
     """
+    if not session_locked:
+        _lock_session_for_blob_quota(conn, session_id)
     current_total = conn.execute(
         select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == session_id)
     ).scalar()
@@ -1313,12 +1317,14 @@ def _execute_update_blob(
                             f"Blob '{blob_id}' cannot be updated while active run '{active_run.run_id}' references it."
                         )
 
-                    # Atomic quota check.  ``size_bytes`` is re-read
-                    # inside the transaction so the delta reflects the
-                    # current DB row rather than a pre-transaction
-                    # snapshot (stale under writers that bypass the
-                    # composer session lock — e.g. ``BlobServiceImpl``
-                    # paths that share the same session_engine).
+                    # Atomic quota check. The session row lock serializes
+                    # same-session writers before ``size_bytes`` is re-read,
+                    # so the delta reflects the current DB row rather than a
+                    # pre-transaction snapshot (stale under writers that
+                    # bypass the composer session lock — e.g.
+                    # ``BlobServiceImpl`` paths that share the same
+                    # session_engine).
+                    _lock_session_for_blob_quota(conn, session_id)
                     current_size: int = conn.execute(
                         select(blobs_table.c.size_bytes).where(
                             blobs_table.c.id == blob_id,
@@ -1332,6 +1338,7 @@ def _execute_update_blob(
                             session_id,
                             size_delta,
                             quota_bytes=context.max_blob_storage_per_session_bytes,
+                            session_locked=True,
                         )
                         if quota_error is not None:
                             # Raising inside the ``with`` rolls the DB

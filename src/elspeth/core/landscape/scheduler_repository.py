@@ -1012,10 +1012,11 @@ class TokenSchedulerRepository:
 
         ``membership_fenced=True`` (set only by the public ``claim_ready``
         verb) adds the ``claim_verb_fence_clause`` to the UPDATE WHERE.
-        That clause passes when the worker is active OR when no workers are
-        registered at all (N=0/unit-test mode).  When workers ARE registered,
-        an evicted/departed caller gets rowcount=0 and the re-probe below
-        raises ``RunWorkerEvictedError``.  Internal callers
+        That clause passes when this worker is active OR when no workers are
+        registered for the run at all (N=0/unit-test mode). When workers ARE
+        registered, an absent caller gets rowcount=0 with zero mutation and an
+        evicted/departed caller gets rowcount=0 plus the re-probe below raises
+        ``RunWorkerEvictedError``. Internal callers
         (``_enqueue_ready_claimed_on``, ``ingest_row_with_initial_claim``) pass
         the default ``False`` because they operate inside a broader fenced
         transaction whose leadership CAS is the outer guard.
@@ -1031,8 +1032,9 @@ class TokenSchedulerRepository:
             # Membership fence (ADR-030 §G, slice 4): the claimant must hold
             # an active run_workers row OR the run has no registered workers
             # at all (N=0 / unit-test mode — see claim_verb_fence_clause).
-            # An evicted/departed caller with existing run_workers rows returns
-            # rowcount=0; the re-probe below raises RunWorkerEvictedError.
+            # An absent caller is refused once any worker has registered for
+            # the run; an evicted/departed caller is re-probed below and raises
+            # RunWorkerEvictedError.
             where_clauses = and_(
                 where_clauses,
                 claim_verb_fence_clause(worker_id=lease_owner, run_id=run_id),
@@ -1065,13 +1067,11 @@ class TokenSchedulerRepository:
                     #     the worker was registered, then evicted — raise
                     #     RunWorkerEvictedError (the canonical multi-worker signal).
                     #
-                    # (b) Worker is ABSENT (no run_workers row at all): in
-                    #     production every worker registers before claiming; an
-                    #     absent worker means the caller bypassed registration.
-                    #     Return None rather than raising so that unit tests that
-                    #     call claim_ready with fictional lease_owner IDs continue
-                    #     to work.  The fence clause in the UPDATE WHERE still
-                    #     prevents any data mutation.
+                    # (b) Worker is ABSENT while this run has registered workers:
+                    #     in production every worker registers before claiming;
+                    #     an absent worker means the caller bypassed registration.
+                    #     Return None rather than raising; the fence clause in
+                    #     the UPDATE WHERE prevents any data mutation.
                     worker_status = conn.execute(
                         select(run_workers_table.c.status)
                         .where(run_workers_table.c.worker_id == lease_owner)
@@ -1160,10 +1160,10 @@ class TokenSchedulerRepository:
                         token_work_items_table.c.run_id == run_id,
                         token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value,
                         # Membership fence (ADR-030 §G, slice 4): same discipline
-                        # as claim_ready — an evicted/departed claimant gets
-                        # rowcount=0 and the re-probe below raises
-                        # RunWorkerEvictedError rather than silently returning None.
-                        # Uses the lenient variant (passes in N=0/unit-test mode).
+                        # as claim_ready — absent claimants are refused once the
+                        # run has any registered worker; evicted/departed claimants
+                        # are re-probed below and raise RunWorkerEvictedError.
+                        # Uses the lenient variant (passes only in N=0/unit-test mode).
                         claim_verb_fence_clause(worker_id=lease_owner, run_id=run_id),
                     )
                 )
@@ -1176,9 +1176,9 @@ class TokenSchedulerRepository:
             )
             if result.rowcount == 0:
                 # Distinguish "row raced away" from "membership fence failed".
-                # Same absent-vs-evicted logic as _claim_ready_row: only raise
-                # when the worker EXISTS but is non-active (the registered-then-
-                # evicted case that matches the multi-worker eviction protocol).
+                # Same absent-vs-evicted logic as _claim_ready_row: absent
+                # unregistered claimants return None with zero mutation, while
+                # registered-then-evicted claimants raise the multi-worker signal.
                 still_pending = conn.execute(
                     select(token_work_items_table.c.work_item_id)
                     .where(token_work_items_table.c.work_item_id == row["work_item_id"])

@@ -38,6 +38,7 @@ from elspeth.core.landscape.run_coordination_repository import (
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import (
     active_worker_fence_clause,
+    claim_verb_fence_clause,
     nodes_table,
     rows_table,
     run_coordination_table,
@@ -142,6 +143,19 @@ def _seed_ready_item(db: LandscapeDB, run_id: str, *, sequence: int = 0) -> str:
         )
 
 
+def _seed_pending_sink_item(db: LandscapeDB, run_id: str, *, sequence: int = 0) -> str:
+    from elspeth.contracts.scheduler import TokenWorkStatus
+
+    work_item_id = _seed_ready_item(db, run_id, sequence=sequence)
+    with db.engine.begin() as conn:
+        conn.execute(
+            update(token_work_items_table)
+            .where(token_work_items_table.c.work_item_id == work_item_id)
+            .values(status=TokenWorkStatus.PENDING_SINK.value, updated_at=NOW + timedelta(seconds=1))
+        )
+    return work_item_id
+
+
 class TestActiveWorkerFenceClause:
     """Design :257-265, :411 — the CONSTRUCT only (compilation is slice 4)."""
 
@@ -170,6 +184,86 @@ class TestActiveWorkerFenceClause:
             assert literal in check_sql
         clause_sql = str(active_worker_fence_clause(worker_id="w", run_id="r").compile(compile_kwargs={"literal_binds": True}))
         assert "'active'" in clause_sql
+
+
+class TestClaimVerbFenceClause:
+    """Claim verbs are lenient only for true N=0 registry compatibility."""
+
+    @pytest.mark.parametrize(
+        ("registered_worker", "caller", "expected_rowcount"),
+        [
+            (None, "worker-absent", 1),  # N=0 unit-test mode remains allowed
+            ("worker-active", "worker-active", 1),  # active registered caller
+            ("worker-active", "worker-absent", 0),  # absent caller cannot bypass active registry
+            ("worker-evicted", "worker-absent", 0),  # absent caller cannot bypass any non-empty registry
+            ("worker-evicted", "worker-evicted", 0),  # non-active caller remains fenced
+        ],
+    )
+    def test_claim_verb_allows_absent_worker_only_when_run_has_no_workers(
+        self,
+        db: LandscapeDB,
+        registered_worker: str | None,
+        caller: str,
+        expected_rowcount: int,
+    ) -> None:
+        _insert_run(db, RUN_1)
+        if registered_worker is not None:
+            status = "evicted" if registered_worker == "worker-evicted" else "active"
+            _insert_worker(db, worker_id=registered_worker, run_id=RUN_1, status=status)
+        work_item_id = _seed_ready_item(db, RUN_1)
+
+        with begin_write(db.engine) as conn:
+            result = conn.execute(
+                update(token_work_items_table)
+                .where(
+                    token_work_items_table.c.work_item_id == work_item_id,
+                    token_work_items_table.c.status == "ready",
+                    claim_verb_fence_clause(worker_id=caller, run_id=RUN_1),
+                )
+                .values(updated_at=NOW + timedelta(seconds=1))
+            )
+
+        assert result.rowcount == expected_rowcount
+
+    def test_claim_ready_absent_worker_does_not_claim_when_run_has_active_workers(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        work_item_id = _seed_ready_item(db, RUN_1)
+        repo = TokenSchedulerRepository(db.engine)
+
+        claimed = repo.claim_ready(run_id=RUN_1, lease_owner="worker-absent", lease_seconds=60, now=NOW)
+
+        assert claimed is None
+        with db.engine.connect() as conn:
+            row = (
+                conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id))
+                .mappings()
+                .one()
+            )
+        assert row["status"] == TokenWorkStatus.READY.value
+        assert row["lease_owner"] is None
+
+    def test_claim_pending_sink_absent_worker_does_not_claim_when_run_has_active_workers(self, db: LandscapeDB) -> None:
+        from elspeth.contracts.scheduler import TokenWorkStatus
+
+        _insert_run(db, RUN_1)
+        _insert_worker(db, worker_id="worker-active", run_id=RUN_1, status="active")
+        work_item_id = _seed_pending_sink_item(db, RUN_1)
+        repo = TokenSchedulerRepository(db.engine)
+
+        claimed = repo.claim_pending_sink(run_id=RUN_1, lease_owner="worker-absent", lease_seconds=60, now=NOW)
+
+        assert claimed is None
+        with db.engine.connect() as conn:
+            row = (
+                conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id))
+                .mappings()
+                .one()
+            )
+        assert row["status"] == TokenWorkStatus.PENDING_SINK.value
+        assert row["lease_owner"] is None
 
     @pytest.mark.parametrize(
         ("caller", "caller_run", "expected_rowcount"),

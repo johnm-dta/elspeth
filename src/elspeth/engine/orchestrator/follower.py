@@ -310,6 +310,9 @@ class FollowerProcessor:
             if seat is None or not seat.seat_live:
                 raise _SeatDeadError(worker_id, run_id)
 
+        def ensure_leader_live_before_claim() -> None:
+            ensure_leader_live(force=True)
+
         while True:
             # Eviction / finalize-departure discrimination (design §B.1 step 5,
             # §D finalize flip).  The heartbeat latch is set on TWO distinct
@@ -348,7 +351,7 @@ class FollowerProcessor:
                 return
 
             # ── check leader liveness ─────────────────────────────────
-            ensure_leader_live(force=True)
+            ensure_leader_live()
 
             # ── attempt one claim-and-drain pass ──────────────────────
             # _drain_scheduler_claims is the existing production drain; it
@@ -364,7 +367,7 @@ class FollowerProcessor:
                 ctx=ctx,
                 pending_items={},
                 recover_pending_sinks=False,
-                before_claim=ensure_leader_live,
+                before_claim=ensure_leader_live_before_claim,
             )
 
             if drained:

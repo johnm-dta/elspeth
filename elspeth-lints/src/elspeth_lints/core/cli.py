@@ -127,11 +127,12 @@ def _add_judge_transport_arg(parser: argparse.ArgumentParser) -> None:
 def _add_judge_tools_arg(parser: argparse.ArgumentParser) -> None:
     """Attach the ``--judge-tools`` flag (read-only investigation mode).
 
-    'none' (default) keeps the blinded judge — it sees only the excerpt. 'readonly'
-    lets the agent transport Read/Grep/Glob within the source tree + allowlist dir
-    (fail-closed PreToolUse guard) to resolve a would-be block for lack of context.
-    Requires ``--judge-transport agent`` (the OpenRouter path has no tool loop) and
-    is reaudit-only / non-signing, so it never affects the signed corpus or CI.
+    'none' (default) keeps the blinded judge — it sees only the excerpt.
+    'readonly' lets the agent transport Read/Grep/Glob within the source tree +
+    allowlist dir (fail-closed PreToolUse guard) to resolve a would-be block for
+    lack of context. Requires ``--judge-transport agent`` (the OpenRouter path
+    has no tool loop). Signing paths reject it at runtime so raw tool-read bytes
+    cannot enter signed YAML rationales.
     """
     parser.add_argument(
         "--judge-tools",
@@ -142,9 +143,19 @@ def _add_judge_tools_arg(parser: argparse.ArgumentParser) -> None:
             "(excerpt only). 'readonly' lets the agent transport Read/Grep/Glob "
             "within src + allowlist dir to investigate; requires --judge-transport "
             "agent. Less reproducible than blinded mode; use for hard-case "
-            "adjudication, not deterministic decay sweeps."
+            "non-signing adjudication, not deterministic decay sweeps. Commands "
+            "that write signed allowlist entries reject readonly mode."
         ),
     )
+
+
+def _reject_readonly_judge_tools_for_signing(command_name: str) -> int:
+    sys.stderr.write(
+        f"--judge-tools readonly is not supported for {command_name} because "
+        "signed judge rationales must be based only on the scrubbed excerpt. "
+        "Use reaudit with --judge-tools readonly for non-signing investigation.\n"
+    )
+    return 2
 
 
 def _non_empty_string(value: str) -> str:
@@ -1460,17 +1471,15 @@ def _run_justify(args: argparse.Namespace) -> int:
         sys.stderr.write(f"--allowlist-dir: {allowlist_dir} is not a directory\n")
         return 2
 
-    # Resolve the judge transport + (optional) read-only tool scope up front so a
-    # bad flag combination fails before any finding scan / HMAC handling. The
-    # agent transport is a first-class peer of openrouter here; readonly tools
-    # are the agent's superset capability (openrouter has no tool loop).
+    # Resolve the judge transport up front so a bad flag combination fails before
+    # any finding scan / HMAC handling. ``justify`` writes signed YAML carrying
+    # the judge's rationale verbatim; readonly tool mode lets the external agent
+    # read raw source bytes that do not pass through ``extract_safe_excerpt`` /
+    # ``scrub_secrets``. Keep signing paths blinded to the scrubbed excerpt.
     transport: str = _CLI_TRANSPORT_CHOICES[args.judge_transport]
     tool_scope: AgentToolScope | None = None
     if args.judge_tools == "readonly":
-        if transport != TRANSPORT_AGENT:
-            sys.stderr.write("--judge-tools readonly requires --judge-transport agent (the openrouter transport has no tool loop).\n")
-            return 2
-        tool_scope = build_readonly_tool_scope(root=root, allowlist_dir=allowlist_dir)
+        return _reject_readonly_judge_tools_for_signing("justify")
 
     if args.operator_override:
         authorization_error = _operator_override_authorization_error()
@@ -3111,6 +3120,9 @@ def _run_sign_judge_signatures(args: argparse.Namespace) -> int:
     existing ``justify`` implementation. If a judge call fails, the stale row is
     restored so a rejected suppression does not erase the remaining backlog.
     """
+    if args.judge_tools == "readonly":
+        return _reject_readonly_judge_tools_for_signing("sign-judge-signatures")
+
     from elspeth_lints.core.allowlist import _judge_metadata_hmac_key
     from elspeth_lints.core.judge_signature_diagnosis import diagnose_judge_signatures
 

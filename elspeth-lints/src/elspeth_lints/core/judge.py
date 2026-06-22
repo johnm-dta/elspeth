@@ -1131,15 +1131,13 @@ def _call_openrouter(
 # excerpt — identical input to the OpenRouter path. The tool-augmented mode
 # (``tool_scope`` set) lets the judge READ the surrounding source to resolve a
 # question the excerpt can't answer (e.g. "where does this parameter come
-# from?", "is the audit event recorded before this ceremony?"). Since the
-# --judge-tools parity change it is available on BOTH reaudit (read-only) and
-# justify (signing), so it CAN feed a signed verdict. What it trades away is
-# verdict reproducibility (so the deterministic temperature=0 OpenRouter path
-# stays canonical for decay sweeps); and the signed payload does not separately
-# mark a verdict as tool-augmented (``judge_transport`` is "claude_agent_sdk"
-# for blinded and tool modes alike). That provenance gap is benign: reaudit
-# does not gate entry selection on ``policy_hash``, so these entries are
-# re-judged blinded on the next sweep regardless. See elspeth-ab5e093fa3.
+# from?", "is the audit event recorded before this ceremony?"). The CLI permits
+# this only on non-signing reaudit runs. Signing paths stay blinded to the
+# bounded, scrubbed excerpt because tool reads happen inside the external agent
+# transport and raw tool output cannot be routed back through the local source
+# scrubber before it can influence a persisted rationale. What tool mode trades
+# away is verdict reproducibility, so the deterministic temperature=0 OpenRouter
+# path stays canonical for decay sweeps. See elspeth-ab5e093fa3.
 #
 # SECURITY — the load-bearing guard. ``permission_mode="default"``
 # auto-approves read-only tools, so a ``can_use_tool`` callback is NEVER

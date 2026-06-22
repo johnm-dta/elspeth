@@ -472,7 +472,7 @@ def test_call_judge_threads_scope_only_when_set() -> None:
 
 
 # --------------------------------------------------------------------------
-# CLI rejection: --judge-tools readonly requires --judge-transport agent
+# CLI rejection: readonly judge tools are not valid on signing paths
 # --------------------------------------------------------------------------
 
 
@@ -491,9 +491,9 @@ def test_cli_readonly_with_openrouter_rejected(tmp_path: Path, capsys: pytest.Ca
     assert "requires --judge-transport agent" in capsys.readouterr().err
 
 
-def test_cli_justify_readonly_with_openrouter_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    # Parity: justify (the signing path) accepts --judge-tools just like reaudit,
-    # and rejects readonly+openrouter the same way, before any finding scan / HMAC.
+def test_cli_justify_readonly_rejected_for_signing_path(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # justify writes signed YAML, so readonly tool mode is unsafe even with the
+    # agent transport: tool-read bytes bypass source_excerpt.scrub_secrets.
     import argparse
 
     from elspeth_lints.core.cli import _run_justify
@@ -502,8 +502,42 @@ def test_cli_justify_readonly_with_openrouter_rejected(tmp_path: Path, capsys: p
         root=tmp_path,
         repo_root=None,
         allowlist_dir=tmp_path,
-        judge_transport="openrouter",
+        judge_transport="agent",
         judge_tools="readonly",
+        file_path="missing.py",
     )
     assert _run_justify(args) == 2
-    assert "requires --judge-transport agent" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "not supported for justify" in captured.err
+    assert "scrubbed excerpt" in captured.err
+
+
+def test_cli_sign_judge_signatures_readonly_rejected_for_signing_path(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import argparse
+
+    import elspeth_lints.core.cli as cli
+    import elspeth_lints.core.judge_signature_diagnosis as diagnosis
+    from elspeth_lints.core.cli import _run_sign_judge_signatures
+
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("readonly signing rejection must run before signing side effects")
+
+    monkeypatch.setattr(cli, "_load_judge_signing_env_file", fail_if_called)
+    monkeypatch.setattr(cli, "_pop_allow_hits_entry", fail_if_called)
+    monkeypatch.setattr(cli, "_run_justify", fail_if_called)
+    monkeypatch.setattr(diagnosis, "diagnose_judge_signatures", fail_if_called)
+    args = argparse.Namespace(
+        judge_tools="readonly",
+        env_file=None,
+        dry_run=False,
+        root=Path("/unused/root"),
+        allowlist_dir=Path("/unused/allowlist"),
+        manifest=[],
+    )
+    assert _run_sign_judge_signatures(args) == 2
+    captured = capsys.readouterr()
+    assert "not supported for sign-judge-signatures" in captured.err
+    assert "scrubbed excerpt" in captured.err

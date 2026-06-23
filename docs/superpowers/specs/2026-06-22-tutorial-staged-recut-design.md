@@ -23,7 +23,9 @@
   wire-data-contract, cache-key, prompt-scoping, and entry-protocol corrections.
 - **rev 3 (2026-06-22):** Adjudicated a second, deeper code review (14 findings).
   Material corrections: **web_scrape is a TRANSFORM, not a source** — the recipe
-  predicate matches the URL-row `inline_blob` source, not `web_scrape` (D11 fixed);
+  predicate matches the materialized URL-row `json`/`csv` source with
+  `source.options["blob_ref"]` (the `inline_blob` authoring alias becomes a real
+  source plugin after materialization), not `web_scrape` (D11 fixed);
   the interpretation-surfacing pass must fire after **every** site-creating commit
   (source, transform, **and the deterministic recipe-apply**) and must cover **all
   five kinds**, not just prompt_template — plus an explicit frontend **projection +
@@ -76,8 +78,10 @@
   a no-op; `_build_checkpoint_arguments` is at `service.py:4083` (not 4108); B1's orphan
   gate is unreachable from the guided dispatch path (not "only inside
   `_try_terminate_no_tools`"). Plus migration secret-archive hardening (§8), a
-  terminal-stamp invariant test, a 4th-cache-input test, and the field_mapper sink-field
-  assertion (§9).
+  terminal-stamp invariant test, a five-input cache identity test
+  (`composer_model`, retained core freeform skill, staged skill hashes,
+  deployment overlay, and `recipes.py`/`recipe_match.py` content), and the
+  field_mapper sink-field assertion (§9).
 
 ## 1. Motivation
 
@@ -128,10 +132,11 @@ audited staged source → sink → recipe-match → transforms wizard:
 - **A deterministic recipe-match short-circuit** (`step_2_5`) — but it matches
   **CSV sources only** (`composer/guided/recipe_match.py:186` `_is_csv`; all
   recipes hardcode `source.plugin == csv`, `composer/recipes.py:219/314/469`). The
-  canonical pipeline's source is an **`inline_blob`** URL list feeding a
+  canonical authoring pipeline's source is an **`inline_blob`** URL list feeding a
   **`web_scrape` transform** (web_scrape is a transform, not a source —
   `plugins/transforms/web_scrape.py:146`), so no current recipe fires for it; see
-  §3/D11 (we add a web_scrape-shaped recipe keyed on the `inline_blob` source).
+  §3/D11 (we add a web_scrape-shaped recipe keyed on the materialized URL-row
+  `json`/`csv` source with `source.options["blob_ref"]`).
 - **Interpretation review** is a **freeform** construct, **not** a guided turn type
   (corrected — see B4/D12). The backend `TurnType` enum (`protocol.py:16-25`) has
   six members and none is `interpretation_review`; that string exists only in the
@@ -177,12 +182,12 @@ change / no new dispatch branch", not "literally zero code".)
 | D8 | Profile scope | **Plumbing only** — no registry/picker/menu; one wired instance |
 | D9 | Frontend | Tutorial **drives the real coached guided stepper** |
 | D10 | Migration | **In-place** for 0.7.0; remove big-bang components; no feature flag |
-| **D11** | Canonical compose path | **Add a web_scrape recipe** (+ predicate) so the canonical pipeline composes deterministically (zero-LLM). **web_scrape is a TRANSFORM** — the predicate matches the URL-row `inline_blob` SOURCE; the builder emits source→web_scrape→llm_rate→field_mapper(cleanup)→jsonl. **Shield: re-polarized (rev 4).** The recipe omits an *unbuildable* `azure_prompt_shield` hard node (the composer can't instantiate it without configured secrets — `elspeth-abb2cb0931`, a conditional security ticket), **but the existing medium-severity prompt-shield advisory warning STAYS LIVE** and surfaces at the wire stage. Test pins advisory **presence** + absence of the hard node (NOT "no shield recommendation"). Generalises recipe-match to web-scrape guided users |
+| **D11** | Canonical compose path | **Add a web_scrape recipe** (+ predicate) so the canonical pipeline composes deterministically (zero-LLM). **web_scrape is a TRANSFORM** — the predicate matches the materialized URL-row source plugin (`json`/`csv`) with `source.options["blob_ref"]`; `inline_blob` is only the authoring alias. The builder emits source→web_scrape→llm_rate→field_mapper(cleanup)→jsonl. **Shield: re-polarized (rev 4).** The recipe omits an *unbuildable* `azure_prompt_shield` hard node (the composer can't instantiate it without configured secrets — `elspeth-abb2cb0931`, a conditional security ticket), **but the existing medium-severity prompt-shield advisory warning STAYS LIVE** and surfaces at the wire stage. Test pins advisory **presence** + absence of the hard node (NOT "no shield recommendation"). Generalises recipe-match to web-scrape guided users |
 | **D12** | Per-stage review surfacing | **Reuse the freeform `interpretation_events` store** — NO new backend guided `TurnType`. Surface after **every** site-creating commit (source, transform, AND recipe-apply), covering **all five kinds** (prompt_template, model_choice, invented_source, vague_term, pipeline_decision). Frontend: the guided ChatPanel branch must **project** pending events from `interpretationEventsStore` and **block advancement** while pending (the `GuidedTurn.tsx` `interpretation_review` case is dead code, not the path) |
 | **D13** | Advisor terminal ordering + verdicts | END sign-off is a **pre-terminal gate inside the wire-commit branch**, **gated on the server-owned `profile.advisor_checkpoints`** (rev 4: live-guided's empty profile bypasses it, so D14's global wire stage is NOT a blocking-advisor regression for live guided; a client cannot disable it — closed-enum profile, server builds the object). CLEAN stamps COMPLETED. **FLAGGED / MALFORMED** are fail-closed-blocking: re-emit the wire turn while passes remain, then fail-closed non-runnable on budget-exhaustion — **no manual-proceed bypass**. **Sustained UNAVAILABLE / timeout** (infra failure, never a quality verdict) re-emits a retry while passes remain, then on budget-exhaustion offers a **differentiated "complete without sign-off (advisor unreachable)" escape** — ONLY for unavailability, **never** for a FLAG — so an advisor outage cannot brick a first-run tutorial (rev 4, reverses rev-3's undifferentiated fail-closed). `STEP_4_WIRE` re-enterable, bounded by a **persisted** pass counter (D16) |
 | **D14** | Stage set ownership | The stage SET is a **global engine property** (the frozen-total `GuidedStep` enum), NOT a `WorkflowProfile` field; live guided also gains the wire stage (intended improvement, not a parity regression) |
-| **D15** | Schema migration mechanism | **Purge** (not migrate) AND bump `SESSION_SCHEMA_EPOCH` 22→23 so boot fail-closes loudly. Session-DB-only cutover; reuse the existing `docs/runbooks/staging-session-db-recreation.md` |
-| **D16** | Duplicate-submission protection | **Minimal + concurrency parity.** Rely on existing per-session `compose_lock` + `step_advance` + terminal-409 + run-cache; **persist `advisor_checkpoint_passes_used`** on `GuidedSession` (same v6 bump) so duplicate advisor confirms can't re-call the provider unbounded; AND give `/guided/respond` the optimistic-concurrency `step_index` 409 guard `/guided/chat` already has; AND guard **`POST /guided/start` against double-submit** — a second start for a session that already has a persisted `GuidedSession` returns the existing session (idempotent), never re-initialises (rev 4, closes the one open review item). NO full idempotency-key infra (YAGNI) |
+| **D15** | Schema migration mechanism | **Purge** (not migrate) AND bump `SESSION_SCHEMA_EPOCH` 23→24 so boot fail-closes loudly. Session-DB-only cutover; reuse the existing `docs/runbooks/staging-session-db-recreation.md`. Epoch **23** is the settled prior epoch at branch HEAD `5e46c226c`; the next free epoch is **24** |
+| **D16** | Duplicate-submission protection | **Minimal + concurrency parity.** Rely on existing per-session `compose_lock` + `step_advance` + terminal-409 + run-cache; **persist `advisor_checkpoint_passes_used`** on `GuidedSession` (same v6 bump) so duplicate advisor confirms can't re-call the provider unbounded; AND give `POST /api/sessions/{session_id}/guided/respond` the optimistic-concurrency `step_index` 409 guard `POST /api/sessions/{session_id}/guided/chat` already has; AND guard **`POST /api/sessions/{session_id}/guided/start` against double-submit** — a second start for a session that already has a persisted `GuidedSession` returns the existing session (idempotent), never re-initialises (rev 4, closes the one open review item). NO full idempotency-key infra (YAGNI) |
 
 ## 4. Architecture
 
@@ -260,8 +265,8 @@ Must hit all of these in lockstep (import-time asserts catch omissions):
   (`steps.py:390-406`) **and** `handle_step_2_5_recipe_apply` (`steps.py:262-274`)
   stamp `COMPLETED` today; **move the terminal-stamping out of both** and into the
   `STEP_4_WIRE` handler, or the recipe path skips wiring.
-- `sessions/routes/composer.py:1366-1414` — add the `STEP_4_WIRE` rebuild branch in
-  the GET `/guided` re-fetch dispatcher.
+- `sessions/routes/composer/guided.py` — add the `STEP_4_WIRE` rebuild branch in
+  the `GET /api/sessions/{session_id}/guided` re-fetch dispatcher.
 - `frontend/src/types/guided.ts:18-39` — add the step string to the hand-written
   `GuidedStep` TS union and the new `TurnType`(s) to the `TurnType` union.
 
@@ -275,19 +280,20 @@ Must hit all of these in lockstep (import-time asserts catch omissions):
   thread the profile into `_initial_composition_state_with_guided_session`
   (`_helpers.py:2183-2208`).
 - **Entry protocol (B2 — the missing link).** Today guided entry is no-arg/lazy:
-  `GET /{session_id}/guided` (`composer.py:1455-1508`) takes no profile input and
+  `GET /api/sessions/{session_id}/guided` (`composer.py:1455-1508`) takes no profile input and
   lazily builds a default guided state; `createSession()` (`client.ts:329`) posts
   only `{title}`. Threading the parameter into the helper is necessary but not
   sufficient — nothing upstream supplies it. **Add a tutorial-start endpoint**
-  (e.g. `POST /api/sessions/{id}/guided/start` with an optional closed-enum
+  (e.g. `POST /api/sessions/{session_id}/guided/start` with an optional closed-enum
   `profile` discriminator, or fold into the `/api/tutorial/*` route family) that
   constructs the session via `_initial_composition_state_with_guided_session(
-  profile=TUTORIAL_PROFILE)` and **persists** it. `GET /guided` then **reads** the
+  profile=TUTORIAL_PROFILE)` and **persists** it.
+  `GET /api/sessions/{session_id}/guided` then **reads** the
   persisted `GuidedSession.profile` (round-tripped by the v6 schema) rather than
   re-constructing a default. The frontend tutorial machine calls this start
   endpoint instead of relying on the lazy GET default. The lazy no-arg GET path
   stays untouched for live guided (empty profile). **Idempotent start (rev 4):** a
-  second `POST /guided/start` for a session that **already** has a persisted
+  second `POST /api/sessions/{session_id}/guided/start` for a session that **already** has a persisted
   `GuidedSession` returns the existing session unchanged (never re-initialises or
   double-creates) — the single double-submit guard the design needs beyond D16's
   per-step 409s; profile discriminator is validated against a server-side **closed
@@ -321,7 +327,7 @@ field** (D14). The default (empty) profile sets all to live-guided behaviour.
 - **Persist the advisor pass counter (D16).** Add `advisor_checkpoint_passes_used:
   int = 0` to `GuidedSession` in the **same** v6 bump (strict `to_dict`/`from_dict`).
   Today it's a per-compose local (`service.py:3160`); guided re-entry is across
-  separate `/guided/respond` requests, so an unpersisted counter resets to 0 each
+  separate `POST /api/sessions/{session_id}/guided/respond` requests, so an unpersisted counter resets to 0 each
   request and `composer_advisor_checkpoint_max_passes` **never bounds re-entry**. The
   `STEP_4_WIRE` branch reads/increments/persists it (this is what makes D13's "bounded
   re-entry" real).
@@ -348,11 +354,11 @@ field** (D14). The default (empty) profile sets all to live-guided behaviour.
   preserves the profile — that is the intended round-trip, not a leak.)
 - **Duplicate-submission / concurrency (D16).** Inherited guarantees (state them so
   the plan doesn't reinvent them): all guided mutations are serialized per-session by
-  `compose_lock` (`_helpers.py:212`); duplicate `/guided/respond` is naturally
+  `compose_lock` (`_helpers.py:212`); duplicate `POST /api/sessions/{session_id}/guided/respond` is naturally
   idempotent because `step_advance` moves `guided.step` and the terminal **409 guard**
-  (`composer.py:2131`) rejects post-terminal re-submits; `tutorial/run` dedups via the
-  run-cache (no provider re-call). Add: give `/guided/respond` the **optimistic-
-  concurrency `step_index` 409 guard** that `/guided/chat` already has
+  (`composer.py:2131`) rejects post-terminal re-submits; `/api/tutorial/run` dedups via the
+  run-cache (no provider re-call). Add: give `POST /api/sessions/{session_id}/guided/respond` the **optimistic-
+  concurrency `step_index` 409 guard** that `POST /api/sessions/{session_id}/guided/chat` already has
   (`composer.py:2658`) — carry an expected step on the wire confirm, 409 on mismatch.
   No idempotency-key infrastructure (YAGNI for a single-user-per-session wizard).
 
@@ -486,7 +492,7 @@ into the route/dispatcher.
 **Terminal ordering (B5/D13 — corrected).** The END sign-off must be a
 **pre-terminal gate inside the `STEP_4_WIRE` dispatch branch**, *before* it stamps
 `COMPLETED` — **not** a post-`terminal = guided.terminal` hook at
-`composer.py:2381` (once terminal is stamped, `/guided/respond` rejects further
+`composer.py:2381` (once terminal is stamped, `POST /api/sessions/{session_id}/guided/respond` rejects further
 responses with 409 at `composer.py:2131`, foreclosing the revise turn). Behaviour:
 
 **Gate precondition (rev 4):** the entire terminal sign-off runs **only when the
@@ -648,18 +654,21 @@ agnostic to how it was composed. **Run → audit → graduation survive as-is.**
 For the staged design it must fold the complete set of **operator-controlled
 deterministic inputs**:
 
-**Four** keyed inputs (finding 9 — rev-2 listed three and its "instead of the
-freeform skill" phrasing silently **dropped** the deployment hash that the current
-code keys and the staged advisor still consumes):
+**Five** keyed inputs (finding 9 — rev-2 listed three and its "instead of the
+freeform skill" phrasing silently **dropped** the retained core skill hash and
+deployment hash that the current code keys and the staged advisor still consumes):
 
 1. `composer_model`.
-2. The **staged skill hashes** (`base.md` + `step_1..step_4_wire.md`) — folded **in
+2. The retained **core freeform skill hash** (`pipeline_composer.md`) — preserved
+   from the current `tutorial_model_id` because the END advisor prompt still uses
+   the core composer system/deployment stack.
+3. The **staged skill hashes** (`base.md` + `step_1..step_4_wire.md`) — folded **in
    addition to**, not instead of —
-3. the **deployment-overlay hash** `sha256(load_deployment_skill("pipeline_composer",
+4. the **deployment-overlay hash** `sha256(load_deployment_skill("pipeline_composer",
    data_dir))`, **RETAINED** from the current `tutorial_model_id`: the staged advisor
    END sign-off still consumes `build_system_prompt(data_dir)` (`prompts.py:62-86`)
    and per D13 that verdict shapes the cached audit artifact.
-4. A content hash covering **both** `composer/recipes.py` (`RecipeSpec` + `_build_*`)
+5. A content hash covering **both** `composer/recipes.py` (`RecipeSpec` + `_build_*`)
    **and** `composer/guided/recipe_match.py` (the predicate registry + slot
    resolvers) — `recipe_match` selects which recipe fires and pre-fills slots, and
    under D11 the recipe **deterministically authors the cached pipeline including
@@ -688,7 +697,7 @@ second profile (D8).
   building in guided / try freeform").
 - **Mechanism / bridge component (finding 5).** Add a named **`TutorialGuidedShell`**
   component that (a) renders the `welcome` bookend, (b) on Start calls
-  `POST /guided/start` with the `TutorialProfile` and switches the session into guided
+  `POST /api/sessions/{session_id}/guided/start` with the `TutorialProfile` and switches the session into guided
   mode, (c) renders the **same** guided surface as `ChatPanel`'s `chat-panel--guided`
   branch, and (d) on guided `terminal=completed` hands off to the surviving
   `tutorialMachine.ts` run/audit/graduation tail. **Recommended: EMBED** — the
@@ -704,7 +713,7 @@ second profile (D8).
 - **Accepted limitation:** the `welcome`/`run`/`audit`/`graduation` bookend progress
   stays **local** to `tutorialMachine.ts` (not persisted), so a hard refresh mid-tail
   restarts the tail while the guided step itself resumes from the persisted profile via
-  `GET /guided`. Remove `TutorialTurn2Describe` / `TutorialTurn2bShowBuilt`;
+  `GET /api/sessions/{session_id}/guided`. Remove `TutorialTurn2Describe` / `TutorialTurn2bShowBuilt`;
   `tutorialMachine.ts` retains `welcome` + the run/audit/graduation tail.
 
 ## 8. Migration (D10, D15 — corrected runbook)
@@ -728,7 +737,7 @@ two-DB path. The epoch guard is **SQLite-specific** (`PRAGMA application_id` /
 `user_version`); the staging deploy is single-worker SQLite, and Postgres is out of
 scope/unproven for this cutover. Spec-level deltas on top of the runbook:
 
-1. **Also bump `SESSION_SCHEMA_EPOCH` 22→23** (`models.py:117`) so
+1. **Also bump `SESSION_SCHEMA_EPOCH` 23→24** (`models.py:117`) so
    `initialize_session_schema` → `_assert_schema_sentinels` (`schema.py:163-169`)
    **fail-closes at boot** with the actionable "Delete the session DB file and
    restart" message — converting the silent lazy-500 into a loud boot guard (D15).
@@ -768,8 +777,9 @@ pipeline still applies. No long-lived feature flag.
     `llm_model_choice` cards; at the **recipe-apply** commit (zero-LLM path) the
     auto-staged kinds surface (not silent orphans). Each is a **resolvable card**, not
     a run-time 500. Cover all five kinds (incl. `pipeline_decision`, `vague_term`).
-  - The new **web_scrape recipe (D11):** predicate matches the **`inline_blob`** URL
-    source (not `web_scrape`); `_build_*` names the head source + emits
+  - The new **web_scrape recipe (D11):** predicate matches the materialized URL-row
+    source plugin (`json`/`csv`) with `source.options["blob_ref"]`
+    (not bare `inline_blob`, and not `web_scrape`); `_build_*` names the head source + emits
     source→web_scrape→llm_rate→field_mapper→jsonl, staging the raw-HTML
     `pipeline_decision` so it passes the blocking cleanup contract; recipe-apply
     redirects **through** the wire stage. **Shield advisory test (re-polarized, rev 4):**
@@ -801,19 +811,21 @@ pipeline still applies. No long-lived feature flag.
     distinguishing it from CLEAN). Pre-terminal ordering (no 409 dead-end) for every path.
   - **Duplicate-submission (D16):** a double-confirm at the wire stage results in
     **exactly one** advisor provider call (the persisted `advisor_checkpoint_passes_used`
-    bounds re-entry across requests); a stale `step_index` on `/guided/respond` → 409.
+    bounds re-entry across requests); a stale `step_index` on
+    `POST /api/sessions/{session_id}/guided/respond` → 409.
   - **Per-phase `REQUEST_ADVISOR` escape:** dispatch from each stage; the trust-tier
     guard (operator-triggered escapes do NOT pass through Tier-3
     `_validate_advisor_arguments`; checkpoints do not consume unvalidated user text);
     a client-tamper case.
-  - **Cache identity (C2 — four inputs):** editing a stage block, **the deployment
+  - **Cache identity (C2 — five inputs):** editing the retained core
+    `pipeline_composer.md` skill, a staged guided block, **the deployment
     overlay**, OR a `recipe_match` predicate/`recipes.py` builder each invalidates the
     cache; `_state_matches_cached_topology` tolerance; single-profile seed assertion.
     **Regression guard (rev 4):** the existing
     `test_tutorial_model_id_includes_composer_model_core_skill_and_deployment_skill` asserts
-    only **three** inputs — add an explicit assertion that mutating `recipes.py` /
-    `recipe_match.py` content shifts `tutorial_model_id`, so omitting the 4th key cannot
-    pass silently.
+    only the original core inputs — add explicit assertions that mutating staged guided
+    skills and `recipes.py` / `recipe_match.py` content shifts `tutorial_model_id`, so
+    omitting either new key cannot pass silently.
   - **Profile lifecycle (finding 10; rev 4):** fork a tutorial-profile session → the forked
     `GuidedSession.profile` is the **empty** profile (no tutorial seed/coaching/
     bookends); an ordinary guided fork is unaffected. **Critical case:** fork a tutorial
@@ -831,7 +843,7 @@ pipeline still applies. No long-lived feature flag.
     may stamp `COMPLETED` directly (missing either move silently skips the wire stage,
     surfacing, and advisor gate). Make it an import-time/unit invariant, not only an E2E.
   - `WorkflowProfile` schema-v6 strict round-trip (incl. `advisor_checkpoint_passes_used`);
-    a **pre-v6 GuidedSession is rejected** on load; the `SESSION_SCHEMA_EPOCH` 22→23
+    a **pre-v6 GuidedSession is rejected** on load; the `SESSION_SCHEMA_EPOCH` 23→24
     boot guard fires.
 - **Frontend:**
   - Extend `composer-guided.spec.ts` for the wire stage; rewrite `tutorial.spec.ts`
@@ -845,7 +857,7 @@ pipeline still applies. No long-lived feature flag.
     `interpretationEventsStore` **permits** the run to proceed — exercise both branches.
     **Rev 4: put the blocks-run/permits-run assertion at the BACKEND integration tier**
     (mirror the freeform `test_compose_loop_interpretation_review_dispatch.py` mock pattern
-    — hit `POST /tutorial/run` with an unresolved `interpretation_events` row); reserve
+    — hit `POST /api/tutorial/run` with an unresolved `interpretation_events` row); reserve
     E2E for the UI projection/blocking only, to keep the load-bearing backstop off the
     flaky live-LLM staging path.
   - **Bridging (D9):** the `TutorialGuidedShell` mounts the **real** `ChatPanel`
@@ -919,7 +931,9 @@ pipeline still applies. No long-lived feature flag.
   destroyed** with it; follow `docs/runbooks/staging-session-db-recreation.md`
   (single-DB path; back up the full `-wal/-shm/-journal` set first).
 - **web_scrape recipe (D11)** is new engine work; web_scrape is a **transform** (the
-  predicate keys the `inline_blob` source); it must stage the raw-HTML cleanup
+  predicate keys the materialized URL-row `json`/`csv` source with
+  `source.options["blob_ref"]`, never bare `inline_blob` and never `web_scrape`);
+  it must stage the raw-HTML cleanup
   `pipeline_decision` or the deterministic path trips the blocking cleanup contract.
   **rev 4:** it omits the *unbuildable* shield hard node but **keeps the existing
   medium-severity prompt-shield advisory warning live** (`elspeth-abb2cb0931` is a
@@ -934,11 +948,13 @@ pipeline still applies. No long-lived feature flag.
   `steps.py`, `prompts.py`, `emitters.py`, `chain_solver.py`, `recipe_match.py`,
   `skills/`.
 - Recipe catalog (composer top-level, **NOT** under `guided/`): `composer/recipes.py`
-  (`RecipeSpec` + `_build_*`; add the web_scrape RecipeSpec keyed on the `inline_blob`
-  source per D11/B4).
-- Route layer: `sessions/routes/_helpers.py` (dispatcher), `sessions/routes/composer.py`
-  (incl. the new guided/tutorial start endpoint, GET /guided, the 409 guard at
-  `:2131`, the terminal read at `:2381`).
+  (`RecipeSpec` + `_build_*`; add the web_scrape RecipeSpec keyed on the materialized
+  URL-row `json`/`csv` source with `source.options["blob_ref"]` per D11/B4).
+- Route layer: `sessions/routes/_helpers.py` (dispatcher),
+  `sessions/routes/composer/guided.py` (incl. the new
+  `POST /api/sessions/{session_id}/guided/start` endpoint,
+  `GET /api/sessions/{session_id}/guided`, the
+  409 guard, and terminal read).
 - Interpretation: `composer/service.py` (`_auto_surface_prompt_template_reviews`
   `:1412`, surface/gate `:2864`, orphan sites `:1376`), `interpretation_state.py`,
   `execution/service.py:514-525`, `interpretation_events` store / `models.py:648`.

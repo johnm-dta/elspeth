@@ -38,6 +38,7 @@ from elspeth.core.landscape.schema import (
     transform_errors_table,
     validation_errors_table,
 )
+from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.composer.guided.errors import InvariantError
@@ -425,6 +426,7 @@ def _make_progress_route_app(
         composer_rate_limit_per_minute=10,
         shareable_link_signing_key=b"\x00" * 32,
     )
+    app.state.payload_store = FilesystemPayloadStore(app.state.settings.get_payload_store_path())
     app.state.composer_service = None
     app.state.rate_limiter = ComposerRateLimiter(limit=100)
     app.state.execution_service = AsyncMock()
@@ -484,6 +486,7 @@ def _make_app(
         composer_rate_limit_per_minute=10,
         shareable_link_signing_key=b"\x00" * 32,
     )
+    app.state.payload_store = FilesystemPayloadStore(app.state.settings.get_payload_store_path())
     # composer_service is set to None here; tests that POST messages
     # must replace it with a mock before sending requests.
     app.state.composer_service = None
@@ -1728,6 +1731,7 @@ class TestIDORCoverageDrift:
             "get_state_versions",
             "revert_state",
             "get_state_yaml",
+            "import_state_yaml",
             "fork_from_message",
             "get_guided",
             "post_guided_reenter",
@@ -1947,6 +1951,7 @@ class TestIDORProtection:
     - ``GET  /{session_id}/state/versions``  (get_state_versions)
     - ``POST /{session_id}/state/revert``    (revert_state)
     - ``GET  /{session_id}/state/yaml``      (get_state_yaml)
+    - ``POST /{session_id}/state/yaml``      (import_state_yaml)
     - ``POST /{session_id}/fork``            (fork_from_message)
     - ``GET  /{session_id}/guided``          (get_guided)
     - ``POST /{session_id}/guided/reenter``  (post_guided_reenter)
@@ -2077,6 +2082,30 @@ class TestIDORProtection:
         # options, source/sink names, routing); missing this guard would
         # be the highest-bandwidth IDOR leak of the state-read family.
         resp = bob_client.get(f"/api/sessions/{session_id}/state/yaml")
+        assert resp.status_code == 404
+
+        # Bob tries to POST state/yaml -- should be 404.  Import is a
+        # high-impact mutation endpoint: without the same ownership gate as
+        # export, an attacker could overwrite Alice's composition state.
+        resp = bob_client.post(
+            f"/api/sessions/{session_id}/state/yaml",
+            json={
+                "yaml": (
+                    "sources:\n"
+                    "  source:\n"
+                    "    plugin: csv\n"
+                    "    options:\n"
+                    "      path: inputs/data.csv\n"
+                    "      schema:\n"
+                    "        mode: observed\n"
+                    "sinks:\n"
+                    "  main:\n"
+                    "    plugin: csv\n"
+                    "    options:\n"
+                    "      path: outputs/out.csv\n"
+                )
+            },
+        )
         assert resp.status_code == 404
 
         # Bob tries to POST fork -- should be 404.  A successful fork

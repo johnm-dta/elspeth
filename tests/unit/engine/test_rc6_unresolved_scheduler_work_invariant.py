@@ -46,7 +46,7 @@ _PAYLOAD = TokenSchedulerRepository.serialize_row_payload(PipelineRow({"id": 1},
 
 def _build_processor() -> tuple[RowProcessor, TokenSchedulerRepository, RecorderSetup]:
     """Real RowProcessor over a real in-memory audit DB and scheduler repository."""
-    setup = make_recorder_with_run(run_id="run-unresolved-pin", source_node_id="source-1")
+    setup = make_recorder_with_run(run_id="run-unresolved-pin", source_node_id="source-1", leader_worker_id=LEASE_OWNER)
     register_test_node(setup.data_flow, setup.run_id, NODE_ID)
     scheduler = setup.factory.scheduler
     processor = RowProcessor(

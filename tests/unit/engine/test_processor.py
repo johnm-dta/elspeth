@@ -80,6 +80,7 @@ from tests.fixtures.landscape import leader_coordination_token, make_recorder_wi
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 _DEFAULT_SCHEDULER = object()
+_TEST_LEADER_WORKER_ID = "seeder"
 
 
 def _make_contract() -> SchemaContract:
@@ -249,8 +250,42 @@ def _make_factory(
         run_id=run_id,
         source_node_id=source_node_id,
         source_plugin_name="test-source",
+        leader_worker_id=_TEST_LEADER_WORKER_ID,
     )
     return setup.db, setup.factory
+
+
+def _register_test_worker(
+    factory: RecorderFactory,
+    worker_id: str,
+    *,
+    run_id: str = "test-run",
+    heartbeat_expires_at: datetime | None = None,
+) -> None:
+    """Register a scheduler lease owner used by direct test claims."""
+    from sqlalchemy import insert, select
+
+    from elspeth.core.landscape.schema import run_workers_table
+
+    with factory._db.engine.begin() as conn:
+        exists = conn.execute(
+            select(run_workers_table.c.worker_id)
+            .where(run_workers_table.c.worker_id == worker_id)
+            .where(run_workers_table.c.run_id == run_id)
+        ).first()
+        if exists is not None:
+            return
+        registered_at = datetime.now(UTC)
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id=worker_id,
+                run_id=run_id,
+                role="follower",
+                status="active",
+                registered_at=registered_at,
+                heartbeat_expires_at=heartbeat_expires_at or registered_at + timedelta(hours=1),
+            )
+        )
 
 
 def _make_processor(
@@ -284,6 +319,9 @@ def _make_processor(
     stamp_blocked_rows_adopted: bool = True,
 ) -> RowProcessor:
     """Create a RowProcessor with sensible defaults."""
+    if scheduler_lease_owner is not None:
+        _register_test_worker(factory, scheduler_lease_owner, run_id=run_id)
+
     coalesce_nodes = dict(coalesce_node_ids or {})
     traversal_steps = dict(node_step_map or {})
     source_node = NodeID(source_node_id)
@@ -432,16 +470,15 @@ class TestConstructorErrorEdgeMap:
         with pytest.raises(TypeError, match="scheduler"):
             _make_processor(factory, scheduler=None)
 
-    def test_default_scheduler_lease_owner_is_instance_unique(self) -> None:
-        """Implicit scheduler lease owners must distinguish processors for the same run."""
+    def test_default_scheduler_lease_owner_uses_coordination_token(self) -> None:
+        """A processor with a coordination token uses its registered worker identity."""
         _, factory = _make_factory()
 
         first = _make_processor(factory, scheduler=factory.scheduler)
         second = _make_processor(factory, scheduler=factory.scheduler)
 
-        assert first._scheduler_lease_owner.startswith("row-processor:test-run:")
-        assert second._scheduler_lease_owner.startswith("row-processor:test-run:")
-        assert first._scheduler_lease_owner != second._scheduler_lease_owner
+        assert first._scheduler_lease_owner == _TEST_LEADER_WORKER_ID
+        assert second._scheduler_lease_owner == _TEST_LEADER_WORKER_ID
 
     def test_explicit_scheduler_lease_owner_is_honored(self) -> None:
         """Tests and controlled workers can still provide a stable lease-owner identity."""
@@ -4338,6 +4375,7 @@ class TestDurableSchedulerResumeDrain:
             row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
             available_at=past,
         )
+        _register_test_worker(factory, "dead-worker")
         claimed = factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="dead-worker",
@@ -5264,6 +5302,7 @@ class TestDurableSchedulerResumeDrain:
             available_at=datetime.now(UTC),
             barrier_key=str(agg_node),
         )
+        _register_test_worker(factory, "test-worker")
         stray_claim = factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="test-worker",
@@ -5508,6 +5547,7 @@ class TestDurableSchedulerResumeDrain:
         # Peer worker A claims the row under its own lease_owner. Lease window
         # is wide enough that ``peer_active_leases`` sees it as unexpired.
         peer_claim_now = datetime.now(UTC)
+        _register_test_worker(factory, "peer-worker-A")
         peer_claim = factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="peer-worker-A",
@@ -5590,6 +5630,7 @@ class TestDurableSchedulerResumeDrain:
         )
 
         # Crashed peer A held a short lease that has since expired.
+        _register_test_worker(factory, "crashed-peer", heartbeat_expires_at=clock.now_utc() - timedelta(seconds=120))
         factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="crashed-peer",
@@ -5663,6 +5704,7 @@ class TestDurableSchedulerResumeDrain:
         )
 
         # The caller's lease_owner pre-claims the row before the drain entry.
+        _register_test_worker(factory, "own-worker")
         factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="own-worker",

@@ -918,10 +918,15 @@ class _SessionAwareDispatchOutcome:
       discovery or composition budget. Session-aware tools that mutate
       composition state report ``False`` so they count as composition
       turns regardless of the success/failure shape.
+    - ``error_class`` / ``error_message`` / ``post_version``: the P4 audit
+      outcome metadata required to preserve the assistant tool-call row.
     """
 
     result: ToolResult | None
     is_discovery: bool
+    error_class: str | None = None
+    error_message: str | None = None
+    post_version: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -3747,12 +3752,13 @@ class ComposerServiceImpl:
                 ),
                 actual_type="missing current_state_id",
             )
+            error_message = str(exc.args[0] if exc.args else "ToolArgumentError")
             arg_error_payload = _arg_error_payload(exc, tool_name)
             recorder.record(
                 finish_arg_error(
                     audit,
                     error_class="ToolArgumentError",
-                    error_message=str(exc.args[0] if exc.args else "ToolArgumentError"),
+                    error_message=error_message,
                     error_payload=arg_error_payload,
                 )
             )
@@ -3764,7 +3770,13 @@ class ComposerServiceImpl:
                     "content": json.dumps(arg_error_payload),
                 }
             )
-            return _SessionAwareDispatchOutcome(result=None, is_discovery=False)
+            return _SessionAwareDispatchOutcome(
+                result=None,
+                is_discovery=False,
+                error_class="ToolArgumentError",
+                error_message=error_message,
+                post_version=state.version,
+            )
 
         handler = _SESSION_AWARE_TOOL_HANDLERS[tool_name]
         kwargs = self._build_session_aware_kwargs(
@@ -3823,12 +3835,13 @@ class ComposerServiceImpl:
             # Audit envelope: ARG_ERROR. Truthful — the handler returned
             # a ToolArgumentError; the rate-cap subtype is recorded
             # elsewhere (F-6 row + F-15 telemetry).
+            error_message = str(exc.args[0] if exc.args else "ToolArgumentError")
             arg_error_payload = _arg_error_payload(exc, tool_name)
             recorder.record(
                 finish_arg_error(
                     audit,
                     error_class="ToolArgumentError",
-                    error_message=str(exc.args[0] if exc.args else "ToolArgumentError"),
+                    error_message=error_message,
                     error_payload=arg_error_payload,
                 )
             )
@@ -3845,7 +3858,13 @@ class ComposerServiceImpl:
             # /resolve patch). Count toward composition turns regardless
             # of the SUCCESS/ARG_ERROR outcome, matching the sync
             # ARG_ERROR handling for mutation tools.
-            return _SessionAwareDispatchOutcome(result=None, is_discovery=False)
+            return _SessionAwareDispatchOutcome(
+                result=None,
+                is_discovery=False,
+                error_class="ToolArgumentError",
+                error_message=error_message,
+                post_version=state.version,
+            )
 
         # SUCCESS path. The handler returned a clean ToolResult; record
         # ``finish_success`` and serialise the result for the LLM. The
@@ -3874,7 +3893,13 @@ class ComposerServiceImpl:
                 "content": _serialize_tool_result(result),
             }
         )
-        return _SessionAwareDispatchOutcome(result=result, is_discovery=False)
+        return _SessionAwareDispatchOutcome(
+            result=result,
+            is_discovery=False,
+            error_class=None,
+            error_message=None,
+            post_version=result.updated_state.version,
+        )
 
     def _build_session_aware_kwargs(
         self,

@@ -523,10 +523,7 @@ async def run_tool_batch(
             # create_blob stays immediate because it allocates the blob id a
             # later composition proposal may reference. Destructive blob-only
             # writes such as update_blob/delete_blob still require approval.
-            and (
-                not is_blob_store_only_mutation_tool(tool_name)
-                or is_approval_required_blob_store_only_mutation_tool(tool_name)
-            )
+            and (not is_blob_store_only_mutation_tool(tool_name) or is_approval_required_blob_store_only_mutation_tool(tool_name))
         ):
             if proposals_this_turn >= _MAX_PENDING_PROPOSALS_PER_TURN:
                 raise ComposerServiceError(
@@ -970,6 +967,13 @@ async def run_tool_batch(
                 response=response,
                 llm_messages=llm_messages,
                 anti_anchor=anti_anchor,
+            )
+            all_cache_hits = False
+            _append_tool_outcome(
+                response=session_aware_outcome.result,
+                error_class=session_aware_outcome.error_class,
+                error_message=session_aware_outcome.error_message,
+                post_version=session_aware_outcome.post_version,
             )
             if session_aware_outcome.is_discovery:
                 turn_has_discovery = True

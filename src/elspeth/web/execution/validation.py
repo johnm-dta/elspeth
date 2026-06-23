@@ -457,7 +457,7 @@ def _build_edge_contract_suggestion(
     return "\n".join(parts)
 
 
-def _skipped_checks(from_check: str) -> list[ValidationCheck]:
+def _skipped_checks(from_check: str, *, already_emitted: frozenset[str] = frozenset()) -> list[ValidationCheck]:
     """Generate skipped check records for all checks after from_check."""
     skipping = False
     result: list[ValidationCheck] = []
@@ -465,7 +465,7 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
         if name == from_check:
             skipping = True
             continue
-        if skipping:
+        if skipping and name not in already_emitted:
             result.append(
                 ValidationCheck(
                     name=name,
@@ -476,6 +476,10 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
                 )
             )
     return result
+
+
+def _append_skipped_checks(checks: list[ValidationCheck], from_check: str) -> None:
+    checks.extend(_skipped_checks(from_check, already_emitted=frozenset(check.name for check in checks)))
 
 
 def _format_interpretation_site(site: InterpretationReviewSite) -> str:
@@ -959,7 +963,7 @@ def validate_pipeline(
                     outcome_code=None,
                 )
             )
-            checks.extend(_skipped_checks(_CHECK_MANAGED_IDENTITY_POLICY))
+            _append_skipped_checks(checks, _CHECK_MANAGED_IDENTITY_POLICY)
             return ValidationResult(
                 is_valid=False,
                 checks=checks,
@@ -1003,7 +1007,7 @@ def validate_pipeline(
                     outcome_code=None,
                 )
             )
-            checks.extend(_skipped_checks(_CHECK_LLM_RETRY_BUDGET_POLICY))
+            _append_skipped_checks(checks, _CHECK_LLM_RETRY_BUDGET_POLICY)
             return ValidationResult(
                 is_valid=False,
                 checks=checks,
@@ -1013,8 +1017,7 @@ def validate_pipeline(
                         component_type="transform",
                         message=llm_retry_policy_error,
                         suggestion=(
-                            "Set max_capacity_retry_seconds to a small positive value "
-                            "or configure pool_size > 1 for pooled retry handling."
+                            "Set max_capacity_retry_seconds to a small positive value or configure pool_size > 1 for pooled retry handling."
                         ),
                         error_code=None,
                     ),
@@ -1081,7 +1084,7 @@ def validate_pipeline(
                 outcome_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_WEB_SCRAPE_NETWORK_POLICY))
+        _append_skipped_checks(checks, _CHECK_WEB_SCRAPE_NETWORK_POLICY)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1232,7 +1235,7 @@ def validate_pipeline(
                     outcome_code=CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
                 )
             )
-            checks.extend(_skipped_checks(_CHECK_SECRET_REFS))
+            _append_skipped_checks(checks, _CHECK_SECRET_REFS)
             return ValidationResult(
                 is_valid=False,
                 checks=checks,
@@ -1285,7 +1288,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_SEMANTIC_CONTRACTS))
+        _append_skipped_checks(checks, _CHECK_SEMANTIC_CONTRACTS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1343,7 +1346,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_BATCH_TRANSFORM_OPTIONS))
+        _append_skipped_checks(checks, _CHECK_BATCH_TRANSFORM_OPTIONS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1389,7 +1392,7 @@ def validate_pipeline(
             )
             for site in materialized_state.sites
         )
-        checks.extend(_skipped_checks(_CHECK_INTERPRETATION_REVIEW))
+        _append_skipped_checks(checks, _CHECK_INTERPRETATION_REVIEW)
         single_site = materialized_state.sites[0] if len(materialized_state.sites) == 1 else None
         return ValidationResult(
             is_valid=False,
@@ -1443,7 +1446,7 @@ def validate_pipeline(
                 )
             )
             errors.extend(_blob_inline_validation_error(violation) for violation in blob_violations)
-            checks.extend(_skipped_checks(_CHECK_BLOB_INLINE_REFS))
+            _append_skipped_checks(checks, _CHECK_BLOB_INLINE_REFS)
             return ValidationResult(
                 is_valid=False,
                 checks=checks,
@@ -1547,7 +1550,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_SETTINGS))
+        _append_skipped_checks(checks, _CHECK_SETTINGS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1635,7 +1638,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_VALUE_SOURCE_COMPLIANCE))
+        _append_skipped_checks(checks, _CHECK_VALUE_SOURCE_COMPLIANCE)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1675,7 +1678,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_PLUGINS))
+        _append_skipped_checks(checks, _CHECK_PLUGINS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1726,7 +1729,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_PLUGINS))
+        _append_skipped_checks(checks, _CHECK_PLUGINS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1774,7 +1777,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_GRAPH))
+        _append_skipped_checks(checks, _CHECK_GRAPH)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1841,7 +1844,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_ROUTE_TARGETS))
+        _append_skipped_checks(checks, _CHECK_ROUTE_TARGETS)
         return ValidationResult(
             is_valid=False,
             checks=checks,

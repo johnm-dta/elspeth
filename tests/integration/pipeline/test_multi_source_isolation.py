@@ -34,7 +34,7 @@ from elspeth.core.landscape.schema import (
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator
 from elspeth.engine.orchestrator.preflight import assemble_and_validate_pipeline_config
-from tests.fixtures.landscape import make_factory, make_landscape_db
+from tests.fixtures.landscape import make_factory, make_landscape_db, register_test_worker
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,6 +333,8 @@ def test_source_a_oversize_row_does_not_starve_source_b_claim_ordering() -> None
         row_payload_json=factory.scheduler.serialize_row_payload(PipelineRow({"payload": "ok"}, contract)),
     )
 
+    register_test_worker(db, run_id=run.run_id, worker_id="worker-a")
+    register_test_worker(db, run_id=run.run_id, worker_id="worker-b")
     claimed_a = factory.scheduler.claim_ready(run_id=run.run_id, lease_owner="worker-a", lease_seconds=30, now=now)
     claimed_b = factory.scheduler.claim_ready(run_id=run.run_id, lease_owner="worker-b", lease_seconds=30, now=now)
 

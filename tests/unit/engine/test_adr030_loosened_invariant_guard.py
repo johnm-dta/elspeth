@@ -82,7 +82,11 @@ def _build_processor(*, scheduler_lease_owner: str | None) -> tuple[RowProcessor
     ``scheduler_lease_owner=None`` exercises the unregistered (legacy/test)
     path (``_scheduler_lease_owner_registered=False``).
     """
-    setup = make_recorder_with_run(run_id="run-loosen-guard", source_node_id="source-1")
+    setup = make_recorder_with_run(
+        run_id="run-loosen-guard",
+        source_node_id="source-1",
+        leader_worker_id=scheduler_lease_owner,
+    )
     register_test_node(setup.data_flow, setup.run_id, NODE_ID)
     clock = MockClock(start=1_750_000_000.0)
     processor = RowProcessor(

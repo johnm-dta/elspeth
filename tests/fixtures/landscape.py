@@ -14,9 +14,11 @@ Factory hierarchy:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import insert, select
 
 from elspeth.contracts import NodeType
 from elspeth.contracts.coordination import CoordinationToken
@@ -28,6 +30,7 @@ from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+from elspeth.core.landscape.schema import run_workers_table
 from tests.fixtures.stores import MockPayloadStore
 
 # Shared default for schema_config across all factory-created nodes
@@ -108,6 +111,35 @@ def leader_coordination_token(factory: RecorderFactory, run_id: str) -> Coordina
     return CoordinationToken(run_id=run_id, worker_id=leader.leader_worker_id, leader_epoch=leader.leader_epoch)
 
 
+def register_test_worker(
+    db: LandscapeDB,
+    *,
+    run_id: str,
+    worker_id: str,
+    heartbeat_expires_at: datetime | None = None,
+) -> None:
+    """Register an active test worker so fenced scheduler claim verbs can use it."""
+    registered_at = datetime.now(UTC)
+    with db.engine.begin() as conn:
+        exists = conn.execute(
+            select(run_workers_table.c.worker_id)
+            .where(run_workers_table.c.worker_id == worker_id)
+            .where(run_workers_table.c.run_id == run_id)
+        ).first()
+        if exists is not None:
+            return
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id=worker_id,
+                run_id=run_id,
+                role="follower",
+                status="active",
+                registered_at=registered_at,
+                heartbeat_expires_at=heartbeat_expires_at or registered_at + timedelta(hours=1),
+            )
+        )
+
+
 def make_factory(db: LandscapeDB | None = None, *, payload_store: PayloadStore | None = None) -> RecorderFactory:
     """Factory for RecorderFactory.
 
@@ -166,6 +198,7 @@ def make_recorder_with_run(
     source_plugin_name: str = "source",
     canonical_version: str = "v1",
     payload_store: PayloadStore | None = None,
+    leader_worker_id: str | None = None,
 ) -> RecorderSetup:
     """Create LandscapeDB + RecorderFactory + run + source node in one call.
 
@@ -186,6 +219,9 @@ def make_recorder_with_run(
             Pass a specific MockPayloadStore instance to inspect stored payloads.
             Tests that explicitly test "no payload store" behavior must pass
             RecorderFactory(db) directly rather than using this helper.
+        leader_worker_id: Optional registered leader worker identity. Tests that
+            drive fenced scheduler claim verbs with a fixed lease owner should
+            pass that same value here.
     """
     db = make_landscape_db()
     factory = make_factory(db, payload_store=payload_store)
@@ -197,6 +233,8 @@ def make_recorder_with_run(
     }
     if run_id is not None:
         begin_kwargs["run_id"] = run_id
+    if leader_worker_id is not None:
+        begin_kwargs["leader_worker_id"] = leader_worker_id
 
     run = factory.run_lifecycle.begin_run(**begin_kwargs)
 

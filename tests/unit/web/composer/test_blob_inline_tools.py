@@ -493,6 +493,11 @@ def test_tool_definitions_include_inline_blob_authoring_tools() -> None:
     definitions = {definition["name"]: definition for definition in get_tool_definitions()}
 
     assert "list_composer_blobs" in definitions
-    assert definitions["list_composer_blobs"]["parameters"] == {"type": "object", "properties": {}, "required": []}
+    assert definitions["list_composer_blobs"]["parameters"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
     assert "wire_blob_inline_ref" in definitions
     assert definitions["wire_blob_inline_ref"]["parameters"]["required"] == ["field_path", "blob_id"]

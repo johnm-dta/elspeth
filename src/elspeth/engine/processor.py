@@ -596,14 +596,15 @@ class RowProcessor:
         self._scheduler = scheduler
         self._coordination_token = coordination_token
         self._run_coordination = run_coordination
-        # ADR-030 §G (slice 5): _scheduler_lease_owner_registered is True when the
-        # caller explicitly passed a scheduler_lease_owner that is registered in the
-        # run_workers table (production multi-worker paths: run_core.py for leaders,
-        # follower.py for followers).  False = legacy / test / single-worker path
-        # where the auto-generated "row-processor:{run_id}:{uuid}" identity has no
-        # run_workers row; the membership fence is inactive in that case.
-        self._scheduler_lease_owner_registered: bool = scheduler_lease_owner is not None
-        self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
+        # ADR-030 §G (slice 5): _scheduler_lease_owner_registered is True when
+        # the lease owner is a run_workers identity. Production paths pass the
+        # owner explicitly; direct tests often pass only the coordination token,
+        # whose worker_id is the same registered leader identity.
+        resolved_scheduler_lease_owner = scheduler_lease_owner
+        if resolved_scheduler_lease_owner is None and coordination_token is not None:
+            resolved_scheduler_lease_owner = coordination_token.worker_id
+        self._scheduler_lease_owner_registered: bool = resolved_scheduler_lease_owner is not None
+        self._scheduler_lease_owner = resolved_scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
         self._scheduler_lease_seconds = scheduler_lease_seconds
         if scheduler_heartbeat_seconds <= 0:
             raise OrchestrationInvariantError(f"scheduler_heartbeat_seconds must be positive, got {scheduler_heartbeat_seconds}")

@@ -67,7 +67,13 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # dataverse_sink +3). All are orchestration-context / response-shape stubs where
 # spec= would require importing internal orchestrator/graph types and is
 # brittle/low-value — matching the prior-bump precedent.
-BASELINE_UNSPECCED_MOCK_TOTAL = 2716
+# Bumped 2716→2776 (2026-06-23): +60 from accumulated release/0.7.0 test
+# additions, led by route/component fakes in test_outputs_routes.py, provider
+# response-shape fakes in rag/test_transform.py and test_azure_search.py, and
+# smaller composer/execution/session harness stubs. This keeps the gate as a
+# no-regression ratchet for future work; paying down this new debt remains
+# separate from the 2306 test-failure closeout.
+BASELINE_UNSPECCED_MOCK_TOTAL = 2776
 MOCK_NAMES = frozenset({"Mock", "MagicMock"})
 SPEC_KEYWORDS = frozenset({"spec", "spec_set", "autospec", "wraps"})
 

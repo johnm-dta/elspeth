@@ -3209,7 +3209,14 @@ sinks:
         session_service.update_run_status = AsyncMock()
         # ``_persist_and_broadcast_run_event`` awaits append_run_event to durably
         # record + broadcast each lifecycle event (multi-worker run coordination).
-        session_service.append_run_event = AsyncMock()
+        next_event_sequence = 0
+
+        async def append_run_event(**_kwargs: Any) -> SimpleNamespace:
+            nonlocal next_event_sequence
+            next_event_sequence += 1
+            return SimpleNamespace(sequence=next_event_sequence)
+
+        session_service.append_run_event = AsyncMock(side_effect=append_run_event)
         # ``_run_pipeline`` resolves the run's owning session (get_run().session_id)
         # to scope inline-blob access before any metadata enforcement
         # (IDOR contract, elspeth-195ecb1d58). Tests below set their owned

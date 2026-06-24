@@ -196,6 +196,103 @@ def _has_two_json_outputs(sink: SinkResolved) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# web-scrape-llm-rate-jsonl predicate
+#
+# web_scrape is a TRANSFORM (plugins/transforms/web_scrape.py); the predicate
+# keys on the URL-ROW SOURCE that feeds it, never on web_scrape itself. An
+# inline_blob URL list materialises to a real registered source plugin via
+# _MIME_TO_SOURCE (tools/sources.py): JSON rows -> "json", CSV -> "csv". The
+# predicate matches those resolved names + a "url" column signal + a single
+# jsonl output, gated on blob_ref (same blob-presence discipline as
+# _classify_predicate).
+# ---------------------------------------------------------------------------
+
+_URL_ROW_SOURCE_PLUGINS: frozenset[str] = frozenset({"json", "csv"})
+_URL_COLUMN_NAMES: frozenset[str] = frozenset({"url"})
+
+
+def _has_single_jsonl_output(sink: SinkResolved) -> bool:
+    """Return True for a single ``json`` output configured as JSONL.
+
+    The canonical web-scrape pipeline writes one JSONL file. ``json`` is the
+    registered sink plugin; ``format: jsonl`` is the JSONL discriminator (an
+    absent format is the json plugin's default object-array, not JSONL).
+    """
+    if not (len(sink.outputs) == 1 and sink.outputs[0].plugin == "json"):
+        return False
+    return sink.outputs[0].options.get("format") == "jsonl"
+
+
+def _source_has_url_column(source: SourceResolved) -> bool:
+    """Return True iff the source surfaces a ``url`` column.
+
+    The signal is the observed URL column that web_scrape's ``url_field``
+    will read. Observed columns come from inspecting the materialised blob;
+    a URL list always surfaces ``url``.
+    """
+    return any(col in _URL_COLUMN_NAMES for col in source.observed_columns)
+
+
+def _web_scrape_predicate(source: SourceResolved, sink: SinkResolved) -> bool:
+    """Return True for a blob-backed URL-row source → single JSONL output.
+
+    Matches the canonical tutorial shape: an inline_blob URL list that
+    materialised to a ``json``/``csv`` source (NOT ``web_scrape`` — that is a
+    downstream transform the recipe inserts) feeding a single JSONL sink, with
+    an observed ``url`` column.
+
+    Requires ``blob_ref`` in ``source.options`` for the same reason as
+    ``_classify_predicate``: the slot resolver cannot derive ``source_blob_id``
+    without it, and "no recipe match" (fall through to the live chain solver)
+    is the correct outcome for a non-blob-backed URL source.
+    """
+    if source.plugin not in _URL_ROW_SOURCE_PLUGINS:
+        return False
+    if "blob_ref" not in source.options:
+        return False
+    if not _has_single_jsonl_output(sink):
+        return False
+    return _source_has_url_column(source)
+
+
+def _web_scrape_slot_resolver(source: SourceResolved, sink: SinkResolved) -> Mapping[str, Any]:
+    """Partial slot map for the web-scrape-llm-rate-jsonl recipe.
+
+    Provides ``source_blob_id`` (the composer-canonical blob UUID),
+    ``source_plugin`` (the real materialised source plugin: json or csv), and
+    ``output_path`` (operator-set verbatim, else a rubber-stampable default).
+    User-fillable: ``model``, ``api_key_secret``, ``provider``,
+    ``rating_template``, ``abuse_contact``, and ``scraping_reason``.
+
+    This is a P4.1 STUB: the real resolver (full slot coverage) and the
+    ``RecipeSpec`` it pre-fills against land in P4.2.  ``match_recipe`` will
+    raise ``InvariantError`` end-to-end until that ``RecipeSpec`` is registered
+    in recipes.py — the unit tests call ``_web_scrape_predicate`` directly and
+    are unaffected.
+
+    Retains the ``blob_ref`` InvariantError guard for the same defence-in-depth
+    reason as the classify/split resolvers: the predicate gates on
+    ``blob_ref in source.options``, so this is structurally unreachable via
+    ``match_recipe``; any caller that bypasses the registry gets a clear crash.
+    """
+    if "blob_ref" not in source.options:
+        raise InvariantError(
+            f"web-scrape recipe slot resolver requires source.options['blob_ref']; source options present: {sorted(source.options.keys())}"
+        )
+    blob_ref = source.options["blob_ref"]
+    sink_options = sink.outputs[0].options
+    if "path" in sink_options:
+        output_path = sink_options["path"]
+    else:
+        output_path = "outputs/ratings.jsonl"
+    return {
+        "source_blob_id": blob_ref,
+        "source_plugin": source.plugin,
+        "output_path": output_path,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Classify-rows-llm-jsonl predicate and slot resolver
 # ---------------------------------------------------------------------------
 
@@ -360,6 +457,14 @@ _RECIPE_PREDICATES: Sequence[tuple[_Predicate, str, _SlotResolver]] = (
     # (both are CSV → single JSON) — only the classifier-keyword check separates
     # them.  Users who want fork-coalesce must hand-build via Step 3 or
     # pre-select via list_recipes.
+    #
+    # web-scrape-llm-rate-jsonl is registered LAST: the URL-row json/csv source
+    # never collides with the CSV classify/split predicates (those need
+    # classifier-keyword required_fields / two outputs), so order is not load-
+    # bearing for disambiguation — it is asserted last to keep registry edits
+    # intentional.  The RecipeSpec it matches lands in P4.2; until then
+    # ``match_recipe`` raises InvariantError end-to-end for this topology.
+    (_web_scrape_predicate, "web-scrape-llm-rate-jsonl", _web_scrape_slot_resolver),
 )
 
 

@@ -510,3 +510,155 @@ class TestUnsatisfiedSlots:
         # Constructor did not raise; both invariants vacuously satisfied.
         assert match.unsatisfied_slots == {}
         assert "source_blob_id" in match.slots
+
+
+# ---------------------------------------------------------------------------
+# web-scrape-llm-rate-jsonl: canonical-source-plugin pin + predicate (P4.1)
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalSourcePluginIsResolved:
+    """Pin the fact the predicate relies on: an inline_blob URL list
+    materialises to a real registered source plugin, never the literal
+    string 'inline_blob' and never 'web_scrape'.
+
+    _MIME_TO_SOURCE is the single mapping that resolves a materialised
+    inline_blob's MIME type to its concrete source plugin; the predicate
+    must key on those resolved names, not on 'inline_blob'.
+    """
+
+    def test_mime_to_source_resolves_url_row_plugins(self) -> None:
+        from elspeth.web.composer.tools.sources import _MIME_TO_SOURCE
+
+        resolved_plugins = {plugin for plugin, _extra in _MIME_TO_SOURCE.values()}
+        # The canonical URL list is JSON rows of {"url": ...}; CSV is the
+        # other URL-row carrier. Both are real registered source plugins.
+        assert "json" in resolved_plugins
+        assert "csv" in resolved_plugins
+        # web_scrape is a TRANSFORM, never a materialised source plugin.
+        assert "web_scrape" not in resolved_plugins
+        assert "inline_blob" not in resolved_plugins
+
+    def test_url_row_source_plugins_constant_matches_resolved_names(self) -> None:
+        from elspeth.web.composer.guided.recipe_match import _URL_ROW_SOURCE_PLUGINS
+
+        assert frozenset({"json", "csv"}) == _URL_ROW_SOURCE_PLUGINS
+        assert "web_scrape" not in _URL_ROW_SOURCE_PLUGINS
+
+
+def _make_url_json_source(
+    blob_ref: str = "a1b2c3d4-0000-0000-0000-000000000099",
+    *,
+    with_blob: bool = True,
+) -> SourceResolved:
+    """A materialised inline_blob URL list: json plugin, url column, blob_ref."""
+    options: dict[str, object] = {}
+    if with_blob:
+        options["blob_ref"] = blob_ref
+    return SourceResolved(
+        plugin="json",
+        options=options,
+        observed_columns=("url",),
+        sample_rows=({"url": "https://dta.gov.au"},),
+    )
+
+
+def _make_url_csv_source(
+    blob_ref: str = "a1b2c3d4-0000-0000-0000-000000000099",
+) -> SourceResolved:
+    """A materialised inline_blob URL list: csv plugin, url column, blob_ref."""
+    return SourceResolved(
+        plugin="csv",
+        options={"blob_ref": blob_ref},
+        observed_columns=("url",),
+        sample_rows=({"url": "https://dta.gov.au"},),
+    )
+
+
+def _make_single_jsonl_sink(path: str = "outputs/ratings.jsonl") -> SinkResolved:
+    return SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                plugin="json",
+                options={"path": path, "format": "jsonl"},
+                required_fields=(),
+                schema_mode="observed",
+            ),
+        )
+    )
+
+
+class TestWebScrapePredicate:
+    def test_matches_blob_backed_json_url_source(self) -> None:
+        from elspeth.web.composer.guided.recipe_match import _web_scrape_predicate
+
+        assert _web_scrape_predicate(_make_url_json_source(), _make_single_jsonl_sink()) is True
+
+    def test_matches_blob_backed_csv_url_source(self) -> None:
+        from elspeth.web.composer.guided.recipe_match import _web_scrape_predicate
+
+        assert _web_scrape_predicate(_make_url_csv_source(), _make_single_jsonl_sink()) is True
+
+    def test_does_not_reference_web_scrape_as_source(self) -> None:
+        """A source whose plugin is literally 'web_scrape' must NOT match.
+
+        web_scrape is a transform, not a source.
+        """
+        from elspeth.web.composer.guided.recipe_match import _web_scrape_predicate
+
+        bad = SourceResolved(
+            plugin="web_scrape",
+            options={"blob_ref": "a1b2c3d4-0000-0000-0000-000000000099"},
+            observed_columns=("url",),
+            sample_rows=({"url": "https://dta.gov.au"},),
+        )
+        assert _web_scrape_predicate(bad, _make_single_jsonl_sink()) is False
+
+    def test_no_match_without_blob_ref(self) -> None:
+        from elspeth.web.composer.guided.recipe_match import _web_scrape_predicate
+
+        assert (
+            _web_scrape_predicate(
+                _make_url_json_source(with_blob=False),
+                _make_single_jsonl_sink(),
+            )
+            is False
+        )
+
+    def test_no_match_without_url_column(self) -> None:
+        from elspeth.web.composer.guided.recipe_match import _web_scrape_predicate
+
+        no_url = SourceResolved(
+            plugin="json",
+            options={"blob_ref": "a1b2c3d4-0000-0000-0000-000000000099"},
+            observed_columns=("name",),
+            sample_rows=({"name": "x"},),
+        )
+        assert _web_scrape_predicate(no_url, _make_single_jsonl_sink()) is False
+
+    def test_no_match_for_non_jsonl_output(self) -> None:
+        from elspeth.web.composer.guided.recipe_match import _web_scrape_predicate
+
+        object_array = SinkResolved(
+            outputs=(
+                SinkOutputResolved(
+                    plugin="json",
+                    options={"path": "outputs/ratings.json"},  # no format: jsonl
+                    required_fields=(),
+                    schema_mode="observed",
+                ),
+            )
+        )
+        assert _web_scrape_predicate(_make_url_json_source(), object_array) is False
+
+
+def test_web_scrape_predicate_registered_last() -> None:
+    """The web-scrape predicate is registered, after the CSV recipes
+    (most-specific-first ordering: the URL-row json source never collides
+    with the CSV classify/split predicates, but order is asserted to keep
+    registry edits intentional)."""
+    from elspeth.web.composer.guided.recipe_match import _RECIPE_PREDICATES
+
+    names = [name for _pred, name, _resolver in _RECIPE_PREDICATES]
+    assert "web-scrape-llm-rate-jsonl" in names
+    assert names[-1] == "web-scrape-llm-rate-jsonl"

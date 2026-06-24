@@ -54,19 +54,48 @@ class TestWorkflowProfileKind:
             WorkflowProfileKind("bespoke")
 
 
-class TestWorkflowProfileFromDictDiagnostics:
-    def test_unknown_keys_reports_unexpected_keys(self) -> None:
-        record = EMPTY_PROFILE.to_dict() | {"stages": []}
+class TestWorkflowProfileSerialisation:
+    def test_empty_profile_round_trips(self) -> None:
+        assert WorkflowProfile.from_dict(EMPTY_PROFILE.to_dict()) == EMPTY_PROFILE
 
-        with pytest.raises(InvariantError, match="unexpected keys"):
-            WorkflowProfile.from_dict(record)
+    def test_tutorial_profile_round_trips(self) -> None:
+        assert WorkflowProfile.from_dict(TUTORIAL_PROFILE.to_dict()) == TUTORIAL_PROFILE
 
-    def test_bool_gate_reports_field_name(self) -> None:
-        record = EMPTY_PROFILE.to_dict() | {"advisor_checkpoints": "false"}
+    def test_to_dict_emits_all_five_keys(self) -> None:
+        assert set(EMPTY_PROFILE.to_dict()) == {
+            "entry_seed",
+            "coaching",
+            "advisor_checkpoints",
+            "recipe_match",
+            "bookends",
+        }
 
-        with pytest.raises(InvariantError, match="advisor_checkpoints must be bool"):
-            WorkflowProfile.from_dict(record)
+    def test_entry_seed_none_round_trips_as_none(self) -> None:
+        d = EMPTY_PROFILE.to_dict()
+        assert d["entry_seed"] is None
+        assert WorkflowProfile.from_dict(d).entry_seed is None
 
-    def test_empty_record_reports_from_dict_context(self) -> None:
+    def test_from_dict_rejects_missing_key(self) -> None:
+        d = TUTORIAL_PROFILE.to_dict()
+        del d["advisor_checkpoints"]
+        with pytest.raises(InvariantError, match=r"WorkflowProfile\.from_dict"):
+            WorkflowProfile.from_dict(d)
+
+    def test_from_dict_uses_direct_key_not_get_default(self) -> None:
+        # An empty dict must crash, never silently fabricate a profile.
         with pytest.raises(InvariantError, match=r"WorkflowProfile\.from_dict"):
             WorkflowProfile.from_dict({})
+
+    def test_from_dict_rejects_unknown_key(self) -> None:
+        # A forked/tampered blob with an injected field must be rejected, not
+        # silently ignored - the closed schema is the tamper boundary.
+        d = {**TUTORIAL_PROFILE.to_dict(), "stages": ["smuggled"]}
+        with pytest.raises(InvariantError, match=r"unexpected keys"):
+            WorkflowProfile.from_dict(d)
+
+    def test_from_dict_rejects_non_bool_advisor_checkpoints(self) -> None:
+        # The JSON string "false" is TRUTHY - a present-but-mistyped gate must
+        # raise, never silently flip the server-owned advisor gate.
+        d = {**TUTORIAL_PROFILE.to_dict(), "advisor_checkpoints": "false"}
+        with pytest.raises(InvariantError, match=r"advisor_checkpoints must be bool"):
+            WorkflowProfile.from_dict(d)

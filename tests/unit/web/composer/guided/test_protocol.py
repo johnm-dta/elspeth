@@ -272,11 +272,20 @@ class TestPayloadValidation:
         assert "payload.knobs" in err
         assert "fields" in err
 
-    def test_confirm_wiring_empty_payload_validates(self) -> None:
-        assert validate_payload(TurnType.CONFIRM_WIRING, {}) is None
+    def test_confirm_wiring_skeleton_payload_validates(self) -> None:
+        payload = {
+            "topology": {},
+            "edge_contracts": [],
+            "semantic_contracts": [],
+        }
+        assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
 
-    def test_confirm_wiring_allows_non_empty_payload_for_now(self) -> None:
-        assert validate_payload(TurnType.CONFIRM_WIRING, {"ignored": "for now"}) is None
+    def test_confirm_wiring_payload_missing_key_rejected(self) -> None:
+        err = validate_payload(TurnType.CONFIRM_WIRING, {"topology": {}})
+        assert err is not None
+        assert "confirm_wiring" in err
+        assert "edge_contracts" in err
+        assert "semantic_contracts" in err
 
     def test_schema_form_plugin_options_requires_plugin(self) -> None:
         from elspeth.web.composer.guided.protocol import validate_payload

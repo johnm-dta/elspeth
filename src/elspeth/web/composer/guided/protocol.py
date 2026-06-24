@@ -218,7 +218,7 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
     # itself uses the SchemaFormPayload discriminator, where
     # mode="recipe_decision" routes the shared one-knob renderer.
     TurnType.RECIPE_OFFER: frozenset({"mode", "knobs", "prefilled", "recipe_context"}),
-    TurnType.CONFIRM_WIRING: frozenset(),
+    TurnType.CONFIRM_WIRING: frozenset({"topology", "edge_contracts", "semantic_contracts"}),
 }
 
 # Nested shape spec for recursive payload validation.

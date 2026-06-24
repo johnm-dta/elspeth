@@ -50,11 +50,9 @@ overview's corrected codebase note). The repo's
 
   import pytest
 
-  from elspeth.web.composer.guided.errors import InvariantError
   from elspeth.web.composer.guided.profile import (
       EMPTY_PROFILE,
       TUTORIAL_PROFILE,
-      WorkflowProfile,
       WorkflowProfileKind,
       profile_for_kind,
   )
@@ -275,8 +273,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Interfaces:**
 - Consumes: `WorkflowProfile.to_dict` / `WorkflowProfile.from_dict` (from P0.1); `InvariantError`.
 
-- [ ] **Step 1: Append the strict-serialisation tests.**
-  Append to `tests/unit/web/composer/guided/test_profile.py`:
+- [ ] **Step 1: Extend the imports, then append the strict-serialisation tests.**
+  First update the imports in `tests/unit/web/composer/guided/test_profile.py`
+  so the new rejection tests are the first slice that imports `InvariantError`
+  and `WorkflowProfile` (P0.1's pre-commit Ruff gate must stay F401-clean):
+  ```python
+  from elspeth.web.composer.guided.errors import InvariantError
+  from elspeth.web.composer.guided.profile import (
+      EMPTY_PROFILE,
+      TUTORIAL_PROFILE,
+      WorkflowProfile,
+      WorkflowProfileKind,
+      profile_for_kind,
+  )
+  ```
+  Then append:
   ```python
   class TestWorkflowProfileSerialisation:
       def test_empty_profile_round_trips(self) -> None:
@@ -395,7 +406,8 @@ constant — no double-edit of the same lines.
   ```bash
   uv run python -m pytest tests/unit/web/composer/guided/test_state_machine.py -k "schema_version" -q
   ```
-  Expected: `3 passed` (the two bumped tests + the still-valid v4 rejection test).
+  Expected: `4 passed` (the two bumped tests, the missing-schema-version guard,
+  and the still-valid v4 rejection test selected by `-k "schema_version"`).
 
 - [ ] **Step 5: Commit.**
   ```bash
@@ -435,7 +447,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
   add nothing new (GuidedSession already imported), but add a new top-of-file
   import line after line 31:
   ```python
-  from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE, WorkflowProfile
+  from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
   ```
   Then append the test class:
   ```python
@@ -761,7 +773,7 @@ the seam + proves threading.
 
 _initial_composition_state_with_guided_session gains a keyword-only profile=
 param (default EMPTY_PROFILE) threaded into GuidedSession.initial(profile).
-Existing no-arg call sites unchanged; the start endpoint (P7) is the first
+Existing no-arg call sites unchanged; the start endpoint (P6) is the first
 non-default caller. P0.5.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
@@ -943,13 +955,16 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 4: Confirm no stale epoch/version literal remains anywhere in the suite, except the intentional prior-epoch regression fixture.**
   ```bash
-  rg -n 'SESSION_SCHEMA_EPOCH == 2[23]|GUIDED_SESSION_SCHEMA_VERSION == 5|"schema_version"] == 5' tests/ src/
-  rg -n 'user_version.*2[23]' tests/ src/ | rg -v 'tests/unit/web/sessions/test_schema.py:.*PRAGMA user_version = 23'
+  rg -n 'SESSION_SCHEMA_EPOCH == 2[23]|GUIDED_SESSION_SCHEMA_VERSION == 5' tests/unit/web src/elspeth/web
+  rg -n '"schema_version"\] == 5' tests/unit/web/composer/guided src/elspeth/web/composer/guided
+  rg -n 'user_version.*2[23]' tests/unit/web src/elspeth/web | rg -v 'tests/unit/web/sessions/test_schema.py:.*PRAGMA user_version = 23'
   ```
-  Expected: no output from the first command; no output from the second command
+  Expected: no output from the first two commands; no output from the third command
   after the allowlist removes the intentional
   `test_initialize_session_schema_rejects_epoch_23_database` fixture. Any other
-  hit is an in-scope follow-up for this phase — fix it before closing P0.
+  hit in these scoped guided/session checks is an in-scope follow-up for this
+  phase — fix it before closing P0. Do not broaden this sweep to unrelated
+  schema-version domains such as elspeth-lints reaudit sidecars.
 
 - [ ] **Step 5: Final phase commit (only if Step 4 surfaced and fixed a stray pin; otherwise skip).**
   ```bash

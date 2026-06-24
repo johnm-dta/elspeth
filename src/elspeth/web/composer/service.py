@@ -4403,6 +4403,32 @@ class ComposerServiceImpl:
             persisted_tool_call_turn=persisted_tool_call_turn,
         )
 
+    async def run_signoff_checkpoint(
+        self,
+        *,
+        state: CompositionState,
+        session_id: str | None,
+        recorder: BufferingRecorder | None,
+        progress: ComposerProgressSink | None = None,
+    ) -> AdvisorCheckpointVerdict:
+        """Public END sign-off checkpoint (ComposerService Protocol, P5).
+
+        Thin delegation to the private deterministic END checkpoint so the
+        guided STEP_4_WIRE dispatcher can request the whole-pipeline sign-off
+        through the ``ComposerService`` handle it holds. The private method
+        owns the build-arguments / bounded-retry / verdict-mapping logic; this
+        façade adds nothing but the public name so the trust boundary and the
+        backend-produced (Tier-1) ``schema_excerpt`` path are unchanged — no
+        unvalidated user text is ever forwarded here.
+        """
+        return await self._run_advisor_checkpoint(
+            phase="end",
+            state=state,
+            session_id=session_id,
+            recorder=recorder,
+            progress=progress,
+        )
+
     async def _run_advisor_checkpoint(
         self,
         *,

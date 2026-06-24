@@ -147,7 +147,7 @@ async function isolateAuditReadinessSideRail(
 
 test.describe("composer-guided — recipe-match happy path", () => {
   test(
-    "guided demo path: CSV → classify-rows-llm-jsonl (≤9 clicks, <30s)",
+    "guided demo path: CSV → classify-rows-llm-jsonl reaches wire gate (≤9 clicks, <30s)",
     async ({ page }) => {
       const start = Date.now();
       let clicks = 0;
@@ -274,15 +274,26 @@ test.describe("composer-guided — recipe-match happy path", () => {
         await page.getByRole("button", { name: "Apply recipe", exact: true }).click();
         clicks++;
 
-        // ── CompletionSummary terminal ─────────────────────────────────────
+        // ── Step 4 wire gate ───────────────────────────────────────────────
+        // P1 moves terminal stamping behind the wire-confirm validation gate.
+        // The current classify recipe intentionally reaches the wire stage but
+        // does not complete because the recipe-produced source does not
+        // guarantee the required input field yet; confirm re-emits the wire
+        // turn instead of showing CompletionSummary.
+        await expect(
+          page.getByRole("button", { name: "Confirm wiring", exact: true }),
+        ).toBeVisible();
+        await page.getByRole("button", { name: "Confirm wiring", exact: true }).click();
+        clicks++;
+        await expect(
+          page.getByRole("button", { name: "Confirm wiring", exact: true }),
+        ).toBeVisible();
         await expect(
           page.getByRole("button", { name: "Open freeform editor", exact: true }),
-        ).toBeVisible();
-        await page.getByRole("button", { name: "Open freeform editor", exact: true }).click();
-        clicks++;
+        ).toHaveCount(0);
 
         // ── Demo SLA assertions ────────────────────────────────────────────
-        // ≤9 clicks (9 in this revised path due to Gap 4 adding Show advanced).
+        // ≤9 clicks (wire confirm is now the final click in this P1 path).
         expect(clicks).toBeLessThanOrEqual(9);
         expect(Date.now() - start).toBeLessThan(30_000);
       } finally {

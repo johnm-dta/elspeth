@@ -3695,6 +3695,7 @@ def _guided_step_index(step: Any) -> int:
         GuidedStep.STEP_2_SINK,
         GuidedStep.STEP_2_5_RECIPE_MATCH,
         GuidedStep.STEP_3_TRANSFORMS,
+        GuidedStep.STEP_4_WIRE,
     )
     return _ORDER.index(step)
 

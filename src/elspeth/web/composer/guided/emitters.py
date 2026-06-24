@@ -15,6 +15,7 @@ Exported:
     build_step_2_5_recipe_offer_turn — recipe_offer from a RecipeMatch.
     build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
     build_step_3_schema_form_turn — schema_form for editing one proposed transform.
+    build_step_4_wire_turn — confirm_wiring turn for the wire stage.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
 data constructed from system-owned state; the Turn dict itself is not persisted
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
     from elspeth.web.composer.guided.recipe_match import RecipeMatch
     from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
-    from elspeth.web.composer.state import CompositionState
+    from elspeth.web.composer.state import CompositionState, ValidationSummary
 
 
 def build_initial_step_1_turn(
@@ -370,6 +371,20 @@ def build_step_3_schema_form_turn(
     )
 
 
+def build_step_4_wire_turn(*, validation: ValidationSummary) -> Turn:
+    """Build a ``confirm_wiring`` skeleton Turn for the wire stage."""
+    payload: dict[str, Any] = {
+        "topology": {},
+        "edge_contracts": [],
+        "semantic_contracts": [],
+    }
+    return Turn(
+        type=TurnType.CONFIRM_WIRING.value,
+        step_index=_step_index(GuidedStep.STEP_4_WIRE),
+        payload=payload,
+    )
+
+
 def _build_inspect_and_confirm_turn(
     inspection: SourceInspectionFacts,
 ) -> Turn:
@@ -430,5 +445,6 @@ def _step_index(step: GuidedStep) -> int:
         GuidedStep.STEP_2_SINK,
         GuidedStep.STEP_2_5_RECIPE_MATCH,
         GuidedStep.STEP_3_TRANSFORMS,
+        GuidedStep.STEP_4_WIRE,
     )
     return _ORDER.index(step)

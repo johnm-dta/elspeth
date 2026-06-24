@@ -12,15 +12,19 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from elspeth.web.composer.guided.emitters import (
+    _step_index,
     build_step_1_schema_form_turn,
     build_step_2_5_recipe_offer_turn,
     build_step_2_schema_form_turn,
     build_step_3_schema_form_turn,
+    build_step_4_wire_turn,
 )
-from elspeth.web.composer.guided.protocol import TurnType, validate_payload
+from elspeth.web.composer.guided.protocol import GuidedStep, TurnType, validate_payload
 from elspeth.web.composer.guided.recipe_match import RecipeMatch
 from elspeth.web.composer.recipes import SlotSpec, get_recipe
 from elspeth.web.composer.source_inspection import SourceInspectionFacts
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
+from elspeth.web.sessions.routes._helpers import _guided_step_index
 
 
 class _Catalog:
@@ -39,6 +43,17 @@ class _Catalog:
                 ]
             },
         )
+
+
+def _empty_state() -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
 
 
 class TestBuildSchemaFormTurns:
@@ -209,3 +224,19 @@ class TestBuildStep25RecipeOfferTurn:
         by_name = {e["name"]: e for e in turn["payload"]["knobs"]["fields"]}
         assert by_name["threshold"]["kind"] == "number-float"
         assert by_name["count"]["kind"] == "number-int"
+
+
+class TestStep4WireEmitter:
+    def test_step_4_wire_index_matches_guided_order(self) -> None:
+        assert _step_index(GuidedStep.STEP_4_WIRE) == 4
+        assert _guided_step_index(GuidedStep.STEP_4_WIRE) == 4
+
+    def test_builds_confirm_wiring_skeleton_payload(self) -> None:
+        turn = build_step_4_wire_turn(validation=_empty_state().validate())
+
+        assert turn["type"] == TurnType.CONFIRM_WIRING.value
+        assert turn["step_index"] == 4
+        assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
+        assert turn["payload"]["topology"] == {}
+        assert turn["payload"]["edge_contracts"] == []
+        assert turn["payload"]["semantic_contracts"] == []

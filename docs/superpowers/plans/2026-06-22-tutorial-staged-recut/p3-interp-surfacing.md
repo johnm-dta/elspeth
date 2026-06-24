@@ -10,7 +10,7 @@
 > freeform finalize/checkpoint call sites that run the gate, so a guided step-3
 > LLM node — or the deterministic recipe-apply — creates real interpretation
 > sites that are surfaced to **no one** and only fail at run time with
-> `UnresolvedInterpretationPlaceholderError` (`execution/service.py:516-526`).
+> `UnresolvedInterpretationPlaceholderError` (`execution/service.py:515-529`).
 > P3 adds a **kind-general** backend surfacing pass that fires after **every**
 > site-creating guided commit (source, transform, recipe-apply), covering all
 > five `InterpretationKind` members, plus the frontend projection that renders
@@ -67,8 +67,13 @@
 
 **Writer-boundary facts (verified, drive the per-kind draft/user_term mapping):**
 `create_pending_interpretation_event` (`sessions/service.py:2778`) is strict per
-kind — it re-reads the persisted parent state inside the locked transaction and
-**raises `ValueError`** unless the requirement shape matches exactly:
+kind — it re-reads the persisted parent state inside the locked transaction and,
+for the three requirement-checked kinds below (`INVENTED_SOURCE`,
+`PIPELINE_DECISION`, `LLM_PROMPT_TEMPLATE`), **raises `ValueError`** unless the
+staged requirement shape matches exactly. `LLM_MODEL_CHOICE` and a bare
+`VAGUE_TERM` fall through the writer's `else`-branch (`:2936`), which only runs
+`_find_llm_transform_node` (an llm transform node with a non-empty
+`prompt_template`) and performs **no** staged-requirement-shape check:
 - `INVENTED_SOURCE` (`:2855`): `affected_node_id` must equal `SOURCE_COMPONENT_ID`;
   the source must carry a `SOURCE_AUTHORING_KEY` block with a non-empty
   `content_hash`; exactly one pending `invented_source` requirement matching
@@ -175,6 +180,10 @@ leaving bare legacy placeholders to the run-time gate. This reuses
       catalog.list_sinks.return_value = []
       settings = WebSettings(
           data_dir=tmp_path,
+          composer_max_composition_turns=15,
+          composer_max_discovery_turns=10,
+          composer_timeout_seconds=85.0,
+          composer_rate_limit_per_minute=10,
           composer_model="anthropic/claude-opus-4-7",
           shareable_link_signing_key=b"\x00" * 32,
       )
@@ -487,8 +496,8 @@ leaving bare legacy placeholders to the run-time gate. This reuses
   Append to `test_surface_pending_interpretation_reviews.py`:
 
   ```python
-      def _model_choice_node(model: str = "anthropic/claude-sonnet-4.6") -> NodeSpec:
-          return NodeSpec(
+  def _model_choice_node(model: str = "anthropic/claude-sonnet-4.6") -> NodeSpec:
+      return NodeSpec(
           id="rate_node",
           node_type="transform",
           plugin="llm",
@@ -497,7 +506,7 @@ leaving bare legacy placeholders to the run-time gate. This reuses
           on_error=None,
           options={
               "prompt_template": "Rate this row and return JSON.",
-                  "model": model,
+              "model": model,
               INTERPRETATION_REQUIREMENTS_KEY: [
                   {
                       "id": "prompt_template_review:rate_node",
@@ -515,7 +524,7 @@ leaving bare legacy placeholders to the run-time gate. This reuses
                       "kind": InterpretationKind.LLM_MODEL_CHOICE.value,
                       "user_term": "llm_model_choice:rate_node",
                       "status": "pending",
-                          "draft": model,
+                      "draft": model,
                       "event_id": None,
                       "accepted_value": None,
                       "accepted_artifact_hash": None,
@@ -991,7 +1000,7 @@ and recipe-apply commits (P3.3/P3.4 are the per-boundary assertions).
   > change in Step 0 below). `post_guided_respond` reads that handle and calls
   > `surface_pending_interpretation_reviews` on it, None-guarded — surfacing is
   > advisory; the run-time `UnresolvedInterpretationPlaceholderError` gate
-  > (`execution/service.py:514-525`) stays the hard backstop, so skipping when no
+  > (`execution/service.py:515-529`) stays the hard backstop, so skipping when no
   > composer is wired is safe.
 
 - [ ] **Step 0: Wire a real `ComposerServiceImpl` onto `app.state.composer_service`
@@ -1062,7 +1071,7 @@ and recipe-apply commits (P3.3/P3.4 are the per-boundary assertions).
                 # would orphan and only fail at run time. Surface every
                 # resolvable pending review against the freshly-persisted state
                 # so the guided UI can project + block on it (D12). Advisory
-                # polarity: the run-time gate (execution/service.py:516-526)
+                # polarity: the run-time gate (execution/service.py:515-529)
                 # stays the hard backstop, so a None composer (no impl wired in
                 # this app) safely skips surfacing.
                 composer: ComposerService = request.app.state.composer_service
@@ -1460,7 +1469,7 @@ EOF
 **Interfaces:**
 - Consumes: `materialize_state_for_execution(state)` returns
   `InterpretationReviewPending` when an unresolved site exists, and
-  `execution/service.py:516-526` raises `UnresolvedInterpretationPlaceholderError`
+  `execution/service.py:515-529` raises `UnresolvedInterpretationPlaceholderError`
   on it; `ExecutionServiceImpl.execute(session_id=...)` (the production run
   path); `SessionServiceImpl.resolve_interpretation_event(...)` resolves a
   pending row. Mirror the freeform mock pattern from
@@ -1484,24 +1493,38 @@ for UI projection only (P3.6).
   `execute()` raises `UnresolvedInterpretationPlaceholderError`, then surfaces +
   resolves the pending event and asserts `execute()` returns a run id.
 
-- [ ] **Step 2: Write the failing backstop test.**
+- [ ] **Step 2: Write the backstop test.**
   Create `tests/integration/web/composer/test_guided_interpretation_run_backstop.py`.
-  Build a persisted state with an LLM node carrying a bare
-  `{{interpretation:cool}}` placeholder (so `materialize_state_for_execution`
-  reports an unresolved site), wire the real `ComposerServiceImpl` +
-  `SessionServiceImpl` + `ExecutionServiceImpl` (copy the construction from the
-  test_service.py fixture and the dispatch-test `_build_composer`). The helper
-  `_persist_state_with_unresolved_node` (a) seeds the session + composition state
-  with the bare-placeholder LLM node and (b) directly creates a pending,
-  resolvable `vague_term` event for that placeholder — the surfacer SKIPS bare
-  vague_term tokens (P3.1, they carry no staged requirement), so the resolvable
-  card is created via the writer boundary, whose `vague_term`/`else` branch only
-  requires the node be an LLM transform node (no staged requirement —
-  `sessions/service.py:~2936+`). Resolving that event via
-  `resolve_interpretation_event(... choice=ACCEPTED_AS_DRAFTED ...)` patches the
-  prompt template (substitutes the placeholder, `sessions/service.py:3206`),
-  clearing the run-time gate. The helper returns
-  `(session_id, state_id, event_id, state)`:
+  Build a persisted state with a PT-only LLM node — a non-empty
+  `prompt_template`, exactly one PENDING `llm_prompt_template` requirement, NO
+  bare `{{interpretation:...}}` token, and NO `model` option — so
+  `interpretation_sites` yields EXACTLY ONE site (the pending PT) and
+  `materialize_state_for_execution` reports it as unresolved (BLOCK). Wire the
+  real `ComposerServiceImpl` + `SessionServiceImpl` + `ExecutionServiceImpl`
+  (copy the construction from the test_service.py fixture and the dispatch-test
+  `_build_composer`). The helper `_persist_state_with_unresolved_node` (a) seeds
+  the session + composition state with that PT-only node and (b) creates a
+  matching pending, resolvable `llm_prompt_template` event through the writer
+  boundary (`sessions/service.py:2949-2974`), whose PT branch requires
+  `options.prompt_template == llm_draft` AND exactly one pending PT requirement
+  for `user_term` — both staged on the node. Resolving that event via
+  `resolve_interpretation_event(... choice=ACCEPTED_AS_DRAFTED ...)` marks the PT
+  requirement `status="resolved"` (`sessions/service.py:1161-1242`), which clears
+  BOTH the pending-PT (`_pending_node_sites`) and the missing-PT
+  (`_missing_prompt_template_review_sites`) enumerators — the state then has zero
+  sites, so the gate PERMITS.
+
+  > **Why not a bare `{{interpretation:cool}}` vague-term node:** such a node
+  > yields TWO sites — a legacy `vague_term` site
+  > (`_legacy_placeholder_sites`) AND a missing-`llm_prompt_template` site
+  > (`_missing_prompt_template_review_sites` fires for any llm node with a
+  > non-empty `prompt_template` and no resolved PT requirement). Resolving only
+  > the vague_term substitutes the placeholder but adds NO PT requirement, so the
+  > missing-PT site persists and `execute()` keeps raising. The PERMIT branch is
+  > therefore structurally unreachable with that fixture; the PT-only node is the
+  > shape that genuinely clears every site.
+
+  The helper returns `(session_id, state_id, event_id, state)`:
 
   ```python
   from __future__ import annotations
@@ -1511,7 +1534,7 @@ for UI projection only (P3.6).
   from datetime import UTC, datetime
   from pathlib import Path
   from typing import Any, cast
-  from unittest.mock import MagicMock
+  from unittest.mock import MagicMock, patch
   from uuid import UUID, uuid4
 
   import pytest
@@ -1532,7 +1555,9 @@ for UI projection only (P3.6).
   from elspeth.web.config import WebSettings
   from elspeth.web.execution.errors import UnresolvedInterpretationPlaceholderError
   from elspeth.web.execution.progress import ProgressBroadcaster
+  from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
   from elspeth.web.execution.service import ExecutionServiceImpl
+  from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
   from elspeth.web.sessions.engine import create_session_engine
   from elspeth.web.sessions.models import sessions_table
   from elspeth.web.sessions.protocol import CompositionStateData
@@ -1578,9 +1603,16 @@ for UI projection only (P3.6).
       catalog.list_sources.return_value = []
       catalog.list_transforms.return_value = []
       catalog.list_sinks.return_value = []
+      # F22 (same class as F1): WebSettings requires these four composer
+      # fields; omitting them raises a 4-error pydantic ValidationError before
+      # the service is ever built. Values mirror the guided conftest / F1.
       settings = WebSettings(
           data_dir=tmp_path,
           composer_model="anthropic/claude-opus-4-7",
+          composer_max_composition_turns=15,
+          composer_max_discovery_turns=10,
+          composer_timeout_seconds=85.0,
+          composer_rate_limit_per_minute=10,
           shareable_link_signing_key=b"\x00" * 32,
       )
       return ComposerServiceImpl(
@@ -1597,14 +1629,23 @@ for UI projection only (P3.6).
   ) -> ExecutionServiceImpl:
       """Real ExecutionServiceImpl over the REAL SessionServiceImpl so execute()'s
       get_current_state(session_id) (~execution/service.py:484) loads the persisted
-      unresolved state and the interpretation gate (:516-526) sees it.
+      unresolved state and the interpretation gate (:515-529) sees it.
 
       The loop / yaml_generator / settings are mocked exactly as the canonical
-      `service` fixture mocks them (test_service.py — grep for the `service` fixture
-      to find current line numbers) so the PERMIT path returns a run id without
-      running a real engine. The gate fires BEFORE the loop/yaml stages, so the
-      BLOCK assertion needs no engine; the PERMIT assertion only needs the real
-      SessionService (create_run) + the stubbed loop.
+      `service` fixture mocks them (test_service.py:282-334) so the PERMIT path
+      returns a run id without running a real engine. The interpretation gate
+      fires BEFORE validate_pipeline / generate_yaml / create_run, so the BLOCK
+      assertion needs no engine and is fully REAL. The PERMIT assertion (step 4)
+      patches validate_pipeline -> valid and _run_pipeline (the same pattern
+      test_service.py::test_execute_allows_valid_pipeline_through_the_gate uses),
+      because an LLM transform cannot pass the real validate_pipeline graph build
+      end-to-end — composer `options.prompt_template` does not map to the runtime
+      `LLMConfig.template` (documented in test_interpretation_runtime_handoff.py:29-35).
+      F23: even with validate_pipeline patched, execute() still calls
+      generate_yaml (execution/service.py:680) and feeds the result through
+      resolve_runtime_yaml_paths into create_run, so the mock yaml below is a
+      VALID plural `sources:` pipeline (the singular `source:` form the review
+      flagged is a malformed top-level key).
       """
       mock_loop = MagicMock(spec=asyncio.AbstractEventLoop)
       broadcaster = ProgressBroadcaster(mock_loop)
@@ -1616,7 +1657,28 @@ for UI projection only (P3.6).
       # is still read by the source/sink path guard, so pin it to a real dir.
       mock_settings.data_dir = str(tmp_path)
       mock_yaml_generator = MagicMock()
-      mock_yaml_generator.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+      # F23: a VALID plural `sources:`+`transforms:`+`sinks:` pipeline (the
+      # earlier singular `source:` is a malformed top-level key). execute() runs
+      # generate_yaml + resolve_runtime_yaml_paths even when validate_pipeline is
+      # patched, so the emitted YAML must parse as a real pipeline document.
+      mock_yaml_generator.generate_yaml.return_value = (
+          "sources:\n"
+          "  source:\n"
+          "    plugin: csv\n"
+          "    options:\n"
+          "      path: rows.csv\n"
+          "      schema:\n"
+          "        mode: observed\n"
+          "transforms:\n"
+          "  - plugin: passthrough\n"
+          "    options: {}\n"
+          "sinks:\n"
+          "  out:\n"
+          "    plugin: json\n"
+          "    options:\n"
+          "      path: out.jsonl\n"
+          "      mode: write\n"
+      )
       svc = ExecutionServiceImpl(
           loop=mock_loop,
           broadcaster=broadcaster,
@@ -1641,11 +1703,25 @@ for UI projection only (P3.6).
       return svc
 
 
-  def _llm_node_with_placeholder(term: str = "cool") -> NodeSpec:
-      # Bare {{interpretation:<term>}} token (mirrors the dispatch test's
-      # _llm_node_spec at test_compose_loop_interpretation_review_dispatch.py:217):
-      # an unresolved site for materialize_state_for_execution, resolvable once the
-      # pending vague_term event is accepted (resolve patches prompt_template).
+  _RUNNABLE_PROMPT_TEMPLATE = "Rate this row and return JSON."
+
+
+  def _llm_node_with_pending_prompt_template() -> NodeSpec:
+      # F21: a PT-only LLM node — a non-empty prompt_template that carries NO bare
+      # {{interpretation:...}} token and exactly ONE pending llm_prompt_template
+      # requirement, and NO `model` option. interpretation_sites then yields
+      # EXACTLY ONE site (the pending PT), so execute()'s gate raises (BLOCK).
+      #
+      # A bare {{interpretation:cool}} node CANNOT reach PERMIT: it yields BOTH a
+      # legacy vague_term site (_legacy_placeholder_sites) AND a missing-PT site
+      # (_missing_prompt_template_review_sites fires for any llm node with a
+      # non-empty prompt_template and no resolved PT requirement). Resolving only
+      # the vague_term substitutes the placeholder but adds NO PT requirement, so
+      # the missing-PT site persists and execute() keeps raising. Resolving the PT
+      # review instead marks the requirement status="resolved", which clears BOTH
+      # the pending-PT (_pending_node_sites) and the missing-PT enumerators, so
+      # the state has zero sites -> PERMIT (verified against interpretation_state.py
+      # :595-614 / :684-709 and sessions/service.py:1161-1242).
       return NodeSpec(
           id="rate_node",
           node_type="transform",
@@ -1653,7 +1729,22 @@ for UI projection only (P3.6).
           input="rows",
           on_success="out",
           on_error=None,
-          options={"prompt_template": f"Rate how {{{{interpretation:{term}}}}} this row is."},
+          options={
+              "prompt_template": _RUNNABLE_PROMPT_TEMPLATE,
+              INTERPRETATION_REQUIREMENTS_KEY: [
+                  {
+                      "id": "prompt_template_review:rate_node",
+                      "kind": InterpretationKind.LLM_PROMPT_TEMPLATE.value,
+                      "user_term": "llm_prompt_template:rate_node",
+                      "status": "pending",
+                      "draft": _RUNNABLE_PROMPT_TEMPLATE,
+                      "event_id": None,
+                      "accepted_value": None,
+                      "accepted_artifact_hash": None,
+                      "resolved_prompt_template_hash": None,
+                  }
+              ],
+          },
           condition=None,
           routes=None,
           fork_to=None,
@@ -1666,14 +1757,12 @@ for UI projection only (P3.6).
   async def _persist_state_with_unresolved_node(
       sessions_service: SessionServiceImpl,
       composer: ComposerServiceImpl,
-      *,
-      term: str = "cool",
   ) -> tuple[UUID, UUID, UUID, CompositionState]:
-      """Seed a session + state with a bare-placeholder LLM node AND a pending,
-      resolvable vague_term event for it. Returns (session_id, state_id, event_id, state)."""
+      """Seed a session + state with a PT-only LLM node AND a matching pending,
+      resolvable llm_prompt_template event. Returns (session_id, state_id, event_id, state)."""
       state = CompositionState(
           source=None,
-          nodes=(_llm_node_with_placeholder(term),),
+          nodes=(_llm_node_with_pending_prompt_template(),),
           edges=(),
           outputs=(),
           metadata=PipelineMetadata(),
@@ -1702,17 +1791,19 @@ for UI projection only (P3.6).
           ),
           provenance="tool_call",
       )
-      # Create the resolvable pending vague_term event directly through the writer
-      # boundary (the surfacer skips bare vague_term tokens). The vague_term branch
-      # only requires the node be an LLM transform node — no staged requirement.
+      # Create the resolvable pending llm_prompt_template event through the writer
+      # boundary (sessions/service.py:2949-2974). That branch requires
+      # options.prompt_template == llm_draft AND exactly one pending PT
+      # requirement matching user_term — both staged on the node above. Resolving
+      # this event marks the PT requirement resolved, clearing every site (PERMIT).
       event = await sessions_service.create_pending_interpretation_event(
           session_id=session_id,
           composition_state_id=record.id,
           affected_node_id="rate_node",
           tool_call_id=f"backend_auto_surface:{uuid4()}",
-          user_term=term,
-          kind=InterpretationKind.VAGUE_TERM,
-          llm_draft="modern, useful, engaging, and clear for the public.",
+          user_term="llm_prompt_template:rate_node",
+          kind=InterpretationKind.LLM_PROMPT_TEMPLATE,
+          llm_draft=_RUNNABLE_PROMPT_TEMPLATE,
           model_identifier=composer._model,
           model_version=composer._model,
           provider="anthropic",
@@ -1720,6 +1811,20 @@ for UI projection only (P3.6).
       )
       # InterpretationEventRecord.id is a UUID (contracts/composer_interpretation.py:210).
       return session_id, record.id, event.id, state
+
+
+  def _valid_result() -> ValidationResult:
+      return ValidationResult(
+          is_valid=True,
+          checks=[],
+          errors=[],
+          readiness=ValidationReadiness(
+              authoring_valid=True,
+              execution_ready=True,
+              completion_ready=True,
+              blockers=[],
+          ),
+      )
 
 
   @pytest.mark.asyncio
@@ -1746,42 +1851,64 @@ for UI projection only (P3.6).
           actor="user:alice",
       )
 
-      # 4. with the placeholder resolved, the run-time gate PERMITS:
-      run_id = await execution_service.execute(session_id=session_id)
+      # 4. with the PT review resolved, the interpretation gate PERMITS. The gate
+      # (execution/service.py:515-529) runs FIRST and is fully REAL here — it now
+      # sees zero sites. validate_pipeline + _run_pipeline are patched (mirroring
+      # test_service.py::test_execute_allows_valid_pipeline_through_the_gate)
+      # because the real validate_pipeline cannot build a runtime graph for an LLM
+      # transform (test_interpretation_runtime_handoff.py:29-35); patching them
+      # does NOT mock the interpretation gate, which is the subject under test.
+      with (
+          patch("elspeth.web.execution.validation.validate_pipeline", return_value=_valid_result()),
+          patch.object(execution_service, "_run_pipeline"),
+      ):
+          run_id = await execution_service.execute(session_id=session_id)
       assert run_id is not None
   ```
 
   The test is drop-in: `_build_execution_service` (inlined above) constructs a real
   `ExecutionServiceImpl` whose `session_service` is the REAL `SessionServiceImpl`
   (so `execute()`'s `get_current_state(session_id)` at `~execution/service.py:484`
-  loads the persisted unresolved state and the gate at `:516-526` sees it), with
-  the `loop` / `yaml_generator` / `settings` mocked exactly as the canonical
-  `service` fixture mocks them (`tests/unit/web/execution/test_service.py` — grep
-  for the `service` fixture and `_call_async` bridge) so the PERMIT path (step 4)
-  returns a run id without running a real engine. The gate fires BEFORE the
-  loop/yaml stages, so the BLOCK assertion needs no engine; the PERMIT assertion
-  only needs `create_run` (real SessionService) + the stubbed loop to yield a run
-  id. `resolve_interpretation_event` reads the pending event's `llm_draft` as the
-  accepted value when `choice == ACCEPTED_AS_DRAFTED`
-  (`sessions/service.py:3206`), so `amended_value=None` is correct. The resolve
-  substitutes `{{interpretation:cool}}` so step 4's
-  `materialize_state_for_execution` returns a real state, not
+  loads the persisted state and the interpretation gate at `:515-529` sees it),
+  with the `loop` / `yaml_generator` / `settings` mocked exactly as the canonical
+  `service` fixture mocks them (`tests/unit/web/execution/test_service.py:282-334`).
+  The interpretation gate fires BEFORE `validate_pipeline` / `generate_yaml` /
+  `create_run`, so the BLOCK assertion is fully REAL and needs no engine. For the
+  PERMIT assertion (step 4) the test patches `validate_pipeline` -> valid and
+  `_run_pipeline` — the same pattern
+  `test_service.py::test_execute_allows_valid_pipeline_through_the_gate` uses —
+  because the real `validate_pipeline` cannot build a runtime graph for an LLM
+  transform (composer `options.prompt_template` does not map to the runtime
+  `LLMConfig.template`; see `test_interpretation_runtime_handoff.py:29-35`).
+  Patching those two does NOT mock the interpretation gate, which is the subject
+  under test, and `create_run` still runs for real against the in-memory session
+  engine. `resolve_interpretation_event` reads the pending event's `llm_draft` as
+  the accepted value when `choice == ACCEPTED_AS_DRAFTED`
+  (`sessions/service.py:3295-3300`), so `amended_value=None` is correct; for a
+  legacy no-parts node the PT acceptance gate then passes because
+  `accepted_value == llm_draft == options.prompt_template`. The resolve marks the
+  PT requirement `status="resolved"`, so step 4's `interpretation_sites` returns
+  empty and `materialize_state_for_execution` returns a real state, not
   `InterpretationReviewPending`.
 
-  Run to fail:
+  Run to verify:
   ```
   cd /home/john/elspeth && uv run pytest tests/integration/web/composer/test_guided_interpretation_run_backstop.py -x -q
   ```
-  Expected failure on first authoring: either the BLOCK assertion (if the node
-  shape doesn't trip the gate) or the PERMIT assertion (if resolution doesn't
-  clear it). Iterate the fixture node shape until BOTH branches are exercised by
-  real production code paths (no mock of `materialize_state_for_execution`).
+  Expected: with the surfacer/gate already in place, this test PASSES as written
+  (the BLOCK and PERMIT shapes are pinned above). If it fails, the failure is
+  diagnostic: a failing BLOCK means the node grew a second site or lost the
+  pending PT requirement; a failing PERMIT means the PT requirement did not
+  resolve (check that `llm_draft == options.prompt_template` and `user_term ==
+  "llm_prompt_template:rate_node"`). The interpretation gate stays REAL in both
+  branches (no mock of `materialize_state_for_execution`).
 
-- [ ] **Step 3: Make it pass.**
-  No production change should be needed — the run-time gate
-  (`execution/service.py:516-526`) and the surfacer (P3.1) already exist. The
-  work is constructing a state whose placeholder is resolvable. Once the fixture
-  shape is right:
+- [ ] **Step 3: Confirm it passes (no production change expected).**
+  No production change is needed — the run-time gate
+  (`execution/service.py:515-529`) and the surfacer (P3.1) already exist, so the
+  test from Step 2 passes as written. The only work is the fixture shape above: a
+  PT-only node that yields exactly one site (BLOCK) and clears to zero sites once
+  the PT review resolves (PERMIT). With the fixture in place:
   ```
   cd /home/john/elspeth && uv run pytest tests/integration/web/composer/test_guided_interpretation_run_backstop.py -x -q
   ```
@@ -1846,7 +1973,7 @@ projection path is the `pendingBySession` store, exactly as
 
       Write the failing tests first — extend the sessionStore guided test:
   ```
-  cd /home/john/elspeth && grep -rln "respondGuided" src/elspeth/web/frontend/src/stores/sessionStore.test.ts
+  cd /home/john/elspeth && grep -rln "respondGuided" src/elspeth/web/frontend/src/stores/sessionStore.guided.test.ts
   ```
       Read the closest existing `respondGuided` test (the happy path,
       `sessionStore.guided.test.ts:231-256`) and add tests asserting that a successful
@@ -1941,9 +2068,12 @@ projection path is the `pendingBySession` store, exactly as
       `void refreshInterpretationEventsForSession(...)` if they intentionally do not
       block their UI.
 
-      Then update `respondGuided`: after the stale-session check and before setting
-      `guidedResponsePending: false`, write the returned guided fields and await the
-      card refresh while the pending flag is still true:
+      Then update `respondGuided`: the success branch is currently a single atomic
+      `set({...})` carrying all four wire fields **and** `guidedResponsePending: false`
+      (`sessionStore.ts:1246-1252`). Remove `guidedResponsePending: false` from that
+      fused set so it sets only the four wire fields, await the card refresh while the
+      pending flag is still true, re-check the active session, then add a trailing
+      `set({ guidedResponsePending: false })`:
       ```ts
             set({
               guidedSession: response.guided_session,
@@ -2037,8 +2167,15 @@ projection path is the `pendingBySession` store, exactly as
 
     it("renders a review affordance for each pending user_approved event", () => {
       render(<GuidedInterpretationReviews sessionId={SID} />);
-      // InterpretationReviewTurn renders a role="region" with a kind-aware name
-      expect(screen.getByRole("region")).toBeInTheDocument();
+      // With one event there are TWO regions: the wrapper <section
+      // aria-label="Assumptions to review"> (a named region) AND the inner
+      // InterpretationReviewTurn's own <section role="region"> — so a singular
+      // getByRole("region") would throw "Found multiple elements", and
+      // InterpretationReviewTurn also carries role="status" so that role is
+      // ambiguous too. Assert via the wrapper count line instead, the same way
+      // the sibling TutorialTurn2bShowBuilt.test.tsx does (getByText concatenates
+      // only the <p>'s direct text-node children, so it matches uniquely).
+      expect(screen.getByText("1 assumption to review")).toBeInTheDocument();
     });
 
     it("renders nothing when there are no pending events", () => {
@@ -2224,15 +2361,20 @@ projection path is the `pendingBySession` store, exactly as
   ```
   Expected after Step 4: pass.
 
-- [ ] **Step 6: Frontend gates — typecheck + build + full vitest.**
+- [ ] **Step 6: Frontend gates — typecheck + build + full vitest + E2E (§9.2).**
   ```
-  cd /home/john/elspeth/src/elspeth/web/frontend && npm run typecheck && npm test -- --run && npm run build
+  cd /home/john/elspeth/src/elspeth/web/frontend && npm run typecheck && npm test -- --run && npm run build && npm run test:e2e
   ```
-  Expected: typecheck clean, all vitest pass, build succeeds.
+  Also run `npm run test:e2e:staging` (from the same `src/elspeth/web/frontend`
+  dir) when `STAGING_BASE_URL` and staging credentials are available, otherwise
+  report it as operator-env blocked rather than silently skipping it.
+  Expected: typecheck clean, all vitest pass, build succeeds, `npm run test:e2e`
+  passes — P3.6 edits the live guided render/advancement path (ChatPanel.tsx +
+  sessionStore.ts `respondGuided`), exactly what E2E covers.
 
 - [ ] **Step 7: Commit.**
   ```
-  cd /home/john/elspeth && git add src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedInterpretationReviews.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedInterpretationReviews.test.tsx src/elspeth/web/frontend/src/stores/sessionStore.ts src/elspeth/web/frontend/src/stores/sessionStore.test.ts src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx && git commit -m "$(cat <<'EOF'
+  cd /home/john/elspeth && git add src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedInterpretationReviews.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedInterpretationReviews.test.tsx src/elspeth/web/frontend/src/stores/sessionStore.ts src/elspeth/web/frontend/src/stores/sessionStore.guided.test.ts src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx && git commit -m "$(cat <<'EOF'
 feat(frontend/guided): project pending interpretation cards + block advancement (D12)
 
 The guided ChatPanel branch now projects interpretationEventsStore
@@ -2255,11 +2397,15 @@ EOF
 
 **Files:** none (verification only).
 
-- [ ] **Step 1: Backend lint + types over the touched files.**
+- [ ] **Step 1: Backend lint + types (§9.2 scope).**
   ```
-  cd /home/john/elspeth && uv run ruff check src/ tests/ && uv run ruff format --check src/ tests/ && uv run mypy src/elspeth/web/composer/service.py src/elspeth/web/sessions/routes/composer/guided.py
+  cd /home/john/elspeth && uv run ruff check src/ tests/ scripts/ examples/ elspeth-lints/src/ && uv run ruff format --check src/ tests/ scripts/ examples/ elspeth-lints/src/ && uv run mypy src/ elspeth-lints/src/
   ```
   Expected: all clean. Fix any finding at the boundary (not by suppression).
+  This is the full §9.2 ruff/mypy scope (00-overview.md:68-70), not just the
+  P3-touched files — `mypy src/` covers `src/elspeth/web/composer/protocol.py`
+  (the `ComposerService` Protocol method added in P3.2 Step 3b), which the
+  narrower per-file mypy line omitted.
 
 - [ ] **Step 2: Targeted backend suite (surfacer + route + backstop).**
   ```

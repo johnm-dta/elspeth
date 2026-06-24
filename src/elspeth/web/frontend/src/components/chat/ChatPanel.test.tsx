@@ -483,6 +483,24 @@ describe("ChatPanel mode discriminator", () => {
     );
   });
 
+  it("marks STEP_4_WIRE as the current guided workflow step", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_4_wire" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    const workflow = screen.getByRole("list", { name: /guided workflow/i });
+    expect(workflow).toHaveTextContent("Wire");
+    expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
+      "Wire",
+    );
+  });
+
   it("renders the active turn in a current-decision panel with step purpose copy", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -631,6 +649,22 @@ describe("ChatPanel mode discriminator", () => {
 
     expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
       "Ask about sink config, outputs, or schema mode…",
+    );
+  });
+
+  it("renders the per-step placeholder for STEP_4_WIRE", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_4_wire" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
+      "Confirm how the steps connect, then continue.",
     );
   });
 

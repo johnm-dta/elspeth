@@ -46,6 +46,7 @@ const STEP_LABELS: Record<GuidedStep, string> = {
   step_2_sink: "Sink",
   step_2_5_recipe_match: "Recipe match",
   step_3_transforms: "Transforms",
+  step_4_wire: "Wire",
 };
 
 interface Props {

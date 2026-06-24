@@ -85,7 +85,7 @@ describe("interpretation protocol types", () => {
     expect(isInterpretationKind(null)).toBe(false);
   });
 
-  it("TurnType union has 7 values (Phase 5b adds interpretation_review)", () => {
+  it("TurnType union has 8 values (Phase 5b plus confirm_wiring)", () => {
     const _exact: Equals<
       TurnType,
       | "inspect_and_confirm"
@@ -95,6 +95,7 @@ describe("interpretation protocol types", () => {
       | "propose_chain"
       | "recipe_offer"
       | "interpretation_review"
+      | "confirm_wiring"
     > = true;
     const all: TurnType[] = [
       "inspect_and_confirm",
@@ -104,9 +105,10 @@ describe("interpretation protocol types", () => {
       "propose_chain",
       "recipe_offer",
       "interpretation_review",
+      "confirm_wiring",
     ];
     expect(_exact).toBe(true);
-    expect(all).toHaveLength(7);
+    expect(all).toHaveLength(8);
   });
 
   it("InterpretationEvent has the exhaustive 23-field shape (compile-time exact-keys check)", () => {

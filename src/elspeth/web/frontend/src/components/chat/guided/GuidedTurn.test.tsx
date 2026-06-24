@@ -2,7 +2,7 @@
 // GuidedTurn dispatcher -- routing contract regression coverage.
 //
 // Pins THREE contracts:
-//   1. Six-turn-type routing correctness: each TurnPayload.type routes to
+//   1. Turn-type routing correctness: each TurnPayload.type routes to
 //      exactly the matching leaf widget, identifiable by a widget-specific
 //      rendered element.
 //   2. onSubmit forwarding: the dispatcher passes onSubmit through unchanged;
@@ -20,6 +20,7 @@
 //   schema_form           -- "Continue" button (submit action, present when canSubmit)
 //   propose_chain         -- "Accept proposal" button
 //   recipe_offer          -- SchemaFormTurn recipe-decision renderer
+//   confirm_wiring        -- "Confirm wiring" button
 // ============================================================================
 
 import { describe, it, expect, vi } from "vitest";
@@ -129,11 +130,15 @@ function makeTurn(
   type: "recipe_offer",
   payload: SchemaFormPayload,
 ): TurnPayload;
+function makeTurn(
+  type: "confirm_wiring",
+  payload: null,
+): TurnPayload;
 function makeTurn(type: TurnPayload["type"], payload: unknown): TurnPayload {
   return { type, step_index: 0, payload };
 }
 
-// ── Suite 1: Six-turn-type routing correctness ────────────────────────────────
+// ── Suite 1: Turn-type routing correctness ───────────────────────────────────
 
 describe("GuidedTurn dispatcher — routing", () => {
   it("single_select: renders SingleSelectTurn (question legend)", () => {
@@ -205,6 +210,19 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(screen.getByRole("heading", { level: 3, name: "csv_to_json" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Apply recipe" })).toBeTruthy();
   });
+
+  it("confirm_wiring: renders the confirm wiring placeholder action", () => {
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", null)}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Confirm wiring" }),
+    ).toBeTruthy();
+  });
 });
 
 // ── Suite 2: onSubmit forwarding ──────────────────────────────────────────────
@@ -228,6 +246,47 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
       chosen: ["csv"],
       custom_inputs: null,
     });
+  });
+
+  it("confirm_wiring click forwards the exact confirm body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", null)}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Confirm wiring" }));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: ["confirm"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+  });
+
+  it("confirm_wiring disabled mode does not submit", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", null)}
+        onSubmit={onSubmit}
+        disabled
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Confirm wiring" });
+    expect(button).toBeDisabled();
+    await user.click(button);
+
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });
 

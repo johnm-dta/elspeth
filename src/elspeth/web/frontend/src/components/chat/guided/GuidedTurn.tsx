@@ -11,6 +11,7 @@
 //   "schema_form"             -> SchemaFormTurn
 //   "propose_chain"           -> ProposeChainTurn
 //   "recipe_offer"            -> SchemaFormTurn (mode="recipe_decision")
+//   "confirm_wiring"          -> ConfirmWiringPlaceholderTurn
 //
 // Exhaustiveness assertion:
 //   The `default:` branch contains `const _exhaustive: never = turn.type`.
@@ -61,6 +62,34 @@ interface GuidedTurnProps {
 
 function guidedTurnInstanceKey(turn: TurnPayload): string {
   return JSON.stringify([turn.step_index, turn.type, turn.payload]);
+}
+
+function ConfirmWiringPlaceholderTurn({
+  onSubmit,
+  disabled,
+}: {
+  onSubmit: (body: GuidedRespondRequest) => void;
+  disabled: boolean;
+}) {
+  const handleConfirm = () => {
+    if (disabled) return;
+    onSubmit({
+      chosen: ["confirm"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+  };
+
+  return (
+    <div className="guided-turn guided-turn--confirm-wiring">
+      <button type="button" onClick={handleConfirm} disabled={disabled}>
+        Confirm wiring
+      </button>
+    </div>
+  );
 }
 
 export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps) {
@@ -144,6 +173,14 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
         />
       );
     }
+    case "confirm_wiring":
+      return (
+        <ConfirmWiringPlaceholderTurn
+          key={turnInstanceKey}
+          onSubmit={guardedSubmit}
+          disabled={disabled}
+        />
+      );
     default: {
       // Exhaustiveness check: if a new TurnType is added to guided.ts without
       // a matching case here, TypeScript will report a compile error on this

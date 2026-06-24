@@ -18,8 +18,22 @@ import type {
   TurnType,
 } from "./guided";
 
+// Compile-time mutual-extends check.
+type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
 describe("guided protocol types", () => {
-  it("TurnType union has 6 values", () => {
+  it("TurnType union has exactly 8 values", () => {
+    const _exact: Equals<
+      TurnType,
+      | "inspect_and_confirm"
+      | "single_select"
+      | "multi_select_with_custom"
+      | "schema_form"
+      | "propose_chain"
+      | "recipe_offer"
+      | "interpretation_review"
+      | "confirm_wiring"
+    > = true;
     const all: TurnType[] = [
       "inspect_and_confirm",
       "single_select",
@@ -27,12 +41,14 @@ describe("guided protocol types", () => {
       "schema_form",
       "propose_chain",
       "recipe_offer",
+      "interpretation_review",
+      "confirm_wiring",
     ];
-    expect(all).toHaveLength(6);
+    expect(_exact).toBe(true);
+    expect(all).toHaveLength(8);
   });
 
   it("ControlSignal union has 3 values", () => {
-    type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
     const _exact: Equals<
       ControlSignal,
       "exit_to_freeform" | "request_advisor" | "reject"
@@ -46,14 +62,24 @@ describe("guided protocol types", () => {
     expect(all).toHaveLength(3);
   });
 
-  it("GuidedStep union has 4 values", () => {
+  it("GuidedStep union has exactly 5 values", () => {
+    const _exact: Equals<
+      GuidedStep,
+      | "step_1_source"
+      | "step_2_sink"
+      | "step_2_5_recipe_match"
+      | "step_3_transforms"
+      | "step_4_wire"
+    > = true;
     const all: GuidedStep[] = [
       "step_1_source",
       "step_2_sink",
       "step_2_5_recipe_match",
       "step_3_transforms",
+      "step_4_wire",
     ];
-    expect(all).toHaveLength(4);
+    expect(_exact).toBe(true);
+    expect(all).toHaveLength(5);
   });
 
   it("TerminalKind union has 2 values", () => {
@@ -82,7 +108,6 @@ describe("guided protocol types", () => {
   });
 
   it("GuidedSession has exactly step, history, terminal, chat_history, chat_turn_seq — exhaustive", () => {
-    type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
     // Compile-time mutual-extends: adding/removing a key in GuidedSession
     // makes this assignment fail tsc.  Slice 5 added chat_history and
     // chat_turn_seq to the GuidedSession wire shape.

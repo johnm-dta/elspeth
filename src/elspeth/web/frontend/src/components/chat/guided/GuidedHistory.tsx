@@ -17,6 +17,7 @@ const STEP_LABELS: Record<GuidedStep, string> = {
   step_2_sink: "Output",
   step_2_5_recipe_match: "Recipe",
   step_3_transforms: "Transforms",
+  step_4_wire: "Wire",
 };
 
 /**
@@ -35,6 +36,7 @@ const TURN_TYPE_LABELS: Record<TurnType, string> = {
   // Record<TurnType, string> exhaustive-keys contract holds the moment the
   // TurnType union widens.
   interpretation_review: "Interpretation review",
+  confirm_wiring: "Confirm wiring",
 };
 
 // ── Component ────────────────────────────────────────────────────────────────

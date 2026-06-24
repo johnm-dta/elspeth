@@ -461,6 +461,7 @@ const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
   step_2_sink: "Ask about sink config, outputs, or schema mode…",
   step_2_5_recipe_match: "Ask about the suggested recipe or alternatives…",
   step_3_transforms: "Ask about the proposed transform chain…",
+  step_4_wire: "Confirm how the steps connect, then continue.",
 };
 
 interface ChatPanelProps {
@@ -1712,6 +1713,7 @@ const GUIDED_STEP_PURPOSES: Record<GuidedStep, string> = {
   step_2_sink: "Choose the output shape and the fields the pipeline should produce.",
   step_2_5_recipe_match: "Review the suggested recipe before ELSPETH builds the transforms.",
   step_3_transforms: "Review the transform chain that turns source data into the output.",
+  step_4_wire: "Review and confirm the wiring between your pipeline steps.",
 };
 
 const GUIDED_WORKFLOW_STEPS: ReadonlyArray<{
@@ -1722,6 +1724,7 @@ const GUIDED_WORKFLOW_STEPS: ReadonlyArray<{
   { id: "step_2_sink", label: "Output" },
   { id: "step_2_5_recipe_match", label: "Recipe" },
   { id: "step_3_transforms", label: "Transforms" },
+  { id: "step_4_wire", label: "Wire" },
   { id: "ready", label: "Ready" },
 ];
 

@@ -25,7 +25,8 @@ export type TurnType =
   // Phase 5b: guided-mode interpretation-review widget.  Dispatched from
   // GuidedTurn.tsx (the freeform variant uses InterpretationReviewInlineMessage
   // — different file, different component, no shared widget).
-  | "interpretation_review";
+  | "interpretation_review"
+  | "confirm_wiring";
 
 export type ControlSignal =
   | "exit_to_freeform"
@@ -36,7 +37,8 @@ export type GuidedStep =
   | "step_1_source"
   | "step_2_sink"
   | "step_2_5_recipe_match"
-  | "step_3_transforms";
+  | "step_3_transforms"
+  | "step_4_wire";
 
 export type TerminalKind = "completed" | "exited_to_freeform";
 

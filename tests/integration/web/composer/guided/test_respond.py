@@ -680,7 +680,10 @@ class TestStep25RecipeAccept:
         )
 
         assert resp.status_code == 400, resp.json()
-        assert "confirm_wiring response must be exactly" in resp.json()["detail"]
+        # P5.6 narrowed the CONFIRM_WIRING response-shape guard (closed-enum chosen)
+        # so a malformed body cannot reach the EMPTY_PROFILE auto-complete branch;
+        # the 400 detail now names the two accepted closed choices.
+        assert "confirm_wiring response must be chosen=" in resp.json()["detail"]
 
         body = _get_guided(composer_test_client, session_id)
         confirm_record = next(r for r in body["guided_session"]["history"] if r["turn_type"] == "confirm_wiring")

@@ -1138,6 +1138,8 @@ async def post_guided_respond(
                         model=settings.composer_model,
                         temperature=settings.composer_temperature,
                         seed=settings.composer_seed,
+                        composer_service=request.app.state.composer_service,
+                        advisor_checkpoint_max_passes=settings.composer_advisor_checkpoint_max_passes,
                     )
                 except HTTPException:
                     # Dispatcher-level 400s happen after the turn has been

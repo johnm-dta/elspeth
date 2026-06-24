@@ -2648,6 +2648,8 @@ async def _dispatch_guided_respond(
     model: str,
     temperature: float | None,
     seed: int | None,
+    composer_service: ComposerService | None = None,  # compatibility default; tutorial profile fails closed on None (P5.6)
+    advisor_checkpoint_max_passes: int | None = None,  # compatibility default; tutorial profile requires positive int (P5.6)
 ) -> tuple[CompositionState, GuidedSession, Any | None]:
     """Dispatch a guided respond to the correct step handler and next-turn emitter.
 

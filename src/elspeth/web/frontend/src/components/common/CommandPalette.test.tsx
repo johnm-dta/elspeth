@@ -46,6 +46,7 @@ const exitedGuidedSession: GuidedSession = {
   },
   chat_history: [],
   chat_turn_seq: 0,
+  profile: null,
 };
 
 describe("CommandPalette guided-mode commands", () => {

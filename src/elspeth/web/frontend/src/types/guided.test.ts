@@ -17,6 +17,7 @@ import type {
   TurnRecord,
   TurnType,
   WireStageData,
+  WorkflowProfile,
 } from "./guided";
 
 // Compile-time mutual-extends check.
@@ -108,13 +109,18 @@ describe("guided protocol types", () => {
     expect(payload.step_index).toBe(0);
   });
 
-  it("GuidedSession has exactly step, history, terminal, chat_history, chat_turn_seq — exhaustive", () => {
+  it("GuidedSession has exactly step, history, terminal, chat_history, chat_turn_seq, profile — exhaustive", () => {
     // Compile-time mutual-extends: adding/removing a key in GuidedSession
     // makes this assignment fail tsc.  Slice 5 added chat_history and
-    // chat_turn_seq to the GuidedSession wire shape.
+    // chat_turn_seq; P6.2 added profile (server-owned WorkflowProfile).
     const _exact: Equals<
       keyof GuidedSession,
-      "step" | "history" | "terminal" | "chat_history" | "chat_turn_seq"
+      | "step"
+      | "history"
+      | "terminal"
+      | "chat_history"
+      | "chat_turn_seq"
+      | "profile"
     > = true;
     expect(_exact).toBe(true);
   });
@@ -151,6 +157,38 @@ describe("guided protocol types", () => {
     };
     // Runtime: just confirm the type guard compiles; value is irrelevant.
     expect(check).toBeTypeOf("function");
+  });
+});
+
+describe("WorkflowProfile wire type", () => {
+  it("carries exactly the four wire-visible boolean flags (entry_seed is server-side)", () => {
+    // Compile-time exhaustive check: entry_seed is consumed server-side at
+    // POST /guided/start and is NOT on the wire — adding it here would fail tsc.
+    const _exact: Equals<
+      keyof WorkflowProfile,
+      "coaching" | "bookends" | "recipe_match" | "advisor_checkpoints"
+    > = true;
+    const profile: WorkflowProfile = {
+      coaching: true,
+      bookends: true,
+      recipe_match: true,
+      advisor_checkpoints: true,
+    };
+    expect(_exact).toBe(true);
+    expect(profile.advisor_checkpoints).toBe(true);
+  });
+
+  it("rides GuidedSession.profile; null is the empty/live-guided profile", () => {
+    const profile: WorkflowProfile = {
+      coaching: false,
+      bookends: false,
+      recipe_match: false,
+      advisor_checkpoints: false,
+    };
+    const seeded: Pick<GuidedSession, "profile"> = { profile };
+    expect(seeded.profile).not.toBeNull();
+    const empty: Pick<GuidedSession, "profile"> = { profile: null };
+    expect(empty.profile).toBeNull();
   });
 });
 

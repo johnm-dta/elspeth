@@ -82,6 +82,20 @@ export interface ChatTurn {
 }
 
 /**
+ * Wire: WorkflowProfileResponse (schemas.py — WorkflowProfileResponse).
+ * Server-owned workflow profile, wire-visible subset. `entry_seed` is
+ * consumed server-side at POST /api/sessions/{session_id}/guided/start
+ * (`/guided/start` shorthand only) and is NOT on the wire.
+ * A `null` `GuidedSession.profile` is the empty/live-guided profile.
+ */
+export interface WorkflowProfile {
+  coaching: boolean;
+  bookends: boolean;
+  recipe_match: boolean;
+  advisor_checkpoints: boolean;
+}
+
+/**
  * Wire: GuidedSessionResponse (schemas.py:231-242 post-slice-5).
  * `chat_history` + `chat_turn_seq` were added in Phase A slice 5 to
  * persist per-step chat across reloads; before slice 5 the frontend
@@ -94,6 +108,8 @@ export interface GuidedSession {
   terminal: TerminalState | null;
   chat_history: ChatTurn[];
   chat_turn_seq: number;
+  /** Server-owned WorkflowProfile, or `null` for the empty/live-guided profile. */
+  profile: WorkflowProfile | null;
 }
 
 /** Wire: TurnPayloadResponse (schemas.py:239-252). step_index is 0-based ordinal (number). */

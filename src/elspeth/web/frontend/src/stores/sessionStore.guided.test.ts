@@ -60,6 +60,7 @@ const sampleGuidedSession: GuidedSession = {
   terminal: null,
   chat_history: [],
   chat_turn_seq: 0,
+  profile: null,
 };
 
 const sampleNextTurn: TurnPayload = {

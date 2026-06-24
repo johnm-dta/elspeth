@@ -537,6 +537,17 @@ def _make_response(
     )
 
 
+def _wire_response(control: ControlSignal | None = None) -> TurnResponse:
+    return TurnResponse(
+        chosen=None,
+        edited_values=None,
+        custom_inputs=None,
+        accepted_step_index=None,
+        edit_step_index=None,
+        control_signal=control,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Task 2.1 tests: step_advance dispatcher + Step 1 → Step 2 branch
 # ---------------------------------------------------------------------------
@@ -990,6 +1001,34 @@ class TestStepAdvance:
                 "python -O strips AssertionError raises and would silently "
                 "skip the dispatcher gate."
             )
+
+
+class TestAdvanceStep4Wire:
+    def test_confirm_wiring_is_a_self_loop(self) -> None:
+        session = dataclasses.replace(GuidedSession.initial(), step=GuidedStep.STEP_4_WIRE)
+        new_session, turn, terminal, directives = step_advance(
+            session,
+            _wire_response(),
+            current_turn_type=TurnType.CONFIRM_WIRING,
+        )
+        assert new_session.step is GuidedStep.STEP_4_WIRE
+        assert terminal is None
+        assert turn is None
+        assert directives == []
+
+    def test_wire_stage_rejects_illegal_turn_type(self) -> None:
+        session = dataclasses.replace(GuidedSession.initial(), step=GuidedStep.STEP_4_WIRE)
+        with pytest.raises(InvariantError, match="STEP_4_WIRE"):
+            step_advance(session, _wire_response(), current_turn_type=TurnType.PROPOSE_CHAIN)
+
+    def test_wire_stage_exit_to_freeform_still_terminates(self) -> None:
+        session = dataclasses.replace(GuidedSession.initial(), step=GuidedStep.STEP_4_WIRE)
+        _new, _turn, terminal, _directives = step_advance(
+            session,
+            _wire_response(control=ControlSignal.EXIT_TO_FREEFORM),
+            current_turn_type=TurnType.CONFIRM_WIRING,
+        )
+        assert terminal is not None
 
 
 # ---------------------------------------------------------------------------

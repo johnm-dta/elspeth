@@ -579,6 +579,8 @@ def step_advance(
         return _advance_step_2_5(session, response, current_turn_type)
     if session.step is GuidedStep.STEP_3_TRANSFORMS:
         return _advance_step_3(session, response, current_turn_type)
+    if session.step is GuidedStep.STEP_4_WIRE:
+        return _advance_step_4(session, response, current_turn_type)
     raise InvariantError(f"unhandled step: {session.step}")
 
 
@@ -802,6 +804,24 @@ def _advance_step_3(
         f"_advance_step_3: unexpected turn_type {turn_type!r} — Step 3 only "
         "emits PROPOSE_CHAIN, SINGLE_SELECT, and SCHEMA_FORM turns; any other type in the "
         "history record indicates a server-side emitter bug."
+    )
+
+
+def _advance_step_4(
+    session: GuidedSession,
+    response: TurnResponse,
+    turn_type: TurnType,
+) -> _StepAdvanceResult:
+    """Handle Step 4 (wire skeleton) responses.
+
+    Step 4 advancement is owned by the dispatcher/handler path in later work.
+    The state-machine branch is intentionally a pure self-loop for the
+    CONFIRM_WIRING turn and must not stamp terminal state.
+    """
+    if turn_type is TurnType.CONFIRM_WIRING:
+        return (session, None, None, [])
+    raise InvariantError(
+        f"_advance_step_4: unexpected turn_type {turn_type!r} for {GuidedStep.STEP_4_WIRE.name}; Step 4 only emits CONFIRM_WIRING turns."
     )
 
 

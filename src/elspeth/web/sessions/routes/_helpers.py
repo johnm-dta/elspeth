@@ -62,6 +62,7 @@ from elspeth.web.composer.audit import (
 from elspeth.web.composer.guided.audit import (
     emit_dropped_to_freeform,
     emit_hidden_field_rejected,
+    emit_signoff_decision,
     emit_step_advanced,
     emit_turn_answered,
     emit_turn_emitted,
@@ -3826,7 +3827,7 @@ async def _dispatch_guided_respond(
         # whole-pipeline END sign-off as a PRE-terminal gate so a FLAG can
         # still re-emit a revise turn (a post-terminal hook would be
         # foreclosed by the composer.py:2131 terminal-409).
-        from elspeth.web.composer.guided.signoff import SignoffOutcome, run_wire_signoff
+        from elspeth.web.composer.guided.signoff import SignoffOutcome, run_wire_signoff, signoff_audit_event_name
 
         if not guided.profile.advisor_checkpoints:
             yaml_text = generate_yaml(state)
@@ -3883,6 +3884,20 @@ async def _dispatch_guided_respond(
             acknowledged_unavailable=acknowledged_unavailable,
             progress=None,
         )
+        # D13 — record the DISTINCT sign-off audit event BEFORE the COMPLETE
+        # early-return so a clean sign-off (composer.signoff.clean) and an
+        # advisor-unreachable completion
+        # (composer.signoff.completed_without_signoff_advisor_unreachable) are
+        # never indistinguishable in the audit trail. The non-COMPLETE outcomes
+        # are audited here too, ahead of the re-emitted turn.
+        emit_signoff_decision(
+            recorder,
+            event_name=signoff_audit_event_name(decision),
+            outcome=decision.outcome.value,
+            reason=decision.reason,
+            composition_version=state.version,
+            actor=user_id,
+        )
         if decision.outcome is SignoffOutcome.COMPLETE:
             yaml_text = generate_yaml(state)
             terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
@@ -3891,10 +3906,20 @@ async def _dispatch_guided_respond(
         # Non-COMPLETE: re-emit the wire turn (terminal stays None). The
         # turn payload carries the advisor findings + outcome class so the
         # frontend renders the revise / fail-closed / escape-offer affordance.
+        # For a BLOCKED_* terminal, carry the NON-RUNNABLE blocked-validation
+        # findings (every readiness axis False) so the turn renders fail-closed
+        # rather than a plain retry.
+        blocked_findings: str | None = None
+        if decision.outcome in (SignoffOutcome.BLOCKED_FLAGGED, SignoffOutcome.BLOCKED_UNAVAILABLE):
+            blocked = _advisor_signoff_blocked_validation(
+                reason=decision.reason or "exhausted",
+                findings=decision.findings_text,
+            )
+            blocked_findings = blocked.errors[0].message if blocked.errors else decision.findings_text
         next_turn = build_step_4_wire_turn(
             state,
             catalog=catalog,
-            advisor_findings=decision.findings_text,
+            advisor_findings=blocked_findings or decision.findings_text,
             signoff_outcome=decision.outcome.value,
         )
         new_record = TurnRecord(

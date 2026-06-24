@@ -258,6 +258,40 @@ def emit_dropped_to_freeform(
     recorder.record(invocation)
 
 
+def emit_signoff_decision(
+    recorder: ComposerToolRecorder,
+    *,
+    event_name: str,
+    outcome: str,
+    reason: str | None,
+    composition_version: int,
+    actor: str,
+) -> None:
+    """Record a differentiated wire-stage sign-off decision audit event (D13).
+
+    ``event_name`` is the distinct ``signoff_audit_event_name(decision)`` string
+    (e.g. ``"composer.signoff.completed_without_signoff_advisor_unreachable"`` vs
+    ``"composer.signoff.clean"``) — the audit trail MUST distinguish an
+    advisor-unreachable completion from a real sign-off. Built as a
+    ``ComposerToolInvocation`` via the shared ``_build_invocation`` (Errata C4
+    pattern: no new audit primitive); recorded through ``recorder.record(...)``.
+    ``reason`` is omitted from the canonical payload when ``None`` so the
+    absence (a CLEAN sign-off) is unambiguous rather than a null sentinel.
+    """
+    payload: dict[str, Any] = {"outcome": outcome}
+    if reason is not None:
+        payload["reason"] = reason
+    now = datetime.now(UTC)
+    invocation = _build_invocation(
+        tool_name=event_name,
+        payload=payload,
+        composition_version=composition_version,
+        actor=actor,
+        now=now,
+    )
+    recorder.record(invocation)
+
+
 def emit_hidden_field_rejected(
     recorder: ComposerToolRecorder,
     *,

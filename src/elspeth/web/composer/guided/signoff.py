@@ -175,3 +175,25 @@ async def run_wire_signoff(
     )
 
     return new_session, decision
+
+
+def signoff_audit_event_name(decision: SignoffDecision) -> str:
+    """Map a sign-off decision to a DISTINCT audit event name (D13 provenance).
+
+    The "complete without sign-off (advisor unreachable)" escape MUST be
+    distinguishable in the audit trail from a CLEAN sign-off — both are
+    COMPLETE outcomes, but the escape carries ``reason="unavailable"`` while a
+    CLEAN sign-off carries ``reason=None``. An operator reading the audit log
+    can therefore tell an advisor-unreachable completion from a real sign-off.
+    """
+    if decision.outcome is SignoffOutcome.COMPLETE:
+        if decision.reason == "unavailable":
+            return "composer.signoff.completed_without_signoff_advisor_unreachable"
+        return "composer.signoff.clean"
+    if decision.outcome is SignoffOutcome.REVISE:
+        return "composer.signoff.revise"
+    if decision.outcome is SignoffOutcome.ESCAPE_UNAVAILABLE:
+        return "composer.signoff.escape_offered"
+    if decision.outcome is SignoffOutcome.BLOCKED_UNAVAILABLE:
+        return "composer.signoff.blocked_unavailable"
+    return "composer.signoff.blocked_flagged"

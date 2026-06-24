@@ -4466,20 +4466,60 @@ class ComposerServiceImpl:
             except Exception as exc:
                 # Convert-to-verdict (non-raising): the call core re-raises
                 # typed LLM errors (timeout, auth, transport, malformed); a
-                # checkpoint must degrade to "unavailable" rather than crash
-                # the compose loop, so every exception class is treated alike.
+                # checkpoint must degrade rather than crash the compose loop.
+                # The raw exception is retained only to CLASSIFY the failure
+                # below (transport vs malformed) — never to render user text.
                 last_exc = exc
                 continue
             blocking = not guidance.strip().upper().startswith("CLEAN")
             return AdvisorCheckpointVerdict(ok=True, blocking=blocking, findings_text=guidance.strip())
-        # Keep fail-closed semantics but do not carry provider SDK text into
-        # findings_text. The END gate folds findings_text into ValidationError
-        # and the returned assistant message, so rendering str(last_exc) here
-        # would bypass the route-level provider-error redaction policy.
+        # Bounded retry exhausted. The call core re-raises typed LLM errors, so
+        # classify the LAST exception into a failure CLASS the END gate can act
+        # on differently (D13/P5.3): a timeout/transport/auth/rate-limit outage
+        # is UNAVAILABLE (the advisor never rendered a judgement -> escapable at
+        # budget exhaustion), while a parse/validation/shape failure (or ANY
+        # unrecognised error) is MALFORMED and MUST fail closed — a goal-pressured
+        # model could emit garbage to slip the gate. Unknown -> MALFORMED is the
+        # SAFER (fail-closed) default. The raw exception is classified ONLY into
+        # ``failure_class`` (an enum-ish literal): ``findings_text`` carries no
+        # provider SDK text, exception class name, message, URL, or credential, so
+        # the route-level provider-error redaction policy is preserved (the END
+        # gate folds findings_text into a ValidationError and the assistant
+        # message).
+        #
+        # Allowlist is name/type-based and TIGHT. Builtin TimeoutError /
+        # ConnectionError cover the asyncio.wait_for deadline and stdlib transport
+        # errors. The name-set covers LiteLLM's typed transport classes by
+        # ``type(exc).__name__`` (verified against the installed litellm: the
+        # provider-deadline class is ``Timeout`` (subclasses APITimeoutError, but
+        # its own __name__ is "Timeout" and it is NOT a builtin TimeoutError), and
+        # ``ServiceUnavailableError`` is a 503 outage). ``BadRequestError`` /
+        # generic ``APIError`` / ``InternalServerError`` are deliberately ABSENT —
+        # they are ambiguous (could be a malformed/4xx request) and fall through to
+        # the fail-closed MALFORMED default.
+        _unavailable_types = (TimeoutError, ConnectionError)
+        _unavailable_names = {
+            "APITimeoutError",
+            "APIConnectionError",
+            "AuthenticationError",
+            "RateLimitError",
+            "Timeout",
+            "ServiceUnavailableError",
+        }
+        failure_class: Literal["none", "unavailable", "malformed"]
+        if last_exc is not None and (isinstance(last_exc, _unavailable_types) or type(last_exc).__name__ in _unavailable_names):
+            failure_class = "unavailable"
+        else:
+            # Parse/validation/shape errors AND any unrecognised exception class
+            # (including last_exc is None, which should be unreachable after a
+            # bounded-retry loop) fail closed as MALFORMED.
+            failure_class = "malformed"
+        findings_text = _ADVISOR_UNAVAILABLE_USER_DETAIL if failure_class == "unavailable" else _ADVISOR_MALFORMED_USER_DETAIL
         return AdvisorCheckpointVerdict(
             ok=False,
             blocking=False,
-            findings_text=_ADVISOR_UNAVAILABLE_USER_DETAIL if last_exc else "advisor unavailable",
+            failure_class=failure_class,
+            findings_text=findings_text,
         )
 
     async def _maybe_run_early_checkpoint(
@@ -4926,6 +4966,14 @@ class AdvisorCheckpointVerdict:
     ok: bool
     blocking: bool
     findings_text: str
+    # P5.3/D13: distinguishes the two ``ok=False`` failure CLASSES the gate must
+    # treat differently. ``_run_advisor_checkpoint`` collapses every exception to
+    # ``ok=False``, so ``(ok, blocking)`` alone cannot tell a malformed/parse
+    # failure (MUST fail closed) from a transport outage (MAY take the audited
+    # escape at budget exhaustion). Only the EXACT value ``"unavailable"`` is
+    # escapable; ``"none"`` (default; never read on CLEAN/FLAGGED), ``"malformed"``,
+    # or any unrecognised value fails closed. See ``classify_signoff_verdict``.
+    failure_class: Literal["none", "unavailable", "malformed"] = "none"
 
 
 # Salient, intent-bearing option keys whose VALUES are rendered (compactly) in
@@ -5195,6 +5243,11 @@ _ADVISOR_SIGNOFF_BLOCKED_CODE: Final[str] = "advisor_signoff_blocked"
 # result names a stable check the UI/audit can key on.
 _ADVISOR_SIGNOFF_BLOCKED_CHECK_NAME: Final[ValidationCheckName] = CHECK_ADVISOR_SIGNOFF
 _ADVISOR_UNAVAILABLE_USER_DETAIL: Final[str] = "advisor model was unavailable after retry"
+# Fixed user-facing detail for a MALFORMED advisor failure (parse/shape error, or
+# any unclassified exception). Like the unavailable detail it carries NO provider
+# SDK text, exception class name, message, URL, or credential — the raw exception
+# is classified only into ``AdvisorCheckpointVerdict.failure_class`` (P5.3/D13).
+_ADVISOR_MALFORMED_USER_DETAIL: Final[str] = "advisor response was malformed"
 
 
 def _advisor_signoff_blocked_validation(*, reason: str, findings: str) -> ValidationResult:

@@ -22,7 +22,11 @@ import pytest
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
 from elspeth.web.composer.audit import BufferingRecorder
-from elspeth.web.composer.service import AdvisorCheckpointVerdict, ComposerServiceImpl
+from elspeth.web.composer.service import (
+    _ADVISOR_UNAVAILABLE_USER_DETAIL,
+    AdvisorCheckpointVerdict,
+    ComposerServiceImpl,
+)
 from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
@@ -312,6 +316,89 @@ async def test_run_advisor_checkpoint_unavailable_after_retries(make_service, si
     verdict = await service._run_advisor_checkpoint(phase="end", state=simple_state, session_id="s1", recorder=make_recorder())
     assert verdict.ok is False  # unavailable
     assert service._call_advisor_with_audit.await_count >= 2  # bounded retry
+
+
+@pytest.mark.asyncio
+async def test_exhausted_transport_failure_classified_unavailable_no_provider_text(make_service, simple_state):
+    """P5.3/D13: a transport/timeout outage classifies UNAVAILABLE (escapable at
+    budget exhaustion) and carries NO raw provider exception text."""
+    service = make_service()
+    service._call_advisor_with_audit = AsyncMock(side_effect=TimeoutError("provider deadline details"))
+    verdict = await service._run_advisor_checkpoint(phase="end", state=simple_state, session_id="s1", recorder=make_recorder())
+    assert verdict.ok is False
+    assert verdict.failure_class == "unavailable"
+    assert verdict.findings_text == _ADVISOR_UNAVAILABLE_USER_DETAIL
+    assert "TimeoutError" not in verdict.findings_text
+    assert "provider deadline details" not in verdict.findings_text
+
+
+@pytest.mark.asyncio
+async def test_exhausted_litellm_timeout_classified_unavailable(make_service, simple_state):
+    """The live LiteLLM provider-deadline class is ``Timeout`` (its __name__ is
+    "Timeout", and it is NOT a builtin TimeoutError) — it must still classify as
+    a genuine outage, not fail closed as malformed."""
+
+    class Timeout(Exception):  # mirrors litellm.exceptions.Timeout.__name__
+        pass
+
+    service = make_service()
+    service._call_advisor_with_audit = AsyncMock(side_effect=Timeout("upstream 504 https://provider.example api_key=sk-secret"))
+    verdict = await service._run_advisor_checkpoint(phase="end", state=simple_state, session_id="s1", recorder=make_recorder())
+    assert verdict.ok is False
+    assert verdict.failure_class == "unavailable"
+    assert verdict.findings_text == _ADVISOR_UNAVAILABLE_USER_DETAIL
+    assert "sk-secret" not in verdict.findings_text
+    assert "provider.example" not in verdict.findings_text
+
+
+@pytest.mark.asyncio
+async def test_exhausted_litellm_service_unavailable_classified_unavailable(make_service, simple_state):
+    """A LiteLLM ``ServiceUnavailableError`` (provider 503) is a genuine outage —
+    it must classify UNAVAILABLE (escapable), not fail closed as malformed, so a
+    503 storm does not permanently block completion. Locks the allowlist entry."""
+
+    class ServiceUnavailableError(Exception):  # mirrors litellm.exceptions name
+        pass
+
+    service = make_service()
+    service._call_advisor_with_audit = AsyncMock(
+        side_effect=ServiceUnavailableError("provider 503 https://provider.example api_key=sk-secret")
+    )
+    verdict = await service._run_advisor_checkpoint(phase="end", state=simple_state, session_id="s1", recorder=make_recorder())
+    assert verdict.ok is False
+    assert verdict.failure_class == "unavailable"
+    assert verdict.findings_text == _ADVISOR_UNAVAILABLE_USER_DETAIL
+    assert "sk-secret" not in verdict.findings_text
+    assert "provider.example" not in verdict.findings_text
+
+
+@pytest.mark.asyncio
+async def test_exhausted_malformed_failure_classified_malformed_fail_closed(make_service, simple_state):
+    """P5.3/D13: a parse/value/shape error classifies MALFORMED (fail-closed, NOT
+    escapable) and carries NO raw provider exception text."""
+    service = make_service()
+    service._call_advisor_with_audit = AsyncMock(side_effect=ValueError("raw parse failure"))
+    verdict = await service._run_advisor_checkpoint(phase="end", state=simple_state, session_id="s1", recorder=make_recorder())
+    assert verdict.ok is False
+    assert verdict.failure_class == "malformed"
+    assert verdict.findings_text == "advisor response was malformed"
+    assert "ValueError" not in verdict.findings_text
+    assert "raw parse failure" not in verdict.findings_text
+
+
+@pytest.mark.asyncio
+async def test_exhausted_unknown_exception_fails_closed_as_malformed(make_service, simple_state):
+    """Fail-closed default: an unrecognised exception class (not on the tight
+    transport allowlist) must classify MALFORMED, never UNAVAILABLE — so a
+    goal-pressured model cannot slip the gate by raising garbage."""
+    service = make_service()
+    service._call_advisor_with_audit = AsyncMock(side_effect=RuntimeError("provider 500 internal request_id=req-secret"))
+    verdict = await service._run_advisor_checkpoint(phase="end", state=simple_state, session_id="s1", recorder=make_recorder())
+    assert verdict.ok is False
+    assert verdict.failure_class == "malformed"
+    assert verdict.findings_text == "advisor response was malformed"
+    assert "RuntimeError" not in verdict.findings_text
+    assert "req-secret" not in verdict.findings_text
 
 
 # ---------------------------------------------------------------------------

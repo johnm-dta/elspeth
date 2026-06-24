@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 from elspeth.web.composer.guided.resolved import (
     SinkOutputResolved as SinkOutputResolved,
@@ -312,6 +313,9 @@ class GuidedSession:
     step_1_result: SourceResolved | None
     step_2_result: SinkResolved | None
     step_3_proposal: ChainProposal | None
+    profile: WorkflowProfile = EMPTY_PROFILE
+    advisor_checkpoint_passes_used: int = 0
+    advisor_signoff_escape_offered: bool = False
     step_1_inspection_facts: SourceInspectionFacts | None = None
     step_1_chosen_plugin: str | None = None
     terminal: TerminalState | None = None
@@ -332,6 +336,12 @@ class GuidedSession:
     chat_turn_seq: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.profile) is not WorkflowProfile:
+            raise TypeError(f"profile must be WorkflowProfile, got {type(self.profile).__name__}")
+        if type(self.advisor_checkpoint_passes_used) is not int or self.advisor_checkpoint_passes_used < 0:
+            raise TypeError("advisor_checkpoint_passes_used must be a non-negative int")
+        if type(self.advisor_signoff_escape_offered) is not bool:
+            raise TypeError(f"advisor_signoff_escape_offered must be bool, got {type(self.advisor_signoff_escape_offered).__name__}")
         if self.step_1_inspection_facts is not None and type(self.step_1_inspection_facts) is not SourceInspectionFacts:
             raise TypeError(
                 f"step_1_inspection_facts must be SourceInspectionFacts or None, got {type(self.step_1_inspection_facts).__name__}"
@@ -340,13 +350,14 @@ class GuidedSession:
             raise TypeError(f"step_1_chosen_plugin must be str or None, got {type(self.step_1_chosen_plugin).__name__}")
 
     @classmethod
-    def initial(cls) -> GuidedSession:
+    def initial(cls, profile: WorkflowProfile = EMPTY_PROFILE) -> GuidedSession:
         return cls(
             step=GuidedStep.STEP_1_SOURCE,
             history=(),
             step_1_result=None,
             step_2_result=None,
             step_3_proposal=None,
+            profile=profile,
             terminal=None,
         )
 
@@ -368,6 +379,9 @@ class GuidedSession:
             "step_1_result": self.step_1_result.to_dict() if self.step_1_result is not None else None,
             "step_2_result": self.step_2_result.to_dict() if self.step_2_result is not None else None,
             "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
+            "profile": self.profile.to_dict(),
+            "advisor_checkpoint_passes_used": self.advisor_checkpoint_passes_used,
+            "advisor_signoff_escape_offered": self.advisor_signoff_escape_offered,
             "step_1_inspection_facts": facts_to_dict(self.step_1_inspection_facts) if self.step_1_inspection_facts is not None else None,
             "step_1_chosen_plugin": self.step_1_chosen_plugin,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
@@ -405,6 +419,17 @@ class GuidedSession:
             step_1_raw = d["step_1_result"]
             step_2_raw = d["step_2_result"]
             step_3_raw = d["step_3_proposal"]
+            profile_raw = d["profile"]
+            advisor_checkpoint_passes_used_raw = d["advisor_checkpoint_passes_used"]
+            advisor_signoff_escape_offered_raw = d["advisor_signoff_escape_offered"]
+            try:
+                profile = WorkflowProfile.from_dict(profile_raw)
+            except InvariantError as exc:
+                raise InvariantError("GuidedSession.from_dict: malformed profile") from exc
+            if type(advisor_checkpoint_passes_used_raw) is not int or advisor_checkpoint_passes_used_raw < 0:
+                raise InvariantError("GuidedSession.from_dict: advisor_checkpoint_passes_used must be a non-negative int")
+            if type(advisor_signoff_escape_offered_raw) is not bool:
+                raise InvariantError("GuidedSession.from_dict: advisor_signoff_escape_offered must be bool")
             inspection_facts_raw = d["step_1_inspection_facts"]
             step_1_chosen_plugin_raw = d["step_1_chosen_plugin"]
             terminal_raw = d["terminal"]
@@ -442,6 +467,9 @@ class GuidedSession:
                 step_1_result=SourceResolved.from_dict(step_1_raw) if step_1_raw is not None else None,
                 step_2_result=SinkResolved.from_dict(step_2_raw) if step_2_raw is not None else None,
                 step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
+                profile=profile,
+                advisor_checkpoint_passes_used=advisor_checkpoint_passes_used_raw,
+                advisor_signoff_escape_offered=advisor_signoff_escape_offered_raw,
                 step_1_inspection_facts=facts_from_dict(inspection_facts_raw) if inspection_facts_raw is not None else None,
                 step_1_chosen_plugin=str(step_1_chosen_plugin_raw) if step_1_chosen_plugin_raw is not None else None,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,

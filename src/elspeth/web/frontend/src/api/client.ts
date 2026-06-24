@@ -608,6 +608,26 @@ export async function getGuided(
 }
 
 /**
+ * Seed a guided session with a server-owned WorkflowProfile.
+ *
+ * The `profileKind` is a closed-enum discriminator ("live" | "tutorial"); the
+ * SERVER constructs the concrete profile object and persists the GuidedSession.
+ * Idempotent (D16): a second call for a session that already has a persisted
+ * guided session returns the existing session unchanged.
+ */
+export async function startGuidedSession(
+  sessionId: string,
+  profileKind: "live" | "tutorial",
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/start`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ profile: profileKind }),
+  });
+  return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
  * Post a user response to the active guided turn.
  *
  * Server consumes the response, advances the state machine, and returns

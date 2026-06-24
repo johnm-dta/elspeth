@@ -2593,8 +2593,8 @@ def _emit_wire_turn(
     prev_step: GuidedStep | None = None,
     advance_reason: str | None = None,
 ) -> tuple[GuidedSession, Turn]:
-    """Emit the STEP_4_WIRE skeleton confirm_wiring turn."""
-    next_turn = build_step_4_wire_turn(validation=state.validate())
+    """Emit the STEP_4_WIRE confirm_wiring turn."""
+    next_turn = build_step_4_wire_turn(state)
     payload_hash = stable_hash(next_turn["payload"])
     new_record = TurnRecord(
         step=GuidedStep.STEP_4_WIRE,

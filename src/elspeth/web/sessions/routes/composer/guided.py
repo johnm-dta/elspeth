@@ -201,7 +201,7 @@ def _build_get_guided_turn(
         # idempotency machinery handle it (no TurnRecord emitted; client retries).
         return None
     if step is GuidedStep.STEP_4_WIRE:
-        return build_step_4_wire_turn(validation=state.validate())
+        return build_step_4_wire_turn(state)
     return None
 
 

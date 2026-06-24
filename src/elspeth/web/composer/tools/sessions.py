@@ -46,13 +46,13 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
+    _FULL_STATE_COMPONENT_ALIAS_SET,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
     ToolContext,
     ToolResult,
     _credential_wiring_contract_failure,
     _discovery_result,
     _failure_result,
-    _FullPipelineStatePayload,
     _graph_repair_suggestions,
     _missing_output_options_repair_error,
     _mutation_result,
@@ -62,7 +62,7 @@ from elspeth.web.composer.tools._common import (
     _prevalidate_transform,
     _runtime_owned_llm_option_error,
     _semantic_contracts_payload,
-    _serialize_edge,
+    _serialize_full_pipeline_state,
     _serialize_node,
     _serialize_output,
     _serialize_source,
@@ -112,11 +112,6 @@ from elspeth.web.validation import (
     _reject_credential_shaped_content,
     _validate_accepted_value_content,
 )
-
-_FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
-
-_FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
-
 
 ADVISOR_TRIGGER_PROACTIVE_SECURITY: Final[str] = "proactive_security_safety"
 
@@ -1079,23 +1074,6 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
 def _is_full_state_component_alias(component: Any) -> bool:
     """Return whether a component argument explicitly requests full state."""
     return isinstance(component, str) and component.strip().lower() in _FULL_STATE_COMPONENT_ALIAS_SET
-
-
-def _serialize_full_pipeline_state(state: CompositionState, *, requested_component: Any) -> _FullPipelineStatePayload:
-    """Serialize the full state and expose accepted full-state spellings."""
-    return {
-        "sources": {name: _serialize_source(source) for name, source in state.sources.items()},
-        "nodes": [_serialize_node(n) for n in state.nodes],
-        "outputs": [_serialize_output(o) for o in state.outputs],
-        "edges": [_serialize_edge(e) for e in state.edges],
-        "metadata": {"name": state.metadata.name, "description": state.metadata.description},
-        "version": state.version,
-        "inspection": {
-            "requested_component": requested_component,
-            "resolved_component": "full",
-            "accepted_full_state_aliases": list(_FULL_STATE_COMPONENT_ALIASES),
-        },
-    }
 
 
 def _execute_get_pipeline_state(

@@ -232,12 +232,19 @@ class TestStep4WireEmitter:
         assert _guided_step_index(GuidedStep.STEP_4_WIRE) == 4
 
     def test_builds_confirm_wiring_skeleton_payload(self) -> None:
-        turn = build_step_4_wire_turn(validation=_empty_state().validate())
+        turn = build_step_4_wire_turn(_empty_state())
 
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
         assert turn["step_index"] == 4
         assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
-        assert turn["payload"]["topology"] == {"sources": {}, "nodes": [], "outputs": []}
-        assert turn["payload"]["edge_contracts"] == []
-        assert turn["payload"]["semantic_contracts"] == []
-        assert turn["payload"]["warnings"] == []
+        payload = turn["payload"]
+        assert set(payload.keys()) == {
+            "topology",
+            "edge_contracts",
+            "semantic_contracts",
+            "warnings",
+        }
+        assert payload["topology"]["sources"] == {}
+        assert payload["edge_contracts"] == []
+        assert payload["semantic_contracts"] == []
+        assert payload["warnings"] == []

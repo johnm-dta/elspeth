@@ -15,7 +15,7 @@ Exported:
     build_step_2_5_recipe_offer_turn — recipe_offer from a RecipeMatch.
     build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
     build_step_3_schema_form_turn — schema_form for editing one proposed transform.
-    build_step_4_wire_turn — confirm_wiring turn for the wire stage.
+    build_step_4_wire_turn — confirm_wiring turn with topology + validation two-read merge.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
 data constructed from system-owned state; the Turn dict itself is not persisted
@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from elspeth.web.catalog.knob_schema import KnobSchema, lower_slot_specs_to_knob_schema
+from elspeth.web.composer._producer_resolver import source_producer_id
 from elspeth.web.composer.guided.protocol import (
     GuidedStep,
     InspectAndConfirmPayload,
@@ -37,16 +38,19 @@ from elspeth.web.composer.guided.protocol import (
     SingleSelectPayload,
     Turn,
     TurnType,
+    WireStageData,
+    WireTopology,
     _Observed,
     _Option,
 )
+from elspeth.web.composer.tools._common import _semantic_contracts_payload, _serialize_full_pipeline_state
 
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
     from elspeth.web.composer.guided.recipe_match import RecipeMatch
     from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
-    from elspeth.web.composer.state import CompositionState, ValidationSummary
+    from elspeth.web.composer.state import CompositionState
 
 
 def build_initial_step_1_turn(
@@ -371,19 +375,66 @@ def build_step_3_schema_form_turn(
     )
 
 
-def build_step_4_wire_turn(*, validation: ValidationSummary) -> Turn:
-    """Build a ``confirm_wiring`` skeleton Turn for the wire stage."""
-    payload: dict[str, Any] = {
-        "topology": {"sources": {}, "nodes": [], "outputs": []},
-        "edge_contracts": [],
-        "semantic_contracts": [],
-        "warnings": [],
+def build_step_4_wire_turn(
+    state: CompositionState,
+    *,
+    catalog: CatalogServiceProtocol | None = None,
+    advisor_findings: str | None = None,
+    signoff_outcome: str | None = None,
+) -> Turn:
+    """Build a ``confirm_wiring`` Turn from topology and validation reads."""
+    del catalog  # Reserved for future catalog-backed presentation enrichment.
+    validation = state.validate()
+    payload: WireStageData = {
+        "topology": _build_wire_topology(state),
+        "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],
+        "semantic_contracts": _semantic_contracts_payload(validation.semantic_contracts),
+        "warnings": [w.to_dict() for w in validation.warnings],
     }
+    if advisor_findings is not None:
+        payload["advisor_findings"] = advisor_findings
+    if signoff_outcome is not None:
+        payload["signoff_outcome"] = signoff_outcome
     return Turn(
         type=TurnType.CONFIRM_WIRING.value,
         step_index=_step_index(GuidedStep.STEP_4_WIRE),
         payload=payload,
     )
+
+
+def _build_wire_topology(state: CompositionState) -> WireTopology:
+    """Build the label topology used by the wire-stage renderer."""
+    full_state = _serialize_full_pipeline_state(state, requested_component="pipeline")
+    sources = {
+        source_name: {
+            "id": source_producer_id(source_name),
+            "plugin": source["plugin"],
+            "on_success": source["on_success"],
+        }
+        for source_name, source in full_state["sources"].items()
+    }
+    nodes = [
+        {
+            "id": node["id"],
+            "node_type": node["node_type"],
+            "plugin": node["plugin"],
+            "input": node["input"],
+            "on_success": node["on_success"],
+            "on_error": node["on_error"],
+            "routes": node["routes"],
+            "fork_to": node["fork_to"],
+        }
+        for node in full_state["nodes"]
+    ]
+    outputs = [
+        {
+            "id": f"output:{output['sink_name']}",
+            "sink_name": output["sink_name"],
+            "plugin": output["plugin"],
+        }
+        for output in full_state["outputs"]
+    ]
+    return cast(WireTopology, {"sources": sources, "nodes": nodes, "outputs": outputs})
 
 
 def _build_inspect_and_confirm_turn(

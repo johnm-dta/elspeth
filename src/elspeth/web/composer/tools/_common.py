@@ -88,6 +88,8 @@ from elspeth.web.validation import (
     INTERPRETATION_PLACEHOLDER_RE,
 )
 
+_FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
+_FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 _DATA_ERROR_KEY: Final[str] = "error"
 _RUNTIME_OWNED_LLM_OPTION_KEYS: Final[frozenset[str]] = frozenset({"resolved_prompt_template_hash"})
 _RESOLVER_OWNED_INTERPRETATION_REQUIREMENT_FIELDS: Final[frozenset[str]] = frozenset(
@@ -1035,6 +1037,23 @@ def _serialize_edge(edge: EdgeSpec) -> dict[str, Any]:
         "to_node": edge.to_node,
         "edge_type": edge.edge_type,
         "label": edge.label,
+    }
+
+
+def _serialize_full_pipeline_state(state: CompositionState, *, requested_component: Any) -> _FullPipelineStatePayload:
+    """Serialize the full state and expose accepted full-state spellings."""
+    return {
+        "sources": {name: _serialize_source(source) for name, source in state.sources.items()},
+        "nodes": [_serialize_node(n) for n in state.nodes],
+        "outputs": [_serialize_output(o) for o in state.outputs],
+        "edges": [_serialize_edge(e) for e in state.edges],
+        "metadata": {"name": state.metadata.name, "description": state.metadata.description},
+        "version": state.version,
+        "inspection": {
+            "requested_component": requested_component,
+            "resolved_component": "full",
+            "accepted_full_state_aliases": list(_FULL_STATE_COMPONENT_ALIASES),
+        },
     }
 
 

@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -475,7 +478,7 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     const workflow = screen.getByRole("list", { name: /guided workflow/i });
-    for (const label of ["Source", "Output", "Recipe", "Transforms", "Ready"]) {
+    for (const label of ["Source", "Output", "Recipe", "Transforms", "Wire", "Ready"]) {
       expect(workflow).toHaveTextContent(label);
     }
     expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
@@ -499,6 +502,14 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
       "Wire",
     );
+  });
+
+  it("keeps the guided workflow stepper on a six-column grid", () => {
+    const css = readFileSync(
+      join(process.cwd(), "src/components/chat/guided/guided.css"),
+      "utf8",
+    );
+    expect(css).toContain("grid-template-columns: repeat(6, minmax(0, 1fr));");
   });
 
   it("renders the active turn in a current-decision panel with step purpose copy", () => {

@@ -203,24 +203,18 @@ def _has_two_json_outputs(sink: SinkResolved) -> bool:
 # inline_blob URL list materialises to a real registered source plugin via
 # _MIME_TO_SOURCE (tools/sources.py): JSON rows -> "json", CSV -> "csv". The
 # predicate matches those resolved names + a "url" column signal + a single
-# jsonl output, gated on blob_ref (same blob-presence discipline as
-# _classify_predicate).
+# json output (format-blind, like _classify_predicate), gated on blob_ref
+# (same blob-presence discipline as _classify_predicate). The builder in
+# recipes.py force-sets ``format: jsonl`` on its output regardless of the
+# matched sink's format, so the predicate must NOT gate on format: at
+# match_recipe time the resolved json sink's format is the Step-2 SchemaForm
+# default (None — jsonl is auto-detected from a .jsonl filename only at
+# RUNTIME). Gating on format here is why the canonical tutorial pipeline never
+# matched (E2E review).
 # ---------------------------------------------------------------------------
 
 _URL_ROW_SOURCE_PLUGINS: frozenset[str] = frozenset({"json", "csv"})
 _URL_COLUMN_NAMES: frozenset[str] = frozenset({"url"})
-
-
-def _has_single_jsonl_output(sink: SinkResolved) -> bool:
-    """Return True for a single ``json`` output configured as JSONL.
-
-    The canonical web-scrape pipeline writes one JSONL file. ``json`` is the
-    registered sink plugin; ``format: jsonl`` is the JSONL discriminator (an
-    absent format is the json plugin's default object-array, not JSONL).
-    """
-    if not (len(sink.outputs) == 1 and sink.outputs[0].plugin == "json"):
-        return False
-    return sink.outputs[0].options.get("format") == "jsonl"
 
 
 def _source_has_url_column(source: SourceResolved) -> bool:
@@ -234,12 +228,26 @@ def _source_has_url_column(source: SourceResolved) -> bool:
 
 
 def _web_scrape_predicate(source: SourceResolved, sink: SinkResolved) -> bool:
-    """Return True for a blob-backed URL-row source → single JSONL output.
+    """Return True for a blob-backed URL-row source → single ``json`` output.
 
     Matches the canonical tutorial shape: an inline_blob URL list that
     materialised to a ``json``/``csv`` source (NOT ``web_scrape`` — that is a
-    downstream transform the recipe inserts) feeding a single JSONL sink, with
-    an observed ``url`` column.
+    downstream transform the recipe inserts) feeding a single ``json`` sink,
+    with an observed ``url`` column.
+
+    Format-blind, mirroring ``_classify_predicate`` and ``_has_single_json_output``:
+    the recipe matches ANY single ``json`` output, not just one already tagged
+    ``format: jsonl``. The web_scrape builder (recipes.py) force-sets
+    ``format: jsonl`` on its output regardless of the matched sink's format, so
+    a format gate here is both unnecessary and harmful — at ``match_recipe``
+    time the resolved json sink's ``format`` is the operator's Step-2 SchemaForm
+    default (``None``; jsonl is auto-detected from a ``.jsonl`` filename only at
+    runtime), so gating on it made the canonical tutorial pipeline never match
+    and silently degrade to LLM-driven compose (E2E review).
+
+    The discriminator is therefore the (json/csv source plugin + ``blob_ref`` +
+    observed ``url`` column) signal, NOT the sink format. A non-url json/csv
+    source still fails ``_source_has_url_column`` and returns None.
 
     Requires ``blob_ref`` in ``source.options`` for the same reason as
     ``_classify_predicate``: the slot resolver cannot derive ``source_blob_id``
@@ -250,7 +258,7 @@ def _web_scrape_predicate(source: SourceResolved, sink: SinkResolved) -> bool:
         return False
     if "blob_ref" not in source.options:
         return False
-    if not _has_single_jsonl_output(sink):
+    if not _has_single_json_output(sink):
         return False
     return _source_has_url_column(source)
 
@@ -458,11 +466,16 @@ _RECIPE_PREDICATES: Sequence[tuple[_Predicate, str, _SlotResolver]] = (
     # them.  Users who want fork-coalesce must hand-build via Step 3 or
     # pre-select via list_recipes.
     #
-    # web-scrape-llm-rate-jsonl is registered LAST: the URL-row json/csv source
-    # never collides with the CSV classify/split predicates (those need
-    # classifier-keyword required_fields / two outputs), so order is not load-
-    # bearing for disambiguation — it is asserted last to keep registry edits
-    # intentional.  The RecipeSpec it matches is registered in recipes.py
+    # web-scrape-llm-rate-jsonl is registered LAST: the canonical URL-row json
+    # source (no classifier-keyword required_fields, single output) does not
+    # collide with the CSV classify/split predicates.  ORDER IS THE TIEBREAKER
+    # for one genuine overlap, however: now that _web_scrape_predicate is
+    # format-blind (matches any single JSON output), a CSV source carrying BOTH
+    # a classifier-keyword required_field AND an observed ``url`` column matches
+    # classify AND web_scrape.  classify is registered first, so it wins — the
+    # defensible outcome (an explicit classifier-keyword field is the stronger
+    # intent signal than a column merely named ``url``).  Keep classify ahead of
+    # web_scrape.  The RecipeSpec it matches is registered in recipes.py
     # (``web-scrape-llm-rate-jsonl``), so ``match_recipe`` resolves it end-to-end.
     (_web_scrape_predicate, "web-scrape-llm-rate-jsonl", _web_scrape_slot_resolver),
 )

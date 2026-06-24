@@ -588,6 +588,28 @@ def _make_single_jsonl_sink(path: str = "outputs/ratings.jsonl") -> SinkResolved
     )
 
 
+def _make_single_json_sink_no_format(path: str = "outputs/ratings.jsonl") -> SinkResolved:
+    """A single ``json`` output with NO ``format`` key — the REAL match-time shape.
+
+    At ``match_recipe`` time the resolved json sink's options come from the
+    operator's Step-2 SchemaForm submission, where the json sink's ``format``
+    defaults to absent (jsonl is auto-detected from a ``.jsonl`` filename only at
+    RUNTIME, not in the resolved options). Tests that hand-set ``format: jsonl``
+    re-mask the bug this fixture exists to catch; route reachability/canonical
+    assertions through THIS helper, not ``_make_single_jsonl_sink``.
+    """
+    return SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                plugin="json",
+                options={"path": path},  # NO format key — operator default
+                required_fields=(),
+                schema_mode="observed",
+            ),
+        )
+    )
+
+
 class TestWebScrapePredicate:
     def test_matches_blob_backed_json_url_source(self) -> None:
         from elspeth.web.composer.guided.recipe_match import _web_scrape_predicate
@@ -636,20 +658,30 @@ class TestWebScrapePredicate:
         )
         assert _web_scrape_predicate(no_url, _make_single_jsonl_sink()) is False
 
-    def test_no_match_for_non_jsonl_output(self) -> None:
+    def test_matches_json_output_without_explicit_jsonl_format(self) -> None:
+        """A single ``json`` output with NO ``format: jsonl`` key MUST match.
+
+        This is the real match-time shape (the Step-2 SchemaForm default leaves
+        ``format`` absent; jsonl is auto-detected from the filename only at
+        runtime). The predicate is format-blind — the builder force-sets jsonl
+        on its output regardless — so this output matches. Before the E2E-review
+        fix the predicate gated on ``format == "jsonl"`` and this returned False,
+        which is why the canonical tutorial recipe never fired. Inverted to pin
+        the corrected behaviour.
+        """
         from elspeth.web.composer.guided.recipe_match import _web_scrape_predicate
 
         object_array = SinkResolved(
             outputs=(
                 SinkOutputResolved(
                     plugin="json",
-                    options={"path": "outputs/ratings.json"},  # no format: jsonl
+                    options={"path": "outputs/ratings.json"},  # no format key
                     required_fields=(),
                     schema_mode="observed",
                 ),
             )
         )
-        assert _web_scrape_predicate(_make_url_json_source(), object_array) is False
+        assert _web_scrape_predicate(_make_url_json_source(), object_array) is True
 
 
 def test_web_scrape_predicate_registered_last() -> None:
@@ -700,6 +732,39 @@ def test_match_recipe_returns_web_scrape_match_for_csv_url_source() -> None:
     assert result.slots["source_plugin"] == "csv"
 
 
+def test_match_recipe_fires_for_real_resolved_shape_without_explicit_format() -> None:
+    """REACHABILITY CRUX (E2E review): match_recipe must fire for the (source,
+    sink) shape the guided flow ACTUALLY produces at Step 2.5 — a json source
+    with ``blob_ref`` + observed ``url`` column, and a single json sink whose
+    options carry NO ``format`` key (the operator's Step-2 SchemaForm default).
+
+    This is the test that would have caught the bug: the previous predicate
+    gated on ``sink.options.format == "jsonl"``, but at match time the resolved
+    json sink's ``format`` is absent (jsonl is auto-detected from the .jsonl
+    filename only at RUNTIME), so the canonical tutorial pipeline never matched
+    and silently degraded to LLM-driven compose. A ``format: jsonl`` fixture
+    would NOT have caught it — that is why this asserts against the no-format
+    shape, not ``_make_single_jsonl_sink``.
+    """
+    from elspeth.web.composer.guided.recipe_match import match_recipe
+
+    source = SourceResolved(
+        plugin="json",
+        options={"blob_ref": "a1b2c3d4-0000-0000-0000-000000000099", "path": "composer_blobs/canonical-url-list.json"},
+        observed_columns=("url",),
+        sample_rows=({"url": "https://www.dta.gov.au"},),
+    )
+    sink = _make_single_json_sink_no_format(path="outputs/ratings.jsonl")
+    result = match_recipe(source, sink)
+    assert result is not None, "real no-explicit-format match-time shape must fire the web_scrape recipe (zero-LLM canonical)"
+    assert result.recipe_name == "web-scrape-llm-rate-jsonl"
+    assert result.slots["source_blob_id"] == source.options["blob_ref"]
+    assert result.slots["source_plugin"] == "json"
+    # The resolver carries the operator's path verbatim; the builder force-sets
+    # format:jsonl on the output regardless of the matched sink's (absent) format.
+    assert result.slots["output_path"] == "outputs/ratings.jsonl"
+
+
 def test_canonical_seed_materialised_source_matches_web_scrape_recipe() -> None:
     """§4.1 zero-LLM lever: the REAL canonical tutorial seed, materialised by
     set_pipeline(source.inline_blob), matches the web_scrape recipe.
@@ -716,6 +781,12 @@ def test_canonical_seed_materialised_source_matches_web_scrape_recipe() -> None:
     the recipe fires. If this assertion ever flips to None, the zero-LLM
     canonical compose is broken; do NOT relax the predicate — fix the
     materialisation or the fixture so the two agree.
+
+    The sink uses the NO-explicit-format shape (``_make_single_json_sink_no_format``):
+    the operator's Step-2 SchemaForm leaves ``format`` absent (jsonl is
+    auto-detected from the ``.jsonl`` filename only at runtime), and the
+    predicate is format-blind. A hand-set ``format: jsonl`` fixture would
+    re-mask the E2E-review bug this test guards against.
     """
     from elspeth.web.composer.guided.recipe_match import match_recipe
 
@@ -730,7 +801,7 @@ def test_canonical_seed_materialised_source_matches_web_scrape_recipe() -> None:
         observed_columns=("url",),
         sample_rows=({"url": "https://www.dta.gov.au"},),
     )
-    canonical_sink = _make_single_jsonl_sink()
+    canonical_sink = _make_single_json_sink_no_format()
 
     result = match_recipe(canonical_source, canonical_sink)
     assert result is not None, "canonical seed must match the web_scrape recipe (zero-LLM §4.1)"

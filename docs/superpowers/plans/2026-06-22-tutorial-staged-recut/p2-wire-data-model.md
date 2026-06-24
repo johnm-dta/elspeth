@@ -3,17 +3,22 @@
 ## Phase P2 — Wire stage data model (B2)
 
 > **Scope.** The `STEP_4_WIRE` turn payload returns **two reads** — *neither alone
-> suffices*: (1) `_serialize_full_pipeline_state` (`composer/tools/sessions.py:1084`,
-> via `_serialize_source/_serialize_node/_serialize_output` in `_common.py:968-1010`)
-> for the **connection-label topology** (`input/on_success/on_error/routes/fork_to` +
+> suffices*: (1) a shared `_serialize_full_pipeline_state` helper in
+> `composer/tools/_common.py` (extracted from the current sessions-plane helper,
+> using `_serialize_source/_serialize_node/_serialize_output`) for the
+> **connection-label topology** (`input/on_success/on_error/routes/fork_to` +
 > source `on_success`), and (2) the `edge_contracts` (+ `semantic_contracts`) overlay
-> from `state.validate()` (built into `_authoring_validation_payload`,
-> `sessions.py:1166-1175`; surfaced by `_execute_preview_pipeline`, `generation.py:1651`,
-> summary `:1685-1692`). `EdgeContract.to_dict()` (`state.py:359-368`) emits keys
-> **`from`/`to`** — NOT `from_id`/`to_id`. The render reconstructs edges from connection
-> labels (NEVER `state.edges` — guided passes `edges=[]`) and overlays `edge_contracts`
-> keyed by `(from, to)`. B6: after any wire-stage reconciliation the confirm gate
-> re-evaluates `validate().is_valid` AND re-runs the P3 surfacing pass.
+> from `state.validate()` (serialized with lower shared helpers, not by importing
+> `composer.tools.sessions` from guided emitters). `EdgeContract.to_dict()`
+> (`state.py:359-368`) emits keys **`from`/`to`** — NOT `from_id`/`to_id`.
+> The render reconstructs edges from connection labels (NEVER `state.edges` —
+> guided passes `edges=[]`) and overlays `edge_contracts` keyed by `(from, to)`.
+> Topology therefore carries explicit contract/render ids: source ids are
+> `source` or `source:<name>` (`source_producer_id`), node ids are node ids, and
+> output ids are `output:<sink_name>`. The human-facing labels (`sources` map key
+> and `outputs[].sink_name`) remain separate from these ids. B6: after any
+> wire-stage reconciliation the confirm gate re-evaluates `validate().is_valid`
+> AND re-runs the P3 surfacing pass.
 >
 > **Dependencies on other phases (must land first):** P1 owns
 > `GuidedStep.STEP_4_WIRE`, `TurnType.CONFIRM_WIRING`, the `emitters.py` `_ORDER`
@@ -41,6 +46,7 @@
 - Produces:
   ```python
   class _WireSourceTopo(TypedDict):
+      id: str
       plugin: str
       on_success: str | None
   class _WireNodeTopo(TypedDict):
@@ -53,6 +59,7 @@
       routes: Mapping[str, str] | None
       fork_to: Sequence[str] | None
   class _WireOutputTopo(TypedDict):
+      id: str
       sink_name: str
       plugin: str
   class WireTopology(TypedDict):
@@ -108,6 +115,7 @@
   `ProposeChainPayload` class (`:62-65`), insert:
   ```python
   class _WireSourceTopo(TypedDict):
+      id: str
       plugin: str
       on_success: str | None
 
@@ -124,6 +132,7 @@
 
 
   class _WireOutputTopo(TypedDict):
+      id: str
       sink_name: str
       plugin: str
 
@@ -143,10 +152,14 @@
       state.py:359-368) — NOT from_id/to_id. ``warnings`` carries the LIVE
       prompt-shield advisory (prompt_shield_recommendation_warning_pairs) so the
       wire stage surfaces it (D11/B4). The render reconstructs edges from the
-      topology connection labels, never from state.edges. Output sinks do not have
-      a separate input field; their ``sink_name`` is the connection label consumed
-      by the sink, so renderers create upstream→sink edges by matching
-      source/node ``on_success``/route labels to ``outputs[].sink_name``.
+      topology connection labels, never from state.edges. Source rows carry
+      ``id`` values that match validation producer ids (``source`` or
+      ``source:<name>``); output rows carry ``id`` values that match validation
+      sink ids (``output:<sink_name>``). Output sinks do not have a separate
+      input field; their ``sink_name`` is the connection label consumed by the
+      sink, so renderers create upstream→sink edges by matching source/node
+      ``on_success``/route labels to ``outputs[].sink_name`` and using
+      ``outputs[].id`` as the edge target.
 
       ``advisor_findings`` / ``signoff_outcome`` are ``NotRequired`` — present only
       on the P5.6/P5.7 sign-off revise re-emit (carrying the advisor findings text
@@ -175,6 +188,15 @@
 **Files:**
 - Modify `src/elspeth/web/composer/guided/protocol.py` (`_REQUIRED_KEYS` `:200-218`,
   `_NESTED_SHAPES` `:243-253`)
+- Modify `src/elspeth/web/composer/guided/emitters.py` (temporary P1 skeleton
+  bridge only: keep the old `validation=` signature but emit the final minimal
+  payload shape)
+- Modify `tests/unit/web/composer/guided/test_protocol.py` (existing skeleton
+  payload assertions)
+- Modify `tests/unit/web/composer/guided/test_emitters.py` (existing P1 skeleton
+  emitter assertions)
+- Modify `tests/integration/web/composer/guided/test_get_guided.py` (existing
+  STEP_4_WIRE GET skeleton payload assertion)
 
 **Interfaces:**
 - Consumes: `TurnType.CONFIRM_WIRING` (P1), `validate_payload` (`protocol.py:256`)
@@ -182,11 +204,14 @@
   "edge_contracts", "semantic_contracts", "warnings"})`; `_NESTED_SHAPES[TurnType.CONFIRM_WIRING]
   = (("topology", "mapping", frozenset({"sources", "nodes", "outputs"})),)`
 
-> P1 (P1.T1) registers `CONFIRM_WIRING` in `_REQUIRED_KEYS`/`_NESTED_SHAPES` with the
-> wire-data keys above (it must, for totality). This task PINS those exact keys with a
-> validation test so a P1/P2 drift in the payload contract crashes loudly. If P1 already
-> set identical values, Step 3 is a no-op confirmation; otherwise reconcile to the canonical
-> values here (the payload data model owns the key set).
+> P1 registered `CONFIRM_WIRING` with the three-key skeleton
+> (`topology`, `edge_contracts`, `semantic_contracts`). P2 owns the final
+> wire-data contract and adds `warnings` plus the nested topology shape. This
+> task is a compatibility bridge: reconcile the protocol registry AND update the
+> P1 skeleton emitter/tests to emit/expect the final **minimal** shape while
+> keeping the old `build_step_4_wire_turn(validation=...)` call shape until
+> P2.4 replaces the public signature. Do not leave `test_emitters.py` or
+> `test_protocol.py` broken between tasks.
 
 - [ ] **Step 1: Write failing test.** Append to
   `tests/unit/web/composer/guided/test_wire_payload.py`:
@@ -250,34 +275,96 @@
           ("topology", "mapping", frozenset({"sources", "nodes", "outputs"})),
       ),
   ```
-- [ ] **Step 4: Run to pass.**
+- [ ] **Step 4: Bridge the P1 skeleton emitter to the final minimal payload shape.**
+  In `build_step_4_wire_turn(*, validation=...)`, keep the **old signature** for
+  now but update the skeleton payload to:
+  ```python
+      payload: dict[str, Any] = {
+          "topology": {"sources": {}, "nodes": [], "outputs": []},
+          "edge_contracts": [],
+          "semantic_contracts": [],
+          "warnings": [],
+      }
+  ```
+  This prevents the newly-tightened protocol from breaking the live P1 emitter
+  tests before P2.4 performs the real state-based emitter replacement.
+- [ ] **Step 5: Update existing P1 protocol/emitter tests.**
+  In `tests/unit/web/composer/guided/test_protocol.py`, rename
+  `test_confirm_wiring_skeleton_payload_validates` to
+  `test_confirm_wiring_wire_payload_validates` and change the payload to:
+  ```python
+          payload = {
+              "topology": {"sources": {}, "nodes": [], "outputs": []},
+              "edge_contracts": [],
+              "semantic_contracts": [],
+              "warnings": [],
+          }
+  ```
+  Update `test_confirm_wiring_payload_missing_key_rejected` to assert `warnings`
+  is reported missing as well.
+
+  In `tests/unit/web/composer/guided/test_emitters.py`, keep the old
+  `build_step_4_wire_turn(validation=_empty_state().validate())` call for this
+  task, but update the assertions to:
+  ```python
+        assert turn["payload"]["topology"] == {"sources": {}, "nodes": [], "outputs": []}
+        assert turn["payload"]["edge_contracts"] == []
+        assert turn["payload"]["semantic_contracts"] == []
+        assert turn["payload"]["warnings"] == []
+  ```
+  In `tests/integration/web/composer/guided/test_get_guided.py`, update the
+  existing `test_step_4_wire_returns_confirm_wiring_turn_idempotently` payload-key
+  assertion from the three-key skeleton to the final minimal shape:
+  ```python
+        assert set(first["next_turn"]["payload"]) == {
+            "topology",
+            "edge_contracts",
+            "semantic_contracts",
+            "warnings",
+        }
+        assert first["next_turn"]["payload"]["topology"] == {
+            "sources": {},
+            "nodes": [],
+            "outputs": [],
+        }
+  ```
+- [ ] **Step 6: Run to pass.**
   `uv run pytest tests/unit/web/composer/guided/test_wire_payload.py::TestConfirmWiringValidation -q`
   Expected: `4 passed`.
-- [ ] **Step 5: Run the protocol totality test to confirm no regression.**
-  `uv run pytest tests/unit/web/composer/guided/test_protocol.py -q`
-  Expected: `... passed` (no `KeyError` from the totality assertions).
-- [ ] **Step 6: Commit.**
-  `git add src/elspeth/web/composer/guided/protocol.py tests/unit/web/composer/guided/test_wire_payload.py && git commit -m "feat(guided): pin CONFIRM_WIRING required/nested keys for wire payload (P2.2)"`
+- [ ] **Step 7: Run the protocol + emitter totality tests to confirm no regression.**
+  `uv run pytest tests/unit/web/composer/guided/test_protocol.py tests/unit/web/composer/guided/test_emitters.py tests/integration/web/composer/guided/test_get_guided.py -q -k "confirm_wiring or step_4_wire or Step4Wire"`
+  Expected: all pass (no `KeyError` from the totality assertions and no skeleton
+  payload drift).
+- [ ] **Step 8: Commit.**
+  `git add src/elspeth/web/composer/guided/protocol.py src/elspeth/web/composer/guided/emitters.py tests/unit/web/composer/guided/test_wire_payload.py tests/unit/web/composer/guided/test_protocol.py tests/unit/web/composer/guided/test_emitters.py tests/integration/web/composer/guided/test_get_guided.py && git commit -m "feat(guided): pin CONFIRM_WIRING required/nested keys for wire payload (P2.2)"`
 
 ---
 
 ### Task P2.3: `_build_wire_topology` — topology read from connection labels
 
 **Files:**
+- Modify `src/elspeth/web/composer/tools/_common.py` (extract/add shared
+  `_serialize_full_pipeline_state`; same body as the current sessions-plane helper)
+- Modify `src/elspeth/web/composer/tools/sessions.py` (import the shared helper
+  and remove the local duplicate)
 - Modify `src/elspeth/web/composer/guided/emitters.py` (add helper near `_step_index`,
   `:422-435`)
 
 **Interfaces:**
-- Consumes: `CompositionState` (`composer/state.py:1970`), `_serialize_full_pipeline_state`
-  (`composer/tools/sessions.py:1084`)
+- Consumes: `CompositionState` (`composer/state.py:1970`), shared
+  `_serialize_full_pipeline_state` (`composer/tools/_common.py`, extracted from
+  the current `composer/tools/sessions.py` helper), `source_producer_id`
+  (`composer/_producer_resolver.py`)
 - Produces: `def _build_wire_topology(state: CompositionState) -> WireTopology`
 
-> The topology MUST come from `_serialize_full_pipeline_state` (it carries the
+> The topology MUST come from shared `_serialize_full_pipeline_state` (it carries the
 > connection labels `input/on_success/on_error/routes/fork_to`). `preview_pipeline`'s
 > own `nodes` list is only `{id, node_type, plugin}` and is NOT a topology source. We
-> reuse `_serialize_full_pipeline_state` rather than re-walk the spec so the wire view
-> can never drift from `get_pipeline_state`. We project it down to the wire-visible
-> topology subset (dropping `options`/`condition`/`branches`/etc.).
+> reuse the same shared serializer as `get_pipeline_state` rather than re-walk the spec
+> so the wire view can never drift from that tool. The helper lives in `_common.py`
+> to avoid a guided-emitter import from the sessions/tool route plane. We project it
+> down to the wire-visible topology subset (dropping `options`/`condition`/`branches`/etc.)
+> and add explicit contract ids for source/output endpoints.
 
 - [ ] **Step 1: Write failing test.** Append to
   `tests/unit/web/composer/guided/test_wire_payload.py`:
@@ -356,6 +443,7 @@
       def test_topology_reads_connection_labels(self) -> None:
           topo = _build_wire_topology(_canonical_state())
           assert topo["sources"]["source"] == {
+              "id": "source",
               "plugin": "inline_blob",
               "on_success": "chain_in",
           }
@@ -364,7 +452,7 @@
           assert node_by_id["scrape"]["on_success"] == "scraped"
           assert node_by_id["mapper"]["input"] == "scraped"
           assert node_by_id["mapper"]["on_success"] == "jsonl_out"
-          assert topo["outputs"] == [{"sink_name": "jsonl_out", "plugin": "json"}]
+          assert topo["outputs"] == [{"id": "output:jsonl_out", "sink_name": "jsonl_out", "plugin": "json"}]
 
       def test_topology_node_subset_drops_options(self) -> None:
           topo = _build_wire_topology(_canonical_state())
@@ -390,16 +478,62 @@
 
       def test_output_sink_name_is_preserved_as_connection_label(self) -> None:
           topo = _build_wire_topology(_canonical_state())
-          assert topo["outputs"] == [{"sink_name": "jsonl_out", "plugin": "json"}]
+          assert topo["outputs"] == [{"id": "output:jsonl_out", "sink_name": "jsonl_out", "plugin": "json"}]
           assert any(n["on_success"] == "jsonl_out" for n in topo["nodes"])
+
+      def test_named_source_id_matches_validation_contract_id(self) -> None:
+          state = _canonical_state().with_named_source(
+              "refunds",
+              SourceSpec(
+                  plugin="inline_blob",
+                  on_success="refund_in",
+                  options={"blob_id": "b2"},
+                  on_validation_failure="discard",
+              ),
+          )
+          topo = _build_wire_topology(state)
+          assert topo["sources"]["refunds"]["id"] == "source:refunds"
+          assert topo["sources"]["refunds"]["on_success"] == "refund_in"
   ```
 - [ ] **Step 2: Run to fail.**
   `uv run pytest tests/unit/web/composer/guided/test_wire_payload.py::TestBuildWireTopology -q`
   Expected: `ImportError: cannot import name '_build_wire_topology'`.
-- [ ] **Step 3: Implement `_build_wire_topology`.** In `emitters.py`, add the
+- [ ] **Step 3: Move/extract the shared full-state serializer to `_common.py`.**
+  In `src/elspeth/web/composer/tools/_common.py`, add a shared
+  `_serialize_full_pipeline_state(state, *, requested_component)` helper using
+  the current body from `composer/tools/sessions.py`:
+  ```python
+  def _serialize_full_pipeline_state(
+      state: CompositionState,
+      *,
+      requested_component: Any,
+  ) -> _FullPipelineStatePayload:
+      """Serialize the full pipeline state for get_pipeline_state and wire topology."""
+      return {
+          "sources": {name: _serialize_source(source) for name, source in state.sources.items()},
+          "nodes": [_serialize_node(n) for n in state.nodes],
+          "outputs": [_serialize_output(o) for o in state.outputs],
+          "edges": [_serialize_edge(e) for e in state.edges],
+          "metadata": {"name": state.metadata.name, "description": state.metadata.description},
+          "version": state.version,
+          "inspection": {
+              "requested_component": requested_component,
+              "resolved_component": "full",
+              "accepted_full_state_aliases": list(_FULL_STATE_COMPONENT_ALIASES),
+          },
+      }
+  ```
+  If `_FULL_STATE_COMPONENT_ALIASES` currently lives only in `sessions.py`, move
+  that constant to `_common.py` next to the helper and import it from `sessions.py`.
+  In `sessions.py`, import `_serialize_full_pipeline_state` from `_common.py` and
+  delete the local duplicate. This keeps `get_pipeline_state` behavior unchanged
+  while giving guided emitters a lower shared dependency.
+- [ ] **Step 4: Implement `_build_wire_topology`.** In `emitters.py`, add the
   imports to the existing `from elspeth.web.composer.guided.protocol import (...)`
   block (`:30-41`): add `WireTopology`, `_WireNodeTopo`, `_WireOutputTopo`,
-  `_WireSourceTopo`. Then add, just before `_step_index` (`:422`):
+  `_WireSourceTopo`. Also import `source_producer_id` from
+  `elspeth.web.composer._producer_resolver` and `_serialize_full_pipeline_state`
+  from `elspeth.web.composer.tools._common`. Then add, just before `_step_index` (`:422`):
   ```python
   def _build_wire_topology(state: CompositionState) -> WireTopology:
       """Project the full pipeline state down to the wire-visible topology subset.
@@ -410,11 +544,13 @@
       passes ``edges=()``). Options/condition/branches are dropped; the wire stage
       shows connectivity, not configuration.
       """
-      from elspeth.web.composer.tools.sessions import _serialize_full_pipeline_state
-
       full = _serialize_full_pipeline_state(state, requested_component=None)
       sources: dict[str, _WireSourceTopo] = {
-          name: {"plugin": src["plugin"], "on_success": src["on_success"]}
+          name: {
+              "id": source_producer_id(name),
+              "plugin": src["plugin"],
+              "on_success": src["on_success"],
+          }
           for name, src in full["sources"].items()
       }
       nodes: list[_WireNodeTopo] = [
@@ -431,15 +567,25 @@
           for n in full["nodes"]
       ]
       outputs: list[_WireOutputTopo] = [
-          {"sink_name": o["sink_name"], "plugin": o["plugin"]} for o in full["outputs"]
+          {
+              "id": f"output:{o['sink_name']}",
+              "sink_name": o["sink_name"],
+              "plugin": o["plugin"],
+          }
+          for o in full["outputs"]
       ]
       return {"sources": sources, "nodes": nodes, "outputs": outputs}
   ```
-- [ ] **Step 4: Run to pass.**
+- [ ] **Step 5: Run to pass.**
   `uv run pytest tests/unit/web/composer/guided/test_wire_payload.py::TestBuildWireTopology -q`
-  Expected: `4 passed`.
-- [ ] **Step 5: Commit.**
-  `git add src/elspeth/web/composer/guided/emitters.py tests/unit/web/composer/guided/test_wire_payload.py && git commit -m "feat(guided): _build_wire_topology projects connection-label topology (P2.3)"`
+  Expected: `5 passed`.
+- [ ] **Step 6: Run the existing get_pipeline_state tests that cover the moved serializer.**
+  `uv run pytest tests/unit/web/composer/test_tools.py tests/integration/web/composer/guided/test_get_guided.py tests/unit/web/composer/guided/test_wire_payload.py -q -k "get_pipeline_state or step_4_wire or BuildWireTopology"`
+  Expected: pass (if this selector is too broad for the local checkout, at minimum
+  run the existing tests that mention `get_pipeline_state` plus
+  `test_wire_payload.py::TestBuildWireTopology`).
+- [ ] **Step 7: Commit.**
+  `git add src/elspeth/web/composer/tools/_common.py src/elspeth/web/composer/tools/sessions.py src/elspeth/web/composer/guided/emitters.py tests/unit/web/composer/guided/test_wire_payload.py && git commit -m "feat(guided): _build_wire_topology projects connection-label topology (P2.3)"`
 
 ---
 
@@ -448,13 +594,17 @@
 **Files:**
 - Modify `src/elspeth/web/composer/guided/emitters.py` (REPLACE the P1.3 skeleton
   `build_step_4_wire_turn` body + signature, near `:349`)
+- Modify `src/elspeth/web/sessions/routes/_helpers.py` (update existing
+  `_emit_wire_turn` builder call from `validation=...` to positional `state`)
+- Modify `src/elspeth/web/sessions/routes/composer/guided.py` (update existing
+  STEP_4_WIRE GET rebuild branch from `validation=...` to positional `state`)
 - Modify `tests/unit/web/composer/guided/test_emitters.py` (update the P1.3 skeleton
   call `build_step_4_wire_turn(validation=...)` → `build_step_4_wire_turn(state)`)
 
 **Interfaces:**
 - Consumes: `CompositionState.validate()` (`composer/state.py:2225`, returns
   `ValidationSummary` with `edge_contracts`/`semantic_contracts`/`warnings`),
-  `_authoring_validation_payload` (`composer/tools/sessions.py:1166`),
+  `_semantic_contracts_payload` (`composer/tools/_common.py`),
   `_build_wire_topology` (P2.3), `GuidedStep.STEP_4_WIRE` (P1), `TurnType.CONFIRM_WIRING` (P1),
   `CatalogServiceProtocol` (already the TYPE_CHECKING alias in `emitters.py:44` —
   `from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol`;
@@ -474,9 +624,11 @@
 > The emitter merges the two reads into one `WireStageData` payload (one round-trip):
 > topology from `_build_wire_topology` (read 1) + `edge_contracts`/`semantic_contracts`/
 > `warnings` from `state.validate()` (read 2 — `validate()` is a pure function, no I/O,
-> so the emitter stays pure). `EdgeContract.to_dict()` already emits `from`/`to`, so we
-> reuse `_authoring_validation_payload` to get the canonical serialized overlay rather
-> than re-serializing. `warnings` carries the LIVE prompt-shield advisory (D11/B4) so the
+> so the emitter stays pure). `EdgeContract.to_dict()` already emits `from`/`to`; use
+> direct `to_dict()` serialization for `edge_contracts`/`warnings` and
+> `_semantic_contracts_payload` from `_common.py` for semantic contracts. Do not import
+> `_authoring_validation_payload` from `composer.tools.sessions` into guided emitters.
+> `warnings` carries the LIVE prompt-shield advisory (D11/B4) so the
 > wire stage surfaces it. `catalog` is accepted (forward-compat for catalog-aware
 > rendering) but the payload is catalog-independent; `advisor_findings`/`signoff_outcome`
 > (set by the P5.6/P5.7 revise re-emit) are folded into the payload as `advisor_findings`
@@ -546,9 +698,11 @@
   (the P1.3 skeleton is keyword-only `validation`; the positional `state` call fails
   the shape — NOT an `ImportError`, because P1.3 already defined the name).
 - [ ] **Step 3: REPLACE the emitter.** In `emitters.py`, add `WireStageData` to the
-  protocol import block. The `CatalogServiceProtocol` alias is ALREADY in the
-  `TYPE_CHECKING` block (`:44`), so no new import is needed for the `catalog`
-  annotation. REPLACE the P1.3 skeleton `build_step_4_wire_turn` (near `:349`) with:
+  protocol import block and import `_semantic_contracts_payload` from
+  `elspeth.web.composer.tools._common`. The `CatalogServiceProtocol` alias is
+  ALREADY in the `TYPE_CHECKING` block (`:44`), so no new import is needed for the
+  `catalog` annotation. REPLACE the P1.3 skeleton `build_step_4_wire_turn` (near
+  `:349`) with:
   ```python
   def build_step_4_wire_turn(
       state: CompositionState,
@@ -572,15 +726,12 @@
       into the payload so the frontend distinguishes a revise re-emit (showing the
       advisor findings + outcome class) from the initial confirm.
       """
-      from elspeth.web.composer.tools.sessions import _authoring_validation_payload
-
       validation = state.validate()
-      overlay = _authoring_validation_payload(state, validation)
       payload: WireStageData = {
           "topology": _build_wire_topology(state),
-          "edge_contracts": overlay["edge_contracts"],
-          "semantic_contracts": overlay["semantic_contracts"],
-          "warnings": overlay["warnings"],
+          "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],
+          "semantic_contracts": _semantic_contracts_payload(validation.semantic_contracts),
+          "warnings": [w.to_dict() for w in validation.warnings],
       }
       if advisor_findings is not None:
           payload["advisor_findings"] = advisor_findings
@@ -598,22 +749,44 @@
 - [ ] **Step 4: Run to pass.**
   `uv run pytest tests/unit/web/composer/guided/test_wire_payload.py::TestBuildStep4WireTurn -q`
   Expected: `6 passed`.
-- [ ] **Step 5: Update the P1.3 skeleton emitter test + run the full module.**
+- [ ] **Step 5: Update the P1.3 skeleton emitter test.**
   In `tests/unit/web/composer/guided/test_emitters.py`, change the P1.3 skeleton call
   `build_step_4_wire_turn(validation=_empty_state().validate())` to
   `build_step_4_wire_turn(_empty_state())` and update the three skeleton-payload
   assertions (`topology == {}`, `edge_contracts == []`, `semantic_contracts == []`) to
   the real shape: `payload["topology"]["sources"] == {}` and `payload["edge_contracts"] == []`
   for the empty state (no source/sink), `set(payload.keys()) == {"topology", "edge_contracts", "semantic_contracts", "warnings"}`.
+- [ ] **Step 6: Update existing route call sites in the same slice.**
+  In `src/elspeth/web/sessions/routes/_helpers.py`, update the existing
+  `_emit_wire_turn` builder line from:
+  ```python
+      next_turn = build_step_4_wire_turn(validation=state.validate())
   ```
-  uv run pytest tests/unit/web/composer/guided/test_wire_payload.py tests/unit/web/composer/guided/test_emitters.py -q
+  to:
+  ```python
+      next_turn = build_step_4_wire_turn(state)
+  ```
+  In `src/elspeth/web/sessions/routes/composer/guided.py`, update the existing
+  `STEP_4_WIRE` branch from:
+  ```python
+      return build_step_4_wire_turn(validation=state.validate())
+  ```
+  to:
+  ```python
+      return build_step_4_wire_turn(state)
+  ```
+  Do this in P2.4, not P2.9, so the public emitter signature change does not
+  leave GET/POST seed paths broken between commits.
+- [ ] **Step 7: Run the full module + route smoke.**
+  ```
+  uv run pytest tests/unit/web/composer/guided/test_wire_payload.py tests/unit/web/composer/guided/test_emitters.py tests/integration/web/composer/guided/test_wire_dispatch.py tests/integration/web/composer/guided/test_get_guided.py -q -k "wire or step_4"
   ```
   Expected: all pass.
-- [ ] **Step 6: Export the emitter.** The P1.3 `Exported:` line already names
+- [ ] **Step 8: Export the emitter.** The P1.3 `Exported:` line already names
   `build_step_4_wire_turn`; update its one-line description (`emitters.py:8-18`) to:
   `    build_step_4_wire_turn — build the STEP_4_WIRE confirm_wiring turn (two-read merge).`
-- [ ] **Step 7: Commit.**
-  `git add src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py tests/unit/web/composer/guided/test_wire_payload.py tests/unit/web/composer/guided/test_emitters.py && git commit -m "feat(guided): replace skeleton build_step_4_wire_turn with two-read merge + final signature (P2.4)"`
+- [ ] **Step 9: Commit.**
+  `git add src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py tests/unit/web/composer/guided/test_wire_payload.py tests/unit/web/composer/guided/test_emitters.py && git commit -m "feat(guided): replace skeleton build_step_4_wire_turn with two-read merge + final signature (P2.4)"`
 
 ---
 
@@ -711,9 +884,9 @@
   ```ts
   export interface WireStageData {
     topology: {
-      sources: Record<string, { plugin: string; on_success: string | null }>;
+      sources: Record<string, { id: string; plugin: string; on_success: string | null }>;
       nodes: Array<{ id: string; node_type: string; plugin: string | null; input: string | null; on_success: string | null; on_error: string | null; routes: Record<string, string> | null; fork_to: string[] | null }>;
-      outputs: Array<{ sink_name: string; plugin: string }>;
+      outputs: Array<{ id: string; sink_name: string; plugin: string }>;
     };
     edge_contracts: Array<{ from: string; to: string; producer_guarantees: string[]; consumer_requires: string[]; missing_fields: string[]; satisfied: boolean }>;
     semantic_contracts: Array<Record<string, unknown>>;
@@ -724,9 +897,11 @@
   ```
 
 > `edge_contracts` keys are `from`/`to` (NOT `from_id`/`to_id`) — M1. `node.plugin` is
-> nullable (gates/coalesces). Output sinks consume `output.sink_name` as their
-> connection label, so renderers reconstruct upstream→sink edges as well as
-> source/node→node edges. `advisor_findings` and `signoff_outcome` are optional and
+> nullable (gates/coalesces). `source.id` and `output.id` are contract/render ids
+> matching backend validation (`source` / `source:<name>` and `output:<sink_name>`).
+> Output sinks consume `output.sink_name` as their connection label, so renderers
+> reconstruct upstream→sink edges as well as source/node→node edges, but use
+> `output.id` as the edge target when overlaying contracts. `advisor_findings` and `signoff_outcome` are optional and
 > appear only on P5 sign-off revise re-emits. Vitest type-assertion failures ARE the test (the array
 > literal stops compiling if the shape drifts). P1 owns adding `"step_4_wire"` to the
 > `GuidedStep` union and `"confirm_wiring"` to the `TurnType` union — this task does NOT
@@ -740,7 +915,7 @@
     it("carries topology + from/to edge_contracts", () => {
       const data: WireStageData = {
         topology: {
-          sources: { source: { plugin: "inline_blob", on_success: "chain_in" } },
+          sources: { source: { id: "source", plugin: "inline_blob", on_success: "chain_in" } },
           nodes: [
             {
               id: "scrape",
@@ -753,7 +928,7 @@
               fork_to: null,
             },
           ],
-          outputs: [{ sink_name: "jsonl_out", plugin: "json" }],
+          outputs: [{ id: "output:jsonl_out", sink_name: "jsonl_out", plugin: "json" }],
         },
         edge_contracts: [
           {
@@ -805,7 +980,7 @@
    */
   export interface WireStageData {
     topology: {
-      sources: Record<string, { plugin: string; on_success: string | null }>;
+      sources: Record<string, { id: string; plugin: string; on_success: string | null }>;
       nodes: Array<{
         id: string;
         node_type: string;
@@ -816,7 +991,7 @@
         routes: Record<string, string> | null;
         fork_to: string[] | null;
       }>;
-      outputs: Array<{ sink_name: string; plugin: string }>;
+      outputs: Array<{ id: string; sink_name: string; plugin: string }>;
     };
     edge_contracts: Array<{
       from: string;
@@ -874,7 +1049,9 @@
 > `reconstructWireEdges` builds edges from connection labels (`source.on_success ->
 > node.input` or `output.sink_name`; `node.on_success / routes / fork_to ->
 > downstream node.input` or `output.sink_name`) and overlays `edge_contracts` keyed
-> by `(from, to)`. An edge with no matching contract row gets `satisfied: null`
+> by `(from, to)`. Source edges use `source.id` as the producer id; output edges
+> use `output.id` (`output:<sink_name>`) as the consumer id so live sink contracts
+> overlay correctly. An edge with no matching contract row gets `satisfied: null`
 > (honest-gap, e.g. fork/coalesce). NEVER reads `state.edges`.
 > The `confirmDisabled` prop is the block-while-pending hook the P4 frontend
 > (interpretation projection) drives; this phase just exposes it.
@@ -891,7 +1068,7 @@
   function canonicalData(): WireStageData {
     return {
       topology: {
-        sources: { source: { plugin: "inline_blob", on_success: "chain_in" } },
+        sources: { source: { id: "source", plugin: "inline_blob", on_success: "chain_in" } },
         nodes: [
           {
             id: "scrape",
@@ -924,12 +1101,20 @@
             fork_to: null,
           },
         ],
-        outputs: [{ sink_name: "jsonl_out", plugin: "json" }],
+        outputs: [{ id: "output:jsonl_out", sink_name: "jsonl_out", plugin: "json" }],
       },
       edge_contracts: [
         {
           from: "scrape",
           to: "mapper",
+          producer_guarantees: ["content"],
+          consumer_requires: ["content"],
+          missing_fields: [],
+          satisfied: true,
+        },
+        {
+          from: "mapper",
+          to: "output:jsonl_out",
           producer_guarantees: ["content"],
           consumer_requires: ["content"],
           missing_fields: [],
@@ -951,14 +1136,35 @@
       expect(pairs).toContainEqual(["scrape", "mapper"]);
       // scrape.on_error=scrape_error -> error_handler.input=scrape_error
       expect(pairs).toContainEqual(["scrape", "error_handler"]);
-      // mapper.on_success=jsonl_out -> output.sink_name=jsonl_out
-      expect(pairs).toContainEqual(["mapper", "jsonl_out"]);
+      // mapper.on_success=jsonl_out -> output.sink_name=jsonl_out, but target
+      // id is output:jsonl_out so sink edge_contracts overlay.
+      expect(pairs).toContainEqual(["mapper", "output:jsonl_out"]);
     });
 
     it("overlays edge_contracts keyed by (from, to)", () => {
       const edges = reconstructWireEdges(canonicalData());
       const scrapeToMapper = edges.find((e) => e.from === "scrape" && e.to === "mapper");
       expect(scrapeToMapper?.satisfied).toBe(true);
+    });
+
+    it("overlays output sink contracts using output:<sink_name> ids", () => {
+      const edges = reconstructWireEdges(canonicalData());
+      const mapperToOutput = edges.find(
+        (e) => e.from === "mapper" && e.to === "output:jsonl_out",
+      );
+      expect(mapperToOutput?.satisfied).toBe(true);
+    });
+
+    it("uses named source contract ids for non-default sources", () => {
+      const data = canonicalData();
+      data.topology.sources = {
+        refunds: { id: "source:refunds", plugin: "inline_blob", on_success: "chain_in" },
+      };
+      const edges = reconstructWireEdges(data);
+      expect(edges.map((e) => [e.from, e.to])).toContainEqual([
+        "source:refunds",
+        "scrape",
+      ]);
     });
 
     it("marks an edge with no contract row as honest-gap (satisfied=null)", () => {
@@ -989,7 +1195,7 @@
       // must render a text status token, not only a --ok/--unchecked CSS class, so
       // the state is visible to screen readers and colour-blind users (an edge with
       // satisfied===false and empty missing_fields is otherwise colour-only).
-      expect(screen.getByText(/\(connected\)/)).toBeInTheDocument();
+      expect(screen.getAllByText(/\(connected\)/).length).toBeGreaterThan(0);
       expect(screen.getByText(/\(contract unchecked\)/)).toBeInTheDocument();
     });
   });
@@ -1017,9 +1223,12 @@
    * Reconstruct pipeline edges from the topology's connection labels (B2 hard
    * constraint): source.on_success -> node.input or output.sink_name;
    * node.on_success / routes values / fork_to -> downstream node.input or
-   * output.sink_name. NEVER reads state.edges (guided passes edges=[]). Overlays
-   * edge_contracts keyed by (from, to); an edge with no matching contract row is
-   * honest-gap (satisfied=null, e.g. fork/coalesce).
+   * output.sink_name. Source/output edges use the explicit contract ids
+   * (`source` / `source:<name>`, `output:<sink_name>`) when forming `from`/`to`,
+   * because live edge_contracts use those ids. NEVER reads state.edges
+   * (guided passes edges=[]). Overlays edge_contracts keyed by (from, to);
+   * an edge with no matching contract row is honest-gap (satisfied=null, e.g.
+   * fork/coalesce).
    */
   export function reconstructWireEdges(data: WireStageData): WireEdge[] {
     const { sources, nodes, outputs } = data.topology;
@@ -1031,7 +1240,7 @@
       }
     }
     for (const output of outputs) {
-      consumerByLabel.set(output.sink_name, output.sink_name);
+      consumerByLabel.set(output.sink_name, output.id);
     }
     const contractByPair = new Map<
       string,
@@ -1063,8 +1272,8 @@
       });
     };
 
-    for (const [name, src] of Object.entries(sources)) {
-      pushEdge(name, src.on_success);
+    for (const src of Object.values(sources)) {
+      pushEdge(src.id, src.on_success);
     }
     for (const node of nodes) {
       pushEdge(node.id, node.on_success);
@@ -1151,10 +1360,12 @@
   ```
 - [ ] **Step 4: Run to pass.**
   `npm test -- --run src/components/chat/guided/WireStageTurn.test.tsx`
-  Expected: all 5 tests pass.
+  Expected: all WireStageTurn tests pass, including output-contract overlay,
+  named-source id reconstruction, warning rendering, disabled confirm, and
+  text-visible status assertions.
 - [ ] **Step 5: Wire `WireStageTurn` into the active `GuidedTurn` dispatcher.**
-  Replace the P1 placeholder `case "confirm_wiring": return null;` in
-  `GuidedTurn.tsx` with:
+  Replace the existing P1 `ConfirmWiringPlaceholderTurn`/`case "confirm_wiring"`
+  in `GuidedTurn.tsx` with:
   ```tsx
       case "confirm_wiring":
         return (
@@ -1176,17 +1387,28 @@
         );
   ```
   Add `WireStageData` to the type import from `@/types/guided` and import
-  `{ WireStageTurn }` from `./WireStageTurn`. Add a dispatcher assertion in the
-  nearest guided-turn test surface (or in `WireStageTurn.test.tsx` if no dedicated
-  dispatcher test exists) that rendering `GuidedTurn` with `type="confirm_wiring"`
-  renders the WireStageTurn UI, and clicking "Confirm wiring" calls `onSubmit` with
-  exactly this `GuidedRespondRequest` body: `chosen: ["confirm"]` and all other
-  response fields `null`.
-- [ ] **Step 6: Typecheck + build (from `src/elspeth/web/frontend`).**
+  `{ WireStageTurn }` from `./WireStageTurn`. Update the existing
+  `src/components/chat/guided/GuidedTurn.test.tsx` confirm-wiring fixtures from
+  `payload: null` to a real `WireStageData` fixture; otherwise the dispatcher tests
+  dereference `data.topology` and fail for the wrong reason. Add/keep dispatcher
+  assertions that rendering `GuidedTurn` with `type="confirm_wiring"` renders the
+  WireStageTurn UI, clicking "Confirm wiring" calls `onSubmit` with exactly this
+  `GuidedRespondRequest` body: `chosen: ["confirm"]` and all other response fields
+  `null`, and `disabled` mode prevents submission.
+- [ ] **Step 6: Add the repo-standard accessibility audit for the new component.**
+  Extend `src/elspeth/web/frontend/src/test/a11y/components.a11y.test.tsx` with a
+  `WireStageTurn` no-violations case using the same `WireStageData` fixture. Also
+  add `"WireStageTurn"` to both `AUDITED_COMPONENTS` and
+  `EXPECTED_AUDITED_COMPONENTS_SORTED` in that file; the snapshot is the audit-scope
+  guard and must change with the new component. Add a keyboard/focus assertion in
+  `WireStageTurn.test.tsx` or
+  `GuidedTurn.test.tsx` proving the confirm button is reachable and activates via
+  keyboard.
+- [ ] **Step 7: Typecheck + build (from `src/elspeth/web/frontend`).**
   `npm run typecheck && npm run build`
   Expected: both succeed (no TS errors).
-- [ ] **Step 7: Commit.**
-  `git add src/elspeth/web/frontend/src/components/chat/guided/WireStageTurn.tsx src/elspeth/web/frontend/src/components/chat/guided/WireStageTurn.test.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx && git commit -m "feat(frontend): WireStageTurn renders edges from connection labels + contract overlay (P2.7)"`
+- [ ] **Step 8: Commit.**
+  `git add src/elspeth/web/frontend/src/components/chat/guided/WireStageTurn.tsx src/elspeth/web/frontend/src/components/chat/guided/WireStageTurn.test.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.test.tsx src/elspeth/web/frontend/src/test/a11y/components.a11y.test.tsx && git commit -m "feat(frontend): WireStageTurn renders edges from connection labels + contract overlay (P2.7)"`
 
 ---
 
@@ -1324,14 +1546,17 @@
 - Modify `tests/integration/web/composer/guided/test_wire_dispatch.py`
 
 **Interfaces:**
-- Consumes: `build_step_4_wire_turn` (**P2.4**, positional `state`),
+- Consumes: `build_step_4_wire_turn` (**P2.4**, positional `state`; route call
+  sites were already upgraded in P2.4),
   `rebuild_wire_turn_after_reconciliation` (**P2.8**),
   `handle_step_4_wire_confirm` (**P1.6**), `GuidedStep.STEP_4_WIRE` +
   `TurnType.CONFIRM_WIRING` (**P1**), `TurnRecord`, `stable_hash`,
   `emit_turn_emitted`, `_store_guided_audit_payload`, `_replace`.
-- Produces: behaviour — the P1 accept/confirm route path stays live, but all
-  emitted/rebuilt wire turns now use the final two-read payload. `_emit_wire_turn`
-  accepts `payload_store` and persists the payload via `_store_guided_audit_payload`;
+- Produces: behaviour — the P1 accept/confirm route path stays live, all
+  emitted/rebuilt wire turns use the final two-read payload, and the existing
+  accept-to-wire `guided_step_advanced` audit events are preserved. `_emit_wire_turn`
+  keeps `prev_step` / `advance_reason`, accepts `payload_store`, optionally accepts
+  a prebuilt `next_turn`, and persists the payload via `_store_guided_audit_payload`;
   no placeholder audit payload id is allowed.
 - Produces: boundary validation remains exact: `CONFIRM_WIRING` accepts only
   `GuidedRespondRequest` body `chosen=["confirm"]` with every other response field
@@ -1355,9 +1580,10 @@
   `_emit_wire_turn(...)`, already dispatches `CONFIRM_WIRING` to
   `handle_step_4_wire_confirm`, and already rebuilds
   `GET /api/sessions/{session_id}/guided` for
-  `STEP_4_WIRE`. This task upgrades those P1 skeleton calls from
+  `STEP_4_WIRE`. P2.4 already upgraded those P1 skeleton calls from
   `build_step_4_wire_turn(validation=state.validate())` to
-  `build_step_4_wire_turn(state)` and binds the P2.8 rebuild helper.
+  `build_step_4_wire_turn(state)`; this task verifies that state and binds the
+  P2.8 rebuild helper without dropping the existing transition-audit seam.
 
 > **Pre-condition — P1.6 must be complete before running this step.** The test below
 > imports `_empty_state` from
@@ -1583,13 +1809,13 @@
   ```
   uv run pytest tests/integration/web/composer/guided/test_wire_dispatch.py -q
   ```
-  Expected failure: P1's route path still calls the skeleton emitter signature
-  (`validation=...`), so the final payload key assertion fails or the route raises
-  `TypeError` once P2.4 has changed `build_step_4_wire_turn` to positional
-  `state`. The malformed-body tests should already pass from P1.6; if they do not,
-  fix the boundary branch in this task before proceeding.
+  Expected failure: the invalid/reconciliation re-emit path has not yet been
+  bound through `rebuild_wire_turn_after_reconciliation` with a prebuilt
+  `next_turn`, and/or the new final-payload/audit assertions are not yet updated.
+  The malformed-body tests should already pass from P1.6; if they do not, fix the
+  boundary branch in this task before proceeding.
 
-- [ ] **Step 4: Upgrade the P1 `_emit_wire_turn` helper to the final emitter signature and audit payload store.**
+- [ ] **Step 4: Upgrade the P1 `_emit_wire_turn` helper to accept a prebuilt rebuilt turn while preserving transition audit.**
   In `src/elspeth/web/sessions/routes/_helpers.py`, update the P1 helper to this
   final shape:
   ```python
@@ -1600,13 +1826,17 @@
       recorder: BufferingRecorder,
       user_id: str,
       payload_store: Any,
+      prev_step: GuidedStep | None = None,
+      advance_reason: str | None = None,
       next_turn: Turn | None = None,
   ) -> tuple[GuidedSession, Turn]:
       """Emit the STEP_4_WIRE confirm_wiring turn after an accept/rebuild (P2.9).
 
       P1.6 created this helper with the skeleton emitter. P2.9 upgrades it to
       the final two-read payload and persists the emitted payload through the
-      configured payload store for the guided audit row.
+      configured payload store for the guided audit row. Existing accept-to-wire
+      transition audits are preserved through ``prev_step`` / ``advance_reason``;
+      invalid same-step re-emits pass neither.
       """
       if next_turn is None:
           next_turn = build_step_4_wire_turn(state)
@@ -1618,6 +1848,17 @@
           response_hash=None,
           emitter="server",
       )
+      if (prev_step is None) != (advance_reason is None):
+          raise InvariantError("wire turn emission must provide prev_step and advance_reason together")
+      if prev_step is not None and advance_reason is not None:
+          emit_step_advanced(
+              recorder,
+              prev=prev_step,
+              next_=GuidedStep.STEP_4_WIRE,
+              reason=advance_reason,
+              composition_version=state.version,
+              actor=user_id,
+          )
       emit_turn_emitted(
           recorder,
           step=GuidedStep.STEP_4_WIRE,
@@ -1635,7 +1876,10 @@
 
 - [ ] **Step 5: Update every `_emit_wire_turn` call site to pass `payload_store`.**
   P1.6 already replaced the recipe-apply, chain-accept repair-success, and
-  chain-accept success returns with `_emit_wire_turn(...)`. Update each call to:
+  chain-accept success returns with `_emit_wire_turn(...)`, and P2.4 already
+  changed the builder call inside `_emit_wire_turn` to `build_step_4_wire_turn(state)`.
+  Confirm each call still passes `payload_store` **and preserves** its existing
+  `prev_step` / `advance_reason` pair:
   ```python
   guided, next_turn = _emit_wire_turn(
       state=handler_result.state,
@@ -1643,10 +1887,15 @@
       recorder=recorder,
       user_id=user_id,
       payload_store=payload_store,
+      prev_step=<existing previous step>,
+      advance_reason=<existing reason>,
   )
   return handler_result.state, guided, next_turn
   ```
   Use `repair_result.state` / `repair_result.session` in the repair-success branch.
+  Expected live reasons after P1: recipe-apply = `recipe_applied`, repair success =
+  `auto_advanced`, direct chain accept = `user_advanced`. Do **not** remove these
+  events; `test_audit_emission.py` and `test_wire_dispatch.py` pin them.
   No accept-commit path may return `next_turn=None`.
 
 - [ ] **Step 6: Harden the existing `STEP_4_WIRE` / `CONFIRM_WIRING` branch and bind B6 rebuild.**
@@ -1707,19 +1956,21 @@
   `rebuild_wire_turn_after_reconciliation`, persists the rebuilt payload via
   `_store_guided_audit_payload`, and appends a server `TurnRecord`.
 
-- [ ] **Step 7: Add the `GET /api/sessions/{session_id}/guided` rebuild branch for `STEP_4_WIRE`.**
+- [ ] **Step 7: Verify/update the existing `GET /api/sessions/{session_id}/guided` rebuild branch for `STEP_4_WIRE`.**
   In `src/elspeth/web/sessions/routes/composer/guided.py`, in the `_build_get_guided_turn`
-  function (`:91`), after the
-  `if step is GuidedStep.STEP_3_TRANSFORMS:` block (its `return build_step_3_propose_chain_turn(...)`
-  is at `:195`) and BEFORE the trailing `return None` at `:199`, insert:
+  function (`:91`), P1 already added a `STEP_4_WIRE` branch. Ensure it is a sibling
+  of the STEP_3 branch, before the trailing `return None`, and that it calls the
+  final state-based emitter:
   ```python
       if step is GuidedStep.STEP_4_WIRE:
           # Rebuild the wire turn deterministically from the current state
           # (build_step_4_wire_turn is pure: topology + validate() overlay).
           return build_step_4_wire_turn(state)
   ```
+  Do not insert a duplicate branch; replace the old `validation=state.validate()`
+  call if it still exists. P2.4 should already have made this update.
   Add `build_step_4_wire_turn` to the existing emitter import block in `composer/guided.py`
-  (the block that imports `build_step_3_propose_chain_turn` at `:68`).
+  only if it is not already imported.
   Add a route regression to `tests/integration/web/composer/guided/test_wire_dispatch.py`
   that persists a `GuidedSession` at `step=GuidedStep.STEP_4_WIRE`, calls
   `GET /api/sessions/{session_id}/guided`, and asserts:
@@ -1765,31 +2016,34 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 **Interfaces:** none
 
 - [ ] **Step 1: ruff check.**
-  `uv run ruff check src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py tests/unit/web/composer/guided/test_wire_payload.py tests/integration/web/composer/guided/test_wire_dispatch.py`
+  `uv run ruff check src/elspeth/web/composer/tools/_common.py src/elspeth/web/composer/tools/sessions.py src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py tests/unit/web/composer/guided/test_wire_payload.py tests/integration/web/composer/guided/test_wire_dispatch.py`
   Expected: `All checks passed!`.
 - [ ] **Step 2: ruff format check.**
-  `uv run ruff format --check src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py`
+  `uv run ruff format --check src/elspeth/web/composer/tools/_common.py src/elspeth/web/composer/tools/sessions.py src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py`
   Expected: `... files already formatted`.
 - [ ] **Step 3: mypy.**
-  `uv run mypy src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py`
+  `uv run mypy src/elspeth/web/composer/tools/_common.py src/elspeth/web/composer/tools/sessions.py src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py`
   Expected: `Success: no issues found`.
 - [ ] **Step 4: SlotType / guided.ts mirror gate.**
   `uv run python scripts/cicd/check_slot_type_cross_language.py`
   Expected: exit 0.
 - [ ] **Step 5: Frontend gates (from `src/elspeth/web/frontend`).**
-  `npm run typecheck && npm test -- --run src/types/guided.test.ts src/components/chat/guided/WireStageTurn.test.tsx && npm run build`
+  `npm run typecheck && npm test -- --run src/types/guided.test.ts src/components/chat/guided/WireStageTurn.test.tsx src/components/chat/guided/GuidedTurn.test.tsx src/test/a11y/components.a11y.test.tsx && npm run build`
   Expected: typecheck clean, vitest green, build succeeds.
 - [ ] **Step 6: Targeted backend pytest.**
   `uv run pytest tests/unit/web/composer/guided/ tests/integration/web/composer/guided/ -q`
   Expected: all pass (no regression in the guided suite from the new payload shape or wire dispatch).
-- [ ] **Step 7: Wardline full-root gate.**
+- [ ] **Step 7: Wardline full-root gate (local trust-boundary gate).**
   `wardline scan . --fail-on ERROR`
   Expected: exit 0. Exit 1 means the trust-boundary gate tripped; fix findings at
   the boundary and re-run. Exit 2 is a Wardline/tooling error that must be surfaced
-  before this phase can close.
+  before this phase can close. If the local wardline install is missing scanner
+  extras, use the known-good project command:
+  `uvx --with 'wardline[scanner]' --with blake3 wardline scan . --fail-on ERROR`.
+  Remove any generated `.wardline/` or `findings.jsonl` artifacts before commit/final.
 - [ ] **Step 8: Commit (if any formatter touched files).**
   ```
-  git add src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py src/elspeth/web/frontend/src/types/guided.ts src/elspeth/web/frontend/src/types/guided.test.ts src/elspeth/web/frontend/src/components/chat/guided/WireStageTurn.tsx src/elspeth/web/frontend/src/components/chat/guided/WireStageTurn.test.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx tests/unit/web/composer/guided/test_wire_payload.py tests/unit/web/composer/guided/test_emitters.py tests/integration/web/composer/guided/test_wire_dispatch.py tests/integration/web/composer/guided/test_auto_drop.py && git commit -m "chore(guided): P2 wire-data gate sweep clean (P2.10)" --allow-empty
+  git add src/elspeth/web/composer/tools/_common.py src/elspeth/web/composer/tools/sessions.py src/elspeth/web/composer/guided/emitters.py src/elspeth/web/composer/guided/protocol.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py src/elspeth/web/frontend/src/types/guided.ts src/elspeth/web/frontend/src/types/guided.test.ts src/elspeth/web/frontend/src/components/chat/guided/WireStageTurn.tsx src/elspeth/web/frontend/src/components/chat/guided/WireStageTurn.test.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.test.tsx src/elspeth/web/frontend/src/test/a11y/components.a11y.test.tsx tests/unit/web/composer/guided/test_wire_payload.py tests/unit/web/composer/guided/test_protocol.py tests/unit/web/composer/guided/test_emitters.py tests/integration/web/composer/guided/test_wire_dispatch.py tests/integration/web/composer/guided/test_get_guided.py tests/integration/web/composer/guided/test_audit_emission.py tests/integration/web/composer/guided/test_auto_drop.py && git commit -m "chore(guided): P2 wire-data gate sweep clean (P2.10)" --allow-empty
   ```
 
 ---

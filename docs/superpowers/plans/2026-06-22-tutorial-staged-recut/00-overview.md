@@ -71,8 +71,8 @@ elspeth-lints trust-tier static analysis + wardline taint gate; pytest + ruff + 
   - `PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check --rules trust_tier.tier_model,trust_boundary.tests,trust_boundary.scope,trust_boundary.tier,'composer/*' --root src/elspeth`
   - `uv run python scripts/cicd/check_slot_type_cross_language.py` (SlotType / guided.ts mirror gate — this work edits `guided.ts`)
   - targeted `pytest` over the new guided/tutorial/recipe test files
-  - frontend (run from `src/elspeth/web/frontend`): `npm run typecheck`, `npm test -- --run`, `npm run build`, `npm run test:e2e` (+ `test:e2e:staging`)
-  - `wardline scan . --fail-on ERROR` (exit 0 clean / 1 gate tripped / 2 tool error) — B1/B3/recipe touch externally-fed advisor/user-text trust boundaries; fix at the boundary, not the sink. See `.agents/skills/wardline-gate/SKILL.md`.
+  - frontend (run from `src/elspeth/web/frontend`): `npm run typecheck`, `npm test -- --run`, `npm run build`, `npm run test:e2e`; also run `npm run test:e2e:staging` when `STAGING_BASE_URL` and staging credentials are available, otherwise report it as operator-env blocked rather than silently skipping it.
+  - local trust-boundary gate: `wardline scan . --fail-on ERROR` (exit 0 clean / 1 gate tripped / 2 tool error) — B1/B3/recipe touch externally-fed advisor/user-text trust boundaries; fix at the boundary, not the sink. If local scanner extras are missing, use `uvx --with 'wardline[scanner]' --with blake3 wardline scan . --fail-on ERROR`. Remove generated `.wardline/` or `findings.jsonl` artifacts before commit/final. See `.agents/skills/wardline-gate/SKILL.md`.
 - elspeth-lints trust-tier + trust_boundary honesty gate apply: B1/B3 add/move Tier-3 advisor/user-text handling; new `@trust_boundary` decorations must pass `trust_boundary.tests,scope,tier`. Operator-triggered advisor escapes must NOT route through Tier-3 `_validate_advisor_arguments`; backend checkpoints must not consume unvalidated user text.
 
 ---

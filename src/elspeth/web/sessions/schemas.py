@@ -320,6 +320,22 @@ class ChatTurnResponse(_StrictResponse):
     ts_iso: str
 
 
+class WorkflowProfileResponse(_StrictResponse):
+    """Wire-visible subset of a server-owned WorkflowProfile.
+
+    Mirrors :class:`elspeth.web.composer.guided.profile.WorkflowProfile`
+    MINUS ``entry_seed``. The seed is consumed server-side at
+    ``POST /api/sessions/{session_id}/guided/start`` and must never ride
+    the GET wire. ``None`` at the parent ``GuidedSessionResponse.profile``
+    level means the empty/live-guided profile.
+    """
+
+    coaching: bool
+    bookends: bool
+    recipe_match: bool
+    advisor_checkpoints: bool
+
+
 class GuidedSessionResponse(_StrictResponse):
     """Wire representation of the GuidedSession attached to a CompositionState."""
 
@@ -335,6 +351,11 @@ class GuidedSessionResponse(_StrictResponse):
     # standard, that is evidence tampering.
     chat_history: list[ChatTurnResponse]
     chat_turn_seq: int
+    # Server-owned WorkflowProfile (wire-visible subset). ``None`` for the
+    # empty/live-guided profile. Defaulted to ``None`` because most
+    # GuidedSessionResponse construction sites carry the empty profile; the
+    # start/GET path overrides it explicitly.
+    profile: WorkflowProfileResponse | None = None
 
 
 class TurnPayloadResponse(_StrictResponse):

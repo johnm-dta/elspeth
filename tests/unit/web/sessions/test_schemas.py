@@ -447,3 +447,35 @@ class TestSessionResponseHappyPath:
         assert resp.validation_errors == ["boom"]
         assert resp.validation_warnings is not None
         assert resp.validation_warnings[0].component == "c"
+
+
+def test_workflow_profile_response_wire_subset_and_strict() -> None:
+    from elspeth.web.sessions.schemas import WorkflowProfileResponse
+
+    model = WorkflowProfileResponse(coaching=True, bookends=True, recipe_match=True, advisor_checkpoints=True)
+    dumped = model.model_dump()
+    assert set(dumped.keys()) == {
+        "coaching",
+        "bookends",
+        "recipe_match",
+        "advisor_checkpoints",
+    }
+
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        WorkflowProfileResponse(
+            coaching=True,
+            bookends=True,
+            recipe_match=True,
+            advisor_checkpoints=True,
+            entry_seed="leak",
+        )
+
+    with pytest.raises(pydantic.ValidationError):
+        WorkflowProfileResponse(
+            coaching="yes",
+            bookends=True,
+            recipe_match=True,
+            advisor_checkpoints=True,
+        )

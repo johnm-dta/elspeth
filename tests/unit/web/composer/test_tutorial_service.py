@@ -448,6 +448,67 @@ def test_tutorial_model_id_changes_when_deployment_skill_overlay_is_added(tmp_pa
     )
 
 
+def test_tutorial_model_id_includes_staged_skill_and_recipe_hashes(tmp_path: Path) -> None:
+    """C2 five-input cache key: staged guided skills + recipe catalog are keyed.
+
+    rev-4 regression guard: the original test asserted only THREE inputs
+    (composer_model + core skill + deployment overlay). A staged design must
+    also key the guided staged skills and both recipe modules, or a stage
+    block / recipe edit silently serves a stale cached pipeline.
+    """
+    from elspeth.web.composer.guided.prompts import guided_staged_skill_hash
+    from elspeth.web.composer.recipes import recipe_catalog_content_hash
+
+    settings = _make_tutorial_settings(tmp_path, composer_model="anthropic/claude-sonnet-4.5")
+    model_id = tutorial_model_id(settings)
+
+    assert f"staged_skill={guided_staged_skill_hash()}" in model_id
+    assert f"recipe={recipe_catalog_content_hash()}" in model_id
+
+
+def test_tutorial_model_id_shifts_when_recipe_catalog_hash_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutating recipes.py / recipe_match.py content shifts the cache key.
+
+    Pins that the recipe-catalog input is load-bearing: if it were dropped, this would
+    pass silently. We monkeypatch the hash function the way an edited module
+    would shift it (the real shift is a source-byte change).
+    """
+    import elspeth.web.composer.tutorial_service as tutorial_service_module
+
+    settings = _make_tutorial_settings(tmp_path, composer_model="openai/gpt-5")
+    baseline = tutorial_model_id(settings)
+
+    monkeypatch.setattr(
+        tutorial_service_module,
+        "recipe_catalog_content_hash",
+        lambda: "deadbeef" * 8,
+    )
+    shifted = tutorial_model_id(settings)
+    assert baseline != shifted, "recipe catalog hash must participate in the cache key"
+
+
+def test_tutorial_model_id_shifts_when_staged_skill_hash_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mutating a guided stage block shifts the cache key (staged skill input)."""
+    import elspeth.web.composer.tutorial_service as tutorial_service_module
+
+    settings = _make_tutorial_settings(tmp_path, composer_model="openai/gpt-5")
+    baseline = tutorial_model_id(settings)
+
+    monkeypatch.setattr(
+        tutorial_service_module,
+        "guided_staged_skill_hash",
+        lambda: "cafebabe" * 8,
+    )
+    shifted = tutorial_model_id(settings)
+    assert baseline != shifted, "staged guided skill hash must participate in the cache key"
+
+
 # --- _parse_rows_file / _rows_from_artifacts --------------------------------
 # Tier-1 audit invariant: row-parsing distinguishes three failure modes, none
 # of which may be silently coalesced into ``[]``:

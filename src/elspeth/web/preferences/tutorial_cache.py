@@ -12,6 +12,10 @@ Invalidation envelope (what causes a different key, hence cache miss):
 - Core composer skill markdown (``pipeline_composer.md``) content change.
 - Deployment skill overlay (``{data_dir}/skills/pipeline_composer.md``)
   content change.
+- Staged guided skill pack (``base.md`` + ``step_1..step_4_wire.md``) content
+  change.
+- Recipe catalog content change (``composer/recipes.py`` or
+  ``composer/guided/recipe_match.py``).
 
 Out of scope (cache does NOT auto-invalidate on these — operator clears the
 cache directory manually, consistent with the project's

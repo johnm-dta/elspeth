@@ -35,6 +35,8 @@ from elspeth.core.landscape.write_repository import LandscapeWriteRepository, Sy
 from elspeth.plugins.infrastructure.discovery import discover_all_plugins
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.composer.guided.prompts import guided_staged_skill_hash
+from elspeth.web.composer.recipes import recipe_catalog_content_hash
 from elspeth.web.composer.skills import load_deployment_skill, load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialOrphanCleanupResponse, TutorialRunOutput, TutorialRunResponse
 from elspeth.web.composer.tutorial_telemetry import _CacheSkipReason, record_tutorial_cache_skipped
@@ -836,7 +838,7 @@ def tutorial_model_id(settings: WebSettings) -> str:
 
     The cache key (``SHA-256(canonical_prompt + ":" + model_id)``) invalidates
     on the operator-controlled inputs that determine the composer's choice of
-    pipeline shape and transform model. Three such inputs are folded into the
+    pipeline shape and transform model. Five such inputs are folded into the
     returned identifier; any one change forces a fresh live composition.
 
     Covered (automatic invalidation):
@@ -848,6 +850,13 @@ def tutorial_model_id(settings: WebSettings) -> str:
     3. Optional deployment skill overlay at
        ``{data_dir}/skills/pipeline_composer.md`` — operator-supplied
        guidance that further shapes composer behaviour.
+    4. The staged guided skill pack (``base.md`` + ``step_1..step_4_wire.md``)
+       consumed by the guided per-step chat solver — biases the staged
+       compose path that authors the cached pipeline.
+    5. The recipe catalog (``composer/recipes.py`` +
+       ``composer/guided/recipe_match.py``) — under D11 the web_scrape recipe
+       deterministically authors the cached pipeline's option-level content,
+       and the predicate registry selects which recipe fires.
 
     Out of scope (operator clears ``{data_dir}/tutorial_cache/`` manually
     when one of these changes — same "operator deletes the artifact"
@@ -866,9 +875,17 @@ def tutorial_model_id(settings: WebSettings) -> str:
       cleared.
     """
     _, core_skill_hash = load_skill_with_hash("pipeline_composer")
+    staged_skill_hash = guided_staged_skill_hash()
     deployment_overlay = load_deployment_skill("pipeline_composer", settings.data_dir)
     deployment_hash = hashlib.sha256(deployment_overlay.encode("utf-8")).hexdigest()
-    return f"composer={settings.composer_model}|skill={core_skill_hash}|deployment_skill={deployment_hash}"
+    recipe_hash = recipe_catalog_content_hash()
+    return (
+        f"composer={settings.composer_model}"
+        f"|skill={core_skill_hash}"
+        f"|staged_skill={staged_skill_hash}"
+        f"|deployment_skill={deployment_hash}"
+        f"|recipe={recipe_hash}"
+    )
 
 
 async def cleanup_tutorial_orphans(

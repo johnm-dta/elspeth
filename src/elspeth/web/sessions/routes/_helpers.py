@@ -78,6 +78,7 @@ from elspeth.web.composer.guided.emitters import (
     build_step_3_propose_chain_turn,
     build_step_3_schema_form_turn,
     build_step_4_wire_turn,
+    rebuild_wire_turn_after_reconciliation,
 )
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
@@ -2592,9 +2593,11 @@ def _emit_wire_turn(
     payload_store: Any,
     prev_step: GuidedStep | None = None,
     advance_reason: str | None = None,
+    next_turn: Turn | None = None,
 ) -> tuple[GuidedSession, Turn]:
     """Emit the STEP_4_WIRE confirm_wiring turn."""
-    next_turn = build_step_4_wire_turn(state)
+    if next_turn is None:
+        next_turn = build_step_4_wire_turn(state)
     payload_hash = stable_hash(next_turn["payload"])
     new_record = TurnRecord(
         step=GuidedStep.STEP_4_WIRE,
@@ -3789,9 +3792,14 @@ async def _dispatch_guided_respond(
         if guided.terminal is not None:
             return handler_result.state, guided, None
 
+        next_turn, _is_valid = rebuild_wire_turn_after_reconciliation(
+            handler_result.state,
+            resurface=lambda _state: None,
+        )
         guided, next_turn = _emit_wire_turn(
             state=handler_result.state,
             guided=guided,
+            next_turn=next_turn,
             recorder=recorder,
             user_id=user_id,
             payload_store=payload_store,

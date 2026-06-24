@@ -16,6 +16,7 @@ Exported:
     build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
     build_step_3_schema_form_turn — schema_form for editing one proposed transform.
     build_step_4_wire_turn — confirm_wiring turn with topology + validation two-read merge.
+    rebuild_wire_turn_after_reconciliation — resurface and rebuild the wire turn after reconciliation.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
 data constructed from system-owned state; the Turn dict itself is not persisted
@@ -24,7 +25,7 @@ data constructed from system-owned state; the Turn dict itself is not persisted
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from elspeth.web.catalog.knob_schema import KnobSchema, lower_slot_specs_to_knob_schema
@@ -400,6 +401,17 @@ def build_step_4_wire_turn(
         step_index=_step_index(GuidedStep.STEP_4_WIRE),
         payload=payload,
     )
+
+
+def rebuild_wire_turn_after_reconciliation(
+    state: CompositionState,
+    *,
+    resurface: Callable[[CompositionState], None],
+) -> tuple[Turn, bool]:
+    """Re-evaluate the wire turn after a wire-stage reconciliation (B6)."""
+    resurface(state)
+    turn = build_step_4_wire_turn(state)
+    return turn, state.validate().is_valid
 
 
 def _build_wire_topology(state: CompositionState) -> WireTopology:

@@ -311,3 +311,89 @@ class TestBuildStep4WireTurn:
 
         assert "advisor_findings" not in payload
         assert "signoff_outcome" not in payload
+
+
+class TestHonestGapRendering:
+    def test_fork_topology_does_not_fabricate_edge_contract_rows(self) -> None:
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="inline_blob",
+                on_success="chain_in",
+                options={"schema": {"mode": "observed"}},
+                on_validation_failure="reject",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="fork",
+                    node_type="gate",
+                    plugin=None,
+                    input="chain_in",
+                    on_success=None,
+                    on_error=None,
+                    options={},
+                    condition="true",
+                    routes={"true": "fork"},
+                    fork_to=("branch_a", "branch_b"),
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="jsonl_out",
+                    plugin="json",
+                    options={"path": "out.jsonl", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(name="Honest gaps", description=""),
+            version=1,
+        )
+
+        payload = build_step_4_wire_turn(state)["payload"]
+        node = payload["topology"]["nodes"][0]
+
+        assert node["fork_to"] == ["branch_a", "branch_b"]
+        assert ("fork", "branch_a") not in {(row["from"], row["to"]) for row in payload["edge_contracts"]}
+        assert ("fork", "branch_b") not in {(row["from"], row["to"]) for row in payload["edge_contracts"]}
+
+
+class TestWireReconciliationRebuild:
+    def test_resurface_called_on_post_mutation_state_and_turn_rebuilt(self) -> None:
+        from elspeth.web.composer.guided.emitters import rebuild_wire_turn_after_reconciliation
+
+        state = _canonical_state()
+        seen: list[int] = []
+
+        turn, is_valid = rebuild_wire_turn_after_reconciliation(
+            state,
+            resurface=lambda surfaced: seen.append(surfaced.version),
+        )
+
+        assert seen == [state.version]
+        assert turn["type"] == TurnType.CONFIRM_WIRING.value
+        assert turn["payload"]["topology"]["sources"]["source"]["plugin"] == "inline_blob"
+        assert isinstance(is_valid, bool)
+
+    def test_is_valid_reflects_fresh_validate(self) -> None:
+        from elspeth.web.composer.guided.emitters import rebuild_wire_turn_after_reconciliation
+
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="inline_blob",
+                on_success="chain_in",
+                options={"schema": {"mode": "observed"}},
+                on_validation_failure="reject",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(),
+            metadata=PipelineMetadata(name="Invalid", description=""),
+            version=1,
+        )
+
+        _turn, is_valid = rebuild_wire_turn_after_reconciliation(state, resurface=lambda _state: None)
+
+        assert is_valid is False

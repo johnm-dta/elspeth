@@ -28,6 +28,7 @@ from elspeth.web.composer.guided.steps import (
 )
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
+from elspeth.web.sessions.routes import _helpers as guided_route_helpers
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond, _summarize_guided_response
 from tests.fixtures.stores import MockPayloadStore
 
@@ -165,6 +166,25 @@ def _audit_args(recorder: BufferingRecorder, tool_name: str) -> list[dict[str, A
     return [json.loads(invocation.arguments_canonical) for invocation in recorder.invocations if invocation.tool_name == tool_name]
 
 
+def _assert_final_wire_payload_stored(
+    *,
+    next_turn: Any,
+    emitted_args: dict[str, Any],
+    payload_store: MockPayloadStore,
+) -> None:
+    payload = next_turn["payload"]
+
+    assert set(payload) == {
+        "topology",
+        "edge_contracts",
+        "semantic_contracts",
+        "warnings",
+    }
+    assert set(payload["topology"]) == {"sources", "nodes", "outputs"}
+    stored = json.loads(payload_store.retrieve(emitted_args["payload_payload_id"]).decode("utf-8"))
+    assert stored == payload
+
+
 def test_summarize_confirm_wiring_exact_body_returns_summary() -> None:
     assert _summarize_guided_response(TurnType.CONFIRM_WIRING, _valid_confirm_body()) == "Confirmed wiring"
 
@@ -225,7 +245,7 @@ async def test_chain_accept_returns_confirm_wiring_turn() -> None:
     assert advanced[-1]["reason"] == "user_advanced"
     emitted = _audit_args(recorder, "guided_turn_emitted")
     assert emitted[-1]["turn_type"] == TurnType.CONFIRM_WIRING.value
-    assert payload_store.retrieve(emitted[-1]["payload_payload_id"])
+    _assert_final_wire_payload_stored(next_turn=next_turn, emitted_args=emitted[-1], payload_store=payload_store)
 
 
 @pytest.mark.asyncio
@@ -275,7 +295,39 @@ async def test_confirm_wiring_invalid_pipeline_reemits_wire_turn_without_termina
     assert next_turn is not None
     assert next_turn["type"] == TurnType.CONFIRM_WIRING.value
     assert _audit_args(recorder, "guided_step_advanced") == []
-    assert len([r for r in guided2.history if r.turn_type is TurnType.CONFIRM_WIRING]) == 1
+    confirm_records = [r for r in guided2.history if r.turn_type is TurnType.CONFIRM_WIRING]
+    assert len(confirm_records) == 1
+    emitted = _audit_args(recorder, "guided_turn_emitted")
+    assert len(emitted) == 1
+    _assert_final_wire_payload_stored(next_turn=next_turn, emitted_args=emitted[0], payload_store=payload_store)
+
+
+@pytest.mark.asyncio
+async def test_confirm_wiring_invalid_pipeline_rebuild_path_is_bound(monkeypatch: pytest.MonkeyPatch) -> None:
+    from elspeth.web.composer.guided.emitters import rebuild_wire_turn_after_reconciliation as real_rebuild
+
+    state, wire_session, catalog, payload_store = _wire_ready_session(valid=False)
+    seen_versions: list[int] = []
+
+    def recording_rebuild(state: CompositionState, *, resurface: Any) -> tuple[Any, bool]:
+        seen_versions.append(state.version)
+        return real_rebuild(state, resurface=resurface)
+
+    monkeypatch.setattr(guided_route_helpers, "rebuild_wire_turn_after_reconciliation", recording_rebuild)
+
+    _state2, _guided2, next_turn, _recorder = await _dispatch(
+        state,
+        wire_session,
+        catalog,
+        payload_store=payload_store,
+        current_step=GuidedStep.STEP_4_WIRE,
+        current_turn_type=TurnType.CONFIRM_WIRING,
+        turn_response=_valid_confirm_body(),
+    )
+
+    assert seen_versions == [state.version]
+    assert next_turn is not None
+    assert next_turn["type"] == TurnType.CONFIRM_WIRING.value
 
 
 @pytest.mark.parametrize(

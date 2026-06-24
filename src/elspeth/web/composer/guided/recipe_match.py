@@ -264,11 +264,11 @@ def _web_scrape_slot_resolver(source: SourceResolved, sink: SinkResolved) -> Map
     User-fillable: ``model``, ``api_key_secret``, ``provider``,
     ``rating_template``, ``abuse_contact``, and ``scraping_reason``.
 
-    This is a P4.1 STUB: the real resolver (full slot coverage) and the
-    ``RecipeSpec`` it pre-fills against land in P4.2.  ``match_recipe`` will
-    raise ``InvariantError`` end-to-end until that ``RecipeSpec`` is registered
-    in recipes.py — the unit tests call ``_web_scrape_predicate`` directly and
-    are unaffected.
+    Auto-derives the three slots inferable from (source, sink); the remaining
+    required slots (``model``, ``api_key_secret``, ``abuse_contact``,
+    ``scraping_reason``) surface as ``unsatisfied_slots`` for the operator to
+    fill via ``recipe_offer``.  The ``RecipeSpec`` this pre-fills against is
+    registered in recipes.py (``web-scrape-llm-rate-jsonl``).
 
     Retains the ``blob_ref`` InvariantError guard for the same defence-in-depth
     reason as the classify/split resolvers: the predicate gates on
@@ -462,8 +462,8 @@ _RECIPE_PREDICATES: Sequence[tuple[_Predicate, str, _SlotResolver]] = (
     # never collides with the CSV classify/split predicates (those need
     # classifier-keyword required_fields / two outputs), so order is not load-
     # bearing for disambiguation — it is asserted last to keep registry edits
-    # intentional.  The RecipeSpec it matches lands in P4.2; until then
-    # ``match_recipe`` raises InvariantError end-to-end for this topology.
+    # intentional.  The RecipeSpec it matches is registered in recipes.py
+    # (``web-scrape-llm-rate-jsonl``), so ``match_recipe`` resolves it end-to-end.
     (_web_scrape_predicate, "web-scrape-llm-rate-jsonl", _web_scrape_slot_resolver),
 )
 

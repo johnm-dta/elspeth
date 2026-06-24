@@ -31,7 +31,10 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.protocol import YamlGenerator
+from elspeth.web.execution.schemas import ValidationCheck
 from elspeth.web.execution.validation import (
+    _ALL_CHECKS,
+    _append_skipped_checks,
     _build_edge_contract_suggestion,
     _collect_secret_refs,
     _format_edge_contract_failure,
@@ -271,6 +274,57 @@ class TestValidatePipelinePathAllowlist:
         path_check = next(c for c in result.checks if c.name == "path_allowlist")
         assert path_check.passed is True
         assert "skipped" in path_check.detail.lower()
+
+
+class TestSkippedCheckDeduplication:
+    """``_append_skipped_checks`` must not emit a second, contradictory
+    "skipped" record for a check that was already recorded earlier in the
+    same ``validate_pipeline`` pass.
+
+    Because checks are *emitted* during ``validate_pipeline`` in a different
+    order than the canonical ``_ALL_CHECKS`` ordering, a check that already has
+    a record can fall inside the "skip everything after me" range of a later
+    gate failure.  Without the ``already_emitted`` guard it would then gain a
+    second, contradictory ``passed=False`` skipped record; the guard exists to
+    prevent exactly that.
+    """
+
+    def test_does_not_duplicate_an_already_emitted_check(self) -> None:
+        from_check = _ALL_CHECKS[0]
+        already_emitted_name = _ALL_CHECKS[-1]  # positioned strictly after from_check
+        assert already_emitted_name != from_check
+
+        original = ValidationCheck(
+            name=already_emitted_name,
+            passed=True,
+            detail="recorded before the skip-after sweep",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+        checks = [original]
+
+        _append_skipped_checks(checks, from_check)
+
+        names = [c.name for c in checks]
+        # The already-emitted record survives exactly once — not shadowed by a
+        # contradictory "skipped" entry for the same check name.
+        assert names.count(already_emitted_name) == 1
+        survivor = next(c for c in checks if c.name == already_emitted_name)
+        assert survivor is original
+        assert survivor.passed is True
+
+    def test_still_records_skips_for_not_yet_emitted_checks(self) -> None:
+        """The dedup guard must not suppress genuine skips for checks that
+        were not already emitted — otherwise the audit trail loses coverage."""
+        from_check = _ALL_CHECKS[0]
+        not_emitted = _ALL_CHECKS[1]  # after from_check, never pre-seeded
+
+        checks: list[ValidationCheck] = []
+        _append_skipped_checks(checks, from_check)
+
+        skipped = next(c for c in checks if c.name == not_emitted)
+        assert skipped.passed is False
+        assert "skipped" in skipped.detail.lower()
 
 
 class TestValidatePipelineWebScrapeNetworkPolicy:
@@ -2852,7 +2906,6 @@ class TestValidatePipelineRuntimeCheckBoundaries:
             RUNTIME_GRAPH_VALIDATION_CHECKS,
         )
         from elspeth.web.execution.schemas import VALIDATION_BLOCKING_CHECK_NAMES
-        from elspeth.web.execution.validation import _ALL_CHECKS
 
         assert RUNTIME_GRAPH_VALIDATION_CHECKS == (
             RUNTIME_CHECK_PLUGIN_INSTANTIATION,

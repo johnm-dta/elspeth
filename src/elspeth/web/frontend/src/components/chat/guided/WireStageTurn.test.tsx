@@ -175,6 +175,33 @@ describe("reconstructWireEdges", () => {
     );
   });
 
+  it("builds coalesce fan-in edges from array-form branches", () => {
+    // Backend coalesce branches are `Sequence[str] | Mapping[str, str]`
+    // (state.py CoalesceBranches); the Record form is covered above. This
+    // pins that the alternate array (`string[]`) shape also produces correct
+    // fan-in edges (regression coverage for the real backend shape).
+    const data = canonicalData();
+    const merge = data.topology.nodes.find((node) => node.id === "merge_paths");
+    merge!.branches = ["path_a_done", "path_b_done"];
+
+    const edges = reconstructWireEdges(data);
+
+    expect(edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          from: "path_a_transform",
+          to: "merge_paths",
+          label: "path_a_done",
+        }),
+        expect.objectContaining({
+          from: "path_b_transform",
+          to: "merge_paths",
+          label: "path_b_done",
+        }),
+      ]),
+    );
+  });
+
   it("overlays edge_contracts keyed by from/to for scrape to mapper", () => {
     const edges = reconstructWireEdges(canonicalData());
 

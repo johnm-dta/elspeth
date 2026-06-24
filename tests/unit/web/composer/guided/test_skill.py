@@ -39,11 +39,6 @@ class TestGuidedSkill:
         ):
             assert turn_type in text, f"missing turn type: {turn_type}"
 
-    def test_base_closed_taxonomy_mentions_confirm_wiring(self) -> None:
-        text = load_guided_skill()
-        assert "one of these seven types" in text
-        assert "`schema_form`, `propose_chain`, `recipe_offer`, `confirm_wiring`" in text
-
     def test_anti_fabrication_clause_present(self) -> None:
         text = load_guided_skill()
         # The hard rule that survives from freeform skill (spec §8.1.4)

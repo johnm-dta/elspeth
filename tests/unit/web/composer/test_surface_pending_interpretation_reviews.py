@@ -17,6 +17,8 @@ from elspeth.web.composer.state import (
 from elspeth.web.config import WebSettings
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
+    RAW_HTML_CLEANUP_REVIEW_DRAFT,
+    RAW_HTML_CLEANUP_USER_TERM,
     SOURCE_AUTHORING_KEY,
     SOURCE_COMPONENT_ID,
 )
@@ -506,3 +508,104 @@ async def test_surfacer_surfaces_invented_source(tmp_path, sessions_service) -> 
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
     kinds = {e.kind for e in events}
     assert InterpretationKind.INVENTED_SOURCE in kinds
+
+
+def _field_mapper_pipeline_decision_node(
+    draft: str = RAW_HTML_CLEANUP_REVIEW_DRAFT,
+) -> NodeSpec:
+    # A field_mapper node carrying a staged pipeline_decision requirement for the
+    # raw-HTML cleanup decision. To satisfy validate_pipeline_decision_semantics
+    # for a draft that names both the "raw html" and "fingerprint" markers, the
+    # node must use plugin="field_mapper", select_only=True, a non-empty mapping,
+    # and that mapping must not preserve any raw HTML/fingerprint field (rating
+    # and url are plain data fields). With no web_scrape node in the pipeline the
+    # web_scrape_raw_fields set is empty, so the validator only inspects the
+    # mapping field names. user_term is the canonical RAW_HTML_CLEANUP_USER_TERM.
+    return NodeSpec(
+        id="field_mapper_cleanup",
+        node_type="transform",
+        plugin="field_mapper",
+        input="rated",
+        on_success="main",
+        on_error=None,
+        options={
+            "select_only": True,
+            "mapping": {"rating": "rating", "url": "url"},
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": "pipeline_decision_review",
+                    "kind": InterpretationKind.PIPELINE_DECISION.value,
+                    "user_term": RAW_HTML_CLEANUP_USER_TERM,
+                    "status": "pending",
+                    "draft": draft,
+                    "event_id": None,
+                    "accepted_value": None,
+                    "accepted_artifact_hash": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        },
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_surfacer_surfaces_pipeline_decision(tmp_path, sessions_service) -> None:
+    # A field_mapper node carrying a staged pipeline_decision requirement
+    # surfaces a resolvable pending event at the recipe-apply writer boundary.
+    # The PIPELINE_DECISION branch of create_pending_interpretation_event
+    # requires exactly one pending requirement plus a passing
+    # validate_pipeline_decision_semantics check.
+    composer = _composer(tmp_path, sessions_service)
+    state = CompositionState(
+        source=None,
+        nodes=(_field_mapper_pipeline_decision_node(),),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    session_id, state_id = await _persist(sessions_service, state)
+    await composer.surface_pending_interpretation_reviews(state, session_id=str(session_id), current_state_id=str(state_id))
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    kinds = {e.kind for e in events}
+    assert InterpretationKind.PIPELINE_DECISION in kinds
+
+
+@pytest.mark.asyncio
+async def test_pipeline_decision_dedup_is_draft_aware(tmp_path, sessions_service) -> None:
+    """A stale raw-HTML-cleanup event for the same field_mapper decision must
+    not suppress a newly authored decision draft."""
+    composer = _composer(tmp_path, sessions_service)
+    old_draft = "Drop raw HTML fields before writing output."
+    new_draft = RAW_HTML_CLEANUP_REVIEW_DRAFT
+    old_state = CompositionState(
+        source=None,
+        nodes=(_field_mapper_pipeline_decision_node(old_draft),),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    session_id, old_state_id = await _persist(sessions_service, old_state)
+    await composer.surface_pending_interpretation_reviews(old_state, session_id=str(session_id), current_state_id=str(old_state_id))
+
+    new_state = CompositionState(
+        source=None,
+        nodes=(_field_mapper_pipeline_decision_node(new_draft),),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=2,
+    )
+    new_record = await _save_state_for_session(sessions_service, session_id, new_state)
+    await composer.surface_pending_interpretation_reviews(new_state, session_id=str(session_id), current_state_id=str(new_record.id))
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    drafts = [e.llm_draft for e in events if e.kind is InterpretationKind.PIPELINE_DECISION]
+    assert old_draft in drafts
+    assert new_draft in drafts

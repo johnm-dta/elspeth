@@ -12,7 +12,13 @@ import dataclasses
 
 from elspeth.web.composer.guided.profile import WorkflowProfile
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType
-from elspeth.web.composer.guided.state_machine import GuidedSession, TurnRecord
+from elspeth.web.composer.guided.state_machine import (
+    GuidedSession,
+    SinkOutputResolved,
+    SinkResolved,
+    SourceResolved,
+    TurnRecord,
+)
 from elspeth.web.composer.state import (
     CompositionState,
     OutputSpec,
@@ -48,13 +54,44 @@ def _valid_state() -> CompositionState:
 def make_wire_ready_session_and_state(
     *,
     profile: WorkflowProfile,
+    at_step3: bool = False,
 ) -> tuple[GuidedSession, CompositionState]:
-    """Build a STEP_4_WIRE-positioned session + a valid composition state.
+    """Build a wire-ready (or STEP_3-positioned) session + a valid composition state.
 
-    The session history carries a single server-emitted CONFIRM_WIRING
-    ``TurnRecord`` so the dispatcher sees a confirm answer for the wire turn.
+    Default: a STEP_4_WIRE-positioned session whose history carries a single
+    server-emitted CONFIRM_WIRING ``TurnRecord`` so the dispatcher sees a confirm
+    answer for the wire turn.
+
+    When ``at_step3`` is True, returns a STEP_3-positioned session carrying staged
+    ``step_1_result`` / ``step_2_result`` (so the existing STEP_3 ``REJECT`` /
+    ``REQUEST_ADVISOR`` chain re-solve branch is reachable; that branch raises
+    ``InvariantError`` if either step result is None).
     """
     state = _valid_state()
+    if at_step3:
+        session = dataclasses.replace(
+            GuidedSession.initial(),
+            step=GuidedStep.STEP_3_TRANSFORMS,
+            history=(),
+            profile=profile,
+            step_1_result=SourceResolved(
+                plugin="csv",
+                options={"path": "in.csv"},
+                observed_columns=("id", "text"),
+                sample_rows=({"id": "1", "text": "hello"},),
+            ),
+            step_2_result=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="csv",
+                        options={"path": "out.csv"},
+                        required_fields=(),
+                        schema_mode="observed",
+                    ),
+                )
+            ),
+        )
+        return session, state
     wire_record = TurnRecord(
         step=GuidedStep.STEP_4_WIRE,
         turn_type=TurnType.CONFIRM_WIRING,

@@ -3774,6 +3774,95 @@ async def _dispatch_guided_respond(
                 detail=f"STEP_4_WIRE expects confirm_wiring; got {current_turn_type!r}.",
             )
 
+        # D6/D13 — per-phase ON-DEMAND advisor escape at the wire stage. A
+        # ``REQUEST_ADVISOR`` control on a CONFIRM_WIRING turn runs the
+        # whole-pipeline END sign-off on-demand, bounded by the SAME persisted
+        # pass budget as the auto sign-off below so a learner cannot spin the
+        # advisor unbounded. This MUST be handled BEFORE the P5.6 response-shape
+        # guard, which rejects any non-null ``control_signal`` — a legitimate
+        # REQUEST_ADVISOR carries one and would otherwise 400. It re-emits the
+        # wire turn with the findings (terminal stays None) so the user decides;
+        # a CLEAN verdict completes exactly as the auto sign-off path does. The
+        # on-demand checkpoint goes through ``run_wire_signoff`` ->
+        # ``run_signoff_checkpoint`` (backend Tier-1 ``schema_excerpt``), so no
+        # unvalidated user text is forwarded and the Tier-3
+        # ``_validate_advisor_arguments`` boundary is never crossed.
+        if turn_response["control_signal"] is ControlSignal.REQUEST_ADVISOR:
+            from elspeth.web.composer.guided.signoff import (
+                SignoffOutcome,
+                run_wire_signoff,
+                signoff_audit_event_name,
+            )
+
+            if composer_service is None or advisor_checkpoint_max_passes is None or advisor_checkpoint_max_passes <= 0:
+                # Fail closed exactly as the auto sign-off path does (P5.6): a
+                # missing service/budget never silently skips the gate.
+                blocked = _advisor_signoff_blocked_validation(
+                    reason="invariant",
+                    findings="Advisor sign-off service or pass budget is not configured.",
+                )
+                advisor_findings = (
+                    blocked.errors[0].message if blocked.errors else "Advisor sign-off service or pass budget is not configured."
+                )
+                next_turn = build_step_4_wire_turn(
+                    state,
+                    catalog=catalog,
+                    advisor_findings=advisor_findings,
+                    signoff_outcome=SignoffOutcome.BLOCKED_UNAVAILABLE.value,
+                )
+                guided, next_turn = _emit_wire_turn(
+                    state=state,
+                    guided=guided,
+                    next_turn=next_turn,
+                    recorder=recorder,
+                    user_id=user_id,
+                    payload_store=payload_store,
+                )
+                return state, guided, next_turn
+
+            max_passes = advisor_checkpoint_max_passes  # P5.4 dispatcher param (shared bound)
+            guided, decision = await run_wire_signoff(
+                session=guided,
+                state=state,
+                session_id=session_id,
+                recorder=recorder,
+                composer_service=composer_service,
+                max_passes=max_passes,
+                acknowledged_unavailable=False,
+                progress=None,
+            )
+            # Record the DISTINCT sign-off audit event for EVERY real decision
+            # (same provenance discipline as the auto path), ahead of the
+            # COMPLETE early-return.
+            emit_signoff_decision(
+                recorder,
+                event_name=signoff_audit_event_name(decision),
+                outcome=decision.outcome.value,
+                reason=decision.reason,
+                composition_version=state.version,
+                actor=user_id,
+            )
+            if decision.outcome is SignoffOutcome.COMPLETE:
+                yaml_text = generate_yaml(state)
+                terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
+                guided = _replace(guided, terminal=terminal)
+                return state, guided, None
+            next_turn = build_step_4_wire_turn(
+                state,
+                catalog=catalog,
+                advisor_findings=decision.findings_text,
+                signoff_outcome=decision.outcome.value,
+            )
+            guided, next_turn = _emit_wire_turn(
+                state=state,
+                guided=guided,
+                next_turn=next_turn,
+                recorder=recorder,
+                user_id=user_id,
+                payload_store=payload_store,
+            )
+            return state, guided, next_turn
+
         # Narrowed response-shape guard (P5.6). The CONFIRM_WIRING branch accepts
         # exactly two closed choices: the plain ``confirm`` and the server-offered
         # unavailable-escape acknowledgement ``complete_without_signoff``. Every

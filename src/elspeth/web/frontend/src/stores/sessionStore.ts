@@ -135,13 +135,19 @@ function formatLlmAuthError(apiErr: ApiError): string {
  * freeform-surface equivalent. Only selectSession (session load / deep-link)
  * otherwise refreshes, so without this a mid-session compose deadlocks the user.
  *
- * Fire-and-forget and idempotent (the store keys by session_id and reconciles
- * resolved events across surfaces), so it is safe to call on any compose
- * completion. A new compose entry point that omits this call reintroduces the
- * freeform deadlock.
+ * Idempotent (the store keys by session_id and reconciles resolved events
+ * across surfaces), so it is safe to call on any compose completion. A new
+ * compose entry point that omits this call reintroduces the freeform deadlock.
+ *
+ * Returns the underlying refresh promise. The freeform callers fire it and
+ * forget (each `void`s the result); guided `respondGuided` (P3.6/D12) must
+ * `await` it so backend-surfaced pending cards land in the store before the
+ * guided submit re-enables.
  */
-function refreshInterpretationEventsForSession(sessionId: string): void {
-  void useInterpretationEventsStore.getState().refreshAll(sessionId);
+async function refreshInterpretationEventsForSession(
+  sessionId: string,
+): Promise<void> {
+  await useInterpretationEventsStore.getState().refreshAll(sessionId);
 }
 
 function mergeCompositionProposals(
@@ -641,8 +647,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       void get().loadSessions();
       // Surface any interpretation reviews this compose turn created (see the
       // invariant on refreshInterpretationEventsForSession). Without this the
-      // freeform inline review widgets never render mid-session.
-      refreshInterpretationEventsForSession(activeSessionId);
+      // freeform inline review widgets never render mid-session. Freeform is
+      // fire-and-forget (`void`); only guided respondGuided awaits the refresh.
+      void refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       let errorMessage: string;
       // Client-side abort (the useComposer COMPOSE_TIMEOUT_MS guard or any
@@ -749,8 +756,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ),
       });
       // Surface any interpretation reviews accepting this proposal created
-      // (see the invariant on refreshInterpretationEventsForSession).
-      refreshInterpretationEventsForSession(activeSessionId);
+      // (see the invariant on refreshInterpretationEventsForSession). Freeform
+      // is fire-and-forget (`void`); only guided respondGuided awaits it.
+      void refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       if (isHttpConflict(err)) {
         await get().loadCompositionProposals(activeSessionId);
@@ -1036,8 +1044,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Fire-and-forget: refresh blob list in case the LLM created files
       useBlobStore.getState().loadBlobs(activeSessionId);
       // Surface any interpretation reviews this recompose created (see the
-      // invariant on refreshInterpretationEventsForSession).
-      refreshInterpretationEventsForSession(activeSessionId);
+      // invariant on refreshInterpretationEventsForSession). Freeform is
+      // fire-and-forget (`void`); only guided respondGuided awaits it.
+      void refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       let errorMessage: string;
       if (isAbortError(err)) {
@@ -1248,8 +1257,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
         compositionState: response.composition_state,
-        guidedResponsePending: false,
       });
+      // B1 (spec §5/D12): backend-surfaced pending interpretation cards must be
+      // in interpretationEventsStore before guidedResponsePending clears, else
+      // the submit button can briefly re-enable before the card-block arrives.
+      // Keep guidedResponsePending true across this await so the guided turn
+      // stays disabled until the pending-card projection has refreshed.
+      await refreshInterpretationEventsForSession(requestedSessionId);
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      set({ guidedResponsePending: false });
     } catch {
       if (get().activeSessionId !== requestedSessionId) {
         return;

@@ -28,6 +28,10 @@ import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
+import {
+  GuidedInterpretationReviews,
+  useHasPendingGuidedInterpretations,
+} from "./guided/GuidedInterpretationReviews";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
 import { InlineSourceDisambiguationTurn } from "./InlineSourceDisambiguationTurn";
 import { InlineSourceFallbackPrompt } from "./InlineSourceFallbackPrompt";
@@ -528,6 +532,13 @@ export function ChatPanel({
   const guidedChatPending = useSessionStore((s) => s.guidedChatPending);
   const guidedResponsePending = useSessionStore((s) => s.guidedResponsePending);
   const enterGuided = useSessionStore((s) => s.enterGuided);
+  // D12 / P3.6: block guided advancement while any pending user_approved
+  // interpretation card remains in the store. Hook is unconditional (called at
+  // the component top, not inside the conditional guided return); the empty
+  // session id is safe — pendingBySession[""] is undefined, so it returns false.
+  const hasPendingGuidedInterpretations = useHasPendingGuidedInterpretations(
+    activeSessionId ?? "",
+  );
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
   const {
@@ -1314,10 +1325,11 @@ export function ChatPanel({
             aria-live="polite"
             aria-relevant="additions"
           >
+            <GuidedInterpretationReviews sessionId={activeSessionId ?? ""} />
             <GuidedTurn
               turn={guidedNextTurn}
               onSubmit={(body) => void respondGuided(body)}
-              disabled={guidedResponsePending}
+              disabled={guidedResponsePending || hasPendingGuidedInterpretations}
             />
           </div>
           {guidedResponsePending && (

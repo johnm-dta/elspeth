@@ -384,6 +384,10 @@ describe("ChatPanel mode discriminator", () => {
     vi.resetAllMocks();
     Element.prototype.scrollIntoView = vi.fn();
     resetStore(useSessionStore);
+    // P3.6: the guided-branch tests seed pendingBySession to exercise the
+    // interpretation-card block; reset it so a seeded card does not leak into
+    // sibling tests and spuriously disable their guided turn.
+    resetStore(useInterpretationEventsStore);
     (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
       sendMessage: vi.fn(),
       retryMessage: vi.fn(),
@@ -624,6 +628,56 @@ describe("ChatPanel mode discriminator", () => {
       csvButton.click();
     });
     expect(respondGuidedSpy).not.toHaveBeenCalled();
+  });
+
+  // D12 / P3.6: a pending user_approved interpretation card surfaced into the
+  // interpretationEventsStore must block guided advancement — the wizard turn's
+  // submit control is disabled until the card is resolved, even when no guided
+  // response is in flight (guidedResponsePending is false here).
+  it("disables the guided turn while a pending user_approved interpretation card exists", () => {
+    const pendingCard: InterpretationEvent = {
+      id: "card-1",
+      session_id: "session-guided",
+      composition_state_id: "state-1",
+      affected_node_id: "rate_node",
+      tool_call_id: "backend_auto_surface:abc",
+      user_term: "llm_model_choice:rate_node",
+      kind: "llm_model_choice",
+      llm_draft: "anthropic/claude-sonnet-4.6",
+      accepted_value: null,
+      choice: "pending",
+      created_at: "2026-06-22T00:00:00Z",
+      resolved_at: null,
+      actor: "system:composer",
+      interpretation_source: "user_approved",
+      model_identifier: "anthropic/claude-opus-4-7",
+      model_version: "anthropic/claude-opus-4-7",
+      provider: "anthropic",
+      composer_skill_hash: "0".repeat(64),
+      arguments_hash: null,
+      hash_domain_version: null,
+      runtime_model_identifier_at_resolve: null,
+      runtime_model_version_at_resolve: null,
+      resolved_prompt_template_hash: null,
+    };
+    useInterpretationEventsStore.setState({
+      pendingBySession: { "session-guided": { "card-1": pendingCard } },
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedResponsePending: false,
+    });
+
+    render(<ChatPanel />);
+
+    // Same query the pending-response test above uses: GuidedTurn's primary
+    // option button. InterpretationReviewTurn renders no "CSV" button, so this
+    // uniquely targets the wizard turn's submit control.
+    expect(screen.getByRole("button", { name: "CSV" })).toBeDisabled();
   });
 
   it("renders the per-step placeholder for STEP_1_SOURCE", () => {

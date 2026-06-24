@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
 import type { GuidedSession, TurnPayload, TerminalState, GetGuidedResponse, GuidedRespondResponse, GuidedChatResponse } from "@/types/guided";
 
@@ -256,6 +257,74 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.compositionState).toEqual(
       sampleRespondResponse.composition_state,
     );
+  });
+
+  // ── Test 4b: respondGuided refreshes the interpretation-event store (B1/D12) ─
+  //
+  // P3.2 (backend) surfaces pending interpretation cards into the store on the
+  // commit path; the frontend only sees them after respondGuided refreshes the
+  // interpretationEventsStore.  The refresh must complete (be awaited) before
+  // guidedResponsePending clears, otherwise the submit button can briefly
+  // re-enable before the card-block arrives.
+
+  it("awaits interpretation-event refresh after a successful guided respond", async () => {
+    const { respondGuided } = await import("@/api/client");
+    (respondGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleRespondResponse,
+    );
+    const refreshAll = vi.fn(async () => {});
+    vi.spyOn(useInterpretationEventsStore, "getState").mockReturnValue({
+      ...useInterpretationEventsStore.getState(),
+      refreshAll,
+    });
+    // Pre-seed the active session (same as the happy-path test above).
+    useSessionStore.setState({ activeSessionId: "sess-1" });
+
+    await useSessionStore.getState().respondGuided({
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+
+    expect(refreshAll).toHaveBeenCalledWith("sess-1");
+    expect(useSessionStore.getState().guidedResponsePending).toBe(false);
+  });
+
+  it("keeps submit disabled while the pending-card refresh is deferred", async () => {
+    const { respondGuided } = await import("@/api/client");
+    (respondGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleRespondResponse,
+    );
+    let releaseRefresh!: () => void;
+    const refreshAll = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseRefresh = resolve;
+        }),
+    );
+    vi.spyOn(useInterpretationEventsStore, "getState").mockReturnValue({
+      ...useInterpretationEventsStore.getState(),
+      refreshAll,
+    });
+    useSessionStore.setState({ activeSessionId: "sess-1" });
+
+    const promise = useSessionStore.getState().respondGuided({
+      chosen: ["csv"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+
+    await vi.waitFor(() => expect(refreshAll).toHaveBeenCalledWith("sess-1"));
+    expect(useSessionStore.getState().guidedResponsePending).toBe(true);
+    releaseRefresh();
+    await promise;
+    expect(useSessionStore.getState().guidedResponsePending).toBe(false);
   });
 
   // ── Test 5: respondGuided invariant violation ─────────────────────────────

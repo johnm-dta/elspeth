@@ -22,6 +22,7 @@ class TurnType(StrEnum):
     SCHEMA_FORM = "schema_form"
     PROPOSE_CHAIN = "propose_chain"
     RECIPE_OFFER = "recipe_offer"
+    CONFIRM_WIRING = "confirm_wiring"
 
 
 class _Option(TypedDict):
@@ -100,6 +101,7 @@ class GuidedStep(StrEnum):
     STEP_2_SINK = "step_2_sink"
     STEP_2_5_RECIPE_MATCH = "step_2_5_recipe_match"
     STEP_3_TRANSFORMS = "step_3_transforms"
+    STEP_4_WIRE = "step_4_wire"
 
 
 class ChatRole(StrEnum):
@@ -189,6 +191,7 @@ _LEGAL_TURN_MATRIX: Mapping[GuidedStep, frozenset[TurnType]] = {
             TurnType.SCHEMA_FORM,
         }
     ),
+    GuidedStep.STEP_4_WIRE: frozenset({TurnType.CONFIRM_WIRING}),
 }
 
 
@@ -215,6 +218,7 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
     # itself uses the SchemaFormPayload discriminator, where
     # mode="recipe_decision" routes the shared one-knob renderer.
     TurnType.RECIPE_OFFER: frozenset({"mode", "knobs", "prefilled", "recipe_context"}),
+    TurnType.CONFIRM_WIRING: frozenset(),
 }
 
 # Nested shape spec for recursive payload validation.
@@ -250,6 +254,7 @@ _NESTED_SHAPES: Mapping[TurnType, tuple[_NestedSpec, ...]] = {
     TurnType.SCHEMA_FORM: (("knobs", "mapping", frozenset({"fields"})),),
     TurnType.PROPOSE_CHAIN: (),
     TurnType.RECIPE_OFFER: (("knobs", "mapping", frozenset({"fields"})),),
+    TurnType.CONFIRM_WIRING: (),
 }
 
 

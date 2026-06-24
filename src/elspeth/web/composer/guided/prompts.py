@@ -7,6 +7,7 @@ Skills are split per step:
   skills/step_2_sink.md           Step-2 playbook.
   skills/step_2_5_recipe_match.md Step-2.5 playbook.
   skills/step_3_transforms.md     Step-3 playbook + sample-value eyeballing.
+  skills/step_4_wire.md           Step-4 wiring constraints.
 
 ``load_guided_skill()`` composes all five (base + every step) and is consumed
 by the chain solver, which serves Step 3 but historically receives the full
@@ -45,6 +46,7 @@ _STEP_FILE_NAMES: dict[GuidedStep, str] = {
     GuidedStep.STEP_2_SINK: "step_2_sink.md",
     GuidedStep.STEP_2_5_RECIPE_MATCH: "step_2_5_recipe_match.md",
     GuidedStep.STEP_3_TRANSFORMS: "step_3_transforms.md",
+    GuidedStep.STEP_4_WIRE: "step_4_wire.md",
 }
 
 # Playbook order — the order steps appear when composing the full skill.
@@ -55,6 +57,7 @@ _STEP_PLAYBOOK_ORDER: tuple[GuidedStep, ...] = (
     GuidedStep.STEP_2_SINK,
     GuidedStep.STEP_2_5_RECIPE_MATCH,
     GuidedStep.STEP_3_TRANSFORMS,
+    GuidedStep.STEP_4_WIRE,
 )
 
 # Discoverability invariant: the per-step file map and the playbook order

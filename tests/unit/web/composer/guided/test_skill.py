@@ -26,7 +26,7 @@ class TestGuidedSkill:
         text = load_guided_skill()
         assert text.count("\n") <= 100, "guided skill should be ≤100 lines (target ≤80)"
 
-    def test_mentions_six_turn_types(self) -> None:
+    def test_mentions_seven_turn_types(self) -> None:
         text = load_guided_skill()
         for turn_type in (
             "inspect_and_confirm",
@@ -35,6 +35,7 @@ class TestGuidedSkill:
             "schema_form",
             "propose_chain",
             "recipe_offer",
+            "confirm_wiring",
         ):
             assert turn_type in text, f"missing turn type: {turn_type}"
 
@@ -83,6 +84,7 @@ class TestStepChatSkill:
             GuidedStep.STEP_2_SINK: "Step 2 — Sink",
             GuidedStep.STEP_2_5_RECIPE_MATCH: "Step 2.5 — Recipe",
             GuidedStep.STEP_3_TRANSFORMS: "Step 3 — Transform",
+            GuidedStep.STEP_4_WIRE: "Step 4 — Wiring",
         }
         for step, marker in markers.items():
             text = load_step_chat_skill(step)
@@ -91,6 +93,14 @@ class TestStepChatSkill:
                 if other_step is step:
                     continue
                 assert other_marker not in text, f"{other_marker!r} leaked into {step.value} skill — scoping violated"
+
+    def test_step_4_wire_skill_mentions_wiring_constraints(self) -> None:
+        text = load_step_chat_skill(GuidedStep.STEP_4_WIRE)
+        for marker in ("wiring", "chain_in", '"main"', "select_only"):
+            assert marker in text
+
+    def test_full_guided_skill_includes_wiring_constraint_labels(self) -> None:
+        assert "chain_in" in load_guided_skill()
 
 
 class TestStep3ContextBlock:

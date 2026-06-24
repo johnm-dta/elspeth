@@ -60,6 +60,7 @@ from .._helpers import (
     _validate_control_signal,
     _validate_step_indices,
     _verify_session_ownership,
+    _workflow_profile_response,
     build_initial_step_1_turn,
     build_step_1_inspect_and_confirm_turn_from_intent,
     build_step_1_schema_form_turn,
@@ -467,6 +468,7 @@ async def get_guided(
                         for t in guided.chat_history
                     ],
                     chat_turn_seq=guided.chat_turn_seq,
+                    profile=_workflow_profile_response(guided),
                 ),
                 next_turn=TurnPayloadResponse(
                     type=turn["type"],
@@ -697,6 +699,7 @@ async def post_guided_reenter(
                     for t in new_guided.chat_history
                 ],
                 chat_turn_seq=new_guided.chat_turn_seq,
+                profile=_workflow_profile_response(new_guided),
             ),
             next_turn=TurnPayloadResponse(
                 type=turn["type"],
@@ -911,6 +914,7 @@ async def post_guided_respond(
                             for t in new_guided.chat_history
                         ],
                         chat_turn_seq=new_guided.chat_turn_seq,
+                        profile=_workflow_profile_response(new_guided),
                     ),
                     next_turn=None,
                     terminal=new_terminal_response,
@@ -1283,6 +1287,7 @@ async def post_guided_respond(
                         for t in guided.chat_history
                     ],
                     chat_turn_seq=guided.chat_turn_seq,
+                    profile=_workflow_profile_response(guided),
                 ),
                 next_turn=TurnPayloadResponse(
                     type=next_turn["type"],
@@ -1745,6 +1750,7 @@ async def post_guided_chat(
                                 for t in guided.chat_history
                             ],
                             chat_turn_seq=guided.chat_turn_seq,
+                            profile=_workflow_profile_response(guided),
                         ),
                         next_turn=TurnPayloadResponse(
                             type=next_turn["type"],
@@ -1928,6 +1934,7 @@ async def post_guided_chat(
                         for t in new_guided.chat_history
                     ],
                     chat_turn_seq=new_guided.chat_turn_seq,
+                    profile=_workflow_profile_response(new_guided),
                 ),
                 next_turn=None,
                 terminal=None,

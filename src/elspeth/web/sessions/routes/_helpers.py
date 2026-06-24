@@ -196,6 +196,7 @@ from elspeth.web.sessions.schemas import (
     UpdateComposerPreferencesRequest,
     UpdateSessionRequest,
     ValidationEntryResponse,
+    WorkflowProfileResponse,
 )
 from elspeth.web.sessions.service import (
     InterpretationEventAlreadyResolvedError,
@@ -2217,6 +2218,23 @@ def _initial_composition_state_with_guided_session(*, profile: WorkflowProfile =
         metadata=PipelineMetadata(),
         version=1,
         guided_session=GuidedSession.initial(profile=profile),
+    )
+
+
+def _workflow_profile_response(guided: GuidedSession) -> WorkflowProfileResponse | None:
+    """Project a GuidedSession's server-owned profile onto the wire subset.
+
+    Returns ``None`` for the empty/live-guided profile (== ``EMPTY_PROFILE``).
+    ``entry_seed`` is deliberately excluded: it is the server-side cache-key
+    discriminator, not a render input.
+    """
+    if guided.profile == EMPTY_PROFILE:
+        return None
+    return WorkflowProfileResponse(
+        coaching=guided.profile.coaching,
+        bookends=guided.profile.bookends,
+        recipe_match=guided.profile.recipe_match,
+        advisor_checkpoints=guided.profile.advisor_checkpoints,
     )
 
 
@@ -4274,6 +4292,7 @@ __all__ = [
     "_validate_run_status_accounting_for_list",
     "_validate_step_indices",
     "_verify_session_ownership",
+    "_workflow_profile_response",
     "annotations",
     "asyncio",
     "audit_envelope",

@@ -488,6 +488,39 @@ def _litellm_error_detail(
     return detail
 
 
+def _redact_guided_meta_entry_seed(composer_meta: Any) -> Any:
+    """Strip ``entry_seed`` from the guided-session profile in a WIRE composer_meta.
+
+    ``composer_meta`` is persisted as ``{"guided_session": GuidedSession.to_dict()}``
+    and ``GuidedSession.to_dict()`` embeds ``"profile": WorkflowProfile.to_dict()``
+    which INCLUDES ``entry_seed`` (a server-side ``str`` framing prompt, P0). When the
+    raw persisted blob is echoed onto the wire via ``_state_response`` →
+    ``composition_state.composer_meta`` it would leak ``entry_seed`` — a second wire
+    channel that bypasses the ``WorkflowProfileResponse`` subset (P6.1). This strips
+    it from the WIRE copy ONLY (see :func:`deep_thaw`, which returns a fresh deep copy,
+    so the persisted blob is untouched and P7.5's welcome bookend still reads the
+    persisted seed). The other profile flags (coaching/bookends/...) are preserved —
+    the frontend may read them.
+
+    Defensive against shape drift: any non-dict / missing level is a no-op
+    passthrough (this is a wire-redaction belt, not a validation gate). Mutates and
+    returns *composer_meta* in place — callers pass the already-thawed wire copy.
+    """
+    if not isinstance(composer_meta, dict):
+        return composer_meta
+    guided = composer_meta.get("guided_session")
+    if not isinstance(guided, dict):
+        return composer_meta
+    profile = guided.get("profile")
+    if not isinstance(profile, dict):
+        return composer_meta
+    # Delete the key entirely (not set-to-None): the strict wire invariant is
+    # that neither the seed string NOR the ``entry_seed`` key name appears on the
+    # wire. The frontend reads the bool flags, never ``entry_seed``.
+    profile.pop("entry_seed", None)
+    return composer_meta
+
+
 def _state_response(
     state: CompositionStateRecord,
     live_validation: ValidationSummary | None = None,
@@ -535,7 +568,10 @@ def _state_response(
         else None,
         derived_from_state_id=str(state.derived_from_state_id) if state.derived_from_state_id is not None else None,
         created_at=state.created_at,
-        composer_meta=deep_thaw(state.composer_meta) if state.composer_meta is not None else None,
+        # deep_thaw yields a fresh mutable deep copy; redact entry_seed from the
+        # guided-session profile on the WIRE only — persisted storage keeps it
+        # for P7.5's welcome bookend.
+        composer_meta=_redact_guided_meta_entry_seed(deep_thaw(state.composer_meta)) if state.composer_meta is not None else None,
     )
 
 

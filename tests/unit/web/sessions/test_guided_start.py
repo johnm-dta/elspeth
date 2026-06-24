@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,6 +11,7 @@ import structlog
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 
+from elspeth.contracts.freeze import deep_thaw
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
@@ -134,8 +136,10 @@ async def test_guided_start_persists_profile_without_materializing_topology(tmp_
     assert resp.status_code == 200
     body = resp.json()
 
-    # entry_seed is server-side only: it must not appear on the wire profile.
-    assert "entry_seed" not in str(body["guided_session"]["profile"])
+    # entry_seed is server-side only. WHOLE-BODY check (not just the profile
+    # subtree): it must not leak via ANY wire channel, including the raw
+    # composer_meta.guided_session.profile echoed in composition_state.
+    assert "entry_seed" not in json.dumps(body)
     # The tutorial profile is on the wire (populated subset).
     assert body["guided_session"]["profile"] is not None
     assert body["guided_session"]["profile"]["advisor_checkpoints"] is True
@@ -152,10 +156,11 @@ async def test_guided_start_persists_profile_without_materializing_topology(tmp_
     assert state["outputs"] == []
 
     # The profile is persisted: GET reflects the populated tutorial profile and
-    # the same empty (un-materialized) composition state.
+    # the same empty (un-materialized) composition state — and still no leak.
     get_resp = client.get(f"/api/sessions/{session.id}/guided")
     assert get_resp.status_code == 200
     get_body = get_resp.json()
+    assert "entry_seed" not in json.dumps(get_body)
     assert get_body["guided_session"]["profile"]["advisor_checkpoints"] is True
     assert get_body["guided_session"]["chat_history"] == []
 
@@ -166,6 +171,49 @@ async def test_guided_start_persists_profile_without_materializing_topology(tmp_
     assert tuple(persisted.nodes) == ()
     assert tuple(persisted.edges) == ()
     assert tuple(persisted.outputs) == ()
+
+
+@pytest.mark.asyncio
+async def test_guided_start_entry_seed_redacted_on_wire_but_retained_in_storage(tmp_path) -> None:
+    """entry_seed is stripped from EVERY wire channel yet kept in persisted storage.
+
+    Regression for the second-channel leak: ``_state_response`` echoes the raw
+    persisted ``composer_meta`` (``{"guided_session": GuidedSession.to_dict()}``),
+    and ``GuidedSession.to_dict()`` embeds ``profile.entry_seed``. The
+    ``WorkflowProfileResponse`` subset alone does not cover that path. The wire
+    redaction must strip ``entry_seed`` from the composer_meta projection on both
+    POST /guided/start and GET /guided — WITHOUT dropping the persisted value
+    (P7.5's welcome bookend reads the persisted seed).
+    """
+    from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
+    from elspeth.web.composer.guided.state_machine import GuidedSession
+
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+
+    # POST response: whole-body + the specific composer_meta channel are clean.
+    resp = client.post(f"/api/sessions/{session.id}/guided/start", json={"profile": "tutorial"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "entry_seed" not in json.dumps(body)
+    assert TUTORIAL_PROFILE.entry_seed not in json.dumps(body)
+    meta_profile = body["composition_state"]["composer_meta"]["guided_session"]["profile"]
+    # The redaction DELETES the key (other flags preserved for the frontend).
+    assert "entry_seed" not in meta_profile
+    assert meta_profile["advisor_checkpoints"] is True
+
+    # GET response: same wire guarantee.
+    get_body = client.get(f"/api/sessions/{session.id}/guided").json()
+    assert "entry_seed" not in json.dumps(get_body)
+    assert TUTORIAL_PROFILE.entry_seed not in json.dumps(get_body)
+
+    # POSITIVE: the seed is STILL persisted in storage (not dropped by redaction).
+    persisted = await service.get_current_state(session.id)
+    assert persisted is not None
+    assert persisted.composer_meta is not None
+    persisted_guided = GuidedSession.from_dict(dict(deep_thaw(persisted.composer_meta))["guided_session"])
+    assert persisted_guided.profile.entry_seed == TUTORIAL_PROFILE.entry_seed
 
 
 @pytest.mark.asyncio

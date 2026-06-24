@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE, WorkflowProfileKind
+from elspeth.web.composer.guided.profile import WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.protocol import ComposerService
 from elspeth.web.sessions.schemas import StartGuidedRequest
 
@@ -770,7 +770,10 @@ async def post_guided_start(
             status_code=400,
             detail=(f"Unknown profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
         ) from exc
-    profile = TUTORIAL_PROFILE if profile_kind is WorkflowProfileKind.TUTORIAL else EMPTY_PROFILE
+    # Map the validated kind to its SERVER-owned profile constant via the closed
+    # mapper (profile.py): a future third kind raises InvariantError here instead
+    # of silently mapping to EMPTY.
+    profile = profile_for_kind(profile_kind)
 
     compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
     async with compose_lock:

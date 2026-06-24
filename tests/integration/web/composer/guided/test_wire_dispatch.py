@@ -357,14 +357,12 @@ async def test_confirm_wiring_invalid_pipeline_rebuild_path_is_bound(monkeypatch
             "edit_step_index": None,
             "control_signal": None,
         },
-        {
-            "chosen": ["confirm"],
-            "edited_values": None,
-            "custom_inputs": [],
-            "accepted_step_index": None,
-            "edit_step_index": None,
-            "control_signal": None,
-        },
+        # NOTE (P5.6): the former `custom_inputs=[]` case was REMOVED. Under the
+        # profile-gated wire terminal, custom_inputs is arbitrary Tier-3 text that
+        # the narrowed response guard no longer rejects and that can never
+        # acknowledge the unavailable-escape (the escape gate requires
+        # custom_inputs is None). See test_wire_stage_signoff_gate.py
+        # ::test_custom_inputs_never_acknowledge_unavailable_escape.
     ],
 )
 @pytest.mark.asyncio

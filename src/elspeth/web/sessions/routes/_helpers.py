@@ -124,7 +124,7 @@ from elspeth.web.composer.redaction import (
     redact_tool_call_response,
 )
 from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
-from elspeth.web.composer.service import _BadRequestLLMError
+from elspeth.web.composer.service import _advisor_signoff_blocked_validation, _BadRequestLLMError
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.telemetry_phase8 import (
@@ -3772,10 +3772,19 @@ async def _dispatch_guided_respond(
                 status_code=400,
                 detail=f"STEP_4_WIRE expects confirm_wiring; got {current_turn_type!r}.",
             )
+
+        # Narrowed response-shape guard (P5.6). The CONFIRM_WIRING branch accepts
+        # exactly two closed choices: the plain ``confirm`` and the server-offered
+        # unavailable-escape acknowledgement ``complete_without_signoff``. Every
+        # other ``chosen`` value (incl. None) and any non-null
+        # edited_values/step-index/control_signal is malformed and is rejected so
+        # a junk body can never flow into the EMPTY_PROFILE auto-complete branch
+        # (which never reads ``chosen``). ``custom_inputs`` is deliberately NOT
+        # gated here: it stays arbitrary Tier-3 text and can never acknowledge the
+        # escape (the escape gate below requires custom_inputs is None).
         if (
-            turn_response["chosen"] != ["confirm"]
+            turn_response["chosen"] not in (["confirm"], ["complete_without_signoff"])
             or turn_response["edited_values"] is not None
-            or turn_response["custom_inputs"] is not None
             or turn_response["accepted_step_index"] is not None
             or turn_response["edit_step_index"] is not None
             or turn_response["control_signal"] is not None
@@ -3783,30 +3792,130 @@ async def _dispatch_guided_respond(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    "confirm_wiring response must be exactly chosen=['confirm'] "
-                    "with edited_values/custom_inputs/step indices/control_signal all null "
+                    "confirm_wiring response must be chosen=['confirm'] or "
+                    "chosen=['complete_without_signoff'] with "
+                    "edited_values/step indices/control_signal all null "
                     "(exit_to_freeform is handled before dispatch)."
                 ),
             )
 
-        handler_result = handle_step_4_wire_confirm(state=state, session=guided)
-        guided = handler_result.session
-        if guided.terminal is not None:
-            return handler_result.state, guided, None
+        # Validate-gate first (same semantics as P1.6/P2): an invalid pipeline never
+        # completes — re-emit the wire turn so the user can reconcile (B6). The
+        # re-emit routes through rebuild_wire_turn_after_reconciliation so the B6
+        # resurface hook stays bound on the invalid-pipeline path.
+        if not state.validate().is_valid:
+            rebuilt_turn, _is_valid = rebuild_wire_turn_after_reconciliation(
+                state,
+                resurface=lambda _state: None,
+            )
+            guided, next_turn = _emit_wire_turn(
+                state=state,
+                guided=guided,
+                next_turn=rebuilt_turn,
+                recorder=recorder,
+                user_id=user_id,
+                payload_store=payload_store,
+            )
+            return state, guided, next_turn
 
-        next_turn, _is_valid = rebuild_wire_turn_after_reconciliation(
-            handler_result.state,
-            resurface=lambda _state: None,
+        # D13 — profile-gated terminal advisor sign-off. The empty/live-
+        # guided profile (advisor_checkpoints=False) skips the provider
+        # entirely and completes on a valid pipeline (no blocking advisor
+        # round-trip; the wire stage stays a benign topology-review
+        # improvement for live guided). The tutorial profile runs the
+        # whole-pipeline END sign-off as a PRE-terminal gate so a FLAG can
+        # still re-emit a revise turn (a post-terminal hook would be
+        # foreclosed by the composer.py:2131 terminal-409).
+        from elspeth.web.composer.guided.signoff import SignoffOutcome, run_wire_signoff
+
+        if not guided.profile.advisor_checkpoints:
+            yaml_text = generate_yaml(state)
+            terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
+            guided = _replace(guided, terminal=terminal)
+            return state, guided, None
+
+        if composer_service is None or advisor_checkpoint_max_passes is None or advisor_checkpoint_max_passes <= 0:
+            blocked = _advisor_signoff_blocked_validation(
+                reason="invariant",
+                findings="Advisor sign-off service or pass budget is not configured.",
+            )
+            advisor_findings = blocked.errors[0].message if blocked.errors else "Advisor sign-off service or pass budget is not configured."
+            next_turn = build_step_4_wire_turn(
+                state,
+                catalog=catalog,
+                advisor_findings=advisor_findings,
+                signoff_outcome=SignoffOutcome.BLOCKED_UNAVAILABLE.value,
+            )
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_4_WIRE,
+                turn_type=TurnType.CONFIRM_WIRING,
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_4_WIRE,
+                turn_type=TurnType.CONFIRM_WIRING,
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
+
+        acknowledged_unavailable = (
+            guided.advisor_signoff_escape_offered
+            and guided.advisor_checkpoint_passes_used >= advisor_checkpoint_max_passes
+            and tuple(turn_response.get("chosen") or ()) == ("complete_without_signoff",)
+            and turn_response.get("custom_inputs") is None
         )
-        guided, next_turn = _emit_wire_turn(
-            state=handler_result.state,
-            guided=guided,
-            next_turn=next_turn,
+        max_passes = advisor_checkpoint_max_passes  # P5.4 dispatcher param
+        guided, decision = await run_wire_signoff(
+            session=guided,
+            state=state,
+            session_id=session_id,
             recorder=recorder,
-            user_id=user_id,
-            payload_store=payload_store,
+            composer_service=composer_service,
+            max_passes=max_passes,
+            acknowledged_unavailable=acknowledged_unavailable,
+            progress=None,
         )
-        return handler_result.state, guided, next_turn
+        if decision.outcome is SignoffOutcome.COMPLETE:
+            yaml_text = generate_yaml(state)
+            terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
+            guided = _replace(guided, terminal=terminal)
+            return state, guided, None
+        # Non-COMPLETE: re-emit the wire turn (terminal stays None). The
+        # turn payload carries the advisor findings + outcome class so the
+        # frontend renders the revise / fail-closed / escape-offer affordance.
+        next_turn = build_step_4_wire_turn(
+            state,
+            catalog=catalog,
+            advisor_findings=decision.findings_text,
+            signoff_outcome=decision.outcome.value,
+        )
+        new_record = TurnRecord(
+            step=GuidedStep.STEP_4_WIRE,
+            turn_type=TurnType.CONFIRM_WIRING,
+            payload_hash=stable_hash(next_turn["payload"]),
+            response_hash=None,
+            emitter="server",
+        )
+        emit_turn_emitted(
+            recorder,
+            step=GuidedStep.STEP_4_WIRE,
+            turn_type=TurnType.CONFIRM_WIRING,
+            payload_hash=stable_hash(next_turn["payload"]),
+            payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
+            emitter="server",
+            composition_version=state.version,
+            actor=user_id,
+        )
+        guided = _replace(guided, history=(*guided.history, new_record))
+        return state, guided, next_turn
 
     # Unhandled branch — this is a dispatcher gap, not a user error.
     raise InvariantError(

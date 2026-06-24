@@ -1,11 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { CompositionState } from "@/types/index";
 import {
   CANONICAL_TUTORIAL_PROMPT,
   initialTutorialState,
-  previousStep,
-  summariseCompositionState,
   tutorialReducer,
+  type TutorialState,
 } from "./tutorialMachine";
 
 describe("tutorialMachine", () => {
@@ -20,104 +18,53 @@ describe("tutorialMachine", () => {
         "rest to a json file.",
     );
   });
+});
 
-  it("walks the main tutorial sequence", () => {
-    const described = tutorialReducer(initialTutorialState, { type: "start" });
-    expect(described.step).toBe("describe");
+describe("tutorialReducer staged flow", () => {
+  it("start advances welcome -> guided", () => {
+    const next = tutorialReducer(initialTutorialState, { type: "start" });
+    expect(next.step).toBe("guided");
+  });
 
-    const built = tutorialReducer(described, {
-      type: "built",
-      result: {
-        sessionId: "session-1",
-        prompt: CANONICAL_TUTORIAL_PROMPT,
-        summary: {
-          sourceLabel: "inline_blob",
-          urls: ["australia.gov.au"],
-          transforms: ["web_scrape", "llm_rate"],
-          sinkLabel: "jsonl",
-        },
-      },
+  it("guidedCompleted advances guided -> run and records the session", () => {
+    const guided: TutorialState = { ...initialTutorialState, step: "guided" };
+    const next = tutorialReducer(guided, {
+      type: "guidedCompleted",
+      sessionId: "sess-123",
     });
-    expect(built.step).toBe("showBuilt");
-    expect(built.sessionId).toBe("session-1");
+    expect(next.step).toBe("run");
+    expect(next.sessionId).toBe("sess-123");
+  });
 
-    const graph = tutorialReducer(built, { type: "showGraph" });
-    expect(graph.step).toBe("graph");
-    const run = tutorialReducer(graph, { type: "startRun" });
-    expect(run.step).toBe("run");
-    const audit = tutorialReducer(run, {
+  it("runCompleted advances run -> audit", () => {
+    const run: TutorialState = {
+      ...initialTutorialState,
+      step: "run",
+      sessionId: "sess-123",
+    };
+    const next = tutorialReducer(run, {
       type: "runCompleted",
       result: {
         runId: "run-1",
-        sourceDataHash: "abc123",
-        rows: [{ url: "australia.gov.au", score: 6 }],
-        seededFromCache: false,
+        sourceDataHash: "hash",
+        rows: [],
+        seededFromCache: true,
         cacheKey: null,
         discardedRowCount: 0,
       },
     });
-    expect(audit.step).toBe("audit");
-    expect(audit.runId).toBe("run-1");
-    expect(tutorialReducer(audit, { type: "continueToMode" }).step).toBe("mode");
+    expect(next.step).toBe("audit");
   });
 
-  it("moves from mode choice to graduation and back to mode", () => {
-    const modeState = {
-      ...initialTutorialState,
-      step: "mode" as const,
-    };
-    const graduation = tutorialReducer(modeState, { type: "finishMode" });
-
-    expect(graduation.step).toBe("graduation");
-    expect(previousStep(graduation)).toBe("mode");
-    expect(tutorialReducer(graduation, { type: "back" }).step).toBe("mode");
+  it("continueToGraduation advances audit -> graduation", () => {
+    const audit: TutorialState = { ...initialTutorialState, step: "audit" };
+    const next = tutorialReducer(audit, { type: "continueToGraduation" });
+    expect(next.step).toBe("graduation");
   });
 
-  it("extracts URLs and plugin labels from a composition state", () => {
-    const state: CompositionState = {
-      id: "state-1",
-      version: 1,
-      sources: {
-        source: {
-          plugin: "inline_blob",
-          options: {
-            rows: [
-              { url: "https://www.australia.gov.au" },
-              { url: "dta.gov.au" },
-            ],
-          },
-        },
-      },
-      nodes: [
-        {
-          id: "scrape",
-          node_type: "transform",
-          plugin: "web_scrape",
-          input: "source",
-          on_success: "rate",
-          on_error: null,
-          options: {},
-        },
-        {
-          id: "rate",
-          node_type: "transform",
-          plugin: "llm_rate",
-          input: "scrape",
-          on_success: "sink",
-          on_error: null,
-          options: {},
-        },
-      ],
-      edges: [],
-      outputs: [{ name: "ratings", plugin: "jsonl", options: {} }],
-      metadata: { name: null, description: null },
-    };
-
-    expect(summariseCompositionState(state)).toEqual({
-      sourceLabel: "inline_blob",
-      urls: ["https://www.australia.gov.au", "dta.gov.au"],
-      transforms: ["web_scrape", "llm_rate"],
-      sinkLabel: "jsonl",
-    });
+  it("back from guided returns to welcome", () => {
+    const guided: TutorialState = { ...initialTutorialState, step: "guided" };
+    const next = tutorialReducer(guided, { type: "back" });
+    expect(next.step).toBe("welcome");
   });
 });

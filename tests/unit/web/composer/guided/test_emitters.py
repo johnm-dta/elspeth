@@ -237,6 +237,7 @@ class TestStep4WireEmitter:
         assert turn["type"] == TurnType.CONFIRM_WIRING.value
         assert turn["step_index"] == 4
         assert validate_payload(TurnType.CONFIRM_WIRING, turn["payload"]) is None
-        assert turn["payload"]["topology"] == {}
+        assert turn["payload"]["topology"] == {"sources": {}, "nodes": [], "outputs": []}
         assert turn["payload"]["edge_contracts"] == []
         assert turn["payload"]["semantic_contracts"] == []
+        assert turn["payload"]["warnings"] == []

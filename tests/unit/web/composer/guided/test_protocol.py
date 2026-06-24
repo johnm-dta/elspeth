@@ -272,11 +272,12 @@ class TestPayloadValidation:
         assert "payload.knobs" in err
         assert "fields" in err
 
-    def test_confirm_wiring_skeleton_payload_validates(self) -> None:
+    def test_confirm_wiring_minimal_wire_payload_validates(self) -> None:
         payload = {
-            "topology": {},
+            "topology": {"sources": {}, "nodes": [], "outputs": []},
             "edge_contracts": [],
             "semantic_contracts": [],
+            "warnings": [],
         }
         assert validate_payload(TurnType.CONFIRM_WIRING, payload) is None
 
@@ -286,6 +287,7 @@ class TestPayloadValidation:
         assert "confirm_wiring" in err
         assert "edge_contracts" in err
         assert "semantic_contracts" in err
+        assert "warnings" in err
 
     def test_schema_form_plugin_options_requires_plugin(self) -> None:
         from elspeth.web.composer.guided.protocol import validate_payload

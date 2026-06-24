@@ -707,6 +707,12 @@ class TestGetGuidedFullStateRebuild:
             "topology",
             "edge_contracts",
             "semantic_contracts",
+            "warnings",
+        }
+        assert first["next_turn"]["payload"]["topology"] == {
+            "sources": {},
+            "nodes": [],
+            "outputs": [],
         }
         wire_records = [r for r in second["guided_session"]["history"] if r["step"] == "step_4_wire"]
         assert len(wire_records) == 1

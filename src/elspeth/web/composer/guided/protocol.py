@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from elspeth.web.catalog.knob_schema import SchemaFormPayload as SchemaFormPayload
 
@@ -64,6 +64,51 @@ class ProposeChainPayload(TypedDict):
     steps: Sequence[_ProposedStep]
     why: str
     blockers: Sequence[str]
+
+
+class _WireSourceTopo(TypedDict):
+    id: str
+    plugin: str
+    on_success: str | None
+
+
+class _WireNodeTopo(TypedDict):
+    id: str
+    node_type: str
+    plugin: str | None
+    input: str | None
+    on_success: str | None
+    on_error: str | None
+    routes: Mapping[str, str] | None
+    fork_to: Sequence[str] | None
+
+
+class _WireOutputTopo(TypedDict):
+    id: str
+    sink_name: str
+    plugin: str
+
+
+class WireTopology(TypedDict):
+    """Connection-label topology for the wire stage (from get_pipeline_state)."""
+
+    sources: Mapping[str, _WireSourceTopo]
+    nodes: Sequence[_WireNodeTopo]
+    outputs: Sequence[_WireOutputTopo]
+
+
+class WireStageData(TypedDict):
+    """STEP_4_WIRE turn payload: topology + validate() contract overlay.
+
+    edge_contracts entries carry keys from/to, not from_id/to_id. warnings carries the live prompt-shield advisory. Renderers reconstruct edges from topology labels, never state.edges. Source rows carry id values matching validation producer ids (`source` or `source:<name>`); output rows carry id values matching validation sink ids (`output:<sink_name>`). sink_name remains the connection label; output.id is the edge target for overlay.
+    """
+
+    topology: WireTopology
+    edge_contracts: Sequence[Mapping[str, Any]]
+    semantic_contracts: Sequence[Mapping[str, Any]]
+    warnings: Sequence[Mapping[str, Any]]
+    advisor_findings: NotRequired[str]
+    signoff_outcome: NotRequired[str]
 
 
 class ControlSignal(StrEnum):
@@ -218,7 +263,7 @@ _REQUIRED_KEYS: Mapping[TurnType, frozenset[str]] = {
     # itself uses the SchemaFormPayload discriminator, where
     # mode="recipe_decision" routes the shared one-knob renderer.
     TurnType.RECIPE_OFFER: frozenset({"mode", "knobs", "prefilled", "recipe_context"}),
-    TurnType.CONFIRM_WIRING: frozenset({"topology", "edge_contracts", "semantic_contracts"}),
+    TurnType.CONFIRM_WIRING: frozenset({"topology", "edge_contracts", "semantic_contracts", "warnings"}),
 }
 
 # Nested shape spec for recursive payload validation.
@@ -254,7 +299,7 @@ _NESTED_SHAPES: Mapping[TurnType, tuple[_NestedSpec, ...]] = {
     TurnType.SCHEMA_FORM: (("knobs", "mapping", frozenset({"fields"})),),
     TurnType.PROPOSE_CHAIN: (),
     TurnType.RECIPE_OFFER: (("knobs", "mapping", frozenset({"fields"})),),
-    TurnType.CONFIRM_WIRING: (),
+    TurnType.CONFIRM_WIRING: (("topology", "mapping", frozenset({"sources", "nodes", "outputs"})),),
 }
 
 

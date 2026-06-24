@@ -374,9 +374,10 @@ def build_step_3_schema_form_turn(
 def build_step_4_wire_turn(*, validation: ValidationSummary) -> Turn:
     """Build a ``confirm_wiring`` skeleton Turn for the wire stage."""
     payload: dict[str, Any] = {
-        "topology": {},
+        "topology": {"sources": {}, "nodes": [], "outputs": []},
         "edge_contracts": [],
         "semantic_contracts": [],
+        "warnings": [],
     }
     return Turn(
         type=TurnType.CONFIRM_WIRING.value,

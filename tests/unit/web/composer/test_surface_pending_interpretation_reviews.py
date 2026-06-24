@@ -12,10 +12,13 @@ from elspeth.web.composer.state import (
     CompositionState,
     NodeSpec,
     PipelineMetadata,
+    SourceSpec,
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.interpretation_state import (
     INTERPRETATION_REQUIREMENTS_KEY,
+    SOURCE_AUTHORING_KEY,
+    SOURCE_COMPONENT_ID,
 )
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import CompositionStateData
@@ -445,3 +448,61 @@ async def test_surfacer_skips_model_only_node_without_prompt_template(tmp_path, 
     events = await sessions_service.list_interpretation_events(session_id, status="pending")
     mc = [e for e in events if e.kind is InterpretationKind.LLM_MODEL_CHOICE]
     assert mc == []
+
+
+def _llm_authored_source() -> SourceSpec:
+    # An LLM-authored source: modality must be one that requires LLM provenance
+    # (CreationModality.LLM_GENERATED) so _pending_source_sites yields an
+    # invented_source site, and content_hash must be a populated string for the
+    # writer boundary (create_pending_interpretation_event INVENTED_SOURCE
+    # branch). The staged requirement's user_term is the verbatim
+    # "llm_generated_source" that _pending_source_sites emits for the site.
+    content_hash = "a" * 64
+    return SourceSpec(
+        plugin="inline_blob",
+        options={
+            SOURCE_AUTHORING_KEY: {
+                "modality": "llm_generated",
+                "content_hash": content_hash,
+            },
+            INTERPRETATION_REQUIREMENTS_KEY: [
+                {
+                    "id": "invented_source_review",
+                    "kind": InterpretationKind.INVENTED_SOURCE.value,
+                    "user_term": "llm_generated_source",
+                    "status": "pending",
+                    "draft": "rows: [{url: https://example.gov}]",
+                    "event_id": None,
+                    "accepted_value": None,
+                    "accepted_artifact_hash": None,
+                    "resolved_prompt_template_hash": None,
+                }
+            ],
+        },
+        on_success="main",
+        on_validation_failure="discard",
+    )
+
+
+@pytest.mark.asyncio
+async def test_surfacer_surfaces_invented_source(tmp_path, sessions_service) -> None:
+    # An LLM-authored default source carrying a staged invented_source
+    # requirement surfaces a resolvable pending event at the source-commit
+    # writer boundary. The default source lives in sources[SOURCE_COMPONENT_ID];
+    # the writer reads source.options.source_authoring.content_hash and the
+    # single pending INVENTED_SOURCE requirement.
+    composer = _composer(tmp_path, sessions_service)
+    state = CompositionState(
+        source=None,
+        sources={SOURCE_COMPONENT_ID: _llm_authored_source()},
+        nodes=(),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+    session_id, state_id = await _persist(sessions_service, state)
+    await composer.surface_pending_interpretation_reviews(state, session_id=str(session_id), current_state_id=str(state_id))
+    events = await sessions_service.list_interpretation_events(session_id, status="pending")
+    kinds = {e.kind for e in events}
+    assert InterpretationKind.INVENTED_SOURCE in kinds

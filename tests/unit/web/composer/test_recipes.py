@@ -14,11 +14,14 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import ClassVar
 from uuid import uuid4
 
 import pytest
 
+import elspeth.web.composer.recipes as recipes_module
 from elspeth.web.composer.recipes import (
     RecipeSpec,
     RecipeValidationError,
@@ -26,6 +29,7 @@ from elspeth.web.composer.recipes import (
     apply_recipe,
     get_recipe,
     list_recipes,
+    recipe_catalog_content_hash,
 )
 
 # --------------------------------------------------------------------------
@@ -1640,3 +1644,27 @@ class TestFixedSchemaSingleKeyFormNoFalseOmitDiagnostic:
         # the test fully pins the "declared {col:type} fields match observed
         # headers" contract).
         assert "csv_source_blob_header_mismatch" not in codes, diagnostics
+
+
+# --------------------------------------------------------------------------
+# Recipe catalog content hash (tutorial cache input #5)
+# --------------------------------------------------------------------------
+
+
+def test_recipe_catalog_content_hash_covers_both_recipe_modules() -> None:
+    """The hash folds recipes.py AND guided/recipe_match.py byte content.
+
+    recipe_match selects which recipe fires and pre-fills slots; recipes.py
+    authors the deterministic pipeline including option-level content. Both
+    are operator-controlled cache inputs, so both must be keyed.
+    """
+    recipes_path = Path(recipes_module.__file__)
+    recipe_match_path = recipes_path.parent / "guided" / "recipe_match.py"
+    h = hashlib.sha256()
+    h.update(recipes_path.read_bytes())
+    h.update(recipe_match_path.read_bytes())
+    assert recipe_catalog_content_hash() == h.hexdigest()
+
+
+def test_recipe_catalog_content_hash_is_deterministic() -> None:
+    assert recipe_catalog_content_hash() == recipe_catalog_content_hash()

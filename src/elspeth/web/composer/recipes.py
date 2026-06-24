@@ -12,8 +12,11 @@ slot values they were given.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from functools import cache
+from pathlib import Path
 from typing import Any, Final
 from uuid import UUID
 
@@ -879,3 +882,23 @@ def apply_recipe(name: str, raw_slots: Mapping[str, Any]) -> dict[str, Any]:
     # RecipeSpec contract is the looser superset (Mapping ⊇ dict). Convert
     # to the concrete dict the caller (set_pipeline executor) requires.
     return dict(recipe.build(coerced))
+
+
+@cache  # Process-scoped: module source on disk is immutable for the process lifetime.
+def recipe_catalog_content_hash() -> str:
+    """Hex SHA-256 over recipes.py + guided/recipe_match.py byte content.
+
+    Cache input #5 of the tutorial run-cache key (C2). Under D11 the
+    web_scrape recipe deterministically authors the cached pipeline
+    including option-level content (provider, model, prompt_template,
+    response_field, schema mode, output format), and recipe_match selects
+    the recipe + pre-fills slots. _state_matches_cached_topology is
+    option-blind by design and cannot catch this drift, so option fidelity
+    is guaranteed by keying both module sources here.
+    """
+    recipes_path = Path(__file__)
+    recipe_match_path = recipes_path.parent / "guided" / "recipe_match.py"
+    digest = hashlib.sha256()
+    digest.update(recipes_path.read_bytes())
+    digest.update(recipe_match_path.read_bytes())
+    return digest.hexdigest()

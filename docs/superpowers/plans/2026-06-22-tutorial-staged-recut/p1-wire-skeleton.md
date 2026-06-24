@@ -21,6 +21,15 @@ Where P1 adds a new persisted reachable step, the existing strict `from_dict`
 round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 `GuidedStep(d["step"])`.
 
+**Atomicity / rollback caveat.** P1 stores a new `step_4_wire` enum value under the
+same guided-session schema version (`6`) introduced in P0. Once P1 serves traffic,
+rolling back to a P0-only binary can no longer read v6 sessions that have reached
+`STEP_4_WIRE`; purge/recreate the pre-release session DB before rollback. Also,
+Tasks P1.1 and P1.2 are one atomic implementation slice: appending
+`GuidedStep.STEP_4_WIRE` without registering the prompts maps makes imports that
+touch `prompts.py` fail the totality assert. Do not commit, push, or hand off the
+tree between P1.1 and P1.2.
+
 ### Task P1.1: Append GuidedStep.STEP_4_WIRE + TurnType.CONFIRM_WIRING to the protocol totals
 
 **Files:**
@@ -191,13 +200,13 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
   Expected: all tests PASS (the import-time totality asserts in `prompts.py` will
   still fail at import — that is fixed in P1.2; run only this file here).
 
-- [ ] **Step 9: Commit.**
+- [ ] **Step 9: Do not commit yet — P1.1 and P1.2 are atomic.**
   ```
-  git add src/elspeth/web/composer/guided/protocol.py tests/unit/web/composer/guided/test_protocol.py
-  git commit -m "feat(guided): append STEP_4_WIRE + CONFIRM_WIRING to protocol totals" --no-verify
+  # Leave these changes local; do not commit or push until P1.2 is green.
   ```
-  (`--no-verify`: `prompts.py`'s import-time totality assert is red until P1.2;
-  reconciled at the slice boundary per project policy.)
+  `prompts.py`'s import-time totality assert is red until P1.2. Normal route/chat
+  imports can reach `prompts.py`, so a standalone P1.1 commit would be an
+  import-red tree. Commit the protocol and prompts/skill changes together in P1.2.
 
 ### Task P1.2: Register step_4_wire.md in prompts + create the wiring-constraints skill
 
@@ -235,12 +244,15 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 
       def test_step_4_wire_chat_skill_loads_and_mentions_routing(self) -> None:
           text = load_step_chat_skill(GuidedStep.STEP_4_WIRE)
-          assert "wiring" in text.lower() or "routing" in text.lower()
+          assert "wiring" in text.lower()
+          assert "chain_in" in text
+          assert '"main"' in text
+          assert "select_only" in text
 
       def test_full_guided_skill_includes_wire_block(self) -> None:
           text = load_guided_skill()
           # Wiring-constraint content is concatenated into the chain solver prompt.
-          assert "on_success" in text
+          assert "chain_in" in text
   ```
 
 - [ ] **Step 2: Run the test to confirm it fails.**
@@ -265,29 +277,17 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
   reconstructs the DAG from those labels. When you propose transforms, the
   wiring they imply MUST satisfy these constraints:
 
-  - **Single linear spine.** The committed source emits `on_success: "chain_in"`.
-    The first transform reads `input: "chain_in"`; the last transform emits
-    `on_success: "main"`; intermediate transforms chain via `chain_{k}` labels.
-    Sinks consume `"main"`. Do not introduce a label that no downstream node
-    reads, and do not read a label no upstream node emits — an orphaned or
-    dangling label is a wiring error.
-
-  - **Producer/consumer field contract.** A downstream node may only require
-    fields that some upstream node guarantees. If a transform consumes a field
-    that no prior stage produces, the edge is unsatisfied and the pipeline is
-    not runnable. Prefer ordering that makes every consumer's required fields
-    available from its input label.
-
-  - **Field minimization before a sink.** When a transform emits large or raw
-    intermediate fields (e.g. fetched page content, content fingerprints) that
-    the sink does not need, place a `field_mapper` with `select_only: true`
-    immediately before the sink to drop them. The selected output field set is
-    the sink's contract; raw intermediate fields must not leak to the output.
-
-  - **No fan-out/fan-in unless required.** Routes (`routes`) and forks
-    (`fork_to`) are only for genuine branching. A straight rate/transform/export
-    pipeline is a single linear spine; do not add routing nodes the task does
-    not call for.
+  - **Single linear spine.** Source emits `on_success: "chain_in"`; the first
+    transform reads `"chain_in"`; intermediate transforms use `chain_{k}`; the
+    last transform emits `"main"`; sinks consume `"main"`.
+  - **No orphan labels.** Every label needs one upstream producer and at least
+    one downstream consumer.
+  - **Field contract.** A downstream node may require only fields guaranteed by
+    an upstream producer before that label is consumed.
+  - **Drop raw intermediates.** Before a sink, use `field_mapper` with
+    `select_only: true` when the sink does not need large/raw intermediate fields.
+  - **No branching by default.** Avoid `routes` and `fork_to` unless the user
+    asked for genuine branching.
   ```
 
 - [ ] **Step 4: Register the step in both prompts maps.**
@@ -324,8 +324,13 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 
 - [ ] **Step 6: Commit.**
   ```
-  git add src/elspeth/web/composer/guided/prompts.py src/elspeth/web/composer/guided/skills/step_4_wire.md tests/unit/web/composer/guided/test_skill.py
-  git commit -m "feat(guided): add step_4_wire skill block + register in prompts maps"
+  git add \
+    src/elspeth/web/composer/guided/protocol.py \
+    src/elspeth/web/composer/guided/prompts.py \
+    src/elspeth/web/composer/guided/skills/step_4_wire.md \
+    tests/unit/web/composer/guided/test_protocol.py \
+    tests/unit/web/composer/guided/test_skill.py
+  git commit -m "feat(guided): append wire-stage protocol + prompt totality"
   ```
 
 ### Task P1.3: Append STEP_4_WIRE to both _ORDER tuples + add build_step_4_wire_turn emitter
@@ -482,7 +487,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
   git commit -m "feat(guided): wire STEP_4_WIRE into both _ORDER tuples + build_step_4_wire_turn"
   ```
 
-### Task P1.4: Add step_advance STEP_4_WIRE branch + _advance_step_4 self-loop; route _advance_step_3 accept to STEP_4
+### Task P1.4: Add step_advance STEP_4_WIRE branch + _advance_step_4 self-loop
 
 **Files:**
 - Modify `src/elspeth/web/composer/guided/state_machine.py:546-554` (step_advance dispatch)
@@ -493,7 +498,7 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 - Produces: `step_advance` dispatches `GuidedStep.STEP_4_WIRE -> _advance_step_4`.
 - Produces: `_advance_step_4(session, response, turn_type) -> _StepAdvanceResult` — a **self-loop**: on `CONFIRM_WIRING` it returns the session unchanged (terminal-stamping is the dispatcher/handler's job, P1.6/P5.6); any other turn type raises `InvariantError`. The self-loop is what makes the stage re-enterable across advisor sign-off rounds (D13).
 - Consumes: `_StepAdvanceResult`, `GuidedSession`, `TurnResponse`, `TurnType`, `InvariantError` (all existing).
-- Note: `_advance_step_3` is **not** changed to mutate `step` — it is pure and already passes through on accept (state_machine.py:765-772). The accept-time advance to `STEP_4_WIRE` is performed by the *handlers* setting `session.step = STEP_4_WIRE` (P2.T1), not by `step_advance`. This task only adds the new branch + handler self-loop so the dispatcher can route a wire-stage response.
+- Note: `_advance_step_3` is **not** changed to mutate `step` — it is pure and already passes through on accept (state_machine.py:765-772). The accept-time advance to `STEP_4_WIRE` is performed by the *handlers* setting `session.step = STEP_4_WIRE` in P1.6, not by `step_advance`. This task only adds the new branch + handler self-loop so the dispatcher can route a wire-stage response.
 
 - [ ] **Step 1: Write a failing test for the dispatch branch + self-loop.**
   Append to `tests/unit/web/composer/guided/test_state_machine.py`:
@@ -632,16 +637,18 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 **Files:**
 - Modify `src/elspeth/web/frontend/src/types/guided.ts:18-39` (`TurnType` + `GuidedStep` unions)
 - Modify `src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx` (the `never`-exhaustive switch on `turn.type`)
+- Modify `src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.test.tsx` (minimal confirm_wiring submit contract)
 - Modify `src/elspeth/web/frontend/src/components/chat/guided/GuidedHistory.tsx` (`STEP_LABELS: Record<GuidedStep,…>` + `TURN_TYPE_LABELS: Record<TurnType,…>`)
 - Modify `src/elspeth/web/frontend/src/components/chat/guided/GuidedChatHistory.tsx` (`STEP_LABELS: Record<GuidedStep,…>`)
 - Modify `src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx` (`GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep,…>` + `GUIDED_STEP_PURPOSES: Record<GuidedStep,…>` + `GUIDED_WORKFLOW_STEPS`)
 - Modify `src/elspeth/web/frontend/src/types/guided.test.ts` (TurnType/GuidedStep cardinality tests)
+- Modify `src/elspeth/web/frontend/src/types/interpretation.test.ts` (existing exact `TurnType` gate)
 - Modify `src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx` (workflow stepper renders the Wire step)
 
 **Interfaces:**
 - Produces: TS `TurnType` union gains `"confirm_wiring"`; TS `GuidedStep` union gains `"step_4_wire"`.
 - Consumes: nothing new — these are hand-written mirrors of the Python StrEnums (source-of-truth comment at `guided.ts:5-7`).
-- Note: widening the two unions WITHOUT updating their exhaustive consumers in the SAME slice BREAKS `npm run typecheck` — every `Record<TurnType,…>` / `Record<GuidedStep,…>` total-key map raises a missing-key error (TS2741), `GUIDED_WORKFLOW_STEPS` omits the new step from the visual stepper, and the `never`-exhaustiveness assertion in `GuidedTurn.tsx` fails to narrow. There are **seven** such consumers (GuidedTurn `never` switch; GuidedHistory `STEP_LABELS` + `TURN_TYPE_LABELS`; GuidedChatHistory `STEP_LABELS`; ChatPanel `GUIDED_CHAT_PLACEHOLDERS` + `GUIDED_STEP_PURPOSES` + `GUIDED_WORKFLOW_STEPS`), so this task widens the unions AND extends all seven together. The `WireStageData` TS type is **P2.6** and the `interpretation_review` dead-case removal is **P4.T2**; the real `confirm_wiring`→`WireStageTurn` render replaces the placeholder added here once WireStageTurn exists (**P2.7**).
+- Note: widening the two unions WITHOUT updating their exhaustive consumers in the SAME slice BREAKS `npm run typecheck` — every `Record<TurnType,…>` / `Record<GuidedStep,…>` total-key map raises a missing-key error (TS2741), `GUIDED_WORKFLOW_STEPS` omits the new step from the visual stepper, and the `never`-exhaustiveness assertion in `GuidedTurn.tsx` fails to narrow. There are **seven** exhaustive consumers (GuidedTurn `never` switch; GuidedHistory `STEP_LABELS` + `TURN_TYPE_LABELS`; GuidedChatHistory `STEP_LABELS`; ChatPanel `GUIDED_CHAT_PLACEHOLDERS` + `GUIDED_STEP_PURPOSES` + `GUIDED_WORKFLOW_STEPS`), plus two exact union test gates (`guided.test.ts` and `interpretation.test.ts`), so this task widens the unions, extends all seven consumers, and updates both tests together. The `WireStageData` TS type is **P2.6** and the `interpretation_review` dead-case removal is **P4.T2**; P1 provides only a minimal `confirm_wiring` submit control so the browser can complete the skeleton stage. The full `confirm_wiring`→`WireStageTurn` topology/contracts render replaces that minimal control once WireStageData exists (**P2.7**).
 
 - [ ] **Step 1: Add the new members to the TS unions.**
   Edit `guided.ts:18-28` (TurnType union), appending the new member after
@@ -660,8 +667,9 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
     // GuidedTurn.tsx (the freeform variant uses InterpretationReviewInlineMessage
     // — different file, different component, no shared widget).
     | "interpretation_review"
-    // Wire stage (staged-recut P1): the placeholder turn is rendered in P2.7.
-    // P2.4 replaces the skeleton payload with WireStageData.
+    // Wire stage (staged-recut P1): a minimal confirm control ships now.
+    // P2.4 replaces the skeleton payload with WireStageData; P2.7 replaces
+    // the placeholder control with the full WireStageTurn render.
     | "confirm_wiring";
   ```
 
@@ -677,12 +685,49 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
   ```
 
 - [ ] **Step 2: Extend the seven exhaustive consumers in the SAME slice (required for typecheck).**
-  a) `GuidedTurn.tsx` (the `never`-exhaustive switch on `turn.type`, ~line 153) — add a `confirm_wiring` case BEFORE `default:` so `const _exhaustive: never = turn.type` still narrows. The real `<WireStageTurn>` render is wired in P2.7; here it is a placeholder (WireStageTurn does not exist yet in P1):
+  a) `GuidedTurn.tsx` (the `never`-exhaustive switch on `turn.type`, ~line 153) —
+  add a tiny local `ConfirmWiringPlaceholderTurn` component and route
+  `confirm_wiring` to it BEFORE `default:` so `const _exhaustive: never =
+  turn.type` still narrows. Do **not** add topology/warnings/contracts/advisor UI
+  here; P2/P5 own that. The minimal control exists so P1's backend two-hop flow is
+  usable by browser clients:
   ```tsx
+  function ConfirmWiringPlaceholderTurn({
+    onSubmit,
+    disabled,
+  }: {
+    onSubmit: (body: GuidedRespondRequest) => void;
+    disabled: boolean;
+  }) {
+    return (
+      <button
+        type="button"
+        className="guided-turn-primary-action"
+        disabled={disabled}
+        onClick={() =>
+          onSubmit({
+            chosen: ["confirm"],
+            edited_values: null,
+            custom_inputs: null,
+            accepted_step_index: null,
+            edit_step_index: null,
+            control_signal: null,
+          })
+        }
+      >
+        Confirm wiring
+      </button>
+    );
+  }
+
       case "confirm_wiring":
-        // Placeholder — real WireStageTurn render is wired in P2.7. This case only
-        // keeps the union total so the `never` assertion in `default:` compiles.
-        return null;
+        return (
+          <ConfirmWiringPlaceholderTurn
+            key={turnInstanceKey}
+            onSubmit={guardedSubmit}
+            disabled={disabled}
+          />
+        );
   ```
   b) `GuidedHistory.tsx` — add the new key to BOTH total-key maps:
   ```tsx
@@ -705,22 +750,49 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
       // in GUIDED_WORKFLOW_STEPS
       { id: "step_4_wire", label: "Wire" },
   ```
-  e) `guided.test.ts` — update the TurnType union test to include
-  `"confirm_wiring"` and length `7`; update the GuidedStep union test to include
-  `"step_4_wire"` and length `5`.
-  f) `ChatPanel.test.tsx` — add or update a workflow-stepper assertion so a guided
+  e) `guided.test.ts` — strengthen the TurnType/GuidedStep tests to exact
+  mutual-extends checks (mirroring the existing `ControlSignal` style), update
+  the TurnType list to include both the existing frontend-only
+  `"interpretation_review"` and the new `"confirm_wiring"` (length `8`), and
+  update the GuidedStep list to include `"step_4_wire"` (length `5`).
+  f) `interpretation.test.ts` — update the existing exact `TurnType` assertion
+  and runtime list from the current seven-value set to eight values, keeping
+  `"interpretation_review"` and adding `"confirm_wiring"`.
+  g) `ChatPanel.test.tsx` — add or update a workflow-stepper assertion so a guided
   session at `step_4_wire` renders a `Wire` step marker and marks it active.
+  h) `GuidedTurn.test.tsx` — add a red/green dispatch test for `type:
+  "confirm_wiring"` that clicks the minimal button and asserts the exact body:
+  `chosen: ["confirm"]` and every other response field `null`; add a disabled
+  case proving it does not submit when `disabled=true`.
 
-- [ ] **Step 3: Typecheck the frontend.**
+- [ ] **Step 3: Run focused frontend red/green tests.**
+  ```
+  npm --prefix src/elspeth/web/frontend test -- --run \
+    src/types/guided.test.ts \
+    src/types/interpretation.test.ts \
+    src/components/chat/guided/GuidedTurn.test.tsx \
+    src/components/chat/ChatPanel.test.tsx
+  ```
+  Expected: PASS after the implementation. Before the implementation, the tests
+  must fail for the missing union/stepper/confirm-wiring submit behavior.
+
+- [ ] **Step 4: Typecheck and build the frontend.**
   ```
   npm --prefix src/elspeth/web/frontend run typecheck
+  npm --prefix src/elspeth/web/frontend run build
   ```
   Expected: PASS — but ONLY because Step 2 extended every exhaustive consumer.
   Widening the unions alone does NOT typecheck: each `Record<TurnType,…>` /
   `Record<GuidedStep,…>` total-key map raises TS2741 (missing key) and the
   `never`-exhaustiveness assertion in `GuidedTurn.tsx` fails to narrow.
 
-- [ ] **Step 4: Run the SlotType / guided.ts mirror-drift gate.**
+- [ ] **Step 5: Run the full frontend unit suite.**
+  ```
+  npm --prefix src/elspeth/web/frontend test -- --run
+  ```
+  Expected: PASS.
+
+- [ ] **Step 6: Run the SlotType / guided.ts mirror-drift gate.**
   ```
   uv run python scripts/cicd/check_slot_type_cross_language.py
   ```
@@ -728,12 +800,14 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
   interface, which P1 does not touch — confirm the guided.ts edit did not break
   the parse).
 
-- [ ] **Step 5: Commit.**
+- [ ] **Step 7: Commit.**
   ```
   git add \
     src/elspeth/web/frontend/src/types/guided.ts \
     src/elspeth/web/frontend/src/types/guided.test.ts \
+    src/elspeth/web/frontend/src/types/interpretation.test.ts \
     src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx \
+    src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.test.tsx \
     src/elspeth/web/frontend/src/components/chat/guided/GuidedHistory.tsx \
     src/elspeth/web/frontend/src/components/chat/guided/GuidedChatHistory.tsx \
     src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx \
@@ -747,10 +821,14 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 - Modify `src/elspeth/web/composer/guided/steps.py:218-274` (`handle_step_2_5_recipe_apply`)
 - Modify `src/elspeth/web/composer/guided/steps.py:277-406` (`handle_step_3_chain_accept`)
 - Create the wire handler in `src/elspeth/web/composer/guided/steps.py` (`handle_step_4_wire_confirm`)
-- Modify `src/elspeth/web/sessions/routes/_helpers.py` (`_dispatch_guided_respond`, `_emit_wire_turn`, handler imports/exports)
+- Modify `src/elspeth/web/composer/guided/state_machine.py` comments/docstrings only, if any live text still says recipe accept completes immediately after this behavior moves to the wire stage
+- Modify `src/elspeth/web/sessions/routes/_helpers.py` (`_summarize_guided_response`, `_dispatch_guided_respond`, `_emit_wire_turn`, handler imports/exports)
 - Modify `src/elspeth/web/sessions/routes/composer/guided.py` (`_build_get_guided_turn` rebuild branch for `STEP_4_WIRE`)
 - Modify `tests/integration/web/composer/guided/test_step_handlers.py:251-292,329-400`
 - Create `tests/integration/web/composer/guided/test_wire_dispatch.py`
+- Modify `tests/integration/web/composer/guided/test_respond.py` (real POST accept → wire → confirm flow + malformed confirm boundary)
+- Modify `tests/integration/web/composer/guided/test_get_guided.py` (persisted STEP_4_WIRE GET rebuild/idempotency)
+- Modify `tests/integration/web/composer/guided/test_audit_emission.py` (step_advanced + payload-ref assertions for wire emission)
 
 **Interfaces:**
 - Produces (changed): `handle_step_2_5_recipe_apply` success path now sets `session.step = GuidedStep.STEP_4_WIRE`, `session.terminal = None` (no YAML render, no COMPLETED stamp).
@@ -760,6 +838,8 @@ round-trip already covers `STEP_4_WIRE` because `step` is serialised via
 - Produces (changed route behaviour): a `CONFIRM_WIRING` response body must be exactly `chosen=["confirm"]` with `edited_values=None`, `custom_inputs=None`, `accepted_step_index=None`, `edit_step_index=None`, and `control_signal=None`; malformed bodies return HTTP 400 at the boundary.
 - Produces (changed route behaviour): a valid `CONFIRM_WIRING` response dispatches to `handle_step_4_wire_confirm` and returns `terminal=COMPLETED`, `next_turn=None`.
 - Produces (changed route behaviour): GET `/api/sessions/{session_id}/guided` on a persisted `STEP_4_WIRE` session rebuilds the skeleton wire turn.
+- Produces (changed route behaviour): `_summarize_guided_response(TurnType.CONFIRM_WIRING, ...)` returns `"Confirmed wiring"` only for the exact confirm body, so the real `POST /guided/respond` route can stamp `response_hash`/summary before dispatch instead of raising `InvariantError`.
+- Produces (changed audit behaviour): every successful transition into `STEP_4_WIRE` emits `guided_step_advanced` before the skeleton `guided_turn_emitted` event. Use `reason="recipe_applied"` for recipe apply, `reason="user_advanced"` for direct chain accept, and `reason="auto_advanced"` for repair-success after LLM repair.
 - Consumes: `CompositionState.validate()` (state.py:2215), `generate_yaml` (yaml_generator.py:198), `TerminalState`, `TerminalKind`, `StepHandlerResult`, `ToolResult`.
 
 This route wiring is deliberately minimal: P1 emits the skeleton wire payload from
@@ -884,14 +964,14 @@ payload; P2 then updates the same route seam to call the final emitter shape.
           assert result.session.terminal is None
           assert result.session.step is GuidedStep.STEP_4_WIRE
 
-      _real_catalog = TestStep2_5Handler._real_catalog
+      _real_catalog = TestStep25Handler._real_catalog
   ```
 
   Note: the `_seeded` fixture and `_real_catalog` live on the existing
-  `TestStep2_5Handler` class (the apply-recipe test at line 251 uses them). Reference
-  them by binding `_real_catalog = TestStep2_5Handler._real_catalog` (shown above) and
+  `TestStep25Handler` class (the apply-recipe test at line 251 uses them). Reference
+  them by binding `_real_catalog = TestStep25Handler._real_catalog` (shown above) and
   ensure `_seeded` is a module/conftest fixture — if it is a class-scoped fixture on
-  `TestStep2_5Handler`, lift it to a module-level fixture in the same edit so both
+  `TestStep25Handler`, lift it to a module-level fixture in the same edit so both
   classes can request it. Confirm the fixture scope when implementing.
 
 - [ ] **Step 2: Update the two existing handler tests that assert COMPLETED.**
@@ -990,6 +1070,38 @@ payload; P2 then updates the same route seam to call the final emitter shape.
       assert guided2.terminal.kind is TerminalKind.COMPLETED
 
 
+  def test_confirm_wiring_invalid_pipeline_returns_failed_tool_result_without_terminal() -> None:
+      state, wire_session, _catalog, _payload_store = _wire_ready_session(valid=False)
+      result = handle_step_4_wire_confirm(state=state, session=wire_session)
+      assert result.tool_result.success is False
+      assert result.session.terminal is None
+      assert result.session.step is GuidedStep.STEP_4_WIRE
+
+
+  @pytest.mark.asyncio
+  async def test_confirm_wiring_invalid_pipeline_reemits_wire_turn_without_terminal() -> None:
+      state, wire_session, catalog, payload_store = _wire_ready_session(valid=False)
+      _state2, guided2, next_turn = await _dispatch(
+          state,
+          wire_session,
+          catalog,
+          payload_store=payload_store,
+          current_step=GuidedStep.STEP_4_WIRE,
+          current_turn_type=TurnType.CONFIRM_WIRING,
+          turn_response={
+              "chosen": ["confirm"],
+              "edited_values": None,
+              "custom_inputs": None,
+              "accepted_step_index": None,
+              "edit_step_index": None,
+              "control_signal": None,
+          },
+      )
+      assert guided2.terminal is None
+      assert next_turn is not None
+      assert next_turn["type"] == TurnType.CONFIRM_WIRING.value
+
+
   @pytest.mark.parametrize(
       "body",
       [
@@ -1018,18 +1130,78 @@ payload; P2 then updates the same route seam to call the final emitter shape.
   `_dispatch(...)` is a small local wrapper around `_dispatch_guided_respond` that
   passes `payload_store=payload_store`. `_step3_ready_session()` should drive
   source → sink and stage a `ChainProposal` on a `STEP_3_TRANSFORMS` session.
-  `_wire_ready_session()` may call the step-3 accept handler directly, then assert
-  `step=STEP_4_WIRE` and `terminal is None` before returning. Use the exact
+  `_wire_ready_session(valid=True)` may call the step-3 accept handler directly,
+  then assert `step=STEP_4_WIRE` and `terminal is None` before returning. For
+  `valid=False`, build a `CompositionState` that fails `state.validate()` but still
+  has a wire-positioned session. Use the exact
   `GuidedRespondRequest` body shown above for a valid confirm:
   `chosen=["confirm"]` and every other response field `None`.
 
+  In the same task, update the production endpoint tests, not only this direct
+  dispatcher test:
+
+  - In `tests/integration/web/composer/guided/test_respond.py`, retarget
+    recipe-accept and step-3 accept tests that currently assert immediate
+    `terminal=COMPLETED` (for example `test_recipe_offer_accept_produces_terminal_completed`
+    and `test_completed_terminal_reflected_in_guided_session`) to assert:
+    accept response returns `next_turn.type == "confirm_wiring"`,
+    `guided_session.step == "step_4_wire"`, and `terminal is None`; then a second
+    `POST /guided/respond` with the exact confirm body returns
+    `terminal.kind == "completed"` and `next_turn is None`.
+  - Split malformed/boundary tests by the layer that actually rejects them in the
+    live POST route:
+    - Request-schema boundary: non-list `chosen` returns HTTP 422 before the route
+      body runs. Do not assert response hashing/audit/dispatch for this case.
+    - Pre-dispatch route boundary: non-null `accepted_step_index` and non-null
+      `edit_step_index` return HTTP 400 from `_validate_step_indices` before
+      response hashing/audit/dispatch. Do not classify these as dispatcher tests.
+    - State-machine control path: `control_signal="exit_to_freeform"` on a
+      `CONFIRM_WIRING` history record is valid meta-control and terminates via
+      `step_advance` before the dispatcher. Keep the P1.4 terminal test and add a
+      POST-level exit test if route coverage is missing.
+    - Dispatcher boundary: with current turn type `CONFIRM_WIRING`, null step
+      indices, and `control_signal=None`, exercise `POST /guided/respond` for
+      `chosen is None`, `chosen == ["accept"]`, `chosen == []`,
+      non-null `edited_values`, and non-null `custom_inputs`. These cases should
+      stamp the response hash, emit/store `guided_turn_answered`, then return
+      HTTP 400 from the STEP_4 dispatch branch.
+    - Corrupt persisted history: a `STEP_4_WIRE` session whose current turn type is
+      not `CONFIRM_WIRING` reaches `step_advance` first and must surface as the
+      existing sanitized invariant HTTP 500, not as dispatcher 400.
+  - Add invalid-pipeline retry coverage. Direct handler coverage must assert
+    `tool_result.success is False`, `session.terminal is None`, and
+    `session.step == STEP_4_WIRE`. POST coverage must assert the answered
+    `CONFIRM_WIRING` record keeps its `response_hash`, a new unanswered
+    `CONFIRM_WIRING` turn is appended, no same-step `guided_step_advanced` event is
+    emitted, and repeated GET remains idempotent.
+  - In `tests/integration/web/composer/guided/test_get_guided.py`, add a persisted
+    `STEP_4_WIRE` session test: `GET /guided` rebuilds the skeleton
+    `confirm_wiring` turn, repeated GET is idempotent, and it does not append a
+    duplicate `TurnRecord`.
+  - In `tests/integration/web/composer/guided/test_audit_emission.py`, assert the
+    accept-to-wire path emits both `guided_step_advanced` and `guided_turn_emitted`
+    with retrievable payload refs. Pin `reason="recipe_applied"` for recipe apply,
+    `reason="user_advanced"` for direct chain accept, and `reason="auto_advanced"`
+    for repair-success after LLM repair.
+  - Add or update a direct unit/integration test for `_summarize_guided_response`
+    so `TurnType.CONFIRM_WIRING` with the exact confirm body returns
+    `"Confirmed wiring"` and malformed bodies return `None` rather than falling
+    through to `InvariantError`.
+
 - [ ] **Step 3c: Run the route tests to confirm they fail.**
   ```
-  uv run pytest tests/integration/web/composer/guided/test_wire_dispatch.py -q
+  uv run pytest \
+    tests/integration/web/composer/guided/test_wire_dispatch.py \
+    tests/integration/web/composer/guided/test_respond.py \
+    tests/integration/web/composer/guided/test_get_guided.py \
+    tests/integration/web/composer/guided/test_audit_emission.py \
+    -k "wire or confirm_wiring or redirects_to_wire or recipe_offer_accept or step_3" -q
   ```
   Expected: accept returns `next_turn is None`, `STEP_4_WIRE` confirm hits the
-  unhandled-branch `InvariantError`, and malformed confirm bodies are not yet
-  rejected by the boundary branch.
+  summary/dispatch `InvariantError`, endpoint accept tests still complete
+  immediately instead of two-hop, GET has no rebuild branch, step-advanced audit
+  for entering wire is absent, and malformed confirm bodies are not yet rejected
+  by the boundary branch.
 
 - [ ] **Step 4: Move the stamp out of `handle_step_2_5_recipe_apply`.**
   Edit `steps.py:262-274` (the success path). Replace the YAML-render + terminal
@@ -1147,6 +1319,29 @@ payload; P2 then updates the same route seam to call the final emitter shape.
   runs `freeze_fields(self, "affected_nodes", ...)`, so `affected_nodes=()` is
   mandatory. `ToolResult` is already imported into `steps.py` (steps.py:33-41).
 
+- [ ] **Step 6a: Add `CONFIRM_WIRING` response summaries before dispatch.**
+  In `_summarize_guided_response` (`src/elspeth/web/sessions/routes/_helpers.py`),
+  add a `TurnType.CONFIRM_WIRING` branch before the final `InvariantError`:
+
+  ```python
+      if turn_type is TurnType.CONFIRM_WIRING:
+          if (
+              response["chosen"] == ["confirm"]
+              and response["edited_values"] is None
+              and response["custom_inputs"] is None
+              and response["accepted_step_index"] is None
+              and response["edit_step_index"] is None
+              and response["control_signal"] is None
+          ):
+              return "Confirmed wiring"
+          return None
+  ```
+
+  This is load-bearing: `post_guided_respond` stamps the answered
+  `TurnRecord.response_hash` and `summary` before calling `step_advance` /
+  `_dispatch_guided_respond`. Without this branch, a valid wire confirmation
+  raises `InvariantError` before the dispatcher can stamp terminal completion.
+
 - [ ] **Step 6b: Add a payload-store-backed `_emit_wire_turn` helper.**
   In `src/elspeth/web/sessions/routes/_helpers.py`, import
   `build_step_4_wire_turn` from `guided.emitters` and `Turn` from
@@ -1160,13 +1355,16 @@ payload; P2 then updates the same route seam to call the final emitter shape.
       recorder: BufferingRecorder,
       user_id: str,
       payload_store: Any,
+      prev_step: GuidedStep | None = None,
+      advance_reason: str | None = None,
   ) -> tuple[GuidedSession, Turn]:
       """Emit the STEP_4_WIRE confirm_wiring turn after an accept commit (P1.6).
 
       P1 leaves the accept seams at ``step=STEP_4_WIRE, terminal=None``; this
       builds the skeleton wire turn, appends its server TurnRecord, and emits the
-      audited ``turn_emitted`` event so the user lands on the wire stage rather
-      than silently falling off the wizard with ``next_turn=None``.
+      audited ``step_advanced`` + ``turn_emitted`` events so the user lands on
+      the wire stage rather than silently falling off the wizard with
+      ``next_turn=None``.
       """
       next_turn = build_step_4_wire_turn(validation=state.validate())
       payload_hash = stable_hash(next_turn["payload"])
@@ -1177,6 +1375,17 @@ payload; P2 then updates the same route seam to call the final emitter shape.
           response_hash=None,
           emitter="server",
       )
+      if (prev_step is None) != (advance_reason is None):
+          raise InvariantError("wire turn emission must provide prev_step and advance_reason together")
+      if prev_step is not None and advance_reason is not None:
+          emit_step_advanced(
+              recorder,
+              prev=prev_step,
+              next_=GuidedStep.STEP_4_WIRE,
+              reason=advance_reason,
+              composition_version=state.version,
+              actor=user_id,
+          )
       emit_turn_emitted(
           recorder,
           step=GuidedStep.STEP_4_WIRE,
@@ -1191,17 +1400,33 @@ payload; P2 then updates the same route seam to call the final emitter shape.
   ```
 
   Do not use a placeholder payload id. The dispatcher already receives
-  `payload_store`; thread it into every `_emit_wire_turn` call.
+  `payload_store`; thread it into every `_emit_wire_turn` call. Provide
+  `prev_step` + `advance_reason` only when entering `STEP_4_WIRE` from an earlier
+  step. Do **not** pass them for invalid `CONFIRM_WIRING` re-emits at
+  `STEP_4_WIRE`, because that is a same-step retry, not a step advance. When
+  provided, `advance_reason` must be one of `emit_step_advanced`'s closed
+  allowlist values: `"recipe_applied"`, `"user_advanced"`, or `"auto_advanced"`.
 
 - [ ] **Step 6c: Replace accept-commit `None` returns with `_emit_wire_turn`.**
   In `_dispatch_guided_respond`, replace the three post-commit returns:
-  recipe-apply, chain-accept repair-success, and chain-accept success. Each should
-  follow this shape:
+  recipe-apply, chain-accept repair-success, and chain-accept success.
+  Use these reason pairs:
+
+  - recipe apply: `prev_step=GuidedStep.STEP_2_5_RECIPE_MATCH`,
+    `advance_reason="recipe_applied"`
+  - direct chain accept: `prev_step=GuidedStep.STEP_3_TRANSFORMS`,
+    `advance_reason="user_advanced"`
+  - repair-success after LLM repair: `prev_step=GuidedStep.STEP_3_TRANSFORMS`,
+    `advance_reason="auto_advanced"`
+
+  Each should follow this shape:
 
   ```python
   guided, next_turn = _emit_wire_turn(
       state=handler_result.state,
       guided=handler_result.session,
+      prev_step=GuidedStep.STEP_3_TRANSFORMS,
+      advance_reason="user_advanced",
       recorder=recorder,
       user_id=user_id,
       payload_store=payload_store,
@@ -1215,7 +1440,9 @@ payload; P2 then updates the same route seam to call the final emitter shape.
 
 - [ ] **Step 6d: Add the `STEP_4_WIRE` / `CONFIRM_WIRING` dispatch branch.**
   In `_dispatch_guided_respond`, insert the branch before the final unhandled
-  `InvariantError`:
+  `InvariantError`. In the real POST route, `control_signal="exit_to_freeform"`
+  is handled by `step_advance` before this branch; this branch still rejects any
+  non-null control signal it sees from direct callers or future internal seams:
 
   ```python
       if current_step is GuidedStep.STEP_4_WIRE:
@@ -1236,7 +1463,8 @@ payload; P2 then updates the same route seam to call the final emitter shape.
                   status_code=400,
                   detail=(
                       "confirm_wiring response must be exactly chosen=['confirm'] "
-                      "with edited_values/custom_inputs/step indices/control_signal all null."
+                      "with edited_values/custom_inputs/step indices/control_signal all null "
+                      "(exit_to_freeform is handled before dispatch)."
                   ),
               )
 
@@ -1268,49 +1496,68 @@ payload; P2 then updates the same route seam to call the final emitter shape.
           return build_step_4_wire_turn(validation=state.validate())
   ```
 
-- [ ] **Step 7: Run the tests to confirm they pass.**
+- [ ] **Step 7: Import/export the new handler and refresh stale explanatory text.**
+  Add `handle_step_4_wire_confirm` to the `_helpers.py` import block and `__all__`
+  beside the existing step handlers. Check `_helpers.py:97-101` (handler imports)
+  and `_helpers.py` `__all__` (the `handle_step_*` entries near `:3938-3941`):
+
+  ```python
+  # _helpers.py import block (near :97)
+      handle_step_4_wire_confirm,
+  # _helpers.py __all__ (near :3941)
+      "handle_step_4_wire_confirm",
+  ```
+
+  (P1 imports it so the symbol is reachable before the green route tests run.)
+
+  While the behavior changes from immediate accept-completion to accept → wire →
+  confirm, refresh any nearby explanatory text that still says recipe accept or
+  chain accept terminal-completes immediately. In the live P0 tree this includes
+  the `_advance_step_2_5` comment in `state_machine.py` and the dispatcher decision
+  table in `_helpers.py`; change comments only, with no extra behavior.
+
+- [ ] **Step 8: Run the tests to confirm they pass.**
   ```
   uv run pytest \
     tests/integration/web/composer/guided/test_step_handlers.py \
     tests/integration/web/composer/guided/test_wire_dispatch.py \
+    tests/integration/web/composer/guided/test_respond.py \
+    tests/integration/web/composer/guided/test_get_guided.py \
+    tests/integration/web/composer/guided/test_audit_emission.py \
     -k "TerminalStampInvariant or redirects_to_wire or confirm_wiring or wire_turn" -q
   ```
   Expected: all PASS — both seams leave `terminal is None` + `step == STEP_4_WIRE`;
   route accept returns `confirm_wiring`; the wire handler stamps COMPLETED on the
-  valid pipeline; malformed confirm bodies return 400.
+  valid pipeline; invalid pipelines re-emit `confirm_wiring` without terminal;
+  dispatcher-layer malformed confirm bodies return 400.
 
-- [ ] **Step 8: Run the full step-handler + auto-drop suite to catch fallout.**
+- [ ] **Step 9: Run the full guided route/handler/audit fallout suite.**
   ```
-  uv run pytest tests/integration/web/composer/guided/test_step_handlers.py tests/integration/web/composer/guided/test_auto_drop.py -q
+  uv run pytest \
+    tests/integration/web/composer/guided/test_step_handlers.py \
+    tests/integration/web/composer/guided/test_wire_dispatch.py \
+    tests/integration/web/composer/guided/test_respond.py \
+    tests/integration/web/composer/guided/test_get_guided.py \
+    tests/integration/web/composer/guided/test_audit_emission.py \
+    tests/integration/web/composer/guided/test_auto_drop.py \
+    tests/integration/web/composer/guided/test_step_3_e2e.py -q
   ```
   Expected: PASS. Any route-level accept→complete assertion must now be a two-hop
   flow: accept returns `confirm_wiring`; a second POST with `chosen=["confirm"]`
   stamps COMPLETED. Do not xfail this to P2.
 
-- [ ] **Step 9: Export the new handler.**
-  Add `handle_step_4_wire_confirm` to any `__all__` / re-export of `steps.py`
-  handlers. Check `_helpers.py:97-100` (which imports `handle_step_2_5_recipe_apply`
-  and `handle_step_3_chain_accept`) and the `_helpers.py` `__all__` (the
-  `handle_step_*` entries near `:3938-3940`) — add the import + `__all__` entry so
-  this task can dispatch to it:
-
-  ```python
-  # _helpers.py import block (near :97)
-      handle_step_4_wire_confirm,
-  # _helpers.py __all__ (near :3940)
-      "handle_step_4_wire_confirm",
-  ```
-
-  (P1 imports it so the symbol is reachable and dispatches to it immediately.)
-
 - [ ] **Step 10: Commit.**
   ```
   git add \
     src/elspeth/web/composer/guided/steps.py \
+    src/elspeth/web/composer/guided/state_machine.py \
     src/elspeth/web/sessions/routes/_helpers.py \
     src/elspeth/web/sessions/routes/composer/guided.py \
     tests/integration/web/composer/guided/test_step_handlers.py \
-    tests/integration/web/composer/guided/test_wire_dispatch.py
+    tests/integration/web/composer/guided/test_wire_dispatch.py \
+    tests/integration/web/composer/guided/test_respond.py \
+    tests/integration/web/composer/guided/test_get_guided.py \
+    tests/integration/web/composer/guided/test_audit_emission.py
   git commit -m "feat(guided): move terminal-stamp into handle_step_4_wire_confirm (validate-gate)"
   ```
 
@@ -1320,23 +1567,23 @@ payload; P2 then updates the same route seam to call the final emitter shape.
 
 **Interfaces:** none.
 
-- [ ] **Step 1: Run ruff lint + format check over the touched trees.**
+- [ ] **Step 1: Run ruff lint + format check over the full overview scope.**
   ```
-  uv run ruff check src/elspeth/web/composer/guided/ src/elspeth/web/sessions/routes/_helpers.py tests/unit/web/composer/guided/ tests/integration/web/composer/guided/
-  uv run ruff format --check src/elspeth/web/composer/guided/ src/elspeth/web/sessions/routes/_helpers.py
+  uv run ruff check src/ tests/ scripts/ examples/ elspeth-lints/src/
+  uv run ruff format --check src/ tests/ scripts/ examples/ elspeth-lints/src/
   ```
   Expected: `All checks passed!` and no format diff. (If `ruff format` rewrites the
   new emitter/handler, apply `uv run ruff format <paths>` and re-stage.)
 
-- [ ] **Step 2: Run mypy over the touched modules.**
+- [ ] **Step 2: Run mypy over the full overview scope.**
   ```
-  uv run mypy src/elspeth/web/composer/guided/ src/elspeth/web/sessions/routes/_helpers.py
+  uv run mypy src/ elspeth-lints/src/
   ```
   Expected: `Success: no issues found`. (Watch the `ValidationSummary` import in
   `emitters.py` and the new `ToolResult` construction in `steps.py` — if mypy flags a
   missing `ToolResult` field, mirror the sibling handlers' construction.)
 
-- [ ] **Step 3: Run the full guided unit + integration suite.**
+- [ ] **Step 3: Run the full guided backend suite.**
   ```
   uv run pytest tests/unit/web/composer/guided/ tests/integration/web/composer/guided/ -q
   ```
@@ -1344,14 +1591,32 @@ payload; P2 then updates the same route seam to call the final emitter shape.
   introduced in P1.6 (accept → `confirm_wiring` turn → confirm → COMPLETED);
   there should be no xfail deferring wire dispatch to P2.
 
-- [ ] **Step 4: Frontend typecheck + the mirror gate (final).**
+- [ ] **Step 4: Run frontend typecheck, unit tests, and build.**
   ```
   npm --prefix src/elspeth/web/frontend run typecheck
-  uv run python scripts/cicd/check_slot_type_cross_language.py
+  npm --prefix src/elspeth/web/frontend test -- --run
+  npm --prefix src/elspeth/web/frontend run build
+  npm --prefix src/elspeth/web/frontend run test:e2e
+  npm --prefix src/elspeth/web/frontend run test:e2e:staging
   ```
-  Expected: both PASS.
+  Expected: all PASS. The staging E2E command is a release gate, not an optional
+  best-effort check: run it only with the documented staging environment configured,
+  and capture the exact configuration/evidence if an operator-provided staging
+  prerequisite is unavailable.
 
-- [ ] **Step 5: Final phase commit (if Steps 1-2 produced format/import fixups).**
+- [ ] **Step 5: Run mirror, trust-boundary, and Wardline gates.**
+  ```
+  uv run python scripts/cicd/check_slot_type_cross_language.py
+  PYTHONPATH=elspeth-lints/src uv run python -m elspeth_lints.core.cli check \
+    --rules trust_tier.tier_model,trust_boundary.tests,trust_boundary.scope,trust_boundary.tier,'composer/*' \
+    --root src/elspeth
+  wardline scan . --fail-on ERROR
+  ```
+  Expected: PASS / clean. `wardline` exit `0` is clean; exit `1` means the gate
+  found ERROR findings that must be fixed at the boundary; exit `2` is a tool
+  error to diagnose.
+
+- [ ] **Step 6: Final phase commit (if Steps 1-5 produced format/import/gate fixups).**
   ```
   git add \
     src/elspeth/web/composer/guided/protocol.py \
@@ -1364,7 +1629,9 @@ payload; P2 then updates the same route seam to call the final emitter shape.
     src/elspeth/web/sessions/routes/composer/guided.py \
     src/elspeth/web/frontend/src/types/guided.ts \
     src/elspeth/web/frontend/src/types/guided.test.ts \
+    src/elspeth/web/frontend/src/types/interpretation.test.ts \
     src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.tsx \
+    src/elspeth/web/frontend/src/components/chat/guided/GuidedTurn.test.tsx \
     src/elspeth/web/frontend/src/components/chat/guided/GuidedHistory.tsx \
     src/elspeth/web/frontend/src/components/chat/guided/GuidedChatHistory.tsx \
     src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx \
@@ -1374,7 +1641,10 @@ payload; P2 then updates the same route seam to call the final emitter shape.
     tests/unit/web/composer/guided/test_emitters.py \
     tests/unit/web/composer/guided/test_state_machine.py \
     tests/integration/web/composer/guided/test_step_handlers.py \
-    tests/integration/web/composer/guided/test_wire_dispatch.py
+    tests/integration/web/composer/guided/test_wire_dispatch.py \
+    tests/integration/web/composer/guided/test_respond.py \
+    tests/integration/web/composer/guided/test_get_guided.py \
+    tests/integration/web/composer/guided/test_audit_emission.py
   git commit -m "chore(guided): P1 wire-stage skeleton gate reconciliation"
   ```
   (Skip if nothing changed after the per-task commits.)

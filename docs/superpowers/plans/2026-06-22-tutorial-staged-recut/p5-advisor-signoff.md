@@ -10,10 +10,11 @@
 >   (`composer/guided/protocol.py`).
 > - `handle_step_4_wire_confirm(...)` step handler — **owned by P1.6**
 >   (`composer/guided/steps.py`).
-> - The `STEP_4_WIRE` dispatch branch in `_dispatch_guided_respond` (the seam this
->   phase mutates) — **owned by P2.9** (`sessions/routes/_helpers.py`); P2.9 also
->   adds the post-accept wire-turn emission + the
->   `GET /api/sessions/{session_id}/guided` rebuild branch.
+> - The skeleton `STEP_4_WIRE` dispatch branch in `_dispatch_guided_respond`, the
+>   post-accept wire-turn emission, and the `GET /api/sessions/{session_id}/guided`
+>   rebuild branch — **owned by P1.6** (`sessions/routes/_helpers.py`,
+>   `sessions/routes/composer/guided.py`). P2 upgrades the payload/rebuild shape;
+>   P5 mutates the existing terminal-gate branch for advisor sign-off.
 > - The `build_step_4_wire_turn` emitter — **owned by P2.4**
 >   (`composer/guided/emitters.py`); P2.4 lands the FINAL signature (state +
 >   optional `catalog`/`advisor_findings`/`signoff_outcome`) so no P5 task re-signs it.
@@ -621,9 +622,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 > reads as `max_passes` — threading it here (rather than reaching into
 > `composer_service._settings`) keeps the dispatcher free of private-attr access.
 >
-> **Required-kwarg ordering (decision):** both new params take defaults so the P2.9
-> `_dispatch` test helper and other pre-P5 direct callers do not break when P5.4
-> lands. The defaults are only compatibility defaults. P5.6 must distinguish the
+> **Required-kwarg ordering (decision):** both new params take defaults so the
+> wire-dispatch `_dispatch` test helper (introduced by P1.6 and payload-upgraded
+> by P2) and other pre-P5 direct callers do not break when P5.4 lands. The
+> defaults are only compatibility defaults. P5.6 must distinguish the
 > profile cases: when `guided.profile.advisor_checkpoints` is false, no service is
 > needed and the valid wire stage may complete; when it is true (tutorial mandatory
 > sign-off), `composer_service is None`, `advisor_checkpoint_max_passes is None`, or
@@ -699,14 +701,15 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 - [ ] **Step 6: Run the existing guided-respond route + wire-dispatch suites to confirm no caller breakage.**
   `cd /home/john/elspeth && uv run python -m pytest tests/unit/web tests/integration/web/composer/guided/test_wire_dispatch.py -q -k "guided_respond or dispatch_guided or wire"`
   Expected: existing tests `passed`. Because both new params take safe defaults,
-  the P2.9 `tests/integration/web/composer/guided/test_wire_dispatch.py::_dispatch`
-  helper (which constructs `_dispatch_guided_respond(...)` WITHOUT `composer_service`
-  / `advisor_checkpoint_max_passes`) still imports and runs. That compatibility path
+  the `tests/integration/web/composer/guided/test_wire_dispatch.py::_dispatch`
+  helper (introduced by P1.6 and payload-upgraded by P2, constructing
+  `_dispatch_guided_respond(...)` WITHOUT `composer_service` /
+  `advisor_checkpoint_max_passes`) still imports and runs. That compatibility path
   is valid only for profiles without mandatory advisor checkpoints; the P5.6 tests
   add the tutorial-profile invariant guard so a missing service/budget cannot turn
   into a silent skip. Named direct callers to confirm still pass (and fix in this
   same commit if any break):
-  - `tests/integration/web/composer/guided/test_wire_dispatch.py::_dispatch` (P2.9; relies on the defaults for non-advisor profile coverage — must NOT require the new kwargs).
+  - `tests/integration/web/composer/guided/test_wire_dispatch.py::_dispatch` (P1.6/P2 wire-dispatch helper; relies on the defaults for non-advisor profile coverage — must NOT require the new kwargs).
   Search for any OTHER in-repo direct caller and fix it here if found:
   `grep -rln "_dispatch_guided_respond(" tests/`.
 - [ ] **Step 7: Commit.**
@@ -1031,18 +1034,18 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 ### Task P5.6: Gate the wire-stage terminal on the profile + sign-off decision (dispatch branch)
 
 **Files:**
-- Modify: `src/elspeth/web/sessions/routes/_helpers.py` (the `STEP_4_WIRE` branch of `_dispatch_guided_respond`, **created by P2.9**; this task adds the profile-gated sign-off before the COMPLETED stamp)
+- Modify: `src/elspeth/web/sessions/routes/_helpers.py` (the `STEP_4_WIRE` branch of `_dispatch_guided_respond`, **created by P1.6** and payload-upgraded by P2; this task adds the profile-gated sign-off before the COMPLETED stamp)
 - Create: `tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py`
 
 **Interfaces:**
-- Consumes: `GuidedSession.profile` + `.advisor_checkpoint_passes_used` (**P0**), `WorkflowProfile.advisor_checkpoints` (**P0**), `GuidedStep.STEP_4_WIRE` + `TurnType.CONFIRM_WIRING` (**P1**), `handle_step_4_wire_confirm` (**P1.6**, `composer/guided/steps.py`) + `build_step_4_wire_turn` (**P2.4**, final signature already accepts `catalog`/`advisor_findings`/`signoff_outcome`), the `STEP_4_WIRE` dispatch branch (**P2.9**), `run_wire_signoff` + `SignoffOutcome` (P5.5), `TerminalState`/`TerminalKind` (`state_machine.py`), the wire `composer_service` handle (P5.4).
+- Consumes: `GuidedSession.profile` + `.advisor_checkpoint_passes_used` (**P0**), `WorkflowProfile.advisor_checkpoints` (**P0**), `GuidedStep.STEP_4_WIRE` + `TurnType.CONFIRM_WIRING` (**P1**), `handle_step_4_wire_confirm` (**P1.6**, `composer/guided/steps.py`) + `build_step_4_wire_turn` (**P2.4**, final signature already accepts `catalog`/`advisor_findings`/`signoff_outcome`), the `STEP_4_WIRE` dispatch branch (**P1.6**, payload-upgraded by P2), `run_wire_signoff` + `SignoffOutcome` (P5.5), `TerminalState`/`TerminalKind` (`state_machine.py`), the wire `composer_service` handle (P5.4).
 - Produces: behaviour — the `STEP_4_WIRE` branch stamps `TerminalState(COMPLETED)` only on `SignoffOutcome.COMPLETE`; emits a revise wire turn on `REVISE`/`ESCAPE_UNAVAILABLE`; sets a fail-closed terminal-less revise turn carrying `_advisor_signoff_blocked_validation` findings on `BLOCKED_FLAGGED`/`BLOCKED_UNAVAILABLE`.
 
-> **Precondition (read before implementing):** P2.9 has already created the
+> **Precondition (read before implementing):** P1.6 has already created the
 > `STEP_4_WIRE` branch in `_dispatch_guided_respond` whose `CONFIRM_WIRING`
 > sub-branch calls `handle_step_4_wire_confirm(...)` and lets it stamp
-> `TerminalState(COMPLETED)` on a valid pipeline (P2.9 is a hard upstream
-> dependency — do NOT re-create the branch here). This task REPLACES the BODY of
+> `TerminalState(COMPLETED)` on a valid pipeline; P2 has upgraded the turn
+> payload/rebuild shape. Do NOT re-create the branch here. This task REPLACES the BODY of
 > that `CONFIRM_WIRING` sub-branch with the profile-gated form: it keeps the same
 > validate-gate (re-emit the wire turn on an invalid pipeline) but moves the
 > validate check inline and routes the COMPLETED stamp through the profile gate, so
@@ -1219,10 +1222,10 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 - [ ] **Step 2: Run to fail.**
   `cd /home/john/elspeth && uv run python -m pytest tests/unit/web/sessions/routes/test_wire_stage_signoff_gate.py -q`
   Expected failure: depending on P0–P3 landed state, either an `ImportError` for `EMPTY_PROFILE`/`STEP_4_WIRE`/`make_wire_ready_session_and_state` (cross-phase dep not yet present) or, once those exist, `AssertionError: advisor must NOT be called` / `terminal is None` (the gate logic not yet inserted).
-- [ ] **Step 3: Replace the P2.9 confirm body with the profile-gated sign-off.**
-  In `src/elspeth/web/sessions/routes/_helpers.py`, inside the `if current_turn_type is TurnType.CONFIRM_WIRING:` sub-branch of the `if current_step is GuidedStep.STEP_4_WIRE:` block (P2.9-created), REPLACE the P2.9 body — which called `handle_step_4_wire_confirm(...)` and let *it* stamp COMPLETED unconditionally on a valid pipeline — with the profile-gated form below. Keep the SAME validate-gate semantics: run `state.validate()` first and re-emit the wire turn (terminal stays `None`) on an invalid pipeline, THEN profile-branch. (Do NOT call `handle_step_4_wire_confirm` here any more — its unconditional stamp would race the tutorial-profile gate; the validate check moves inline so the gate owns the stamp.)
+- [ ] **Step 3: Replace the existing confirm body with the profile-gated sign-off.**
+  In `src/elspeth/web/sessions/routes/_helpers.py`, inside the `if current_turn_type is TurnType.CONFIRM_WIRING:` sub-branch of the `if current_step is GuidedStep.STEP_4_WIRE:` block (created by P1.6 and payload-upgraded by P2), REPLACE the existing body — which called `handle_step_4_wire_confirm(...)` and let *it* stamp COMPLETED unconditionally on a valid pipeline — with the profile-gated form below. Keep the SAME validate-gate semantics: run `state.validate()` first and re-emit the wire turn (terminal stays `None`) on an invalid pipeline, THEN profile-branch. (Do NOT call `handle_step_4_wire_confirm` here any more — its unconditional stamp would race the tutorial-profile gate; the validate check moves inline so the gate owns the stamp.)
   ```python
-              # Validate-gate first (same as P2.9): an invalid pipeline never
+              # Validate-gate first (same semantics as P1.6/P2): an invalid pipeline never
               # completes — re-emit the wire turn so the user can reconcile (B6).
               if not state.validate().is_valid:
                   guided, next_turn = _emit_wire_turn(

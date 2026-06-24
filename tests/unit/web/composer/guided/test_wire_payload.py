@@ -9,7 +9,7 @@ from elspeth.web.composer.guided.protocol import (
     WireTopology,
     validate_payload,
 )
-from elspeth.web.composer.state import CompositionState, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
+from elspeth.web.composer.state import CompositionState, EdgeSpec, NodeSpec, OutputSpec, PipelineMetadata, SourceSpec
 
 
 def _canonical_state() -> CompositionState:
@@ -231,11 +231,18 @@ class TestBuildWireTopology:
         }
 
     def test_topology_never_reads_state_edges(self) -> None:
-        topo = _build_wire_topology(_canonical_state())
+        state = _canonical_state()
+        stale_editor_edge_state = state.with_edge(
+            EdgeSpec(
+                id="stale-editor-edge",
+                from_node="source",
+                to_node="wrong_target",
+                edge_type="on_success",
+                label="wrong_label",
+            )
+        )
 
-        assert topo["nodes"][0]["input"] == "chain_in"
-        assert topo["nodes"][1]["input"] == "scraped"
-        assert topo["outputs"][0]["sink_name"] == "jsonl_out"
+        assert _build_wire_topology(stale_editor_edge_state) == _build_wire_topology(state)
 
     def test_output_sink_name_is_preserved_as_connection_label(self) -> None:
         topo = _build_wire_topology(_canonical_state())

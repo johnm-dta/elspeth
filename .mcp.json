@@ -21,6 +21,16 @@
       "command": "/home/john/.local/bin/filigree-mcp",
       "type": "stdio"
     },
+    "legis": {
+      "args": [
+        "mcp",
+        "--agent-id",
+        "claude-code"
+      ],
+      "command": "/home/john/.local/bin/legis",
+      "env": {},
+      "type": "stdio"
+    },
     "loomweave": {
       "args": [
         "serve"
@@ -33,9 +43,7 @@
       "args": [
         "mcp",
         "--root",
-        ".",
-        "--loomweave-url",
-        "http://127.0.0.1:10251"
+        "."
       ],
       "command": "/home/john/.local/bin/wardline",
       "type": "stdio"

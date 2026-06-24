@@ -321,3 +321,8 @@ wardline.yaml
 
 # Filigree issue tracker
 .weft/
+
+# Legis — local working dir / config (regenerated/local; never commit)
+.weft/legis/
+/.weft/legis/operator_session.json
+/.weft/legis/operator.age

@@ -662,3 +662,79 @@ def test_web_scrape_predicate_registered_last() -> None:
     names = [name for _pred, name, _resolver in _RECIPE_PREDICATES]
     assert "web-scrape-llm-rate-jsonl" in names
     assert names[-1] == "web-scrape-llm-rate-jsonl"
+
+
+# ---------------------------------------------------------------------------
+# web-scrape-llm-rate-jsonl: end-to-end match_recipe (P4.2 — RecipeSpec registered)
+# ---------------------------------------------------------------------------
+
+
+def test_match_recipe_returns_web_scrape_match_for_url_source() -> None:
+    """End-to-end: now that the RecipeSpec is registered, match_recipe returns
+    a RecipeMatch (no InvariantError) for the canonical URL-row source."""
+    from elspeth.web.composer.guided.recipe_match import match_recipe
+
+    source = _make_url_json_source()
+    sink = _make_single_jsonl_sink()
+    result = match_recipe(source, sink)
+    assert result is not None
+    assert result.recipe_name == "web-scrape-llm-rate-jsonl"
+    assert result.slots["source_blob_id"] == source.options["blob_ref"]
+    assert result.slots["source_plugin"] == "json"
+    # model/api_key_secret remain unsatisfied (operator fills them via recipe_offer).
+    assert "model" in result.unsatisfied_slots
+    assert "api_key_secret" in result.unsatisfied_slots
+    assert "abuse_contact" in result.unsatisfied_slots
+    assert "scraping_reason" in result.unsatisfied_slots
+
+
+def test_match_recipe_returns_web_scrape_match_for_csv_url_source() -> None:
+    from elspeth.web.composer.guided.recipe_match import match_recipe
+
+    source = _make_url_csv_source()
+    sink = _make_single_jsonl_sink()
+    result = match_recipe(source, sink)
+    assert result is not None
+    assert result.recipe_name == "web-scrape-llm-rate-jsonl"
+    assert result.slots["source_blob_id"] == source.options["blob_ref"]
+    assert result.slots["source_plugin"] == "csv"
+
+
+def test_canonical_seed_materialised_source_matches_web_scrape_recipe() -> None:
+    """§4.1 zero-LLM lever: the REAL canonical tutorial seed, materialised by
+    set_pipeline(source.inline_blob), matches the web_scrape recipe.
+
+    Provenance pin — the materialised source shape this test encodes is what
+    ``_execute_set_pipeline`` produces for the canonical ``inline_blob`` URL seed
+    (``composer/tools/sessions.py``): an ``application/json`` inline blob binds
+    the registered ``json`` source plugin via ``_MIME_TO_SOURCE``
+    (``composer/tools/sources.py``) AND writes ``source.options["blob_ref"]`` =
+    the persisted blob UUID UNCONDITIONALLY in the ``if inline_blob is not None``
+    branch. So ``SourceResolved.plugin == "json"`` (never the ``"inline_blob"``
+    authoring alias, never ``"web_scrape"``) and ``blob_ref`` IS present at
+    ``match_recipe`` time — the predicate's blob-presence gate is satisfied and
+    the recipe fires. If this assertion ever flips to None, the zero-LLM
+    canonical compose is broken; do NOT relax the predicate — fix the
+    materialisation or the fixture so the two agree.
+    """
+    from elspeth.web.composer.guided.recipe_match import match_recipe
+
+    # The materialised canonical source: json plugin + path + blob_ref overlay
+    # + observed url column.
+    canonical_source = SourceResolved(
+        plugin="json",  # _MIME_TO_SOURCE["application/json"] -> "json"
+        options={
+            "path": "composer_blobs/canonical-url-list.json",
+            "blob_ref": "a1b2c3d4-0000-0000-0000-000000000099",
+        },
+        observed_columns=("url",),
+        sample_rows=({"url": "https://www.dta.gov.au"},),
+    )
+    canonical_sink = _make_single_jsonl_sink()
+
+    result = match_recipe(canonical_source, canonical_sink)
+    assert result is not None, "canonical seed must match the web_scrape recipe (zero-LLM §4.1)"
+    assert result.recipe_name == "web-scrape-llm-rate-jsonl"
+    # The slot resolver derives source_blob_id from the materialised blob_ref.
+    assert result.slots["source_blob_id"] == canonical_source.options["blob_ref"]
+    assert result.slots["source_plugin"] == "json"

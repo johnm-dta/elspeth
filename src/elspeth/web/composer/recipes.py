@@ -562,6 +562,211 @@ def _build_fork_coalesce_truncate_recipe(slots: Mapping[str, Any]) -> dict[str, 
 
 
 # ---------------------------------------------------------------------------
+# Recipe 4: web-scrape-llm-rate-jsonl (D11)
+#
+#   json/csv URL-row source (blob)  →  web_scrape (fetch page content)
+#                                    →  llm (rate the page)
+#                                    →  field_mapper(select_only) cleanup
+#                                    →  jsonl sink (single output)
+#
+# web_scrape is a TRANSFORM, not a source: the head source is a json/csv blob
+# of {url: ...} rows. The field_mapper drops the raw scraped content/fingerprint
+# (data minimization) and stages the kind=pipeline_decision raw-HTML cleanup
+# requirement so the blocking cleanup contract (raw_html_cleanup_review_contract_error,
+# interpretation_state.py) passes deterministically.
+#
+# Prompt-injection shield (rev 4, re-polarized): the recipe OMITS an unbuildable
+# azure_prompt_shield hard node (the composer cannot instantiate it without
+# configured endpoint+api_key secrets — elspeth-abb2cb0931, a CONDITIONAL
+# security ticket, NOT a licence to remove all shield signal). It does NOT
+# suppress the existing medium-severity prompt-shield advisory warning
+# (prompt_shield_recommendation_warning_pairs), which surfaces at the wire
+# stage from validate(). See test_no_azure_prompt_shield_hard_node AND the P4.3
+# advisory-presence test.
+# ---------------------------------------------------------------------------
+
+
+_RECIPE_WEB_SCRAPE_SLOTS: Final[dict[str, SlotSpec]] = {
+    "source_blob_id": SlotSpec(
+        slot_type="blob_id",
+        description="UUID of the operator-supplied URL-list blob (json/csv rows of {url: ...}; use create_blob to wrap inline content first)",
+    ),
+    "source_plugin": SlotSpec(
+        slot_type="str",
+        description="Resolved URL-row source plugin carried from match_recipe; must be 'json' or 'csv'. Direct apply callers pass the materialised source plugin explicitly.",
+    ),
+    "model": SlotSpec(
+        slot_type="str",
+        description="LLM model identifier (e.g., 'anthropic/claude-sonnet-4.6'); use list_models to discover",
+    ),
+    "api_key_secret": SlotSpec(
+        slot_type="str",
+        description=(
+            "Name of an inventory secret to wire into the LLM 'api_key' option as "
+            "a deferred {secret_ref} marker. Discover names via list_secret_refs; "
+            "verify with validate_secret_ref. Literal credential strings are rejected."
+        ),
+    ),
+    "provider": SlotSpec(
+        slot_type="str",
+        required=False,
+        default="openrouter",
+        description="LLM provider — 'openrouter' or 'azure'",
+    ),
+    "rating_template": SlotSpec(
+        slot_type="str",
+        required=False,
+        default="Rate the appeal of this government web page from 1-10 and explain briefly:\n\n{{ row['content'] }}",
+        description="Jinja2 template for the rating prompt; reference scraped content as {{ row['content'] }}",
+    ),
+    "abuse_contact": SlotSpec(
+        slot_type="str",
+        description=(
+            "Operator-owned monitored contact address sent in web_scrape HTTP metadata. "
+            "Do not default or invent this value; ask the operator if absent."
+        ),
+    ),
+    "scraping_reason": SlotSpec(
+        slot_type="str",
+        description=(
+            "Operator-authored reason for scraping, sent in web_scrape HTTP metadata. "
+            "Do not default or infer this value from the tutorial prose."
+        ),
+    ),
+    "output_path": SlotSpec(
+        slot_type="str",
+        required=False,
+        default="outputs/ratings.jsonl",
+        description="JSONL output path",
+    ),
+}
+
+
+def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
+    """Build set_pipeline args for the web-scrape-llm-rate-jsonl recipe.
+
+    Emits source → web_scrape → llm → field_mapper(cleanup) → jsonl, named by
+    connection labels (NOT EdgeSpec objects — guided passes edges=[]). The
+    field_mapper drops the raw scraped content/fingerprint and stages the
+    kind=pipeline_decision raw-HTML cleanup requirement so the blocking cleanup
+    contract passes. The unbuildable azure_prompt_shield hard node is omitted
+    (elspeth-abb2cb0931); the existing medium-severity prompt-shield advisory
+    is left to fire from validate() — the recipe MUST NOT suppress it.
+    """
+    # Function-level imports: recipes.py is imported by recipe_match.py and the
+    # tools plane; hoisting these to module scope risks a circular import.
+    from elspeth.contracts.composer_interpretation import InterpretationKind
+    from elspeth.web.composer.tools._common import _pending_interpretation_requirement
+    from elspeth.web.interpretation_state import (
+        INTERPRETATION_REQUIREMENTS_KEY,
+        RAW_HTML_CLEANUP_REVIEW_DRAFT,
+        RAW_HTML_CLEANUP_USER_TERM,
+    )
+
+    content_field = "content"
+    fingerprint_field = "content_fingerprint"
+    cleanup_requirement = _pending_interpretation_requirement(
+        requirement_id="drop_raw_html_review",
+        kind=InterpretationKind.PIPELINE_DECISION,
+        user_term=RAW_HTML_CLEANUP_USER_TERM,
+        draft=RAW_HTML_CLEANUP_REVIEW_DRAFT,
+    )
+    return {
+        "source": {
+            "plugin": slots["source_plugin"],
+            "blob_id": slots["source_blob_id"],
+            "on_success": "rows",
+            "options": {
+                "schema": {"mode": "observed"},
+            },
+            "on_validation_failure": "discard",
+        },
+        "nodes": [
+            {
+                "id": "url_rows",
+                "node_type": "transform",
+                "plugin": "web_scrape",
+                "input": "rows",
+                "on_success": "scraped",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "url_field": "url",
+                    "content_field": content_field,
+                    "fingerprint_field": fingerprint_field,
+                    "format": "markdown",
+                    "http": {
+                        # OPERATOR: these values are visible to scraped third
+                        # parties. They are required slots, not tutorial
+                        # defaults: use a monitored operator-owned inbox and an
+                        # accurate reason, or do not apply the recipe.
+                        "abuse_contact": slots["abuse_contact"],
+                        "scraping_reason": slots["scraping_reason"],
+                    },
+                },
+            },
+            {
+                "id": "rate_pages",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "scraped",
+                "on_success": "rated",
+                "on_error": "discard",
+                "options": {
+                    "provider": slots["provider"],
+                    "model": slots["model"],
+                    "api_key": {"secret_ref": slots["api_key_secret"]},
+                    "prompt_template": slots["rating_template"],
+                    "response_field": "rating",
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": [content_field],
+                },
+            },
+            {
+                "id": "drop_raw_html",
+                "node_type": "transform",
+                "plugin": "field_mapper",
+                "input": "rated",
+                "on_success": "clean",
+                "on_error": "discard",
+                "options": {
+                    "schema": {"mode": "observed"},
+                    "select_only": True,
+                    # mapping preserves ONLY the user-facing fields; the raw
+                    # content/fingerprint are intentionally absent (dropped).
+                    "mapping": {
+                        "url": "url",
+                        "rating": "rating",
+                    },
+                    INTERPRETATION_REQUIREMENTS_KEY: [cleanup_requirement],
+                },
+            },
+        ],
+        "edges": [],
+        "outputs": [
+            {
+                "sink_name": "clean",
+                "plugin": "json",
+                "options": {
+                    "path": slots["output_path"],
+                    "format": "jsonl",
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "on_write_failure": "discard",
+            }
+        ],
+        "metadata": {
+            "name": "web-scrape-llm-rate-jsonl",
+            "description": (
+                f"Scrape each URL, rate the page with an LLM, drop the raw HTML/fingerprint, and write ratings to {slots['output_path']}"
+            ),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -606,6 +811,21 @@ _RECIPES: Final[dict[str, RecipeSpec]] = {
         ),
         slots=_RECIPE3_SLOTS,
         build=_build_fork_coalesce_truncate_recipe,
+    ),
+    "web-scrape-llm-rate-jsonl": RecipeSpec(
+        name="web-scrape-llm-rate-jsonl",
+        description=(
+            "Fetch each URL in a blob of {url: ...} rows, rate the page with an "
+            "LLM, drop the raw scraped HTML and fingerprint, and write a JSONL "
+            "output of url + rating. Use for: 'scrape these pages and rate them', "
+            "'fetch each site and score it'. The URL list must already be uploaded "
+            "as a session blob (json or csv rows with a url column). The resolved "
+            "source_plugin slot preserves whether the materialised source is json "
+            "or csv. The raw-HTML cleanup is staged as a pipeline_decision so the "
+            "data-minimization contract passes deterministically."
+        ),
+        slots=_RECIPE_WEB_SCRAPE_SLOTS,
+        build=_build_web_scrape_recipe,
     ),
 }
 

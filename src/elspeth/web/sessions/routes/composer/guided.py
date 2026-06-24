@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from elspeth.web.composer.protocol import ComposerService
+
 from .._helpers import (
     UTC,
     UUID,
@@ -1226,6 +1228,23 @@ async def post_guided_respond(
                 # widening is out of scope here — see merge commit message).
                 provenance="convergence_persist",
             )
+
+            # B1 (spec §5): the guided dispatch path never reaches the
+            # freeform fail-closed orphan gate, so a committed source /
+            # transform / recipe-apply that creates interpretation sites
+            # would orphan and only fail at run time. Surface every
+            # resolvable pending review against the freshly-persisted state
+            # so the guided UI can project + block on it (D12). Advisory
+            # polarity: the run-time gate (execution/service.py:515-529)
+            # stays the hard backstop, so a None composer (no impl wired in
+            # this app) safely skips surfacing.
+            composer: ComposerService = request.app.state.composer_service
+            if composer is not None:
+                await composer.surface_pending_interpretation_reviews(
+                    new_state,
+                    session_id=str(session_id),
+                    current_state_id=str(state_record_out.id),
+                )
 
             # Recorder persistence happens in the finally block below so
             # rejection paths drain identically to the success path.

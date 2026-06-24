@@ -758,6 +758,27 @@ class ComposerService(Protocol):
             ComposerConvergenceError: If the loop exceeds max_turns.
         """
 
+    async def surface_pending_interpretation_reviews(
+        self,
+        state: CompositionState,
+        *,
+        session_id: str | None,
+        current_state_id: str | None,
+    ) -> None:
+        """Kind-general backend surfacer for the GUIDED commit path (B1).
+
+        Surfaces a resolvable pending interpretation EVENT for every
+        interpretation site on ``state`` whose writer-boundary precondition
+        holds (all five ``InterpretationKind`` members). Called by the guided
+        route persistence seam (``post_guided_respond``) after every committed
+        source / transform / recipe-apply, because the guided dispatch path
+        never reaches the freeform fail-closed orphan gate. Advisory polarity:
+        the run-time ``UnresolvedInterpretationPlaceholderError`` gate stays the
+        hard backstop. Idempotent; a no-op when there is no session/persisted
+        state. See P3.1 for the concrete implementation.
+        """
+        ...
+
     async def explain_run_diagnostics(self, snapshot: Mapping[str, object]) -> str:
         """Explain a bounded run diagnostics snapshot without mutating state."""
         ...

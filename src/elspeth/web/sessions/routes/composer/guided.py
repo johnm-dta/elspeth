@@ -1133,6 +1133,32 @@ async def post_guided_respond(
                     detail="Guided session is already in a terminal state. No further responses accepted.",
                 )
 
+            # Optimistic-concurrency guard (D16): if the client carried an
+            # expected step, reject a mismatch with 409 (the wizard advanced
+            # under the client between read and write) — the same guard
+            # ``POST /api/sessions/{session_id}/guided/chat`` already has
+            # (guided.py:~1394). A stale client
+            # sending an unknown value gets a 400, not a Pydantic 422,
+            # mirroring control_signal. ``None`` (field absent) skips the
+            # guard for turns that do not carry an expected step.
+            if body.step_index is not None:
+                try:
+                    expected_step = GuidedStep(body.step_index)
+                except ValueError as exc:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(f"Unknown step_index {body.step_index!r}. Valid values: {sorted(s.value for s in GuidedStep)}."),
+                    ) from exc
+                if expected_step is not guided.step:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"step_index {expected_step.value!r} does not match the session's "
+                            f"current step {guided.step.value!r}. Re-fetch GET "
+                            f"/api/sessions/{{id}}/guided and retry."
+                        ),
+                    )
+
             # Derive the current turn type from the last TurnRecord for the
             # current step.  Crash if history is empty — the caller must have
             # fetched GET /guided first (which seeds the initial TurnRecord).

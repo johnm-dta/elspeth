@@ -363,3 +363,59 @@ async def test_guided_start_unowned_session_404(tmp_path) -> None:
         json={"profile": "tutorial"},
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_guided_respond_stale_step_index_409(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    client.post(f"/api/sessions/{session.id}/guided/start", json={"profile": "tutorial"})
+    client.get(f"/api/sessions/{session.id}/guided")
+
+    resp = client.post(
+        f"/api/sessions/{session.id}/guided/respond",
+        json={"step_index": "step_3_transforms", "chosen": ["csv"]},
+    )
+    assert resp.status_code == 409
+    assert "step_index" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_guided_respond_unknown_step_index_400(tmp_path) -> None:
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    client.post(f"/api/sessions/{session.id}/guided/start", json={"profile": "tutorial"})
+    client.get(f"/api/sessions/{session.id}/guided")
+
+    resp = client.post(
+        f"/api/sessions/{session.id}/guided/respond",
+        json={"step_index": "step_99_bogus", "chosen": ["csv"]},
+    )
+    assert resp.status_code == 400
+    assert "step_index" in resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_guided_respond_success_preserves_tutorial_profile(tmp_path) -> None:
+    """A normal respond response still carries the persisted tutorial profile."""
+    app, service = _make_app(tmp_path)
+    client = TestClient(app)
+    session = await service.create_session("alice", "T", "local")
+    client.post(f"/api/sessions/{session.id}/guided/start", json={"profile": "tutorial"})
+    client.get(f"/api/sessions/{session.id}/guided")
+
+    resp = client.post(
+        f"/api/sessions/{session.id}/guided/respond",
+        json={"step_index": "step_1_source", "chosen": ["inline_blob"]},
+    )
+    assert resp.status_code == 200
+    profile = resp.json()["guided_session"]["profile"]
+    assert profile is not None
+    assert profile["advisor_checkpoints"] is True
+    assert profile["bookends"] is True
+
+    get_resp = client.get(f"/api/sessions/{session.id}/guided")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["guided_session"]["profile"]["advisor_checkpoints"] is True

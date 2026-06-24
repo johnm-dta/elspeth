@@ -419,6 +419,11 @@ class GuidedRespondRequest(_RequestModel):
     accepted_step_index: int | None = None
     edit_step_index: int | None = None
     control_signal: str | None = None
+    # Optimistic-concurrency token (D16): the client's expected current step.
+    # When present, the route 409s if it does not match the session's live
+    # ``guided.step``. A plain ``str`` (not the enum) makes unknown values fail
+    # with a route-handler 400 rather than a Pydantic 422.
+    step_index: str | None = None
 
 
 class GuidedRespondResponse(_StrictResponse):

@@ -138,6 +138,12 @@ export interface GuidedRespondRequest {
   edit_step_index: number | null;
   /** Typed as closed enum client-side; server validates and accepts str for graceful stale-client failure. */
   control_signal: ControlSignal | null;
+  /**
+   * Optimistic-concurrency token: the client's expected current step. When
+   * present the server 409s on mismatch (the wizard advanced under the
+   * client). Optional — omit for non-wire turns that don't carry a step.
+   */
+  step_index?: GuidedStep | null;
 }
 
 /** Response for POST /api/sessions/{id}/guided/respond (schemas.py:286-296). */

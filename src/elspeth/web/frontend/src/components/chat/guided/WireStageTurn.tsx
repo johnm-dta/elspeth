@@ -12,10 +12,22 @@ function pairKey(from: string, to: string): string {
   return `${from}\u0000${to}`;
 }
 
+function branchConnectionLabels(
+  branches: string[] | Record<string, string> | null,
+): string[] {
+  if (branches === null) return [];
+  if (Array.isArray(branches)) return branches;
+  return Object.values(branches);
+}
+
 export function reconstructWireEdges(data: WireStageData): WireEdge[] {
   const consumerByLabel = new Map<string, string>();
   for (const node of data.topology.nodes) {
-    if (node.input !== null) {
+    if (node.node_type === "coalesce") {
+      for (const label of branchConnectionLabels(node.branches)) {
+        consumerByLabel.set(label, node.id);
+      }
+    } else if (node.input !== null) {
       consumerByLabel.set(node.input, node.id);
     }
   }
@@ -47,6 +59,7 @@ export function reconstructWireEdges(data: WireStageData): WireEdge[] {
 
   for (const source of Object.values(data.topology.sources)) {
     pushEdge(source.id, source.on_success);
+    pushEdge(source.id, source.on_validation_failure);
   }
   for (const node of data.topology.nodes) {
     pushEdge(node.id, node.on_success);
@@ -57,6 +70,9 @@ export function reconstructWireEdges(data: WireStageData): WireEdge[] {
     for (const label of node.fork_to ?? []) {
       pushEdge(node.id, label);
     }
+  }
+  for (const output of data.topology.outputs) {
+    pushEdge(output.id, output.on_write_failure);
   }
 
   return edges;

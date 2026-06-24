@@ -224,6 +224,7 @@ describe("WireStageTurn", () => {
             id: "source",
             plugin: "inline_blob",
             on_success: "chain_in",
+            on_validation_failure: "discard",
           },
         },
         nodes: [
@@ -236,6 +237,7 @@ describe("WireStageTurn", () => {
             on_error: "scrape_error",
             routes: null,
             fork_to: null,
+            branches: null,
           },
           {
             id: "mapper",
@@ -246,6 +248,7 @@ describe("WireStageTurn", () => {
             on_error: null,
             routes: null,
             fork_to: null,
+            branches: null,
           },
         ],
         outputs: [
@@ -253,6 +256,7 @@ describe("WireStageTurn", () => {
             id: "output:jsonl_out",
             sink_name: "jsonl_out",
             plugin: "json",
+            on_write_failure: "discard",
           },
         ],
       },

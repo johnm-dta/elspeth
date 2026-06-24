@@ -199,6 +199,7 @@ class TestBuildWireTopology:
                 "id": "source",
                 "plugin": "inline_blob",
                 "on_success": "chain_in",
+                "on_validation_failure": "reject",
             }
         }
         assert topo["nodes"][0]["input"] == "chain_in"
@@ -210,6 +211,7 @@ class TestBuildWireTopology:
                 "id": "output:jsonl_out",
                 "sink_name": "jsonl_out",
                 "plugin": "json",
+                "on_write_failure": "discard",
             }
         ]
 
@@ -225,6 +227,7 @@ class TestBuildWireTopology:
             "on_error",
             "routes",
             "fork_to",
+            "branches",
         }
 
     def test_topology_never_reads_state_edges(self) -> None:
@@ -259,6 +262,77 @@ class TestBuildWireTopology:
         topo = _build_wire_topology(state)
 
         assert topo["sources"]["refunds"]["id"] == "source:refunds"
+
+    def test_topology_includes_failure_routes_and_coalesce_branches(self) -> None:
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="inline_blob",
+                on_success="branch_in",
+                options={"schema": {"mode": "observed"}},
+                on_validation_failure="quarantine",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="fork",
+                    node_type="gate",
+                    plugin=None,
+                    input="branch_in",
+                    on_success=None,
+                    on_error=None,
+                    options={},
+                    condition="true",
+                    routes={"true": "fork"},
+                    fork_to=("path_a", "path_b"),
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+                NodeSpec(
+                    id="merge",
+                    node_type="coalesce",
+                    plugin=None,
+                    input="branches",
+                    on_success="main",
+                    on_error=None,
+                    options={},
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches={"a": "path_a_done", "b": "path_b_done"},
+                    policy="require_all",
+                    merge="nested",
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="main",
+                    plugin="json",
+                    options={"path": "main.json", "schema": {"mode": "observed"}},
+                    on_write_failure="failures",
+                ),
+                OutputSpec(
+                    name="quarantine",
+                    plugin="json",
+                    options={"path": "quarantine.json", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                ),
+                OutputSpec(
+                    name="failures",
+                    plugin="json",
+                    options={"path": "failures.json", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(name="Failure routes", description=""),
+            version=1,
+        )
+
+        topo = _build_wire_topology(state)
+
+        assert topo["sources"]["source"]["on_validation_failure"] == "quarantine"
+        assert topo["nodes"][1]["branches"] == {"a": "path_a_done", "b": "path_b_done"}
+        assert topo["outputs"][0]["on_write_failure"] == "failures"
 
 
 class TestBuildStep4WireTurn:

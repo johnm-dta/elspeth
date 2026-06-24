@@ -163,6 +163,7 @@ describe("WireStageData wire shape", () => {
             id: "source",
             plugin: "inline_blob",
             on_success: "chain_in",
+            on_validation_failure: "discard",
           },
         },
         nodes: [
@@ -175,6 +176,7 @@ describe("WireStageData wire shape", () => {
             on_error: "scrape_error",
             routes: { retry: "chain_in" },
             fork_to: ["audit_stream"],
+            branches: null,
           },
         ],
         outputs: [
@@ -182,6 +184,7 @@ describe("WireStageData wire shape", () => {
             id: "output:jsonl_out",
             sink_name: "jsonl_out",
             plugin: "json",
+            on_write_failure: "discard",
           },
         ],
       },

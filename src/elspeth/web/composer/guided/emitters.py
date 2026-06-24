@@ -422,6 +422,7 @@ def _build_wire_topology(state: CompositionState) -> WireTopology:
             "id": source_producer_id(source_name),
             "plugin": source["plugin"],
             "on_success": source["on_success"],
+            "on_validation_failure": source["on_validation_failure"],
         }
         for source_name, source in full_state["sources"].items()
     }
@@ -435,6 +436,7 @@ def _build_wire_topology(state: CompositionState) -> WireTopology:
             "on_error": node["on_error"],
             "routes": node["routes"],
             "fork_to": node["fork_to"],
+            "branches": node["branches"],
         }
         for node in full_state["nodes"]
     ]
@@ -443,6 +445,7 @@ def _build_wire_topology(state: CompositionState) -> WireTopology:
             "id": f"output:{output['sink_name']}",
             "sink_name": output["sink_name"],
             "plugin": output["plugin"],
+            "on_write_failure": output["on_write_failure"],
         }
         for output in full_state["outputs"]
     ]

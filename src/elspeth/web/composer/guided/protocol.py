@@ -70,6 +70,7 @@ class _WireSourceTopo(TypedDict):
     id: str
     plugin: str
     on_success: str | None
+    on_validation_failure: str
 
 
 class _WireNodeTopo(TypedDict):
@@ -81,12 +82,14 @@ class _WireNodeTopo(TypedDict):
     on_error: str | None
     routes: Mapping[str, str] | None
     fork_to: Sequence[str] | None
+    branches: Sequence[str] | Mapping[str, str] | None
 
 
 class _WireOutputTopo(TypedDict):
     id: str
     sink_name: str
     plugin: str
+    on_write_failure: str
 
 
 class WireTopology(TypedDict):

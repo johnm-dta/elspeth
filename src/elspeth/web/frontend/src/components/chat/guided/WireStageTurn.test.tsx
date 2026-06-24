@@ -16,6 +16,7 @@ function canonicalData(): WireStageData {
           id: "source",
           plugin: "inline_blob",
           on_success: "chain_in",
+          on_validation_failure: "quarantine",
         },
       },
       nodes: [
@@ -28,6 +29,7 @@ function canonicalData(): WireStageData {
           on_error: "scrape_error",
           routes: null,
           fork_to: null,
+          branches: null,
         },
         {
           id: "mapper",
@@ -38,6 +40,7 @@ function canonicalData(): WireStageData {
           on_error: null,
           routes: null,
           fork_to: null,
+          branches: null,
         },
         {
           id: "error_handler",
@@ -48,6 +51,40 @@ function canonicalData(): WireStageData {
           on_error: null,
           routes: null,
           fork_to: null,
+          branches: null,
+        },
+        {
+          id: "merge_paths",
+          node_type: "coalesce",
+          plugin: null,
+          input: "branches",
+          on_success: "jsonl_out",
+          on_error: null,
+          routes: null,
+          fork_to: null,
+          branches: { a: "path_a_done", b: "path_b_done" },
+        },
+        {
+          id: "path_a_transform",
+          node_type: "transform",
+          plugin: "field_mapper",
+          input: "path_a",
+          on_success: "path_a_done",
+          on_error: null,
+          routes: null,
+          fork_to: null,
+          branches: null,
+        },
+        {
+          id: "path_b_transform",
+          node_type: "transform",
+          plugin: "field_mapper",
+          input: "path_b",
+          on_success: "path_b_done",
+          on_error: null,
+          routes: null,
+          fork_to: null,
+          branches: null,
         },
       ],
       outputs: [
@@ -55,6 +92,19 @@ function canonicalData(): WireStageData {
           id: "output:jsonl_out",
           sink_name: "jsonl_out",
           plugin: "json",
+          on_write_failure: "failed_writes",
+        },
+        {
+          id: "output:quarantine",
+          sink_name: "quarantine",
+          plugin: "json",
+          on_write_failure: "discard",
+        },
+        {
+          id: "output:failed_writes",
+          sink_name: "failed_writes",
+          plugin: "json",
+          on_write_failure: "discard",
         },
       ],
     },
@@ -93,6 +143,34 @@ describe("reconstructWireEdges", () => {
         expect.objectContaining({ from: "scrape", to: "mapper" }),
         expect.objectContaining({ from: "scrape", to: "error_handler" }),
         expect.objectContaining({ from: "mapper", to: "output:jsonl_out" }),
+        expect.objectContaining({ from: "source", to: "output:quarantine" }),
+        expect.objectContaining({
+          from: "merge_paths",
+          to: "output:jsonl_out",
+        }),
+        expect.objectContaining({
+          from: "output:jsonl_out",
+          to: "output:failed_writes",
+        }),
+      ]),
+    );
+  });
+
+  it("builds coalesce fan-in edges from branches", () => {
+    const edges = reconstructWireEdges(canonicalData());
+
+    expect(edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          from: "path_a_transform",
+          to: "merge_paths",
+          label: "path_a_done",
+        }),
+        expect.objectContaining({
+          from: "path_b_transform",
+          to: "merge_paths",
+          label: "path_b_done",
+        }),
       ]),
     );
   });
@@ -131,6 +209,7 @@ describe("reconstructWireEdges", () => {
         id: "source:refunds",
         plugin: "inline_blob",
         on_success: "chain_in",
+        on_validation_failure: "discard",
       },
     };
     data.edge_contracts = [

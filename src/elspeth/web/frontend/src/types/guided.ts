@@ -313,7 +313,12 @@ export interface WireStageData {
   topology: {
     sources: Record<
       string,
-      { id: string; plugin: string; on_success: string | null }
+      {
+        id: string;
+        plugin: string;
+        on_success: string | null;
+        on_validation_failure: string;
+      }
     >;
     nodes: Array<{
       id: string;
@@ -324,8 +329,14 @@ export interface WireStageData {
       on_error: string | null;
       routes: Record<string, string> | null;
       fork_to: string[] | null;
+      branches: string[] | Record<string, string> | null;
     }>;
-    outputs: Array<{ id: string; sink_name: string; plugin: string }>;
+    outputs: Array<{
+      id: string;
+      sink_name: string;
+      plugin: string;
+      on_write_failure: string;
+    }>;
   };
   edge_contracts: Array<{
     from: string;

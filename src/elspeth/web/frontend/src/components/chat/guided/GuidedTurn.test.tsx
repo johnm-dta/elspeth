@@ -113,6 +113,7 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
         id: "source",
         plugin: "inline_blob",
         on_success: "chain_in",
+        on_validation_failure: "discard",
       },
     },
     nodes: [
@@ -125,6 +126,7 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
         on_error: "scrape_error",
         routes: null,
         fork_to: null,
+        branches: null,
       },
       {
         id: "mapper",
@@ -135,6 +137,7 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
         on_error: null,
         routes: null,
         fork_to: null,
+        branches: null,
       },
       {
         id: "error_handler",
@@ -145,6 +148,7 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
         on_error: null,
         routes: null,
         fork_to: null,
+        branches: null,
       },
     ],
     outputs: [
@@ -152,6 +156,7 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
         id: "output:jsonl_out",
         sink_name: "jsonl_out",
         plugin: "json",
+        on_write_failure: "discard",
       },
     ],
   },

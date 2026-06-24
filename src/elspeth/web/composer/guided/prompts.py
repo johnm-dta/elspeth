@@ -23,6 +23,7 @@ effect.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -186,3 +187,22 @@ def build_step_3_context_block(
         f"sink: {json.dumps(sink_payload)}\n"
         f"recipe_match: {match_repr}\n"
     )
+
+
+@lru_cache(maxsize=1)
+def guided_staged_skill_hash() -> str:
+    """Hex SHA-256 over base.md + every step playbook in _STEP_PLAYBOOK_ORDER.
+
+    Consumed by the tutorial run-cache key (tutorial_model_id, cache input
+    #3). Enumerating the playbook order means appending a GuidedStep member
+    (and its skill file) automatically extends the keyed input set — the
+    step_4_wire.md add (P1) shifts this hash with no edit to the cache path.
+
+    Cached per process; restart elspeth-web.service after editing skill
+    markdown (same lifecycle caveat as the other loaders in this module).
+    """
+    digest = hashlib.sha256()
+    digest.update((_SKILLS_DIR / "base.md").read_bytes())
+    for step in _STEP_PLAYBOOK_ORDER:
+        digest.update((_SKILLS_DIR / _STEP_FILE_NAMES[step]).read_bytes())
+    return digest.hexdigest()

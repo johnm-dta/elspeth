@@ -1734,6 +1734,7 @@ class TestIDORCoverageDrift:
             "import_state_yaml",
             "fork_from_message",
             "get_guided",
+            "post_guided_start",
             "post_guided_reenter",
             "post_guided_respond",
             "post_guided_chat",
@@ -2129,6 +2130,14 @@ class TestIDORProtection:
         # wizard state without authorization.  The ownership check in
         # ``get_guided`` runs before the compose lock or catalog access.
         resp = bob_client.get(f"/api/sessions/{session_id}/guided")
+        assert resp.status_code == 404
+
+        # Bob tries to POST guided/start -- should be 404. The start entry
+        # endpoint (P6.4) constructs a server-owned WorkflowProfile and seeds
+        # the guided session; an ownership bypass would let an attacker
+        # re-seed / reset the profile and CompositionState of Alice's session.
+        # The ownership check in ``post_guided_start`` runs before any persist.
+        resp = bob_client.post(f"/api/sessions/{session_id}/guided/start")
         assert resp.status_code == 404
 
         # Bob tries to POST guided/reenter -- should be 404. Re-entry is

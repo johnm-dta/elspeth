@@ -6,9 +6,11 @@ import dataclasses
 
 import pytest
 
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.profile import (
     EMPTY_PROFILE,
     TUTORIAL_PROFILE,
+    WorkflowProfile,
     WorkflowProfileKind,
     profile_for_kind,
 )
@@ -50,3 +52,21 @@ class TestWorkflowProfileKind:
     def test_unknown_kind_string_rejected_by_enum(self) -> None:
         with pytest.raises(ValueError):
             WorkflowProfileKind("bespoke")
+
+
+class TestWorkflowProfileFromDictDiagnostics:
+    def test_unknown_keys_reports_unexpected_keys(self) -> None:
+        record = EMPTY_PROFILE.to_dict() | {"stages": []}
+
+        with pytest.raises(InvariantError, match="unexpected keys"):
+            WorkflowProfile.from_dict(record)
+
+    def test_bool_gate_reports_field_name(self) -> None:
+        record = EMPTY_PROFILE.to_dict() | {"advisor_checkpoints": "false"}
+
+        with pytest.raises(InvariantError, match="advisor_checkpoints must be bool"):
+            WorkflowProfile.from_dict(record)
+
+    def test_empty_record_reports_from_dict_context(self) -> None:
+        with pytest.raises(InvariantError, match=r"WorkflowProfile\.from_dict"):
+            WorkflowProfile.from_dict({})

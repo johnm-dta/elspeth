@@ -64,11 +64,19 @@ class WorkflowProfile:
     def from_dict(cls, d: dict[str, Any]) -> WorkflowProfile:
         """Deserialize a Tier-1 persisted profile record with strict shape checks."""
 
+        if type(d) is not dict:
+            raise InvariantError(f"WorkflowProfile.from_dict: malformed record {d!r}")
+
+        keys = set(d)
+        unexpected_keys = keys - _PROFILE_KEYS
+        if unexpected_keys:
+            raise InvariantError(f"WorkflowProfile.from_dict: unexpected keys {sorted(unexpected_keys)!r} in record {d!r}")
+
+        missing_keys = _PROFILE_KEYS - keys
+        if missing_keys:
+            raise InvariantError(f"WorkflowProfile.from_dict: malformed record {d!r}")
+
         try:
-            if type(d) is not dict:
-                raise TypeError(f"expected dict, got {type(d).__name__}")
-            if set(d) != _PROFILE_KEYS:
-                raise KeyError(f"expected keys {_PROFILE_KEYS!r}, got {set(d)!r}")
             return cls(
                 entry_seed=d["entry_seed"],
                 coaching=d["coaching"],
@@ -76,8 +84,8 @@ class WorkflowProfile:
                 recipe_match=d["recipe_match"],
                 bookends=d["bookends"],
             )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise InvariantError(f"WorkflowProfile.from_dict: malformed record {d!r}") from exc
+        except (TypeError, ValueError) as exc:
+            raise InvariantError(f"WorkflowProfile.from_dict: {exc}") from exc
 
 
 EMPTY_PROFILE = WorkflowProfile(

@@ -303,6 +303,45 @@ export interface ProposeChainPayload {
 }
 
 /**
+ * Wire data for the step-4 wiring review: topology describes source/node/output
+ * connection labels, while contracts overlay producer/consumer compatibility.
+ * Source ids use `source` or `source:<name>` and output ids use
+ * `output:<sink_name>`. Warnings and advisor/signoff fields are optional
+ * advisory metadata emitted when the backend has something to report.
+ */
+export interface WireStageData {
+  topology: {
+    sources: Record<
+      string,
+      { id: string; plugin: string; on_success: string | null }
+    >;
+    nodes: Array<{
+      id: string;
+      node_type: string;
+      plugin: string | null;
+      input: string | null;
+      on_success: string | null;
+      on_error: string | null;
+      routes: Record<string, string> | null;
+      fork_to: string[] | null;
+    }>;
+    outputs: Array<{ id: string; sink_name: string; plugin: string }>;
+  };
+  edge_contracts: Array<{
+    from: string;
+    to: string;
+    producer_guarantees: string[];
+    consumer_requires: string[];
+    missing_fields: string[];
+    satisfied: boolean;
+  }>;
+  semantic_contracts: Array<Record<string, unknown>>;
+  warnings: Array<Record<string, unknown>>;
+  advisor_findings?: string;
+  signoff_outcome?: string;
+}
+
+/**
  * CI mirror for Python `SlotType` (`src/elspeth/web/composer/recipes.py`).
  * Not imported by application code — its members are read by the
  * cross-language drift check `scripts/cicd/check_slot_type_cross_language.py`

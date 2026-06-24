@@ -20,7 +20,7 @@
 //   schema_form           -- "Continue" button (submit action, present when canSubmit)
 //   propose_chain         -- "Accept proposal" button
 //   recipe_offer          -- SchemaFormTurn recipe-decision renderer
-//   confirm_wiring        -- "Confirm wiring" button
+//   confirm_wiring        -- WireStageTurn review heading + "Confirm wiring" button
 // ============================================================================
 
 import { describe, it, expect, vi } from "vitest";
@@ -35,6 +35,7 @@ import type {
   MultiSelectWithCustomPayload,
   SchemaFormPayload,
   ProposeChainPayload,
+  WireStageData,
 } from "@/types/guided";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -105,6 +106,79 @@ const RECIPE_OFFER_PAYLOAD: SchemaFormPayload = {
   },
 };
 
+const WIRE_STAGE_PAYLOAD: WireStageData = {
+  topology: {
+    sources: {
+      source: {
+        id: "source",
+        plugin: "inline_blob",
+        on_success: "chain_in",
+      },
+    },
+    nodes: [
+      {
+        id: "scrape",
+        node_type: "transform",
+        plugin: "web_scrape",
+        input: "chain_in",
+        on_success: "scraped",
+        on_error: "scrape_error",
+        routes: null,
+        fork_to: null,
+      },
+      {
+        id: "mapper",
+        node_type: "transform",
+        plugin: "field_mapper",
+        input: "scraped",
+        on_success: "jsonl_out",
+        on_error: null,
+        routes: null,
+        fork_to: null,
+      },
+      {
+        id: "error_handler",
+        node_type: "transform",
+        plugin: "dead_letter",
+        input: "scrape_error",
+        on_success: null,
+        on_error: null,
+        routes: null,
+        fork_to: null,
+      },
+    ],
+    outputs: [
+      {
+        id: "output:jsonl_out",
+        sink_name: "jsonl_out",
+        plugin: "json",
+      },
+    ],
+  },
+  edge_contracts: [
+    {
+      from: "scrape",
+      to: "mapper",
+      producer_guarantees: ["body", "status"],
+      consumer_requires: ["body"],
+      missing_fields: [],
+      satisfied: true,
+    },
+    {
+      from: "mapper",
+      to: "output:jsonl_out",
+      producer_guarantees: ["mapped"],
+      consumer_requires: ["mapped"],
+      missing_fields: [],
+      satisfied: true,
+    },
+  ],
+  semantic_contracts: [],
+  warnings: [],
+  advisor_findings: "No prompt-shield warnings.",
+  signoff_outcome: "approved",
+};
+
 /** Build a TurnPayload with the given type and typed payload. */
 function makeTurn(
   type: "single_select",
@@ -132,7 +206,7 @@ function makeTurn(
 ): TurnPayload;
 function makeTurn(
   type: "confirm_wiring",
-  payload: null,
+  payload: WireStageData,
 ): TurnPayload;
 function makeTurn(type: TurnPayload["type"], payload: unknown): TurnPayload {
   return { type, step_index: 0, payload };
@@ -211,14 +285,16 @@ describe("GuidedTurn dispatcher — routing", () => {
     expect(screen.getByRole("button", { name: "Apply recipe" })).toBeTruthy();
   });
 
-  it("confirm_wiring: renders the confirm wiring placeholder action", () => {
+  it("confirm_wiring: renders WireStageTurn UI", () => {
     render(
       <GuidedTurn
-        turn={makeTurn("confirm_wiring", null)}
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
         onSubmit={vi.fn()}
       />,
     );
 
+    expect(screen.getByRole("heading", { name: "Review wiring" })).toBeTruthy();
+    expect(screen.getByRole("listitem", { name: /source to scrape/ })).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Confirm wiring" }),
     ).toBeTruthy();
@@ -253,7 +329,7 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
     const onSubmit = vi.fn();
     render(
       <GuidedTurn
-        turn={makeTurn("confirm_wiring", null)}
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
         onSubmit={onSubmit}
       />,
     );
@@ -276,7 +352,7 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
     const onSubmit = vi.fn();
     render(
       <GuidedTurn
-        turn={makeTurn("confirm_wiring", null)}
+        turn={makeTurn("confirm_wiring", WIRE_STAGE_PAYLOAD)}
         onSubmit={onSubmit}
         disabled
       />,

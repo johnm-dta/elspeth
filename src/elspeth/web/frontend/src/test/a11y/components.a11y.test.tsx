@@ -49,6 +49,7 @@ const AUDITED_COMPONENTS = [
   "FilterChipStrip",
   "TemplateCards",
   "ShortcutsHelp",
+  "WireStageTurn",
 ] as const;
 
 const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
@@ -73,6 +74,7 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "ShortcutsHelp",
   "TemplateCards",
   "UserMenu",
+  "WireStageTurn",
 ];
 
 describe("audit surface — coverage snapshot", () => {
@@ -135,6 +137,7 @@ import { PluginCard } from "@/components/catalog/PluginCard";
 import { FilterChipStrip, type CatalogFilters } from "@/components/catalog/FilterChipStrip";
 import { TemplateCards } from "@/components/chat/TemplateCards";
 import { ShortcutsHelp } from "@/components/common/ShortcutsHelp";
+import { WireStageTurn } from "@/components/chat/guided/WireStageTurn";
 
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -145,6 +148,7 @@ import { resetStore } from "@/test/store-helpers";
 import type { InlineSourceSummary } from "@/types/api";
 import type { PluginSummary } from "@/types/index";
 import type { ReadinessRow, AuditReadinessSnapshot } from "@/types/api";
+import type { WireStageData } from "@/types/guided";
 
 // --- Shared store reset ----------------------------------------------------
 
@@ -207,6 +211,78 @@ describe("UserMenu", () => {
 describe("InlineOptOutCheckbox", () => {
   it("has no axe violations", async () => {
     const { container } = render(<InlineOptOutCheckbox />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("WireStageTurn", () => {
+  it("has no axe violations", async () => {
+    const data: WireStageData = {
+      topology: {
+        sources: {
+          source: {
+            id: "source",
+            plugin: "inline_blob",
+            on_success: "chain_in",
+          },
+        },
+        nodes: [
+          {
+            id: "scrape",
+            node_type: "transform",
+            plugin: "web_scrape",
+            input: "chain_in",
+            on_success: "scraped",
+            on_error: "scrape_error",
+            routes: null,
+            fork_to: null,
+          },
+          {
+            id: "mapper",
+            node_type: "transform",
+            plugin: "field_mapper",
+            input: "scraped",
+            on_success: "jsonl_out",
+            on_error: null,
+            routes: null,
+            fork_to: null,
+          },
+        ],
+        outputs: [
+          {
+            id: "output:jsonl_out",
+            sink_name: "jsonl_out",
+            plugin: "json",
+          },
+        ],
+      },
+      edge_contracts: [
+        {
+          from: "scrape",
+          to: "mapper",
+          producer_guarantees: ["body"],
+          consumer_requires: ["body"],
+          missing_fields: [],
+          satisfied: true,
+        },
+      ],
+      semantic_contracts: [],
+      warnings: [
+        {
+          type: "prompt_shield",
+          message: "Prompt shield advisory: source text was reviewed.",
+        },
+      ],
+      advisor_findings: "Reviewed.",
+      signoff_outcome: "approved",
+    };
+    const { container } = render(
+      <WireStageTurn
+        data={data}
+        onConfirm={() => {}}
+        confirmDisabled={false}
+      />,
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });

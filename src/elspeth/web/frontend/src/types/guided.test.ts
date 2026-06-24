@@ -16,6 +16,7 @@ import type {
   TurnPayload,
   TurnRecord,
   TurnType,
+  WireStageData,
 } from "./guided";
 
 // Compile-time mutual-extends check.
@@ -150,5 +151,59 @@ describe("guided protocol types", () => {
     };
     // Runtime: just confirm the type guard compiles; value is irrelevant.
     expect(check).toBeTypeOf("function");
+  });
+});
+
+describe("WireStageData wire shape", () => {
+  it("uses topology ids and edge_contracts from/to keys", () => {
+    const data: WireStageData = {
+      topology: {
+        sources: {
+          source: {
+            id: "source",
+            plugin: "inline_blob",
+            on_success: "chain_in",
+          },
+        },
+        nodes: [
+          {
+            id: "scrape",
+            node_type: "transform",
+            plugin: "web_scrape",
+            input: "chain_in",
+            on_success: "scraped",
+            on_error: "scrape_error",
+            routes: { retry: "chain_in" },
+            fork_to: ["audit_stream"],
+          },
+        ],
+        outputs: [
+          {
+            id: "output:jsonl_out",
+            sink_name: "jsonl_out",
+            plugin: "json",
+          },
+        ],
+      },
+      edge_contracts: [
+        {
+          from: "scrape",
+          to: "output:jsonl_out",
+          producer_guarantees: ["url", "body"],
+          consumer_requires: ["body"],
+          missing_fields: [],
+          satisfied: true,
+        },
+      ],
+      semantic_contracts: [],
+      warnings: [],
+      advisor_findings: "Prompt shield warning reviewed.",
+      signoff_outcome: "approved",
+    };
+
+    expect(data.edge_contracts[0].from).toBe("scrape");
+    expect(data.edge_contracts[0].to).toBe("output:jsonl_out");
+    // @ts-expect-error edge_contracts keys are from/to, NOT from_id.
+    expect(data.edge_contracts[0].from_id).toBeUndefined();
   });
 });

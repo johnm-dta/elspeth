@@ -8,8 +8,8 @@ exercises the repair-then-drop flow:
   reason=solver_exhausted; audit record for guided_dropped_to_freeform emitted.
 
 - Repair-succeeds test: first LLM call proposes a bad chain, second proposes a
-  working passthrough chain → HTTP 200 with terminal kind=completed; no drop
-  event emitted.
+  working passthrough chain → HTTP 200 with confirm_wiring, then confirm stamps
+  terminal kind=completed; no drop event emitted.
 """
 
 from __future__ import annotations
@@ -54,6 +54,19 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
     assert resp.status_code == 200, resp.json()
     return resp.json()
+
+
+def _confirm_wiring(client: TestClient, session_id: str) -> dict:
+    return _respond(
+        client,
+        session_id,
+        chosen=["confirm"],
+        edited_values=None,
+        custom_inputs=None,
+        accepted_step_index=None,
+        edit_step_index=None,
+        control_signal=None,
+    )
 
 
 def _seed_blob(client: TestClient, session_id: str) -> tuple[str, str]:
@@ -321,8 +334,8 @@ class TestAutoDropOnSolverExhausted:
 
 
 class TestRepairSucceeds:
-    def test_first_fails_repair_succeeds_returns_completed(self, composer_test_client: TestClient) -> None:
-        """First chain fails, second (repair) succeeds → HTTP 200, terminal=completed."""
+    def test_first_fails_repair_succeeds_returns_confirm_wiring_then_completed(self, composer_test_client: TestClient) -> None:
+        """First chain fails, repair succeeds → confirm_wiring, then completed."""
         session_id = _create_session(composer_test_client)
 
         # Drive Steps 1 + 2 to reach PROPOSE_CHAIN (initial solve: bad plugin).
@@ -347,7 +360,12 @@ class TestRepairSucceeds:
         assert resp.status_code == 200, resp.json()
         body = resp.json()
 
-        # Terminal must be COMPLETED with rendered YAML.
+        assert body["terminal"] is None
+        assert body["guided_session"]["step"] == "step_4_wire"
+        assert body["next_turn"]["type"] == "confirm_wiring"
+
+        body = _confirm_wiring(composer_test_client, session_id)
+
         terminal = body.get("terminal")
         assert terminal is not None
         assert terminal["kind"] == "completed", f"unexpected kind: {terminal}"

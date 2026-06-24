@@ -2,7 +2,7 @@
 
 Verifies the dispatcher's step routing, intra-step turn progression, and
 the happy-path walk from step 1 (SINGLE_SELECT) through step 2.5
-(RECIPE_OFFER) to a COMPLETED terminal state.
+(RECIPE_OFFER) to the wire-confirm stage and then a COMPLETED terminal state.
 
 HTTP transport: SyncASGITestClient (in-process, synchronous — same pattern
 as test_get_guided.py).  The full roundtrip exercises:
@@ -21,7 +21,8 @@ Per spec §3.1, §3.2, §3.3, §5.3:
   - MULTI_SELECT_WITH_CUSTOM at step 2 → handle_step_2_sink + advance;
     server emits RECIPE_OFFER if recipe matched
   - RECIPE_OFFER chosen=["accept"] → handle_step_2_5_recipe_apply;
-    terminal=COMPLETED
+    server emits CONFIRM_WIRING
+  - CONFIRM_WIRING chosen=["confirm"] → terminal=COMPLETED
 
 Error paths (exit_to_freeform, 409 after terminal) live in test_error_paths.py
 (Task 3.6).
@@ -62,6 +63,19 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
     assert resp.status_code == 200, resp.json()
     return resp.json()
+
+
+def _confirm_wiring(client: TestClient, session_id: str) -> dict:
+    return _respond(
+        client,
+        session_id,
+        chosen=["confirm"],
+        edited_values=None,
+        custom_inputs=None,
+        accepted_step_index=None,
+        edit_step_index=None,
+        control_signal=None,
+    )
 
 
 def _seed_blob(client: TestClient, session_id: str) -> tuple[str, str]:
@@ -405,7 +419,7 @@ class TestStep2IntraStep:
 
 
 # ---------------------------------------------------------------------------
-# Step 2.5 — RECIPE_OFFER accept → terminal=COMPLETED
+# Step 2.5 — RECIPE_OFFER accept → CONFIRM_WIRING → terminal=COMPLETED
 # ---------------------------------------------------------------------------
 
 
@@ -468,8 +482,8 @@ class TestStep25RecipeAccept:
         )
         return body, blob_id
 
-    def test_recipe_offer_accept_produces_terminal_completed(self, composer_test_client: TestClient) -> None:
-        """Accepting the recipe offer produces terminal.kind=completed with pipeline YAML."""
+    def test_recipe_offer_accept_returns_confirm_wiring_then_invalid_confirm_reemits(self, composer_test_client: TestClient) -> None:
+        """Accepting the recipe offer redirects to wire; invalid recipe wiring re-emits."""
         session_id = _create_session(composer_test_client)
         recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
         output_path = _outputs_path(composer_test_client, "out.jsonl")
@@ -499,19 +513,24 @@ class TestStep25RecipeAccept:
             },
         )
 
-        assert body["terminal"] is not None
-        assert body["terminal"]["kind"] == "completed"
-        assert body["terminal"]["pipeline_yaml"] is not None
-        assert "source:" in body["terminal"]["pipeline_yaml"]
-        assert body["next_turn"] is None
+        assert body["terminal"] is None
+        assert body["guided_session"]["step"] == "step_4_wire"
+        assert body["next_turn"] is not None
+        assert body["next_turn"]["type"] == "confirm_wiring"
 
-    def test_completed_terminal_reflected_in_guided_session(self, composer_test_client: TestClient) -> None:
-        """After recipe accept, guided_session.terminal is COMPLETED."""
+        body = _confirm_wiring(composer_test_client, session_id)
+        assert body["terminal"] is None
+        assert body["guided_session"]["step"] == "step_4_wire"
+        assert body["next_turn"] is not None
+        assert body["next_turn"]["type"] == "confirm_wiring"
+
+    def test_invalid_recipe_confirm_remains_active_in_guided_session(self, composer_test_client: TestClient) -> None:
+        """After invalid recipe wire confirm, guided_session stays active at STEP_4_WIRE."""
         session_id = _create_session(composer_test_client)
         _recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
         output_path = _outputs_path(composer_test_client, "out.jsonl")
 
-        body = _respond(
+        accept_body = _respond(
             composer_test_client,
             session_id,
             chosen=["accept"],
@@ -529,20 +548,26 @@ class TestStep25RecipeAccept:
             },
         )
 
+        gs = accept_body["guided_session"]
+        assert gs["step"] == "step_4_wire"
+        assert gs["terminal"] is None
+        assert accept_body["next_turn"]["type"] == "confirm_wiring"
+
+        body = _confirm_wiring(composer_test_client, session_id)
         gs = body["guided_session"]
-        assert gs["terminal"] is not None
-        assert gs["terminal"]["kind"] == "completed"
-        assert gs["terminal"]["reason"] is None
+        assert gs["terminal"] is None
+        assert gs["step"] == "step_4_wire"
+        assert body["next_turn"]["type"] == "confirm_wiring"
 
     def test_recipe_state_survives_roundtrip(self, composer_test_client: TestClient) -> None:
-        """After the full walk, a GET /guided re-fetch returns terminal state from DB."""
+        """After recipe accept, GET /guided re-fetch returns active wire state from DB."""
         session_id = _create_session(composer_test_client)
         recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
         output_path = _outputs_path(composer_test_client, "out.jsonl")
         payload = recipe_body["next_turn"]["payload"]
         offered_recipe = payload["recipe_context"]["recipe_name"]
 
-        _respond(
+        accept_body = _respond(
             composer_test_client,
             session_id,
             chosen=["accept"],
@@ -560,12 +585,61 @@ class TestStep25RecipeAccept:
                 },
             },
         )
+        assert accept_body["next_turn"]["type"] == "confirm_wiring"
+        _confirm_wiring(composer_test_client, session_id)
 
         # Re-fetch from DB
         get_body = _get_guided(composer_test_client, session_id)
         gs = get_body["guided_session"]
-        assert gs["terminal"] is not None
-        assert gs["terminal"]["kind"] == "completed"
+        assert gs["terminal"] is None
+        assert gs["step"] == "step_4_wire"
+        assert get_body["next_turn"]["type"] == "confirm_wiring"
+
+    def test_confirm_wiring_malformed_bodies_return_400_after_answered_hash(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
+        output_path = _outputs_path(composer_test_client, "out.jsonl")
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
+
+        accept_body = _respond(
+            composer_test_client,
+            session_id,
+            chosen=["accept"],
+            edited_values={
+                "recipe_name": offered_recipe,
+                "slots": {
+                    **payload["prefilled"],
+                    "source_blob_id": blob_id,
+                    "classifier_template": "Classify: {{ row['text'] }}",
+                    "model": "anthropic/claude-3.5-sonnet",
+                    "api_key_secret": "OPENROUTER_API_KEY",
+                    "required_input_fields": ["text"],
+                    "label_field": "category",
+                    "output_path": output_path,
+                },
+            },
+        )
+        assert accept_body["next_turn"]["type"] == "confirm_wiring"
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["accept"],
+                "edited_values": None,
+                "custom_inputs": None,
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+        )
+
+        assert resp.status_code == 400, resp.json()
+        assert "confirm_wiring response must be exactly" in resp.json()["detail"]
+
+        body = _get_guided(composer_test_client, session_id)
+        confirm_record = next(r for r in body["guided_session"]["history"] if r["turn_type"] == "confirm_wiring")
+        assert confirm_record["response_hash"] is not None
 
     # ---- Contract-violation negative tests for chosen=["accept"] -----------
     # Defends against silent ``.get()`` defaults that rewrite a malformed

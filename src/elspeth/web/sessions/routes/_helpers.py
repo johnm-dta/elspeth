@@ -77,10 +77,11 @@ from elspeth.web.composer.guided.emitters import (
     build_step_2_single_select_turn,
     build_step_3_propose_chain_turn,
     build_step_3_schema_form_turn,
+    build_step_4_wire_turn,
 )
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
-from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
+from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
@@ -99,6 +100,7 @@ from elspeth.web.composer.guided.steps import (
     handle_step_2_5_recipe_apply,
     handle_step_2_sink,
     handle_step_3_chain_accept,
+    handle_step_4_wire_confirm,
 )
 from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_meta
 from elspeth.web.composer.progress import (
@@ -2391,6 +2393,18 @@ def _summarize_guided_response(
             return "Accepted proposed chain"
         return None
 
+    if turn_type is TurnType.CONFIRM_WIRING:
+        if (
+            response["chosen"] == ["confirm"]
+            and response["edited_values"] is None
+            and response["custom_inputs"] is None
+            and response["accepted_step_index"] is None
+            and response["edit_step_index"] is None
+            and response["control_signal"] is None
+        ):
+            return "Confirmed wiring"
+        return None
+
     raise InvariantError(f"_summarize_guided_response: unhandled turn_type {turn_type!r}")
 
 
@@ -2569,6 +2583,50 @@ def _store_guided_audit_payload(payload_store: Any, payload: Mapping[str, Any]) 
     return payload_ref
 
 
+def _emit_wire_turn(
+    *,
+    state: CompositionState,
+    guided: GuidedSession,
+    recorder: BufferingRecorder,
+    user_id: str,
+    payload_store: Any,
+    prev_step: GuidedStep | None = None,
+    advance_reason: str | None = None,
+) -> tuple[GuidedSession, Turn]:
+    """Emit the STEP_4_WIRE skeleton confirm_wiring turn."""
+    next_turn = build_step_4_wire_turn(validation=state.validate())
+    payload_hash = stable_hash(next_turn["payload"])
+    new_record = TurnRecord(
+        step=GuidedStep.STEP_4_WIRE,
+        turn_type=TurnType.CONFIRM_WIRING,
+        payload_hash=payload_hash,
+        response_hash=None,
+        emitter="server",
+    )
+    if (prev_step is None) != (advance_reason is None):
+        raise InvariantError("wire turn emission must provide prev_step and advance_reason together")
+    if prev_step is not None and advance_reason is not None:
+        emit_step_advanced(
+            recorder,
+            prev=prev_step,
+            next_=GuidedStep.STEP_4_WIRE,
+            reason=advance_reason,
+            composition_version=state.version,
+            actor=user_id,
+        )
+    emit_turn_emitted(
+        recorder,
+        step=GuidedStep.STEP_4_WIRE,
+        turn_type=TurnType.CONFIRM_WIRING,
+        payload_hash=payload_hash,
+        payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
+        emitter="server",
+        composition_version=state.version,
+        actor=user_id,
+    )
+    return _replace(guided, history=(*guided.history, new_record)), next_turn
+
+
 async def _dispatch_guided_respond(
     *,
     state: CompositionState,
@@ -2637,10 +2695,16 @@ async def _dispatch_guided_respond(
     |                   |                           | match_recipe;             |
     |                   |                           | emit RECIPE_OFFER or None |
     | STEP_2_5_RECIPE   | STEP_2_5_RECIPE_MATCH     | RECIPE_OFFER chosen=      |
-    |   (intra/term.)   | (accept: no advance)      | accept → recipe apply;    |
-    |                   |                           | terminal=COMPLETED        |
+    |   (intra/wire)    | (accept: no advance)      | accept → recipe apply;    |
+    |                   |                           | emit CONFIRM_WIRING       |
     | STEP_2_5_RECIPE   | STEP_3_TRANSFORMS         | RECIPE_OFFER chosen=      |
     |   (advancing)     | (step_advance fired)      | build_manually → step 3   |
+    | STEP_3_TRANSFORMS | STEP_3_TRANSFORMS         | PROPOSE_CHAIN accept →    |
+    |   (accept/wire)   | (accept: no advance)      | set pipeline; emit        |
+    |                   |                           | CONFIRM_WIRING            |
+    | STEP_4_WIRE       | STEP_4_WIRE               | CONFIRM_WIRING confirm →  |
+    |                   |                           | validate; terminal or     |
+    |                   |                           | re-emit CONFIRM_WIRING    |
     +-------------------+---------------------------+---------------------------+
 
     ``step_advance`` has already run; ``guided.step`` may already point to the
@@ -3294,9 +3358,16 @@ async def _dispatch_guided_respond(
                     detail=f"Recipe application failed: {handler_result.tool_result}",
                 )
             state = handler_result.state
-            guided = handler_result.session
-            # terminal is now set on guided.terminal (TerminalKind.COMPLETED).
-            return state, guided, None
+            guided, next_turn = _emit_wire_turn(
+                state=state,
+                guided=handler_result.session,
+                recorder=recorder,
+                user_id=user_id,
+                payload_store=payload_store,
+                prev_step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+                advance_reason="recipe_applied",
+            )
+            return state, guided, next_turn
 
         if chosen == ["build_manually"]:
             # step_advance already advanced to STEP_3.  Solve the chain via the LLM.
@@ -3535,8 +3606,16 @@ async def _dispatch_guided_respond(
                         session_id=session_id,
                     )
                     if repair_result.tool_result.success:
-                        # Repair succeeded: wizard completes normally.
-                        return repair_result.state, repair_result.session, None
+                        guided, next_turn = _emit_wire_turn(
+                            state=repair_result.state,
+                            guided=repair_result.session,
+                            recorder=recorder,
+                            user_id=user_id,
+                            payload_store=payload_store,
+                            prev_step=GuidedStep.STEP_3_TRANSFORMS,
+                            advance_reason="auto_advanced",
+                        )
+                        return repair_result.state, guided, next_turn
 
                     # Repair also failed. Mark solver exhausted and auto-drop to freeform.
                     # Build the validation_result dict from the repair failure (Tier 1
@@ -3569,8 +3648,16 @@ async def _dispatch_guided_respond(
                     # Return 200 with terminal — auto-drop is a clean wizard outcome.
                     return state, new_guided, None
 
-                # handler_result.session.terminal is COMPLETED on success.
-                return handler_result.state, handler_result.session, None
+                guided, next_turn = _emit_wire_turn(
+                    state=handler_result.state,
+                    guided=handler_result.session,
+                    recorder=recorder,
+                    user_id=user_id,
+                    payload_store=payload_store,
+                    prev_step=GuidedStep.STEP_3_TRANSFORMS,
+                    advance_reason="user_advanced",
+                )
+                return handler_result.state, guided, next_turn
             if chosen == ["reject"]:
                 raise HTTPException(
                     status_code=501,
@@ -3672,6 +3759,44 @@ async def _dispatch_guided_respond(
             status_code=501,
             detail="Step 3 clarifying question handling is not yet implemented.",
         )
+
+    # --- STEP_4_WIRE turns ----------------------------------------------
+    if current_step is GuidedStep.STEP_4_WIRE:
+        if current_turn_type is not TurnType.CONFIRM_WIRING:
+            raise HTTPException(
+                status_code=400,
+                detail=f"STEP_4_WIRE expects confirm_wiring; got {current_turn_type!r}.",
+            )
+        if (
+            turn_response["chosen"] != ["confirm"]
+            or turn_response["edited_values"] is not None
+            or turn_response["custom_inputs"] is not None
+            or turn_response["accepted_step_index"] is not None
+            or turn_response["edit_step_index"] is not None
+            or turn_response["control_signal"] is not None
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "confirm_wiring response must be exactly chosen=['confirm'] "
+                    "with edited_values/custom_inputs/step indices/control_signal all null "
+                    "(exit_to_freeform is handled before dispatch)."
+                ),
+            )
+
+        handler_result = handle_step_4_wire_confirm(state=state, session=guided)
+        guided = handler_result.session
+        if guided.terminal is not None:
+            return handler_result.state, guided, None
+
+        guided, next_turn = _emit_wire_turn(
+            state=handler_result.state,
+            guided=guided,
+            recorder=recorder,
+            user_id=user_id,
+            payload_store=payload_store,
+        )
+        return handler_result.state, guided, next_turn
 
     # Unhandled branch — this is a dispatcher gap, not a user error.
     raise InvariantError(
@@ -3863,6 +3988,7 @@ __all__ = [
     "_composer_progress_sink",
     "_composition_proposal_response",
     "_dispatch_guided_respond",
+    "_emit_wire_turn",
     "_extract_runtime_model_snapshot",
     "_failed_turn_response_body",
     "_first_message_line",
@@ -3918,6 +4044,7 @@ __all__ = [
     "build_step_2_single_select_turn",
     "build_step_3_propose_chain_turn",
     "build_step_3_schema_form_turn",
+    "build_step_4_wire_turn",
     "cast",
     "chat_turn_audit_envelope",
     "client_cancelled_progress_event",
@@ -3940,6 +4067,7 @@ __all__ = [
     "handle_step_2_5_recipe_apply",
     "handle_step_2_sink",
     "handle_step_3_chain_accept",
+    "handle_step_4_wire_confirm",
     "insert",
     "inspect_blob_content",
     "json",

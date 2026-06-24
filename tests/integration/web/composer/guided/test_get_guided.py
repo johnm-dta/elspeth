@@ -666,6 +666,53 @@ class TestGetGuidedFullStateRebuild:
         assert len(payload["steps"]) == 1
         assert payload["steps"][0]["plugin"] == "rename"
 
+    def test_step_4_wire_returns_confirm_wiring_turn_idempotently(self, composer_test_client: TestClient) -> None:
+        """GET /guided at STEP_4_WIRE rebuilds the skeleton confirm_wiring turn."""
+        session_id = _create_session(composer_test_client)
+
+        guided_dict = {
+            "step": "step_4_wire",
+            "history": [],
+            "step_1_result": self._make_source_resolved_dict(),
+            "step_2_result": self._make_sink_resolved_dict(),
+            "step_3_proposal": {
+                "steps": [
+                    {
+                        "plugin": "passthrough",
+                        "options": {"schema": {"mode": "observed"}},
+                        "rationale": "identity chain",
+                    }
+                ],
+                "why": "Rows already match.",
+            },
+            "terminal": None,
+            "transition_consumed": False,
+            "step_1_source_intent": None,
+            "step_2_sink_intent": None,
+            "step_2_5_recipe_offer": None,
+            "step_2_chosen_plugin": None,
+            "chat_history": [],
+            "chat_turn_seq": 0,
+        }
+        _seed_guided_session(composer_test_client, session_id, guided_dict)
+
+        first = _get_guided(composer_test_client, session_id)
+        second = _get_guided(composer_test_client, session_id)
+
+        assert first["guided_session"]["step"] == "step_4_wire"
+        assert first["next_turn"] is not None
+        assert first["next_turn"]["type"] == "confirm_wiring"
+        assert first["next_turn"]["step_index"] == 4
+        assert set(first["next_turn"]["payload"]) == {
+            "topology",
+            "edge_contracts",
+            "semantic_contracts",
+        }
+        wire_records = [r for r in second["guided_session"]["history"] if r["step"] == "step_4_wire"]
+        assert len(wire_records) == 1
+        assert wire_records[0]["turn_type"] == "confirm_wiring"
+        assert second["next_turn"]["type"] == "confirm_wiring"
+
     # ------------------------------------------------------------------
     # M4: Step 2 intra-step rebuild (Codex #10)
     # ------------------------------------------------------------------

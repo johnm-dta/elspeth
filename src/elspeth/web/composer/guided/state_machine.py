@@ -731,9 +731,9 @@ def _advance_step_2_5(
     - chosen == ["accept"]: the session stays at STEP_2_5 with no directive.
       The endpoint handler (Task 3.3 / Errata C2) detects response["chosen"] ==
       ["accept"] and invokes ``_execute_apply_pipeline_recipe`` to commit the
-      recipe and produce a COMPLETED terminal. step_advance is pure and does not
-      run apply_recipe; emitting emit_turn_answered is the handler's
-      responsibility.
+      recipe, then moves the session to STEP_4_WIRE and emits confirm_wiring.
+      step_advance is pure and does not run apply_recipe; emitting
+      emit_turn_answered is the handler's responsibility.
     - chosen == ["build_manually"]: advance to STEP_3_TRANSFORMS with a
       ``guided_step_advanced`` directive.
 
@@ -747,8 +747,9 @@ def _advance_step_2_5(
     if list(chosen) == ["accept"]:
         # Endpoint handler reads response["chosen"] == ["accept"] and runs
         # apply_recipe (Errata C2). step_advance leaves the session at
-        # STEP_2_5 unchanged; the handler advances to terminal=COMPLETED after
-        # committing. No directive here — the handler emits emit_turn_answered.
+        # STEP_2_5 unchanged; the handler commits, advances to STEP_4_WIRE, and
+        # emits confirm_wiring. No directive here — the handler emits
+        # emit_turn_answered.
         return (session, None, None, [])
     if list(chosen) == ["build_manually"]:
         directives = [

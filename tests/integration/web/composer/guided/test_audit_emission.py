@@ -311,6 +311,40 @@ def _fake_llm_bad_plugin() -> SimpleNamespace:
     )
 
 
+def _fake_llm_passthrough() -> SimpleNamespace:
+    """LiteLLM-shaped response proposing a valid single-step passthrough chain."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps(
+                                    {
+                                        "turn_type": "propose_chain",
+                                        "payload": {
+                                            "steps": [
+                                                {
+                                                    "plugin": "passthrough",
+                                                    "options": {"schema": {"mode": "observed"}},
+                                                    "rationale": "identity chain",
+                                                }
+                                            ],
+                                            "why": "rows already match the sink schema",
+                                        },
+                                    }
+                                ),
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — Recipe-match happy path audit emission
 # ---------------------------------------------------------------------------
@@ -468,6 +502,10 @@ class TestRecipeMatchAuditEmission:
         assert len(guided_invocations["guided_step_advanced"]) >= 1, (
             f"expected at least one guided_step_advanced event; got none. All guided events: {guided_invocations}"
         )
+        assert any(
+            event["prev_step"] == "step_2_5_recipe_match" and event["next_step"] == "step_4_wire" and event["reason"] == "recipe_applied"
+            for event in guided_invocations["guided_step_advanced"]
+        )
 
     def test_recipe_accept_emits_no_drop_events(self, composer_test_client: TestClient) -> None:
         """guided_dropped_to_freeform fires ZERO times on the recipe-accept happy path."""
@@ -497,13 +535,99 @@ class TestRecipeMatchAuditEmission:
             },
         )
 
-        # Confirm this is actually the COMPLETED terminal (not a drop).
-        assert final_body["terminal"] is not None
-        assert final_body["terminal"]["kind"] == "completed", f"expected terminal.kind=completed, got: {final_body['terminal']}"
+        assert final_body["terminal"] is None
+        assert final_body["guided_session"]["step"] == "step_4_wire"
+        assert final_body["next_turn"]["type"] == "confirm_wiring"
 
         guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
         assert guided_invocations["guided_dropped_to_freeform"] == [], (
             f"expected no guided_dropped_to_freeform events on happy path; got: {guided_invocations['guided_dropped_to_freeform']}"
+        )
+
+
+class TestWireAuditEmission:
+    def test_recipe_accept_to_wire_emits_payload_ref_and_recipe_reason(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
+        output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
+        payload = recipe_body["next_turn"]["payload"]
+        offered_recipe = payload["recipe_context"]["recipe_name"]
+
+        body = _respond(
+            composer_test_client,
+            session_id,
+            chosen=["accept"],
+            edited_values={
+                "recipe_name": offered_recipe,
+                "slots": {
+                    **payload["prefilled"],
+                    "source_blob_id": blob_id,
+                    "classifier_template": "Classify: {{ row['text'] }}",
+                    "model": "anthropic/claude-3.5-sonnet",
+                    "api_key_secret": "OPENROUTER_API_KEY",
+                    "required_input_fields": ["text"],
+                    "label_field": "category",
+                    "output_path": output_path,
+                },
+            },
+        )
+
+        assert body["next_turn"]["type"] == "confirm_wiring"
+        guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
+        assert any(
+            event["prev_step"] == "step_2_5_recipe_match" and event["next_step"] == "step_4_wire" and event["reason"] == "recipe_applied"
+            for event in guided_invocations["guided_step_advanced"]
+        )
+        wire_emits = [
+            event
+            for event in guided_invocations["guided_turn_emitted"]
+            if event["step_index"] == "step_4_wire" and event["turn_type"] == "confirm_wiring"
+        ]
+        assert wire_emits
+        _assert_payload_ref_retrievable(
+            composer_test_client,
+            payload_ref=wire_emits[-1]["payload_payload_id"],
+            expected_hash=wire_emits[-1]["payload_hash"],
+        )
+
+    def test_direct_chain_accept_to_wire_emits_user_advanced(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough(),
+        ):
+            _drive_to_step_3_propose_chain(composer_test_client, session_id)
+            body = _respond(composer_test_client, session_id, chosen=["accept"])
+
+        assert body["next_turn"]["type"] == "confirm_wiring"
+        guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
+        assert any(
+            event["prev_step"] == "step_3_transforms" and event["next_step"] == "step_4_wire" and event["reason"] == "user_advanced"
+            for event in guided_invocations["guided_step_advanced"]
+        )
+
+    def test_repair_success_to_wire_emits_auto_advanced(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_bad_plugin(),
+        ):
+            _drive_to_step_3_propose_chain(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=[_fake_llm_passthrough()],
+        ):
+            body = _respond(composer_test_client, session_id, chosen=["accept"])
+
+        assert body["next_turn"]["type"] == "confirm_wiring"
+        guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
+        assert any(
+            event["prev_step"] == "step_3_transforms" and event["next_step"] == "step_4_wire" and event["reason"] == "auto_advanced"
+            for event in guided_invocations["guided_step_advanced"]
         )
 
 

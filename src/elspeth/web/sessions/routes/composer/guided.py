@@ -67,6 +67,7 @@ from .._helpers import (
     build_step_2_single_select_turn,
     build_step_3_propose_chain_turn,
     build_step_3_schema_form_turn,
+    build_step_4_wire_turn,
     contextlib,
     datetime,
     deep_thaw,
@@ -137,6 +138,9 @@ def _build_get_guided_turn(
       if the proposal is absent (LLM call has not completed; should
       not occur in practice — guarded defensively to avoid a crash).
 
+    - STEP_4_WIRE: rebuild the skeleton ``confirm_wiring`` turn from current
+      validation without mutating history.
+
     Returns:
         A ``Turn`` TypedDict, or ``None`` when the step has no rebuildable
         turn (no-recipe STEP_2_5 path, or STEP_3 without a proposal).
@@ -196,6 +200,8 @@ def _build_get_guided_turn(
         # No proposal yet — LLM call has not completed; return None and let the
         # idempotency machinery handle it (no TurnRecord emitted; client retries).
         return None
+    if step is GuidedStep.STEP_4_WIRE:
+        return build_step_4_wire_turn(validation=state.validate())
     return None
 
 
@@ -1131,6 +1137,34 @@ async def post_guided_respond(
                         temperature=settings.composer_temperature,
                         seed=settings.composer_seed,
                     )
+                except HTTPException:
+                    # Dispatcher-level 400s happen after the turn has been
+                    # answered and audited. Persist the response_hash on that
+                    # TurnRecord so a rejected confirm remains a durable part of
+                    # the guided transcript, then re-raise the original HTTP
+                    # response.
+                    new_state = _replace(state, guided_session=guided)
+                    existing_meta_error: dict[str, Any] = {}
+                    if state_record is not None and state_record.composer_meta is not None:
+                        existing_meta_error = dict(deep_thaw(state_record.composer_meta))
+                    error_meta = {**existing_meta_error, "guided_session": guided.to_dict()}
+                    state_d_error = new_state.to_dict()
+                    state_data_error = CompositionStateData(
+                        sources=state_d_error["sources"],
+                        nodes=state_d_error["nodes"],
+                        edges=state_d_error["edges"],
+                        outputs=state_d_error["outputs"],
+                        metadata_=state_d_error["metadata"],
+                        is_valid=False,
+                        validation_errors=None,
+                        composer_meta=error_meta,
+                    )
+                    state_record_out = await service.save_composition_state(
+                        session_id,
+                        state_data_error,
+                        provenance="convergence_persist",
+                    )
+                    raise
                 except InvariantError as exc:
                     # Same B1-sanitization rationale as the step_advance
                     # catch above: ``str(exc)`` from a ``from_dict`` site

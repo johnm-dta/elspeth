@@ -20,6 +20,7 @@ from sqlalchemy import Engine
 
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.recipe_match import RecipeMatch
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
@@ -225,12 +226,11 @@ def handle_step_2_5_recipe_apply(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> StepHandlerResult:
-    """Apply the matched recipe and mark the session COMPLETED.
+    """Apply the matched recipe and redirect the session to the wire stage.
 
     On success the returned state is the recipe-applied pipeline,
-    session.terminal is TerminalState(COMPLETED, reason=None,
-    pipeline_yaml=<rendered>), and tool_result is the canonical
-    ToolResult from _execute_apply_pipeline_recipe.
+    session.step is STEP_4_WIRE, session.terminal remains unset, and
+    tool_result is the canonical ToolResult from _execute_apply_pipeline_recipe.
 
     On failure the state and session are unchanged, tool_result
     reflects the failure; the route layer will re-emit the recipe-
@@ -259,13 +259,7 @@ def handle_step_2_5_recipe_apply(
             tool_result=tool_result,
         )
 
-    yaml_text = generate_yaml(tool_result.updated_state)
-    terminal = TerminalState(
-        kind=TerminalKind.COMPLETED,
-        reason=None,
-        pipeline_yaml=yaml_text,
-    )
-    new_session = dataclasses.replace(session, terminal=terminal)
+    new_session = dataclasses.replace(session, step=GuidedStep.STEP_4_WIRE)
 
     return StepHandlerResult(
         state=tool_result.updated_state,
@@ -284,7 +278,7 @@ def handle_step_3_chain_accept(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> StepHandlerResult:
-    """Commit *proposal* atomically via _execute_set_pipeline and terminate the session.
+    """Commit *proposal* atomically via _execute_set_pipeline and redirect to wire.
 
     Reconstructs the full pipeline spec from the existing single guided source
     + state.outputs and the new transforms from the proposal.
@@ -300,10 +294,10 @@ def handle_step_3_chain_accept(
         idx=N-1: input=f"chain_{N-2}", on_success="main"          (N>1)
         outputs: unchanged — still consume "main"
 
-    On _execute_set_pipeline success the session terminal is COMPLETED with
-    rendered YAML and step_3_proposal is recorded. On failure the state and
-    session are unchanged and the route layer re-emits the propose_chain turn
-    with the validation errors.
+    On _execute_set_pipeline success the session moves to STEP_4_WIRE and
+    step_3_proposal is recorded; the wire confirm handler owns the COMPLETED
+    terminal stamp. On failure the state and session are unchanged and the
+    route layer re-emits the propose_chain turn with the validation errors.
 
     Args:
         state: Current composition state. MUST have a committed source and
@@ -387,16 +381,10 @@ def handle_step_3_chain_accept(
             tool_result=tool_result,
         )
 
-    yaml_text = generate_yaml(tool_result.updated_state)
-    terminal = TerminalState(
-        kind=TerminalKind.COMPLETED,
-        reason=None,
-        pipeline_yaml=yaml_text,
-    )
     new_session = dataclasses.replace(
         session,
+        step=GuidedStep.STEP_4_WIRE,
         step_3_proposal=proposal,
-        terminal=terminal,
     )
 
     return StepHandlerResult(
@@ -404,3 +392,36 @@ def handle_step_3_chain_accept(
         session=new_session,
         tool_result=tool_result,
     )
+
+
+def handle_step_4_wire_confirm(
+    *,
+    state: CompositionState,
+    session: GuidedSession,
+) -> StepHandlerResult:
+    """Confirm wiring and stamp COMPLETED only when validation is clean.
+
+    This is the terminal-stamp gate for guided mode. Recipe apply and chain
+    accept already commit the pipeline and move the session to STEP_4_WIRE; this
+    handler re-runs validation and either stamps the completed terminal with
+    rendered YAML or leaves the session open for another wire-stage turn.
+    """
+    validation = state.validate()
+    tool_result = ToolResult(
+        success=validation.is_valid,
+        updated_state=state,
+        validation=validation,
+        affected_nodes=(),
+        data=None,
+    )
+    if not validation.is_valid:
+        return StepHandlerResult(state=state, session=session, tool_result=tool_result)
+
+    yaml_text = generate_yaml(state)
+    terminal = TerminalState(
+        kind=TerminalKind.COMPLETED,
+        reason=None,
+        pipeline_yaml=yaml_text,
+    )
+    new_session = dataclasses.replace(session, terminal=terminal)
+    return StepHandlerResult(state=state, session=new_session, tool_result=tool_result)

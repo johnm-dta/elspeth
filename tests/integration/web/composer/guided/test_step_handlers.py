@@ -7,6 +7,7 @@ helpers; only the catalog is constructed via the public test seam
 
 from __future__ import annotations
 
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -248,9 +249,9 @@ class TestStep25Handler:
         pm.register_builtin_plugins()
         return CatalogServiceImpl(pm)
 
-    def test_apply_recipe_terminates_completed_with_yaml(self, _seeded) -> None:
+    def test_apply_recipe_redirects_to_wire_with_committed_state(self, _seeded) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep
         from elspeth.web.composer.guided.recipe_match import RecipeMatch
-        from elspeth.web.composer.guided.state_machine import TerminalKind
         from elspeth.web.composer.guided.steps import handle_step_2_5_recipe_apply
 
         engine, session_id, blob_id = _seeded
@@ -285,11 +286,8 @@ class TestStep25Handler:
         assert result.tool_result.success is True, f"recipe application failed: {getattr(result.tool_result, 'data', result.tool_result)}"
         assert result.state.sources.get("source") is not None
         assert len(result.state.outputs) >= 1
-        assert result.session.terminal is not None
-        assert result.session.terminal.kind is TerminalKind.COMPLETED
-        assert result.session.terminal.reason is None
-        assert result.session.terminal.pipeline_yaml is not None
-        assert "source:" in result.session.terminal.pipeline_yaml
+        assert result.session.terminal is None
+        assert result.session.step is GuidedStep.STEP_4_WIRE
 
     def test_apply_recipe_failure_returns_state_unchanged(self) -> None:
         from elspeth.web.composer.guided.recipe_match import RecipeMatch
@@ -326,10 +324,10 @@ class TestStep3Handler:
     switched to `passthrough` to avoid coupling the test to that drift.
     """
 
-    def test_chain_accepted_commits_and_completes(self) -> None:
+    def test_chain_accepted_commits_and_redirects_to_wire(self) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep
         from elspeth.web.composer.guided.state_machine import (
             ChainProposal,
-            TerminalKind,
         )
         from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
 
@@ -392,11 +390,8 @@ class TestStep3Handler:
         assert result.state.nodes[0].on_success == "main"
         assert result.state.sources.get("source") is not None
         assert result.state.sources["source"].on_success == "chain_in"  # rewired
-        assert result.session.terminal is not None
-        assert result.session.terminal.kind == TerminalKind.COMPLETED
-        assert result.session.terminal.reason is None
-        assert result.session.terminal.pipeline_yaml is not None
-        assert len(result.session.terminal.pipeline_yaml) > 0
+        assert result.session.terminal is None
+        assert result.session.step is GuidedStep.STEP_4_WIRE
         assert result.session.step_3_proposal is proposal
 
     def test_refuses_empty_proposal(self) -> None:
@@ -426,3 +421,88 @@ class TestStep3Handler:
                 catalog=create_catalog_service(),
                 proposal=proposal,
             )
+
+
+class TestTerminalStampInvariant:
+    """The accept seams redirect to STEP_4_WIRE; only wire confirm completes."""
+
+    def test_chain_accept_redirects_to_wire_not_completed(self) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep
+        from elspeth.web.composer.guided.state_machine import ChainProposal, TerminalKind
+        from elspeth.web.composer.guided.steps import (
+            handle_step_3_chain_accept,
+            handle_step_4_wire_confirm,
+        )
+
+        state = _empty_state()
+        session = GuidedSession.initial()
+        catalog = create_catalog_service()
+
+        step_1 = handle_step_1_source(
+            state=state,
+            session=session,
+            catalog=catalog,
+            resolved=SourceResolved(
+                plugin="csv",
+                options={"path": "x.csv", "schema": {"mode": "observed"}},
+                observed_columns=("price",),
+                sample_rows=({"price": "1.99"},),
+            ),
+        )
+        step_2 = handle_step_2_sink(
+            state=step_1.state,
+            session=step_1.session,
+            catalog=catalog,
+            resolved=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={"path": "out.jsonl", "schema": {"mode": "observed"}},
+                        required_fields=("price",),
+                        schema_mode="observed",
+                    ),
+                ),
+            ),
+        )
+        proposal = ChainProposal(
+            steps=(
+                {
+                    "plugin": "passthrough",
+                    "options": {"schema": {"mode": "observed"}},
+                    "rationale": "echo rows",
+                },
+            ),
+            why="single-step chain",
+        )
+
+        result = handle_step_3_chain_accept(
+            state=step_2.state,
+            session=step_2.session,
+            catalog=catalog,
+            proposal=proposal,
+        )
+
+        assert result.tool_result.success is True
+        assert result.session.terminal is None
+        assert result.session.step is GuidedStep.STEP_4_WIRE
+        assert result.session.step_3_proposal is proposal
+
+        wire = handle_step_4_wire_confirm(state=result.state, session=result.session)
+
+        assert wire.tool_result.success is True
+        assert wire.session.terminal is not None
+        assert wire.session.terminal.kind is TerminalKind.COMPLETED
+        assert wire.session.terminal.pipeline_yaml is not None
+        assert len(wire.session.terminal.pipeline_yaml) > 0
+
+    def test_wire_confirm_invalid_pipeline_leaves_terminal_unset(self) -> None:
+        from elspeth.web.composer.guided.protocol import GuidedStep
+        from elspeth.web.composer.guided.steps import handle_step_4_wire_confirm
+
+        session = replace(GuidedSession.initial(), step=GuidedStep.STEP_4_WIRE)
+
+        result = handle_step_4_wire_confirm(state=_empty_state(), session=session)
+
+        assert result.tool_result.success is False
+        assert result.session.terminal is None
+        assert result.session.step is GuidedStep.STEP_4_WIRE

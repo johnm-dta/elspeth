@@ -2,8 +2,9 @@
 
 Walks the wizard from new-session through Step 1 (CSV source) + Step 2
 (JSON sink, no recipe match by virtue of non-classifier ``required_fields``)
-+ Step 3 (LLM-proposed chain, accepted) to a COMPLETED terminal with
-rendered YAML.  The LLM is stubbed by patching ``_litellm_acompletion`` on
++ Step 3 (LLM-proposed chain, accepted) to the wire-confirm stage and then a
+COMPLETED terminal with rendered YAML.  The LLM is stubbed by patching
+``_litellm_acompletion`` on
 the chain_solver module the same way the dedicated chain-solver tests do.
 
 Reject and clarifying-question paths are not implemented in this endpoint;
@@ -42,6 +43,19 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
     assert resp.status_code == 200, resp.json()
     return resp.json()
+
+
+def _confirm_wiring(client: TestClient, session_id: str) -> dict:
+    return _respond(
+        client,
+        session_id,
+        chosen=["confirm"],
+        edited_values=None,
+        custom_inputs=None,
+        accepted_step_index=None,
+        edit_step_index=None,
+        control_signal=None,
+    )
 
 
 def _seed_blob(client: TestClient, session_id: str) -> tuple[str, str]:
@@ -162,8 +176,8 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
 
 
 class TestStep3ChainAccept:
-    def test_csv_to_json_step_3_accept_completes_session(self, composer_test_client: TestClient) -> None:
-        """End-to-end: Step 1 + Step 2 + Step 3 ACCEPT → terminal=COMPLETED with YAML."""
+    def test_csv_to_json_step_3_accept_returns_confirm_wiring_then_completes_session(self, composer_test_client: TestClient) -> None:
+        """End-to-end: Step 3 ACCEPT → confirm_wiring → terminal=COMPLETED."""
         session_id = _create_session(composer_test_client)
 
         # Drive Steps 1 + 2 + the auto-advance to Step 3 (with chain-solver stubbed).
@@ -186,8 +200,14 @@ class TestStep3ChainAccept:
             assert payload["steps"][0]["plugin"] == "passthrough"
 
             # Accept the chain.  handle_step_3_chain_accept commits via
-            # _execute_set_pipeline and stamps terminal=COMPLETED.
+            # _execute_set_pipeline and redirects to the wire stage.
             accept_body = _respond(composer_test_client, session_id, chosen=["accept"])
+
+        assert accept_body["terminal"] is None
+        assert accept_body["guided_session"]["step"] == "step_4_wire"
+        assert accept_body["next_turn"]["type"] == "confirm_wiring"
+
+        accept_body = _confirm_wiring(composer_test_client, session_id)
 
         terminal = accept_body["terminal"]
         assert terminal is not None

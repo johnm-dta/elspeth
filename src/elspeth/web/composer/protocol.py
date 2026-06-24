@@ -12,7 +12,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 if TYPE_CHECKING:
+    from elspeth.web.composer.audit import BufferingRecorder
     from elspeth.web.composer.guided.state_machine import TerminalState
+    from elspeth.web.composer.service import AdvisorCheckpointVerdict
 
 from elspeth.contracts.composer_audit import ComposerToolInvocation
 from elspeth.contracts.composer_llm_audit import ComposerLLMCall
@@ -776,6 +778,29 @@ class ComposerService(Protocol):
         the run-time ``UnresolvedInterpretationPlaceholderError`` gate stays the
         hard backstop. Idempotent; a no-op when there is no session/persisted
         state. See P3.1 for the concrete implementation.
+        """
+        ...
+
+    async def run_signoff_checkpoint(
+        self,
+        *,
+        state: CompositionState,
+        session_id: str | None,
+        recorder: BufferingRecorder | None,
+        progress: ComposerProgressSink | None = None,
+    ) -> AdvisorCheckpointVerdict:
+        """Run the deterministic END advisor sign-off checkpoint (phase='end').
+
+        Public façade over the private ``_run_advisor_checkpoint(phase='end')``
+        so the guided STEP_4_WIRE dispatcher — which holds a ``ComposerService``
+        handle but not the impl's private methods — can request the whole-
+        pipeline structural sign-off. Non-raising: a sustained provider failure
+        yields ``ok=False`` (unavailable); a FLAGGED sign-off yields
+        ``blocking=True``; CLEAN yields ``ok=True, blocking=False``. The caller
+        (the wire branch) maps the verdict to terminal/redirect per D13.
+
+        ``recorder`` threads the advisor call's audit sidecar; ``progress``
+        (when set) receives a ``calling_model`` event before the call.
         """
         ...
 

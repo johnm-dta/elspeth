@@ -382,11 +382,11 @@ class TestGuidedSession:
         assert restored.observed_headers == ("name", "age")
 
     def test_guided_session_schema_version_bumped_for_inspection_facts(self) -> None:
-        assert GUIDED_SESSION_SCHEMA_VERSION == 5
+        assert GUIDED_SESSION_SCHEMA_VERSION == 6
 
     def test_guided_session_to_dict_includes_schema_version(self) -> None:
         sess = GuidedSession.initial()
-        assert sess.to_dict()["schema_version"] == 5
+        assert sess.to_dict()["schema_version"] == 6
 
     def test_guided_session_requires_schema_version(self) -> None:
         current = GuidedSession.initial().to_dict()

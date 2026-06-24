@@ -36,9 +36,9 @@ from elspeth.web.composer.guided.resolved import (
 )
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-# Pre-v5 persisted sessions are intentionally incompatible with v5: the
+# Pre-v6 persisted sessions are intentionally incompatible with v6: the
 # operator must delete the guided sessions DB before deploying this change.
-GUIDED_SESSION_SCHEMA_VERSION = 5
+GUIDED_SESSION_SCHEMA_VERSION = 6
 
 if TYPE_CHECKING:
     # Imported for type annotations only — avoids a circular dependency.

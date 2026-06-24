@@ -10,6 +10,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     GUIDED_SESSION_SCHEMA_VERSION,
@@ -382,11 +383,11 @@ class TestGuidedSession:
         assert restored.observed_headers == ("name", "age")
 
     def test_guided_session_schema_version_bumped_for_inspection_facts(self) -> None:
-        assert GUIDED_SESSION_SCHEMA_VERSION == 5
+        assert GUIDED_SESSION_SCHEMA_VERSION == 6
 
     def test_guided_session_to_dict_includes_schema_version(self) -> None:
         sess = GuidedSession.initial()
-        assert sess.to_dict()["schema_version"] == 5
+        assert sess.to_dict()["schema_version"] == 6
 
     def test_guided_session_requires_schema_version(self) -> None:
         current = GuidedSession.initial().to_dict()
@@ -423,6 +424,96 @@ class TestGuidedSession:
 
         with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
             GuidedSession.from_dict(current)
+
+
+class TestGuidedSessionProfileFields:
+    def test_initial_defaults_to_empty_profile(self) -> None:
+        sess = GuidedSession.initial()
+        assert sess.profile == EMPTY_PROFILE
+        assert sess.advisor_checkpoint_passes_used == 0
+        assert sess.advisor_signoff_escape_offered is False
+
+    def test_initial_accepts_profile_argument(self) -> None:
+        sess = GuidedSession.initial(profile=TUTORIAL_PROFILE)
+        assert sess.profile == TUTORIAL_PROFILE
+        assert sess.advisor_checkpoint_passes_used == 0
+
+    def test_to_dict_emits_profile_and_pass_counter(self) -> None:
+        sess = GuidedSession.initial(profile=TUTORIAL_PROFILE)
+        d = sess.to_dict()
+        assert d["profile"] == TUTORIAL_PROFILE.to_dict()
+        assert d["advisor_checkpoint_passes_used"] == 0
+        assert d["advisor_signoff_escape_offered"] is False
+
+    def test_roundtrip_with_tutorial_profile(self) -> None:
+        sess = dataclasses.replace(
+            GuidedSession.initial(profile=TUTORIAL_PROFILE),
+            advisor_checkpoint_passes_used=2,
+            advisor_signoff_escape_offered=True,
+        )
+        restored = GuidedSession.from_dict(sess.to_dict())
+        assert restored == sess
+        assert restored.profile == TUTORIAL_PROFILE
+        assert restored.advisor_checkpoint_passes_used == 2
+        assert restored.advisor_signoff_escape_offered is True
+
+    def test_roundtrip_with_empty_profile(self) -> None:
+        sess = GuidedSession.initial()
+        assert GuidedSession.from_dict(sess.to_dict()) == sess
+
+    def test_from_dict_rejects_missing_profile_key(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        del d["profile"]
+        with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
+            GuidedSession.from_dict(d)
+
+    def test_from_dict_rejects_missing_pass_counter_key(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        del d["advisor_checkpoint_passes_used"]
+        with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
+            GuidedSession.from_dict(d)
+
+    def test_from_dict_rejects_missing_escape_flag_key(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        del d["advisor_signoff_escape_offered"]
+        with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
+            GuidedSession.from_dict(d)
+
+    def test_from_dict_rejects_malformed_profile(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        d["profile"] = {"coaching": True}
+        with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
+            GuidedSession.from_dict(d)
+
+    def test_from_dict_rejects_string_pass_counter(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        d["advisor_checkpoint_passes_used"] = "1"
+        with pytest.raises(InvariantError, match=r"advisor_checkpoint_passes_used"):
+            GuidedSession.from_dict(d)
+
+    def test_from_dict_rejects_bool_as_int_pass_counter(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        d["advisor_checkpoint_passes_used"] = True
+        with pytest.raises(InvariantError, match=r"advisor_checkpoint_passes_used"):
+            GuidedSession.from_dict(d)
+
+    def test_from_dict_rejects_negative_pass_counter(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        d["advisor_checkpoint_passes_used"] = -1
+        with pytest.raises(InvariantError, match=r"advisor_checkpoint_passes_used"):
+            GuidedSession.from_dict(d)
+
+    def test_from_dict_rejects_string_escape_flag(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        d["advisor_signoff_escape_offered"] = "false"
+        with pytest.raises(InvariantError, match=r"advisor_signoff_escape_offered"):
+            GuidedSession.from_dict(d)
+
+    def test_from_dict_rejects_number_escape_flag(self) -> None:
+        d = GuidedSession.initial().to_dict()
+        d["advisor_signoff_escape_offered"] = 1
+        with pytest.raises(InvariantError, match=r"advisor_signoff_escape_offered"):
+            GuidedSession.from_dict(d)
 
 
 # ---------------------------------------------------------------------------

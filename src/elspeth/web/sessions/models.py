@@ -117,7 +117,13 @@ from sqlalchemy.types import JSON
 #   23 → ``run_events.sequence`` added as a durable per-run replay cursor so
 #        websocket reconnects can replay in insertion order and de-duplicate
 #        live queue events already delivered by the persisted replay.
-SESSION_SCHEMA_EPOCH = 23
+#   24 -> no SQL-shape change; bumped in lockstep with GUIDED_SESSION_SCHEMA_VERSION
+#        5->6 (composer_meta JSON adds GuidedSession.profile +
+#        advisor_checkpoint_passes_used + advisor_signoff_escape_offered) so a
+#        stale sessions.db fail-closes at boot via _assert_schema_sentinels instead
+#        of lazy-500-ing per guided row on GuidedSession.from_dict. Pre-release
+#        delete-and-recreate policy; see docs/runbooks/staging-session-db-recreation.md.
+SESSION_SCHEMA_EPOCH = 24
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"

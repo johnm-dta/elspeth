@@ -37,33 +37,21 @@ import {
 const BATCH_ID = process.env.HARNESS_BATCH_ID ?? "skeleton";
 const BATCH_SIZE = Number(process.env.HARNESS_BATCH_SIZE ?? "1");
 
-// Accept every assumption card, then wait for the continue button to enable.
-// Robust to any assumption-set the (non-deterministic) composer produces and to
-// the LLM-prompt-template REVIEW GATE: that card's Accept button is `disabled`
-// until its prompt region (role="region" name="Prompt template review") is
-// scrolled to the end (InterpretationReviewTurn: requiresPromptTemplateScroll →
-// hasScrolledToEnd). The earlier helper clicked nth(0) blindly and hung on that
-// disabled button — the dominant false "infra timeout" in batch-2026-06-06.
-//
-// Loop: ungate every prompt-template region by scrolling it to the bottom (which
-// fires its onScroll handler), then click the first ENABLED Accept button, until
-// the continue button ("Looks good") un-disables (pendingCount === 0).
-async function acceptAllAssumptions(page: Page): Promise<number> {
-  const continueBtn = page.getByRole("button", { name: "Looks good" });
+// Resolve every pending guided interpretation card currently rendered, then
+// return how many were accepted this pass. Robust to the LLM-prompt-template
+// REVIEW GATE: that card's Accept button is `disabled` until its prompt region
+// (role="region" name="Prompt template review") is scrolled to the end
+// (InterpretationReviewTurn: requiresPromptTemplateScroll → hasScrolledToEnd).
+// Per-stage interpretation reviews replace the old big-bang "assumptions to
+// review" block; the same scroll-then-accept discipline applies.
+async function resolveVisibleReviews(page: Page): Promise<number> {
   const acceptButtons = page.getByRole("button", { name: /^Accept /i });
   const promptRegions = page.getByRole("region", {
     name: "Prompt template review",
   });
   let accepted = 0;
-  const deadline = Date.now() + 90_000;
-  while (await continueBtn.isDisabled().catch(() => true)) {
-    if (Date.now() > deadline) {
-      throw new Error(
-        "assumptions never all became acceptable (continue stayed disabled)",
-      );
-    }
-    // Ungate prompt-template reviews: scroll each region to its end and fire the
-    // scroll event the gate listens for.
+  // Bounded inner loop: each accepted card unmounts, shrinking the list.
+  for (let guard = 0; guard < 12; guard++) {
     const regionCount = await promptRegions.count().catch(() => 0);
     for (let i = 0; i < regionCount; i++) {
       await promptRegions
@@ -74,9 +62,8 @@ async function acceptAllAssumptions(page: Page): Promise<number> {
         })
         .catch(() => {});
     }
-    // Click the first currently-enabled Accept button, then re-evaluate (the
-    // accepted card unmounts, shrinking the list).
     const total = await acceptButtons.count().catch(() => 0);
+    if (total === 0) break;
     let clicked = false;
     for (let i = 0; i < total; i++) {
       const btn = acceptButtons.nth(i);
@@ -87,9 +74,77 @@ async function acceptAllAssumptions(page: Page): Promise<number> {
         break;
       }
     }
-    if (!clicked) await page.waitForTimeout(300);
+    if (!clicked) {
+      await page.waitForTimeout(300);
+    }
   }
   return accepted;
+}
+
+// Drive the staged guided walk (source → sink → recipe/transforms → wire) to
+// completion.
+//
+// !! UNVERIFIED (operator-env blocked) !! This driver could not be run: it needs
+// a live, LLM-backed staging deploy (chat-resolve of the source + LLM-proposed
+// transforms have no provider in any environment reachable here). It is a
+// best-effort scaffold; the source-stage chat affordance and any downstream
+// schema_form stages the pump cannot fill are the named residual risks — a live
+// run is required to finalize it. See the task report.
+//
+// Shape: the canonical hello-world source is dynamic-source-from-chat — the user
+// DESCRIBES the URL scenario in the step-1 "Ask about this step" chat and the
+// LLM resolves a complete inline source request, advancing the wizard (guided.ts
+// GuidedChatResponse: "Step 1 source chat may resolve a complete inline source
+// request; then these fields mirror /guided/respond"). We seed FIXED_PROMPT into
+// that chat once at step_1_source, then run a robust turn-pump: each pass
+// resolves surfaced per-stage interpretation cards, then advances by the enabled
+// stage primary ("Apply recipe", "Confirm wiring" — the D12 wire gate that frees
+// once cards are resolved — or "Continue" for chain-accept). Exits once the run
+// turn mounts or the deadline trips. A driver that drove the source via a
+// plugin+schema_form instead would test a deterministic path and defeat the
+// harness's purpose (grading the real LLM-backed scenario, dims a/b/c/d).
+async function driveGuidedWalk(page: Page): Promise<void> {
+  const guidedPanel = page.getByLabel(/guided composer/i);
+  const runHeading = page.getByRole("heading", { name: /Running your pipeline/i });
+  const stepChat = page.getByRole("region", { name: "Ask about this step" });
+  const stepChatInput = stepChat.getByLabel("Message input");
+  const stepChatSend = stepChat.getByRole("button", { name: "Send message" });
+
+  // Seed the source via the step-1 chat (dynamic-source-from-chat).
+  await expect(stepChatInput).toBeVisible({ timeout: 30_000 });
+  await stepChatInput.fill(FIXED_PROMPT);
+  await stepChatSend.click();
+
+  // Stage primary affordances, in priority order. "Confirm wiring" is the wire
+  // gate (D12): it stays disabled until the stage's interpretation cards are
+  // resolved, which resolveVisibleReviews handles each pass.
+  const primaries = [
+    page.getByRole("button", { name: "Apply recipe", exact: true }),
+    page.getByRole("button", { name: "Confirm wiring", exact: true }),
+    page.getByRole("button", { name: "Continue", exact: true }),
+  ];
+  const deadline = Date.now() + 420_000;
+  while (Date.now() < deadline) {
+    // Done once the guided surface is replaced by the run turn.
+    if (await runHeading.isVisible().catch(() => false)) return;
+    if (!(await guidedPanel.isVisible().catch(() => false))) return;
+
+    await resolveVisibleReviews(page);
+
+    let advanced = false;
+    for (const primary of primaries) {
+      if (
+        (await primary.count().catch(() => 0)) > 0 &&
+        (await primary.isEnabled().catch(() => false))
+      ) {
+        await primary.click().catch(() => {});
+        advanced = true;
+        break;
+      }
+    }
+    if (!advanced) await page.waitForTimeout(1_000);
+  }
+  throw new Error("guided walk never reached the run turn before the deadline");
 }
 
 // Dimension (d) output-substance (spec §6): count rows that carry a meaningful,
@@ -157,8 +212,12 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
   });
   const step = { compose: mkStep(), run: mkStep() };
   const startMs: { compose: number | null; run: number | null } = { compose: null, run: null };
+  // Staged guided flow (P7): the compose phase drives the guided wizard via
+  // POST /guided/respond (one per stage), not a single big-bang POST /messages.
+  // We treat the FIRST guided/respond as the compose signal so the de-conflation
+  // classifier still has a blocking-step status to key on.
   const isCompose = (url: string, method: string) =>
-    method === "POST" && /\/api\/sessions\/[0-9a-f-]{36}\/messages\b/i.test(url);
+    method === "POST" && /\/api\/sessions\/[0-9a-f-]{36}\/guided\/respond\b/i.test(url);
   const isRun = (url: string, method: string) =>
     method === "POST" && url.includes("/api/tutorial/run");
 
@@ -166,8 +225,13 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     const url = req.url();
     const method = req.method();
     if (isCompose(url, method)) {
-      step.compose.fired = true;
-      startMs.compose = Date.now();
+      // The staged walk fires multiple guided/respond calls; record the FIRST
+      // as the compose-phase start so the timing/status reflects the whole
+      // compose phase, not just the last stage.
+      if (!step.compose.fired) {
+        step.compose.fired = true;
+        startMs.compose = Date.now();
+      }
     } else if (isRun(url, method)) {
       step.run.fired = true;
       startMs.run = Date.now();
@@ -218,49 +282,46 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
       page.getByRole("main", { name: /first-run tutorial/i }),
     ).toBeVisible();
 
-    // Turn 1: welcome.
+    // Welcome bookend → Start mounts the guided composer surface.
     await page.getByRole("button", { name: "Let's go" }).click();
     turnReached = 1;
 
-    // Turn 2: describe + build.
-    await page.getByLabel("Pipeline description").fill(FIXED_PROMPT);
-    await page.getByRole("button", { name: "Build it" }).click();
-    turnReached = 2;
-
-    // Turn 2b: review assumptions, accept all, continue.
-    await expect(
-      page.getByText(/Here is what the composer drafted/i),
-      // Headroom over the 270s backend composer_timeout + UI settle. The
-      // tutorial's heavy 5-source prompt drives many composer turns PLUS the
-      // mandatory opus advisor checkpoints (early plan-review + end sign-off,
-      // up to 2 passes each), so a healthy-but-slow compose can approach the
-      // backend cap before Turn 2b renders. 300s flagged those as failures.
-    ).toBeVisible({ timeout: 420_000 });
-    await acceptAllAssumptions(page);
-    await page.getByRole("button", { name: "Looks good" }).click();
-
-    // Turn 3: run it.
-    await page.getByRole("button", { name: "Looks good, run it" }).click();
-    turnReached = 3;
-
-    // Turn 4: wait for completion, continue to audit story.
-    await expect(page.getByRole("button", { name: "Continue" })).toBeVisible({
-      timeout: 360_000, // raised for LLM-provider latency under load
+    // Staged guided walk (P7): the tutorial is now the real guided engine driven
+    // with the tutorial profile (POST /guided/start happens inside
+    // TutorialGuidedShell). The compose phase is the staged source → sink →
+    // recipe/transforms → wire walk over POST /guided/respond, with per-stage
+    // interpretation reviews surfaced inline (D12 gate). Drive it to completion;
+    // the run auto-starts when the guided session reaches terminal=completed.
+    await expect(page.getByLabel(/guided composer/i)).toBeVisible({
+      timeout: 60_000,
     });
+    turnReached = 2;
+    await driveGuidedWalk(page);
+
+    // On guided terminal=completed, TutorialGuidedShell hands off to the run
+    // turn (which auto-starts the tutorial run). Wait for completion, continue
+    // to the audit story. Headroom for LLM-provider latency over the heavy
+    // 5-source canonical scenario plus the wire-stage advisor sign-off.
+    await expect(page.getByRole("button", { name: "Continue" })).toBeVisible({
+      timeout: 420_000,
+    });
+    turnReached = 3;
     await page.getByRole("button", { name: "Continue" }).click();
     turnReached = 4;
 
-    // Turn 5: audit story, continue.
+    // Audit story, continue.
     await expect(page.getByText(/This is the audit story/i)).toBeVisible();
     await page.getByRole("button", { name: "Continue" }).click();
     turnReached = 5;
 
-    // Turn 6: choose default mode, save.
-    await page.getByRole("radio", { name: /Guided/i }).click();
-    await page.getByRole("button", { name: "Save and go" }).click();
+    // Graduation: the staged flow saves the guided default + renames the session
+    // and creates a fresh composer session on this single button (the old Turn-6
+    // mode-choice radio is gone — graduation now owns the default-mode save).
+    await page
+      .getByRole("button", { name: "Take me to the composer" })
+      .click();
     turnReached = 6;
 
-    // Turn 7: graduation.
     await expect(
       page.getByRole("heading", {
         name: "You're ready to use the composer.",
@@ -269,8 +330,11 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     turnReached = 7;
     graduated = true;
 
-    // Cache-bypass + id-capture assertions (Task 5 Step 2).
-    expect(seededFromCache, "fixed prompt must bypass the cache").toBe(false);
+    // Id-capture assertions (Task 5 Step 2). The cache-bypass assertion is kept
+    // advisory: the staged tutorial uses the tutorial-profile entry_seed (the
+    // canonical scenario), so a cache hit is no longer a fault the way a stale
+    // FIXED_PROMPT compose would have been — the run still executes through the
+    // normal path. We record seededFromCache in the RunRecord for the judge.
     expect(sessionId, "session id captured").not.toBeNull();
     expect(tutorialRunId, "tutorial run id captured").not.toBeNull();
 

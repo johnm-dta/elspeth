@@ -359,19 +359,33 @@ leaving bare legacy placeholders to the run-time gate. This reuses
                   for event in events
               ):
                   continue
-              await sessions_service.create_pending_interpretation_event(
-                  session_id=UUID(session_id),
-                  composition_state_id=UUID(current_state_id),
-                  affected_node_id=affected_node_id,
-                  tool_call_id=f"backend_auto_surface:{uuid4()}",
-                  user_term=user_term,
-                  kind=site.kind,
-                  llm_draft=llm_draft,
-                  model_identifier=self._model,
-                  model_version=self._model,
-                  provider=self._availability.provider or "unknown",
-                  composer_skill_hash=self._composer_skill_hash,
-              )
+              # W1 backstop: the per-kind precondition above is NECESSARY but not
+              # always SUFFICIENT (e.g. pipeline_decision must additionally pass
+              # validate_pipeline_decision_semantics, which the surfacer does not
+              # replicate). create_pending_interpretation_event raises a ValueError
+              # subclass on any boundary mismatch, and this runs AFTER
+              # save_composition_state at a persist seam with NO outer except — so
+              # an unguarded raise would 500 and wedge the session. Skip the site
+              # instead; it stays fail-closed at the run-time gate (advisory
+              # polarity). Deliberately not slog'd: a skipped advisory surface is
+              # not a telemetry/audit event, matching the existing surfacer's
+              # silent precondition skips.
+              try:
+                  await sessions_service.create_pending_interpretation_event(
+                      session_id=UUID(session_id),
+                      composition_state_id=UUID(current_state_id),
+                      affected_node_id=affected_node_id,
+                      tool_call_id=f"backend_auto_surface:{uuid4()}",
+                      user_term=user_term,
+                      kind=site.kind,
+                      llm_draft=llm_draft,
+                      model_identifier=self._model,
+                      model_version=self._model,
+                      provider=self._availability.provider or "unknown",
+                      composer_skill_hash=self._composer_skill_hash,
+                  )
+              except ValueError:
+                  continue
 
       def _backend_surface_args_for_site(
           self,
@@ -406,6 +420,18 @@ leaving bare legacy placeholders to the run-time gate. This reuses
           if site.kind is InterpretationKind.LLM_MODEL_CHOICE:
               model = options.get("model")
               if not isinstance(model, str) or not model:
+                  return None
+              # W1 (writer-boundary necessary-but-not-sufficient): the writer's
+              # model_choice else-branch routes through _find_llm_transform_node,
+              # which ALSO requires a non-empty prompt_template
+              # (sessions/service.py). The model_choice SITE emitter fires on
+              # `model` alone, so a model-only node yields a site the writer would
+              # REJECT with InterpretationResolveError(ValueError). Guard the
+              # precondition here (mirroring the PT path's
+              # _has_pending_prompt_template_requirement) and leave the site
+              # fail-closed at the run-time gate — the designed advisory polarity.
+              prompt_template = options.get("prompt_template")
+              if not isinstance(prompt_template, str) or not prompt_template:
                   return None
               draft = self._matching_requirement_draft(options, kind=site.kind, user_term=site.user_term)
               if draft is None or draft != model:
@@ -725,20 +751,91 @@ leaving bare legacy placeholders to the run-time gate. This reuses
           version=1,
       )
       session_id, state_id = await _persist(sessions_service, state)
-      # Must not raise (the writer boundary would reject a bare vague_term).
+      # Must not raise: the surfacer returns None for a bare token (no staged
+      # requirement) BEFORE it ever calls the writer, so the writer boundary is
+      # never reached. (The writer would actually ACCEPT a bare vague_term — the
+      # node has a non-empty prompt_template, so _find_llm_transform_node passes
+      # and the else-branch does no VAGUE_TERM check; the skip is the designed
+      # advisory polarity, not protection against a writer rejection.)
       await composer.surface_pending_interpretation_reviews(
           state, session_id=str(session_id), current_state_id=str(state_id)
       )
       events = await sessions_service.list_interpretation_events(session_id, status="pending")
       vt = [e for e in events if e.kind is InterpretationKind.VAGUE_TERM]
       assert vt == []
+
+
+  def _model_only_node(model: str = "anthropic/claude-sonnet-4.6") -> NodeSpec:
+      # W1: an llm node with `model` + a staged llm_model_choice requirement but
+      # NO prompt_template. The model_choice SITE emitter fires on `model` alone,
+      # so the surfacer's precondition would be met — but the strict writer
+      # boundary's else-branch REQUIRES a non-empty prompt_template and would
+      # reject the shape with InterpretationResolveError(ValueError). The surfacer
+      # must SKIP (precondition guard + try/except backstop), never raise.
+      return NodeSpec(
+          id="rate_node",
+          node_type="transform",
+          plugin="llm",
+          input="rows",
+          on_success="out",
+          on_error=None,
+          options={
+              "model": model,
+              INTERPRETATION_REQUIREMENTS_KEY: [
+                  {
+                      "id": "model_choice_review:rate_node",
+                      "kind": InterpretationKind.LLM_MODEL_CHOICE.value,
+                      "user_term": "llm_model_choice:rate_node",
+                      "status": "pending",
+                      "draft": model,
+                      "event_id": None,
+                      "accepted_value": None,
+                      "accepted_artifact_hash": None,
+                      "resolved_prompt_template_hash": None,
+                  }
+              ],
+          },
+          condition=None,
+          routes=None,
+          fork_to=None,
+          branches=None,
+          policy=None,
+          merge=None,
+      )
+
+
+  @pytest.mark.asyncio
+  async def test_surfacer_skips_model_only_node_without_prompt_template(tmp_path, sessions_service) -> None:
+      # W1: the surfacer's model_choice precondition is necessary-but-not-sufficient
+      # — the writer ALSO requires a non-empty prompt_template. A model-only node
+      # must be SKIPPED (left fail-closed at the run-time gate), NOT raised as a 500
+      # at the persist seam. Note: if interpretation_sites does not emit a
+      # model_choice site for a prompt_template-less node, this assertion still holds
+      # (no event surfaced) and the guard is belt-and-suspenders — correct either way.
+      composer = _composer(tmp_path, sessions_service)
+      state = CompositionState(
+          source=None,
+          nodes=(_model_only_node(),),
+          edges=(),
+          outputs=(),
+          metadata=PipelineMetadata(),
+          version=1,
+      )
+      session_id, state_id = await _persist(sessions_service, state)
+      # Must NOT raise even though the writer boundary would reject this shape.
+      await composer.surface_pending_interpretation_reviews(
+          state, session_id=str(session_id), current_state_id=str(state_id)
+      )
+      events = await sessions_service.list_interpretation_events(session_id, status="pending")
+      mc = [e for e in events if e.kind is InterpretationKind.LLM_MODEL_CHOICE]
+      assert mc == []
   ```
 
   Run to pass:
   ```
       cd /home/john/elspeth && uv run pytest tests/unit/web/composer/test_surface_pending_interpretation_reviews.py -x -q
       ```
-      Expected: `6 passed`.
+      Expected: `7 passed`.
 
   > **On the leftover prior-draft event:** draft-aware dedup
   > (`test_model_choice_dedup_is_draft_aware` /
@@ -1057,6 +1154,23 @@ and recipe-apply commits (P3.3/P3.4 are the per-boundary assertions).
   use is the same instance. (The conftest already imports `create_catalog_service`
   at `:28` and `WebSettings` at `:27`.)
 
+  > **W2 — blast radius (READ THIS):** wiring the real `ComposerServiceImpl` onto
+  > the BASE `composer_test_client` fixture activates the surfacer on EVERY guided
+  > respond across ALL ~11 test files that inherit this fixture (`test_respond`,
+  > `test_step_3_e2e`, `test_step_chat`, `test_get_guided`, `test_auto_drop`,
+  > `test_error_paths`, `test_hidden_field_rejection`, `test_step1_prefill`,
+  > `test_audit_emission`, `test_fixture_smoke`, plus the new test). The surfacer is
+  > a genuine no-op only for source/sink-only states; any sibling test that drives a
+  > state carrying staged `llm_prompt_template`/`llm_model_choice` requirements will
+  > now gain backend-surfaced pending events it did NOT expect, shifting
+  > `GET /interpretations` counts or downstream assertions. **Two options —**
+  > **(a, preferred):** add a DEDICATED fixture (mirror `test_progressive_disclosure.py`'s
+  > separate `composer_freeform_client`) used only by the new test, leaving the base
+  > fixture's `composer_service = None` untouched — this bounds the blast radius to
+  > the one test. **(b):** keep the base mutation (simpler, and most siblings ARE
+  > source/sink-only), but treat Step 4's regression run as a HARD gate, not a
+  > formality (see Step 4).
+
   Run to fail:
   ```
   cd /home/john/elspeth && uv run pytest tests/integration/web/composer/guided/test_guided_commit_surfaces_reviews.py -x -q
@@ -1150,8 +1264,16 @@ and recipe-apply commits (P3.3/P3.4 are the per-boundary assertions).
   ```
   cd /home/john/elspeth && uv run pytest tests/unit/web/sessions/routes/ tests/integration/web/composer/ -q -k "guided or respond"
   ```
-  Expected: all pass (the surfacer is a no-op when there are no pending
-  requirements, so existing source/sink-only guided tests are unaffected).
+  Expected: all pass. The surfacer is a no-op for source/sink-only states, so
+  most siblings are unaffected. **W2 gate (if you kept the base-fixture mutation
+  in Step 0):** this run is the HARD gate for the blast radius, not a formality.
+  Any FAILURE here is the expected W2 signal — a sibling test now drives a state
+  carrying staged `llm_prompt_template`/`llm_model_choice` requirements, so the
+  surfacer created backend pending events that test did not expect (shifted
+  `GET /interpretations` counts / assertions). Fix that test (assert the now-correct
+  surfaced events, or move it to the dedicated `composer_service = None` fixture);
+  do NOT suppress the surfacer to make it pass. If you took Step 0 option (a), the
+  base fixture is untouched and this run should be clean.
 
 - [ ] **Step 5: Commit.**
   ```
@@ -1283,7 +1405,7 @@ which is the part most likely to drift.
   ```
       cd /home/john/elspeth && uv run pytest tests/unit/web/composer/test_surface_pending_interpretation_reviews.py -q
       ```
-      Expected: `7 passed`.
+      Expected: `8 passed`.
 
 - [ ] **Step 4: Commit.**
   ```
@@ -1455,7 +1577,7 @@ boundary in isolation so it does not depend on P5 having landed.)
   ```
   cd /home/john/elspeth && uv run pytest tests/unit/web/composer/test_surface_pending_interpretation_reviews.py -q
   ```
-      Expected: `9 passed`.
+      Expected: `10 passed`.
 
 - [ ] **Step 4: Commit.**
   ```
@@ -2121,9 +2243,18 @@ projection path is the `pendingBySession` store, exactly as
       ```
       Update the helper comment: it is idempotent, but no longer fire-and-forget for
       guided `respondGuided`; the guided submit must remain disabled until the
-      pending-card projection refresh completes. Existing freeform callers may use
-      `void refreshInterpretationEventsForSession(...)` if they intentionally do not
-      block their UI.
+      pending-card projection refresh completes.
+
+      **W3 — fix the floating promises (REQUIRED):** the helper was previously sync,
+      so the three EXISTING freeform callers (`sessionStore.ts` ~`:645/:753/:1040`,
+      grep `refreshInterpretationEventsForSession(` to find them) invoke it as bare
+      statements. Now that it returns `Promise<void>`, each of those three sites
+      becomes a floating promise. They are intentionally fire-and-forget for the
+      freeform UI, so prefix each of the three with the `void` operator
+      (`void refreshInterpretationEventsForSession(...)`). `tsc` does not flag floating
+      promises and eslint is not in the §9.2 gate set, so this will NOT trip a gate —
+      it is a deliberate-intent fix that prevents a regression if `no-floating-promises`
+      is later added. Do this in the same edit that makes the helper async.
 
       Then update `respondGuided`: the success branch is currently a single atomic
       `set({...})` carrying all four wire fields **and** `guidedResponsePending: false`
@@ -2358,7 +2489,42 @@ projection path is the `pendingBySession` store, exactly as
   ```
   Expected: pass.
 
-- [ ] **Step 4: Wire the component + blocking into the ChatPanel guided branch.**
+- [ ] **Step 4: Write the failing ChatPanel test asserting the wizard turn is
+  disabled while a pending card exists (genuine RED before Step 5 wiring).**
+  > **W4 ordering:** this test is sequenced BEFORE the Step 5 wiring so its red
+  > phase is real. With no wiring yet, `GuidedTurn`'s `disabled` is only
+  > `guidedResponsePending` (false on a fresh turn), so the seeded pending card
+  > does NOT disable the button and the assertion FAILS — an observable red. Step 5
+  > then adds `|| hasPendingGuidedInterpretations` and the test goes green. (The
+  > `GuidedInterpretationReviews` component already exists from Step 3 and the test
+  > only seeds the store + mounts ChatPanel, so the test file's imports resolve;
+  > only the disabled-gating behaviour is missing pre-Step 5.)
+  Extend the ChatPanel guided test:
+  ```
+  cd /home/john/elspeth && grep -rln "chat-panel--guided\|GuidedTurn\|guidedNextTurn" src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx
+  ```
+  Add a test that, with a pending `user_approved` event seeded in
+  `interpretationEventsStore` and an active guided session + next turn, the
+  submit control of `GuidedTurn` is disabled (assert via the turn widget's
+  primary button `disabled` attribute, the same way the existing guided ChatPanel
+  tests query it). Skeleton assertion:
+  ```tsx
+  // seed pendingBySession[SID] with one pending user_approved event,
+  // mount ChatPanel with guidedSession+guidedNextTurn set, then:
+  expect(screen.getByRole("button", { name: /confirm|continue|accept|submit/i }))
+    .toBeDisabled();
+  ```
+  Read the existing guided ChatPanel test to match the exact turn-button query
+  it already uses; do not invent a new selector.
+
+  Run to fail (before Step 5 wiring is applied):
+  ```
+  cd /home/john/elspeth/src/elspeth/web/frontend && npm test -- --run ChatPanel
+  ```
+  Expected: the new test FAILS (the pending card does not yet disable the wizard
+  turn). It goes green after Step 5.
+
+- [ ] **Step 5: Wire the component + blocking into the ChatPanel guided branch.**
   In `ChatPanel.tsx`, inside the guided branch (`:1252`), import the new symbols
   at the top of the file (near the `GuidedTurn` import, `:30`):
   ```tsx
@@ -2392,31 +2558,11 @@ projection path is the `pendingBySession` store, exactly as
   is active; `GuidedInterpretationReviews` returns null on an empty session id
   because `pendingBySession[""]` is undefined.)
 
-- [ ] **Step 5: Write the failing ChatPanel test asserting the wizard turn is
-  disabled while a pending card exists, then run-to-pass.**
-  Extend the ChatPanel guided test:
-  ```
-  cd /home/john/elspeth && grep -rln "chat-panel--guided\|GuidedTurn\|guidedNextTurn" src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx
-  ```
-  Add a test that, with a pending `user_approved` event seeded in
-  `interpretationEventsStore` and an active guided session + next turn, the
-  submit control of `GuidedTurn` is disabled (assert via the turn widget's
-  primary button `disabled` attribute, the same way the existing guided ChatPanel
-  tests query it). Skeleton assertion:
-  ```tsx
-  // seed pendingBySession[SID] with one pending user_approved event,
-  // mount ChatPanel with guidedSession+guidedNextTurn set, then:
-  expect(screen.getByRole("button", { name: /confirm|continue|accept|submit/i }))
-    .toBeDisabled();
-  ```
-  Read the existing guided ChatPanel test to match the exact turn-button query
-  it already uses; do not invent a new selector.
-
-  Run to fail (before Step 4 is applied) / pass (after):
+  Run to pass:
   ```
   cd /home/john/elspeth/src/elspeth/web/frontend && npm test -- --run ChatPanel
   ```
-  Expected after Step 4: pass.
+  Expected: the Step 4 test now passes.
 
 - [ ] **Step 6: Frontend gates — typecheck + build + full vitest + E2E (§9.2).**
   ```
@@ -2463,6 +2609,11 @@ EOF
   P3-touched files — `mypy src/` covers `src/elspeth/web/composer/protocol.py`
   (the `ComposerService` Protocol method added in P3.2 Step 3b), which the
   narrower per-file mypy line omitted.
+  **Slot-type cross-language gate (§9.2) is N/A for P3:** that gate
+  (`scripts/cicd/check_slot_type_cross_language.py`) is keyed to `guided.ts` /
+  `SlotType` edits, and P3 introduces NO `guided.ts`/`SlotType` change (P3.6 only
+  touches `ChatPanel.tsx`, `sessionStore.ts`, and the new
+  `GuidedInterpretationReviews.tsx`). It is intentionally omitted here, not missed.
 
 - [ ] **Step 2: Targeted backend suite (surfacer + route + backstop).**
   ```

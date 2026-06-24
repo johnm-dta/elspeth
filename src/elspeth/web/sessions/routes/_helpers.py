@@ -3780,13 +3780,17 @@ async def _dispatch_guided_respond(
         # pass budget as the auto sign-off below so a learner cannot spin the
         # advisor unbounded. This MUST be handled BEFORE the P5.6 response-shape
         # guard, which rejects any non-null ``control_signal`` — a legitimate
-        # REQUEST_ADVISOR carries one and would otherwise 400. It re-emits the
-        # wire turn with the findings (terminal stays None) so the user decides;
-        # a CLEAN verdict completes exactly as the auto sign-off path does. The
-        # on-demand checkpoint goes through ``run_wire_signoff`` ->
-        # ``run_signoff_checkpoint`` (backend Tier-1 ``schema_excerpt``), so no
-        # unvalidated user text is forwarded and the Tier-3
-        # ``_validate_advisor_arguments`` boundary is never crossed.
+        # REQUEST_ADVISOR carries one and would otherwise 400.
+        #
+        # REQUEST_ADVISOR is an ADVISORY gesture, NOT the completion gesture: it
+        # ALWAYS re-emits the wire turn with the advisor findings (terminal stays
+        # None — even on a CLEAN verdict) so the user decides. ONLY the
+        # CONFIRM_WIRING confirm path (P5.6) stamps COMPLETED. Auto-completing on
+        # a clean advisory check would surprise the user out of the wizard and
+        # double-count the pass budget vs the confirm. The on-demand checkpoint
+        # goes through ``run_wire_signoff`` -> ``run_signoff_checkpoint`` (backend
+        # Tier-1 ``schema_excerpt``), so no unvalidated user text is forwarded and
+        # the Tier-3 ``_validate_advisor_arguments`` boundary is never crossed.
         if turn_response["control_signal"] is ControlSignal.REQUEST_ADVISOR:
             from elspeth.web.composer.guided.signoff import (
                 SignoffOutcome,
@@ -3832,8 +3836,7 @@ async def _dispatch_guided_respond(
                 progress=None,
             )
             # Record the DISTINCT sign-off audit event for EVERY real decision
-            # (same provenance discipline as the auto path), ahead of the
-            # COMPLETE early-return.
+            # (same provenance discipline as the auto path).
             emit_signoff_decision(
                 recorder,
                 event_name=signoff_audit_event_name(decision),
@@ -3842,15 +3845,21 @@ async def _dispatch_guided_respond(
                 composition_version=state.version,
                 actor=user_id,
             )
-            if decision.outcome is SignoffOutcome.COMPLETE:
-                yaml_text = generate_yaml(state)
-                terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
-                guided = _replace(guided, terminal=terminal)
-                return state, guided, None
+            # ALWAYS re-emit the wire turn (terminal stays as run_wire_signoff
+            # returned it — None; REQUEST_ADVISOR never stamps COMPLETED). For a
+            # BLOCKED_* outcome carry the NON-RUNNABLE blocked-validation findings
+            # so the turn renders fail-closed rather than a plain retry (P5.7).
+            on_demand_blocked_findings: str | None = None
+            if decision.outcome in (SignoffOutcome.BLOCKED_FLAGGED, SignoffOutcome.BLOCKED_UNAVAILABLE):
+                blocked = _advisor_signoff_blocked_validation(
+                    reason=decision.reason or "exhausted",
+                    findings=decision.findings_text,
+                )
+                on_demand_blocked_findings = blocked.errors[0].message if blocked.errors else decision.findings_text
             next_turn = build_step_4_wire_turn(
                 state,
                 catalog=catalog,
-                advisor_findings=decision.findings_text,
+                advisor_findings=on_demand_blocked_findings or decision.findings_text,
                 signoff_outcome=decision.outcome.value,
             )
             guided, next_turn = _emit_wire_turn(

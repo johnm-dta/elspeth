@@ -63,8 +63,10 @@ async def test_request_advisor_at_wire_runs_whole_pipeline_signoff() -> None:
 
 
 @pytest.mark.asyncio
-async def test_request_advisor_at_wire_clean_completes() -> None:
-    # A CLEAN on-demand review DOES auto-complete (terminal stamped as P5.6 does).
+async def test_request_advisor_at_wire_clean_re_emits_never_completes() -> None:
+    # REQUEST_ADVISOR is advisory, NOT the completion gesture: even a CLEAN
+    # verdict RE-EMITS the wire turn (terminal stays None). Only the
+    # CONFIRM_WIRING confirm path (P5.6) stamps COMPLETED.
     session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
     svc = MagicMock()
     svc.run_signoff_checkpoint = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="clean"))
@@ -102,8 +104,10 @@ async def test_request_advisor_at_wire_clean_completes() -> None:
     )
     svc.run_signoff_checkpoint.assert_awaited_once()
     svc._validate_advisor_arguments.assert_not_called()
-    assert guided.terminal is not None
-    assert next_turn is None
+    assert guided.terminal is None  # advisory gesture never auto-completes
+    assert next_turn is not None
+    # The COMPLETE outcome value is carried, but the turn is re-emitted (not terminal).
+    assert next_turn["payload"]["signoff_outcome"] == "complete"
     assert "composer.signoff.clean" in [inv.tool_name for inv in recorder.invocations]
 
 

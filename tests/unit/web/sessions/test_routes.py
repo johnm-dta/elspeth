@@ -2136,8 +2136,13 @@ class TestIDORProtection:
         # endpoint (P6.4) constructs a server-owned WorkflowProfile and seeds
         # the guided session; an ownership bypass would let an attacker
         # re-seed / reset the profile and CompositionState of Alice's session.
-        # The ownership check in ``post_guided_start`` runs before any persist.
-        resp = bob_client.post(f"/api/sessions/{session_id}/guided/start")
+        # A VALID body is sent so the request reaches the in-handler ownership
+        # check (a missing body would 422 at FastAPI validation first); with a
+        # valid body, the ownership check returns 404 for the non-owner.
+        resp = bob_client.post(
+            f"/api/sessions/{session_id}/guided/start",
+            json={"profile": "live"},
+        )
         assert resp.status_code == 404
 
         # Bob tries to POST guided/reenter -- should be 404. Re-entry is

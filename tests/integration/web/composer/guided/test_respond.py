@@ -633,14 +633,12 @@ class TestStep25RecipeAccept:
                 "edit_step_index": None,
                 "control_signal": None,
             },
-            {
-                "chosen": ["confirm"],
-                "edited_values": None,
-                "custom_inputs": [],
-                "accepted_step_index": None,
-                "edit_step_index": None,
-                "control_signal": None,
-            },
+            # NOTE: the former chosen=["confirm"] + custom_inputs=[] case was
+            # removed here: P5.6 deliberately leaves custom_inputs ungated (it
+            # stays arbitrary Tier-3 text and can never acknowledge the
+            # unavailable escape — the escape gate requires custom_inputs is
+            # None), so that body is now a VALID confirm, not a malformed one.
+            # The same superseded case was dropped from test_wire_dispatch.py.
         ],
     )
     def test_confirm_wiring_malformed_bodies_return_400_after_answered_hash(

@@ -2,15 +2,29 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import {
+  GRADUATION_CANCELLED_NOTE,
+  HELLO_WORLD_SESSION_TITLE,
   TURN_7_LEARNING_BULLETS,
   TURN_7_PRIMARY_BUTTON,
 } from "./copy";
 
 interface TutorialTurn7GraduationProps {
-  onBack: () => void;
+  sessionId: string | null;
+  skipped: boolean;
+  cancelled: boolean;
+  /**
+   * Back affordance. Omitted (undefined) when there is no real prior step to
+   * return to — e.g. a skipped or cancelled tutorial whose audit step has no
+   * run. When undefined the Back button is not rendered so the user can never
+   * navigate back into an empty audit.
+   */
+  onBack?: () => void;
 }
 
 export function TutorialTurn7Graduation({
+  sessionId,
+  skipped,
+  cancelled,
   onBack,
 }: TutorialTurn7GraduationProps): JSX.Element {
   const headingRef = useRef<HTMLHeadingElement | null>(null);
@@ -27,6 +41,19 @@ export function TutorialTurn7Graduation({
     setPending(true);
     setError(null);
     try {
+      // Promote the tutorial session to its final title and save Guided as
+      // the default composer mode. A skipped tutorial has no session to
+      // rename (and may not have created one), so only rename a real,
+      // non-skipped session. Both calls run BEFORE the graduation publish +
+      // fresh-composer-session creation; if either fails we surface the error
+      // and do not create the fresh session (fail-closed).
+      if (sessionId !== null && !skipped) {
+        await useSessionStore
+          .getState()
+          .renameSession(sessionId, HELLO_WORLD_SESSION_TITLE);
+      }
+      await usePreferencesStore.getState().saveTutorialMode("guided");
+
       const completedAt = await usePreferencesStore
         .getState()
         .markTutorialGraduated({ publishLocally: false });
@@ -44,7 +71,7 @@ export function TutorialTurn7Graduation({
     } finally {
       setPending(false);
     }
-  }, []);
+  }, [sessionId, skipped]);
 
   const busy = pending || writing;
 
@@ -54,6 +81,11 @@ export function TutorialTurn7Graduation({
       <h2 id="tutorial-graduation-title" ref={headingRef} tabIndex={-1}>
         You're ready to use the composer.
       </h2>
+      {cancelled && (
+        <p role="status" className="tutorial-cancelled-note">
+          {GRADUATION_CANCELLED_NOTE}
+        </p>
+      )}
       <ul className="tutorial-graduation-list">
         {TURN_7_LEARNING_BULLETS.map((bullet) => (
           <li key={bullet.title}>
@@ -71,14 +103,16 @@ export function TutorialTurn7Graduation({
         >
           {busy ? "Saving..." : TURN_7_PRIMARY_BUTTON}
         </button>
-        <button
-          type="button"
-          className="tutorial-link-button"
-          disabled={busy}
-          onClick={onBack}
-        >
-          Back
-        </button>
+        {onBack !== undefined && (
+          <button
+            type="button"
+            className="tutorial-link-button"
+            disabled={busy}
+            onClick={onBack}
+          >
+            Back
+          </button>
+        )}
       </div>
       <p role="status" className="sr-only">
         {busy ? "Saving tutorial completion" : ""}

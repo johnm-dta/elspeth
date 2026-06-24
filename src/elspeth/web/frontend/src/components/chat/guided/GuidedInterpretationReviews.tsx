@@ -19,9 +19,9 @@ function byCreatedAt(a: InterpretationEvent, b: InterpretationEvent): number {
  * blocks advancement while any pending remains (D12). The GuidedTurn
  * interpretation_review case is dead code; this store projection is the path.
  *
- * Returns null when there is nothing to review (mirrors the
- * TutorialTurn2bShowBuilt.tsx projection, minus its empty-state paragraph —
- * the guided branch keeps its own copy/affordances).
+ * Returns null when there is nothing to review (a pending-only projection
+ * with no empty-state paragraph — the guided branch keeps its own
+ * copy/affordances).
  */
 export function GuidedInterpretationReviews({
   sessionId,

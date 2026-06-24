@@ -60,8 +60,7 @@ describe("GuidedInterpretationReviews", () => {
     // aria-label="Assumptions to review"> AND the inner InterpretationReviewTurn's
     // own <section role="region"> — so getByRole("region") would throw "Found
     // multiple elements", and InterpretationReviewTurn also carries role="status",
-    // so that role is ambiguous too. Assert via the wrapper count line instead,
-    // the same way the sibling TutorialTurn2bShowBuilt.test.tsx does.
+    // so that role is ambiguous too. Assert via the wrapper count line instead.
     expect(screen.getByText("1 assumption to review")).toBeInTheDocument();
   });
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE, WorkflowProfileKind
 from elspeth.web.composer.protocol import ComposerService
+from elspeth.web.sessions.schemas import StartGuidedRequest
 
 from .._helpers import (
     UTC,
@@ -48,6 +50,7 @@ from .._helpers import (
     _dispatch_guided_respond,
     _get_session_compose_lock_registry,
     _initial_composition_state_with_guided_session,
+    _materialize_profile_entry_seed_state,
     _persist_chat_turns,
     _persist_llm_calls,
     _persist_tool_invocations,
@@ -706,6 +709,204 @@ async def post_guided_reenter(
                 step_index=turn["step_index"],
                 payload=dict(turn["payload"]),
             ),
+            terminal=None,
+            composition_state=_state_response(state_record_out),
+        )
+
+
+@router.post("/{session_id}/guided/start", response_model=GetGuidedResponse)
+async def post_guided_start(
+    session_id: UUID,
+    body: StartGuidedRequest,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> GetGuidedResponse:
+    """Seed a guided session with a server-owned WorkflowProfile.
+
+    The client supplies a closed-enum ``profile`` discriminator
+    (``WorkflowProfileKind``); the SERVER maps it to the concrete profile
+    object and persists the resulting GuidedSession, so a client cannot
+    inject an arbitrary profile or weaken the advisor gate (D13/§4.3).
+
+    **Idempotent (D16):** a second start for a session that ALREADY has a
+    persisted GuidedSession returns the existing session unchanged — it
+    never re-initialises or double-creates.
+    GET /api/sessions/{session_id}/guided then reads the
+    persisted ``GuidedSession.profile``; the lazy no-arg GET default path
+    stays for live guided (empty profile).
+
+    Decision D: ``start`` persists the profile only — it does NOT materialize
+    ``profile.entry_seed`` into the CompositionState. ``entry_seed`` is a
+    server-side ``str`` framing prompt that stays on the persisted profile for
+    the P7.5 welcome bookend to render; the concrete pipeline is built downstream
+    by the guided wizard + web-scrape recipe match. ``entry_seed`` never rides
+    the request or response wire.
+
+    Raises 404 if the session does not exist or belong to the requester.
+    Raises 409 if the session already has a freeform composition state with
+    no GuidedSession; this route does not convert or discard freeform state.
+    Raises 400 if ``profile`` is not a recognised WorkflowProfileKind or if
+    a client sends anything other than a short discriminator string.
+    """
+    await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    catalog: CatalogServiceProtocol = request.app.state.catalog_service
+
+    # Tier-3 -> Tier-2 coercion at the profile-kind boundary. A stale client
+    # sending an unknown discriminator gets a 400 with a generic message
+    # rather than a Pydantic 422; the typed kind then selects a SERVER-owned
+    # constant — the client never supplies the profile object. Do not echo
+    # the raw value: it may be a long string or an attempted profile object
+    # carrying attacker-controlled fields such as entry_seed.
+    if not isinstance(body.profile, str) or len(body.profile) > 32:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Invalid profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
+        )
+    try:
+        profile_kind = WorkflowProfileKind(body.profile)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Unknown profile discriminator. Valid values: {sorted(k.value for k in WorkflowProfileKind)}."),
+        ) from exc
+    profile = TUTORIAL_PROFILE if profile_kind is WorkflowProfileKind.TUTORIAL else EMPTY_PROFILE
+
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session_id))
+    async with compose_lock:
+        # Idempotency (D16): if a guided session is already persisted, return
+        # it UNCHANGED — never re-init (a second start must not clobber the
+        # learner's in-progress wizard or re-seed a fresh profile).
+        existing_record = await service.get_current_state(session_id)
+        if existing_record is not None:
+            existing_state = _state_from_record(existing_record)
+            if existing_state.guided_session is not None:
+                guided = existing_state.guided_session
+                terminal = guided.terminal
+                return GetGuidedResponse(
+                    guided_session=GuidedSessionResponse(
+                        step=guided.step.value,
+                        history=[
+                            TurnRecordResponse(
+                                step=r.step.value,
+                                turn_type=r.turn_type.value,
+                                payload_hash=r.payload_hash,
+                                response_hash=r.response_hash,
+                                summary=r.summary,
+                                emitter=r.emitter,
+                            )
+                            for r in guided.history
+                        ],
+                        terminal=TerminalStateResponse(
+                            kind=terminal.kind.value,
+                            reason=terminal.reason.value if terminal.reason is not None else None,
+                            pipeline_yaml=terminal.pipeline_yaml,
+                        )
+                        if terminal is not None
+                        else None,
+                        chat_history=[
+                            ChatTurnResponse(
+                                role=t.role.value,
+                                content=t.content,
+                                seq=t.seq,
+                                step=t.step.value,
+                                ts_iso=t.ts_iso,
+                            )
+                            for t in guided.chat_history
+                        ],
+                        chat_turn_seq=guided.chat_turn_seq,
+                        profile=_workflow_profile_response(guided),
+                    ),
+                    next_turn=None,
+                    terminal=TerminalStateResponse(
+                        kind=terminal.kind.value,
+                        reason=terminal.reason.value if terminal.reason is not None else None,
+                        pipeline_yaml=terminal.pipeline_yaml,
+                    )
+                    if terminal is not None
+                    else None,
+                    composition_state=_state_response(existing_record),
+                )
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Cannot start guided on a session that already has existing "
+                    "freeform composition state. Create a new session or fork before "
+                    "starting the tutorial profile."
+                ),
+            )
+
+        # No persisted guided session yet: construct the profile-seeded
+        # initial state and PERSIST it (so GET /api/sessions/{session_id}/guided
+        # reads the profile back). Decision D: this attaches the server-owned
+        # profile only — it does NOT materialize profile.entry_seed into the
+        # CompositionState (entry_seed is a server-side str framing prompt that
+        # stays on the persisted profile for the P7.5 welcome bookend to render;
+        # the concrete pipeline is wizard/recipe-built downstream). For the live
+        # profile this is the existing empty guided state.
+        new_state = _materialize_profile_entry_seed_state(profile)
+        seeded_guided = new_state.guided_session
+        if seeded_guided is None:  # pragma: no cover — helper always attaches a guided session
+            raise InvariantError("post_guided_start: initial state has no guided_session")
+        turn = _build_get_guided_turn(new_state, seeded_guided, catalog=catalog)
+
+        new_composer_meta = {"guided_session": seeded_guided.to_dict()}
+        state_d = new_state.to_dict()
+        state_data = CompositionStateData(
+            sources=state_d["sources"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=False,
+            validation_errors=None,
+            composer_meta=new_composer_meta,
+        )
+        state_record_out = await service.save_composition_state(
+            session_id,
+            state_data,
+            # Start endpoint seeds the canonical guided session for a profile;
+            # ``session_seed`` is the closest existing provenance category for
+            # a fresh server-authored seed state (the closed enum has no
+            # guided-specific value — see merge commit message).
+            provenance="session_seed",
+        )
+
+        return GetGuidedResponse(
+            guided_session=GuidedSessionResponse(
+                step=seeded_guided.step.value,
+                history=[
+                    TurnRecordResponse(
+                        step=r.step.value,
+                        turn_type=r.turn_type.value,
+                        payload_hash=r.payload_hash,
+                        response_hash=r.response_hash,
+                        summary=r.summary,
+                        emitter=r.emitter,
+                    )
+                    for r in seeded_guided.history
+                ],
+                terminal=None,
+                chat_history=[
+                    ChatTurnResponse(
+                        role=t.role.value,
+                        content=t.content,
+                        seq=t.seq,
+                        step=t.step.value,
+                        ts_iso=t.ts_iso,
+                    )
+                    for t in seeded_guided.chat_history
+                ],
+                chat_turn_seq=seeded_guided.chat_turn_seq,
+                profile=_workflow_profile_response(seeded_guided),
+            ),
+            next_turn=TurnPayloadResponse(
+                type=turn["type"],
+                step_index=turn["step_index"],
+                payload=dict(turn["payload"]),
+            )
+            if turn is not None
+            else None,
             terminal=None,
             composition_state=_state_response(state_record_out),
         )

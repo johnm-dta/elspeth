@@ -271,6 +271,22 @@ class RevertStateRequest(_RequestModel):
     state_id: UUID
 
 
+class StartGuidedRequest(_RequestModel):
+    """Request body for POST /api/sessions/{session_id}/guided/start.
+
+    ``profile`` is a raw boundary value whose valid form is a closed-enum
+    discriminator (``WorkflowProfileKind``). The route validates that the
+    value is a short string, maps it to the SERVER-owned WorkflowProfile
+    constant, and rejects anything else with a generic 400. Typing it as
+    ``object`` (not the enum) keeps a stale/hostile client's unknown or
+    object-shaped value out of a Pydantic 422 and away from the response —
+    the handler never echoes the raw value, so an attempted profile object
+    carrying ``entry_seed`` cannot leak back through the error.
+    """
+
+    profile: object = "live"
+
+
 class RunResponse(_StrictResponse):
     """Response for GET /api/sessions/{id}/runs."""
 

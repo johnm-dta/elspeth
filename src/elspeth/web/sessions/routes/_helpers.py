@@ -2221,6 +2221,33 @@ def _initial_composition_state_with_guided_session(*, profile: WorkflowProfile =
     )
 
 
+def _materialize_profile_entry_seed_state(profile: WorkflowProfile) -> CompositionState:
+    """Build the initial guided state for a profile (D16 decision: profile-only).
+
+    Attaches the SERVER-owned ``profile`` to a fresh ``GuidedSession`` via
+    :func:`_initial_composition_state_with_guided_session` and returns that
+    state UNCHANGED. It deliberately does **not** inject a chat turn and does
+    **not** fabricate any source/topology into the ``CompositionState``.
+
+    ``profile.entry_seed`` is a SERVER-owned ``str | None`` framing *prompt*
+    (P0 — ``composer/guided/profile.py``): for ``TUTORIAL_PROFILE`` it is the
+    canonical "rate how cool each Australian government web page is" opener;
+    for ``EMPTY_PROFILE`` it is ``None``. It is NOT consumed here — it stays on
+    the persisted ``GuidedSession.profile`` for a downstream consumer (the P7.5
+    welcome bookend) to render. ``start`` does not materialize it into the
+    ``CompositionState``: the brief's "materialize topology" model is moot for a
+    ``str`` seed, and the concrete pipeline is built downstream by the guided
+    wizard + web-scrape recipe match (P4) via the composer tool flow
+    (``set_pipeline`` in ``composer/tools/sessions.py``), never from ``entry_seed``.
+
+    ``entry_seed`` is never accepted from the request body and never appears on
+    the wire (``WorkflowProfileResponse`` excludes it). The name is kept because
+    callers/tests reference it; the behaviour is the honest profile-attach
+    passthrough.
+    """
+    return _initial_composition_state_with_guided_session(profile=profile)
+
+
 def _workflow_profile_response(guided: GuidedSession) -> WorkflowProfileResponse | None:
     """Project a GuidedSession's server-owned profile onto the wire subset.
 

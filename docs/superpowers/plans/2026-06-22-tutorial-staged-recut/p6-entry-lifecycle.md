@@ -270,7 +270,7 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 **Interfaces:**
 - Consumes: `WorkflowProfileKind` (P0 closed StrEnum `{LIVE="live", TUTORIAL="tutorial"}`), `EMPTY_PROFILE` / `TUTORIAL_PROFILE` (P0), `WorkflowProfile.entry_seed` (P0; server-owned, not wire-visible), `_initial_composition_state_with_guided_session(*, profile=...)` (P0-modified signature, `_helpers.py:2190`), `GuidedSession.profile` (P0).
 - Produces: `class StartGuidedRequest(_RequestModel): profile: object = "live"` (raw boundary field accepted without echoing arbitrary input; the handler validates it is a short string closed-enum discriminator and returns a generic 400 on invalid input — mirrors the `control_signal` / `step_index` graceful-stale-client convention without leaking `entry_seed` payloads). External route `POST /api/sessions/{session_id}/guided/start` → `GetGuidedResponse`; the internal FastAPI decorator remains `@router.post("/{session_id}/guided/start", ...)` because `create_session_router()` mounts this subrouter under `/api/sessions`.
-- Produces: `_initial_composition_state_with_guided_session(profile=...)` still attaches the server-owned `GuidedSession.profile`; `_materialize_profile_entry_seed_state(profile)` wraps it and, when `profile.entry_seed` is present, materializes the canonical tutorial seed/topology into the `CompositionState` before persistence. `entry_seed` is consumed server-side only and never appears in `GuidedSessionResponse.profile`, `StartGuidedRequest`, or the frontend `WorkflowProfile`.
+- Produces: `_initial_composition_state_with_guided_session(profile=...)` attaches the server-owned `GuidedSession.profile`; `_materialize_profile_entry_seed_state(profile)` wraps it and returns that profile-attached state **UNCHANGED** (decision D, 2026-06-25). **`entry_seed` is a server-side `str` framing prompt** (P0 ships `WorkflowProfile.entry_seed: str | None`, NOT a topology object): it stays on the persisted `GuidedSession.profile` and is consumed downstream by the **P7.5 welcome bookend** to render tutorial framing. `start` does **NOT** materialize any seed/topology into the `CompositionState` — the brief's "materialize topology" model is moot for a `str`, and the concrete pipeline is built by the guided wizard + web-scrape recipe match (P4) via the composer tool flow (`set_pipeline` in `composer/tools/sessions.py`), never from `entry_seed`. `entry_seed` is never accepted from the request body and never appears in `GuidedSessionResponse.profile`, `StartGuidedRequest`, or the frontend `WorkflowProfile`.
 
 - [ ] **Step 1: Write the failing integration test (idempotency + persistence).**
   Create `tests/unit/web/sessions/test_guided_start.py`:
@@ -392,15 +392,18 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
 
 
   @pytest.mark.asyncio
-  async def test_guided_start_materializes_tutorial_entry_seed_topology(tmp_path) -> None:
-      """Tutorial start consumes profile.entry_seed server-side and persists it.
+  async def test_guided_start_persists_profile_without_materializing_topology(tmp_path) -> None:
+      """Tutorial start persists the profile-seeded GuidedSession (decision D).
 
-      The client only sends {"profile": "tutorial"}. The canonical seed/topology
-      comes from the SERVER-owned TUTORIAL_PROFILE.entry_seed and never rides the
-      request or response wire as a raw profile object.
+      The client only sends {"profile": "tutorial"}. ``start`` constructs the
+      SERVER-owned TUTORIAL_PROFILE and persists it on the GuidedSession; it does
+      NOT consume ``profile.entry_seed`` into the CompositionState — no chat turn
+      is injected and no source/topology is fabricated. ``entry_seed`` is a
+      server-side ``str`` framing prompt (P0 ships ``entry_seed: str | None``,
+      not a topology object) that stays on the persisted profile for the P7.5
+      welcome bookend to render. ``entry_seed`` never rides the request/response
+      wire (the response carries only the wire-visible profile subset).
       """
-      from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
-
       app, service = _make_app(tmp_path)
       client = TestClient(app)
       session = await service.create_session("alice", "T", "local")
@@ -412,20 +415,25 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
       assert resp.status_code == 200
       body = resp.json()
       assert "entry_seed" not in str(body["guided_session"]["profile"])
+      assert body["guided_session"]["profile"]["advisor_checkpoints"] is True
 
+      # D contract: start materializes NO chat turn and NO topology. Empty
+      # CompositionState on the wire is sources={} (mapping), nodes/edges/
+      # outputs=[] (lists).
+      assert body["guided_session"]["chat_history"] == []
+      assert body["guided_session"]["chat_turn_seq"] == 0
       state = body["composition_state"]
-      # P0 owns the concrete entry_seed shape; P6 owns consuming it.
-      assert state["sources"] == TUTORIAL_PROFILE.entry_seed.sources
-      assert state["nodes"] == TUTORIAL_PROFILE.entry_seed.nodes
-      assert state["edges"] == TUTORIAL_PROFILE.entry_seed.edges
-      assert state["outputs"] == TUTORIAL_PROFILE.entry_seed.outputs
+      assert state["sources"] == {}
+      assert state["nodes"] == []
+      assert state["edges"] == []
+      assert state["outputs"] == []
 
       persisted = await service.get_current_state(session.id)
       assert persisted is not None
-      assert persisted.sources == TUTORIAL_PROFILE.entry_seed.sources
-      assert persisted.nodes == TUTORIAL_PROFILE.entry_seed.nodes
-      assert persisted.edges == TUTORIAL_PROFILE.entry_seed.edges
-      assert persisted.outputs == TUTORIAL_PROFILE.entry_seed.outputs
+      assert dict(persisted.sources) == {}
+      assert tuple(persisted.nodes) == ()
+      assert tuple(persisted.edges) == ()
+      assert tuple(persisted.outputs) == ()
 
 
   @pytest.mark.asyncio
@@ -560,32 +568,33 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"`
       profile: object = "live"
   ```
 - [ ] **Step 4: Add the profile entry-seed materializer to `_helpers.py`.**
-  Near `_initial_composition_state_with_guided_session` (:2190), add:
+  Near `_initial_composition_state_with_guided_session` (:2190), add a **honest
+  profile-attach passthrough** (decision D, 2026-06-25):
   ```python
   def _materialize_profile_entry_seed_state(profile: WorkflowProfile) -> CompositionState:
-      """Build the initial guided state and consume profile.entry_seed server-side.
+      """Build the initial guided state for a profile (decision D: profile-only).
 
-      ``entry_seed`` is a server-owned profile field. It may seed the canonical
-      tutorial source/topology before the first guided turn, but it must never be
-      accepted from the request body or appear in ``WorkflowProfileResponse``.
+      Attaches the server-owned ``profile`` to a fresh GuidedSession and returns
+      that state UNCHANGED. It does NOT inject a chat turn and does NOT fabricate
+      any source/topology.
+
+      ``profile.entry_seed`` is a server-side ``str | None`` framing PROMPT (P0
+      ships ``entry_seed: str | None``, NOT a topology object). It is NOT consumed
+      here — it stays on the persisted ``GuidedSession.profile`` for a downstream
+      consumer (the P7.5 welcome bookend) to render. ``start`` does not materialize
+      it into the CompositionState; the concrete pipeline is built by the guided
+      wizard + web-scrape recipe match (P4) via the composer tool flow, never from
+      ``entry_seed``. The name is kept because callers/tests reference it.
       """
-      state = _initial_composition_state_with_guided_session(profile=profile)
-      seed = profile.entry_seed
-      if seed is None:
-          return state
-      return _replace(
-          state,
-          sources=seed.sources,
-          nodes=seed.nodes,
-          edges=seed.edges,
-          outputs=seed.outputs,
-          metadata=seed.metadata,
-      )
+      return _initial_composition_state_with_guided_session(profile=profile)
   ```
-  Use the concrete P0 `entry_seed` attributes verbatim. If P0 names the canonical seed
-  holder differently, resolve it in `profile.py` and keep this rule unchanged:
-  **only the SERVER-owned profile object supplies seed/topology material; request JSON
-  never supplies profile fields beyond the discriminator.**
+  **Why not "materialize topology":** the original brief modelled `entry_seed` as
+  a topology object (`seed.sources/.nodes/...`). P0 shipped it as `str | None`, so
+  `TUTORIAL_PROFILE.entry_seed.sources` raises `AttributeError` — the topology model
+  is impossible and was never built. Presentation of the framing prompt is owned by
+  P7.5's welcome bookend; `start` must not pre-empt it. The invariant that holds:
+  **request JSON never supplies profile fields beyond the discriminator; the SERVER
+  constructs the profile and `entry_seed` never leaves the server.**
 - [ ] **Step 5: Add the `post_guided_start` route to `guided.py`.**
   Immediately after the `post_guided_reenter` handler (starts :578, ends before `@router.post("/{session_id}/guided/respond"...)` :703) insert:
   ```python
@@ -711,11 +720,12 @@ async def post_guided_start(
             )
 
         # No persisted guided session yet: construct the profile-seeded
-        # initial state, consume profile.entry_seed server-side, and PERSIST
-        # it (so GET /api/sessions/{session_id}/guided reads it back).
-        # For the tutorial profile this
-        # materializes the canonical seed/topology; for the live profile it
-        # is the existing empty guided state.
+        # initial state and PERSIST it (so GET /api/sessions/{session_id}/guided
+        # reads the profile back). Decision D: attaches the server-owned profile
+        # only — does NOT materialize profile.entry_seed into the CompositionState
+        # (entry_seed is a server-side str framing prompt for the P7.5 welcome
+        # bookend; the pipeline is wizard/recipe-built downstream). For the live
+        # profile this is the existing empty guided state.
         new_state = _materialize_profile_entry_seed_state(profile)
         guided = new_state.guided_session
         if guided is None:  # pragma: no cover — helper always attaches a guided session

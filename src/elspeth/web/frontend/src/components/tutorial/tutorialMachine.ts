@@ -51,7 +51,6 @@ export interface TutorialState {
 export type TutorialAction =
   | { type: "start" }
   | { type: "guidedCompleted"; sessionId: string }
-  | { type: "startRun" }
   | { type: "runCompleted"; result: TutorialRunResult }
   | { type: "continueToGraduation" }
   | { type: "skipToGraduation" }
@@ -73,8 +72,14 @@ export const initialTutorialState: TutorialState = {
 /**
  * Explicit back-navigation parent map. With the staged guided walk the flow is
  * a straight line: welcome -> guided -> run -> audit -> graduation. The guided
- * surface owns its own internal stages (source/sink/transform/wire), so back
- * from run/audit lands on `guided` rather than re-deriving an earlier turn.
+ * surface owns its own internal stages (source/sink/transform/wire), but once
+ * completed it is TERMINAL: the persisted guided session is `terminal=completed`
+ * server-side, and re-mounting TutorialGuidedShell onto it cannot re-walk the
+ * stages — it would only re-fire completion. So a consumed guided wizard is
+ * NON-RETURNABLE: `previousStep(run)` is null (the run turn drops its Back
+ * affordance) and `previousStep(audit)` is `run` (the run result stays cache-
+ * backed and re-viewable). Neither routes back into `guided`. welcome<->guided
+ * and graduation->audit remain navigable.
  */
 export function previousStep(state: TutorialState): TutorialStep | null {
   switch (state.step) {
@@ -83,9 +88,9 @@ export function previousStep(state: TutorialState): TutorialStep | null {
     case "guided":
       return "welcome";
     case "run":
-      return "guided";
+      return null;
     case "audit":
-      return "guided";
+      return "run";
     case "graduation":
       return "audit";
   }
@@ -100,11 +105,6 @@ export function tutorialReducer(
       return { ...state, step: "guided" };
     case "guidedCompleted":
       return { ...state, step: "run", sessionId: action.sessionId };
-    case "startRun":
-      if (state.sessionId === null) {
-        throw new Error("tutorialReducer: run step requires a session");
-      }
-      return { ...state, step: "run" };
     case "runCompleted":
       return {
         ...state,

@@ -9,7 +9,13 @@ interface TutorialTurn4RunProps {
   prompt: string;
   onCompleted: (result: TutorialRunResult) => void;
   onCancelled: () => void;
-  onBack: () => void;
+  /**
+   * Back affordance. Omitted (undefined) when the run turn has no real prior
+   * step to return to — once the guided wizard is completed it is terminal and
+   * non-returnable (`previousStep(run)` is null), so HelloWorldTutorial passes
+   * no `onBack`. When undefined the Back button is not rendered.
+   */
+  onBack?: () => void;
 }
 
 /**
@@ -201,13 +207,15 @@ export function TutorialTurn4Run({
             >
               Retry
             </button>
-            <button
-              type="button"
-              className="tutorial-link-button"
-              onClick={onBack}
-            >
-              Back
-            </button>
+            {onBack !== undefined && (
+              <button
+                type="button"
+                className="tutorial-link-button"
+                onClick={onBack}
+              >
+                Back
+              </button>
+            )}
           </div>
         </>
       )}
@@ -234,14 +242,16 @@ export function TutorialTurn4Run({
             >
               {TURN_4_PRIMARY_BUTTON}
             </button>
-            <button
-              type="button"
-              className="tutorial-link-button"
-              onClick={onBack}
-              aria-label="Back: edit prompt and start over"
-            >
-              Back
-            </button>
+            {onBack !== undefined && (
+              <button
+                type="button"
+                className="tutorial-link-button"
+                onClick={onBack}
+                aria-label="Back: edit prompt and start over"
+              >
+                Back
+              </button>
+            )}
           </div>
         </>
       )}

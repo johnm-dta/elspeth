@@ -126,12 +126,14 @@ export function HelloWorldTutorial(): JSX.Element {
         />
       )}
       {state.step === "run" && state.sessionId !== null && (
+        // No onBack: the guided wizard is terminal once completed
+        // (previousStep(run) is null), so the run turn has no prior step to
+        // return to and renders no Back affordance.
         <TutorialTurn4Run
           sessionId={state.sessionId}
           prompt={CANONICAL_TUTORIAL_PROMPT}
           onCompleted={(result) => dispatch({ type: "runCompleted", result })}
           onCancelled={() => dispatch({ type: "cancelRun" })}
-          onBack={goBack}
         />
       )}
       {state.step === "audit" &&

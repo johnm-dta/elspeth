@@ -28,6 +28,11 @@ export function TutorialGuidedShell({
   const startGuided = useSessionStore((s) => s.startGuided);
   const startedRef = useRef(false);
   const completedRef = useRef(false);
+  // True once this mount has OBSERVED a live (non-null, not-yet-completed)
+  // guidedSession. `onCompleted` may fire only for a completion this shell saw
+  // transition to while mounted — never when it mounts directly onto an
+  // already-completed session.
+  const sawActiveRef = useRef(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -85,7 +90,17 @@ export function TutorialGuidedShell({
     })();
   }, [sessionId, startGuided]);
 
-  // Hand off to the run/audit/graduation tail when guided reaches completion.
+  // Hand off to the run/audit/graduation tail when guided reaches completion —
+  // but ONLY on a completion this mount OBSERVED transition to. The back-nav
+  // GET path remounts this shell against the PERSISTED completed guided session
+  // (startGuided clears guidedSession to null, then sets it to the completed
+  // payload), so the shell mounts onto `terminal=completed` without ever seeing
+  // a live wizard. Firing onCompleted there bounces the user straight back to
+  // run (no-op flash from run-Back; guided skipped from audit-Back). Gate on
+  // sawActiveRef: a completed session that was never preceded by a live,
+  // not-yet-completed session during this mount must NOT graduate. Note the
+  // `terminal.kind === "completed"` guard also (deliberately) excludes
+  // `exited_to_freeform` — leaving the wizard for freeform is not a graduation.
   useEffect(() => {
     if (completedRef.current) {
       return;
@@ -97,7 +112,15 @@ export function TutorialGuidedShell({
     ) {
       return;
     }
-    if (guidedSession?.terminal?.kind === "completed") {
+    const kind = guidedSession?.terminal?.kind;
+    // Record that we observed a live wizard: a non-null session that has not
+    // yet completed. The mount-effect's clear-to-null step leaves guidedSession
+    // null (not "active"), so requiring non-null here keeps the back-nav path
+    // from spuriously marking the wizard observed.
+    if (guidedSession !== undefined && guidedSession !== null && kind !== "completed") {
+      sawActiveRef.current = true;
+    }
+    if (kind === "completed" && sawActiveRef.current) {
       completedRef.current = true;
       onCompleted(sessionId);
     }

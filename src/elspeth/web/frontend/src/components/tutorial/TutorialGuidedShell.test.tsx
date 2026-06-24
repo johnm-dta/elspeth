@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TutorialGuidedShell } from "./TutorialGuidedShell";
@@ -5,6 +6,22 @@ import { useSessionStore } from "@/stores/sessionStore";
 
 const startGuidedSessionMock = vi.fn();
 const startGuidedMock = vi.fn();
+
+type TerminalKind = "completed" | "exited_to_freeform";
+
+// Build a minimal GuidedSession payload for the store. `terminalKind=null`
+// yields a live, not-yet-terminal wizard (the state TutorialGuidedShell must
+// OBSERVE before a later completion may graduate).
+function guidedSessionPayload(terminalKind: TerminalKind | null): unknown {
+  return {
+    step: "step_4_wire",
+    history: [],
+    terminal: terminalKind === null ? null : { kind: terminalKind, reason: null },
+    chat_history: [],
+    chat_turn_seq: 0,
+    profile: null,
+  };
+}
 
 vi.mock("@/api/client", () => ({
   startGuidedSession: (...args: unknown[]) => startGuidedSessionMock(...args),
@@ -58,7 +75,10 @@ describe("TutorialGuidedShell", () => {
     expect(useSessionStore.getState().activeSessionId).toBe("sess-1");
   });
 
-  it("renders the real ChatPanel guided surface", async () => {
+  it("mounts the ChatPanel guided surface", async () => {
+    // ChatPanel is stubbed at the module boundary (see vi.mock above); this
+    // asserts only that TutorialGuidedShell mounts it. The real ChatPanel
+    // guided behaviour is covered by ChatPanel's own suite.
     render(
       <TutorialGuidedShell sessionId="sess-1" onCompleted={vi.fn()} />,
     );
@@ -101,23 +121,93 @@ describe("TutorialGuidedShell", () => {
     expect(onCompleted).not.toHaveBeenCalled();
   });
 
-  it("calls onCompleted when the guided session terminal is completed", async () => {
+  it("calls onCompleted when the guided session transitions to completed", async () => {
+    const onCompleted = vi.fn();
+    render(
+      <TutorialGuidedShell sessionId="sess-1" onCompleted={onCompleted} />,
+    );
+    await waitFor(() => expect(startGuidedMock).toHaveBeenCalled());
+    // Observe a live wizard FIRST so the observed-transition guard arms.
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload(null),
+    } as never);
+    await waitFor(() =>
+      expect(useSessionStore.getState().guidedSession).not.toBeNull(),
+    );
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload("completed"),
+    } as never);
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("sess-1"));
+  });
+
+  it("does NOT call onCompleted when mounted onto an already-completed session (back-nav GET)", async () => {
+    // The back-nav path: startGuided resolves the PERSISTED completed guided
+    // session WITHOUT the shell ever seeing a live (non-completed) state. This
+    // is the exact bug — re-firing onCompleted here bounced the user back to
+    // run. The observed-transition guard must suppress it.
+    const onCompleted = vi.fn();
+    startGuidedMock.mockImplementation(async () => {
+      // Mirror sessionStore.startGuided: it sets guidedSession on the store.
+      // Here the persisted session is already terminal=completed.
+      useSessionStore.setState({
+        guidedSession: guidedSessionPayload("completed"),
+      } as never);
+    });
+    render(
+      <TutorialGuidedShell sessionId="sess-1" onCompleted={onCompleted} />,
+    );
+    await waitFor(() => expect(startGuidedMock).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(useSessionStore.getState().guidedSession).not.toBeNull(),
+    );
+    // Give the completion effect a chance to (wrongly) fire, then assert it did
+    // not. The shell never observed a live wizard, so onCompleted stays unfired.
+    await Promise.resolve();
+    expect(onCompleted).not.toHaveBeenCalled();
+  });
+
+  it("fires onCompleted exactly once across a live->completed transition under StrictMode", async () => {
+    // StrictMode double-invokes mount effects; completedRef/sawActiveRef must
+    // make onCompleted fire exactly once for a single observed completion.
+    const onCompleted = vi.fn();
+    render(
+      <StrictMode>
+        <TutorialGuidedShell sessionId="sess-1" onCompleted={onCompleted} />
+      </StrictMode>,
+    );
+    await waitFor(() => expect(startGuidedMock).toHaveBeenCalled());
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload(null),
+    } as never);
+    await waitFor(() =>
+      expect(useSessionStore.getState().guidedSession).not.toBeNull(),
+    );
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload("completed"),
+    } as never);
+    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("sess-1"));
+    expect(onCompleted).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT call onCompleted when the guided session exits to freeform (F-FE2)", async () => {
+    // exited_to_freeform is a terminal kind, but leaving the wizard for freeform
+    // is not a graduation: only terminal.kind === "completed" hands off.
     const onCompleted = vi.fn();
     render(
       <TutorialGuidedShell sessionId="sess-1" onCompleted={onCompleted} />,
     );
     await waitFor(() => expect(startGuidedMock).toHaveBeenCalled());
     useSessionStore.setState({
-      guidedSession: {
-        step: "step_4_wire",
-        history: [],
-        terminal: { kind: "completed", reason: null },
-        chat_history: [],
-        chat_turn_seq: 0,
-        profile: null,
-      },
+      guidedSession: guidedSessionPayload(null),
     } as never);
-    await waitFor(() => expect(onCompleted).toHaveBeenCalledWith("sess-1"));
+    await waitFor(() =>
+      expect(useSessionStore.getState().guidedSession).not.toBeNull(),
+    );
+    useSessionStore.setState({
+      guidedSession: guidedSessionPayload("exited_to_freeform"),
+    } as never);
+    await Promise.resolve();
+    expect(onCompleted).not.toHaveBeenCalled();
   });
 
   it("shows a user-visible error if guided startup fails", async () => {

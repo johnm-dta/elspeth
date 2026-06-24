@@ -84,6 +84,23 @@ describe("HelloWorldTutorial staged flow", () => {
     );
   });
 
+  it("renders no Back affordance on the run turn (consumed guided wizard is non-returnable)", async () => {
+    // previousStep(run) is null, so HelloWorldTutorial passes no onBack to the
+    // run turn and TutorialTurn4Run renders no Back button. This is the wiring
+    // half of the fix: Back from run must not remount the completed guided
+    // wizard (which would re-fire onCompleted and bounce the user back to run).
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    // The run turn fetches via the mocked runTutorialPipeline and renders its
+    // result row ("bold" rationale) plus the primary "continue" button.
+    expect(await screen.findByText("bold")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Back/ })).toBeNull();
+  });
+
   it("tags the created tutorial session before entering guided", async () => {
     const api = await import("@/api/client");
     const user = userEvent.setup();

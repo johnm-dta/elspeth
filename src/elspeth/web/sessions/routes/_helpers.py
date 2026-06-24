@@ -79,6 +79,7 @@ from elspeth.web.composer.guided.emitters import (
     build_step_3_schema_form_turn,
 )
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
@@ -2187,7 +2188,7 @@ async def _handle_runtime_preflight_failure(
     return response_body
 
 
-def _initial_composition_state_with_guided_session() -> CompositionState:
+def _initial_composition_state_with_guided_session(*, profile: WorkflowProfile = EMPTY_PROFILE) -> CompositionState:
     """Construct a fresh CompositionState with a latent guided-mode session attached.
 
     Originally added under spec §5.2 / errata C7 ("new sessions default to
@@ -2211,7 +2212,7 @@ def _initial_composition_state_with_guided_session() -> CompositionState:
         outputs=(),
         metadata=PipelineMetadata(),
         version=1,
-        guided_session=GuidedSession.initial(),
+        guided_session=GuidedSession.initial(profile=profile),
     )
 
 

@@ -252,6 +252,7 @@ class TestStep25Handler:
     def test_apply_recipe_redirects_to_wire_with_committed_state(self, _seeded) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep
         from elspeth.web.composer.guided.recipe_match import RecipeMatch
+        from elspeth.web.composer.guided.state_machine import TerminalKind, TerminalState
         from elspeth.web.composer.guided.steps import handle_step_2_5_recipe_apply
 
         engine, session_id, blob_id = _seeded
@@ -276,7 +277,14 @@ class TestStep25Handler:
 
         result = handle_step_2_5_recipe_apply(
             state=state,
-            session=GuidedSession.initial(),
+            session=replace(
+                GuidedSession.initial(),
+                terminal=TerminalState(
+                    kind=TerminalKind.COMPLETED,
+                    reason=None,
+                    pipeline_yaml="stale yaml",
+                ),
+            ),
             match=match,
             catalog=catalog,
             session_engine=engine,
@@ -428,7 +436,7 @@ class TestTerminalStampInvariant:
 
     def test_chain_accept_redirects_to_wire_not_completed(self) -> None:
         from elspeth.web.composer.guided.protocol import GuidedStep
-        from elspeth.web.composer.guided.state_machine import ChainProposal, TerminalKind
+        from elspeth.web.composer.guided.state_machine import ChainProposal, TerminalKind, TerminalState
         from elspeth.web.composer.guided.steps import (
             handle_step_3_chain_accept,
             handle_step_4_wire_confirm,
@@ -477,7 +485,14 @@ class TestTerminalStampInvariant:
 
         result = handle_step_3_chain_accept(
             state=step_2.state,
-            session=step_2.session,
+            session=replace(
+                step_2.session,
+                terminal=TerminalState(
+                    kind=TerminalKind.COMPLETED,
+                    reason=None,
+                    pipeline_yaml="stale yaml",
+                ),
+            ),
             catalog=catalog,
             proposal=proposal,
         )

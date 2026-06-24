@@ -259,7 +259,11 @@ def handle_step_2_5_recipe_apply(
             tool_result=tool_result,
         )
 
-    new_session = dataclasses.replace(session, step=GuidedStep.STEP_4_WIRE)
+    new_session = dataclasses.replace(
+        session,
+        step=GuidedStep.STEP_4_WIRE,
+        terminal=None,
+    )
 
     return StepHandlerResult(
         state=tool_result.updated_state,
@@ -385,6 +389,7 @@ def handle_step_3_chain_accept(
         session,
         step=GuidedStep.STEP_4_WIRE,
         step_3_proposal=proposal,
+        terminal=None,
     )
 
     return StepHandlerResult(

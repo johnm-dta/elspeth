@@ -2656,13 +2656,13 @@ async def _dispatch_guided_respond(
     Returns ``(updated_state, updated_session, next_turn_or_None)``.
 
     The dispatcher is called only when ``guided.terminal is None``.  The
-    caller checks terminality before and after; the dispatcher never
-    terminates a session (that is ``step_advance``'s responsibility for
-    exit_to_freeform and the step-2.5 recipe-accept path).  The caller
-    also bypasses the dispatcher entirely on the exit-from-COMPLETED path
-    (see ``post_guided_respond``): that path transitions terminal kind
-    COMPLETED -> EXITED_TO_FREEFORM directly, without running any
-    step-handler dispatch logic.
+    caller checks terminality before and after.  ``step_advance`` owns
+    exit-to-freeform terminal transitions; this dispatcher owns the
+    STEP_4_WIRE confirm branch that can stamp COMPLETED.  The caller also
+    bypasses the dispatcher entirely on the exit-from-COMPLETED path (see
+    ``post_guided_respond``): that path transitions terminal kind COMPLETED
+    -> EXITED_TO_FREEFORM directly, without running any step-handler dispatch
+    logic.
 
     Decision table:
 

@@ -2,7 +2,8 @@
 
 Verifies the dispatcher's step routing, intra-step turn progression, and
 the happy-path walk from step 1 (SINGLE_SELECT) through step 2.5
-(RECIPE_OFFER) to the wire-confirm stage and then a COMPLETED terminal state.
+(RECIPE_OFFER) to the wire-confirm stage. Valid wiring confirmation is covered
+by direct chain tests; invalid recipe wiring re-emits the wire turn.
 
 HTTP transport: SyncASGITestClient (in-process, synchronous — same pattern
 as test_get_guided.py).  The full roundtrip exercises:
@@ -36,6 +37,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
+
+import pytest
 
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
@@ -595,7 +598,56 @@ class TestStep25RecipeAccept:
         assert gs["step"] == "step_4_wire"
         assert get_body["next_turn"]["type"] == "confirm_wiring"
 
-    def test_confirm_wiring_malformed_bodies_return_400_after_answered_hash(self, composer_test_client: TestClient) -> None:
+    @pytest.mark.parametrize(
+        "malformed_body",
+        [
+            {
+                "chosen": None,
+                "edited_values": None,
+                "custom_inputs": None,
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+            {
+                "chosen": [],
+                "edited_values": None,
+                "custom_inputs": None,
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+            {
+                "chosen": ["accept"],
+                "edited_values": None,
+                "custom_inputs": None,
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+            {
+                "chosen": ["confirm"],
+                "edited_values": {},
+                "custom_inputs": None,
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+            {
+                "chosen": ["confirm"],
+                "edited_values": None,
+                "custom_inputs": [],
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+        ],
+    )
+    def test_confirm_wiring_malformed_bodies_return_400_after_answered_hash(
+        self,
+        composer_test_client: TestClient,
+        malformed_body: dict[str, object],
+    ) -> None:
         session_id = _create_session(composer_test_client)
         recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
         output_path = _outputs_path(composer_test_client, "out.jsonl")
@@ -624,14 +676,7 @@ class TestStep25RecipeAccept:
 
         resp = composer_test_client.post(
             f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "chosen": ["accept"],
-                "edited_values": None,
-                "custom_inputs": None,
-                "accepted_step_index": None,
-                "edit_step_index": None,
-                "control_signal": None,
-            },
+            json=malformed_body,
         )
 
         assert resp.status_code == 400, resp.json()

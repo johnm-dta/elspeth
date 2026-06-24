@@ -292,7 +292,7 @@ class GuidedSession:
     recipe that was actually offered — binding the acceptance to the server-emitted
     offer and preventing a crafted client from accepting a different recipe.  The
     field is cleared (set to None) in the same atomic replace() that consumes it
-    (the terminal=COMPLETED path).  It is always None when the session is not at
+    (the accept-to-wire path).  It is always None when the session is not at
     STEP_2_5_RECIPE_MATCH.
 
     ``step_2_chosen_plugin`` is a mid-Step-2 staging field.  The Step-2

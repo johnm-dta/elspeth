@@ -817,8 +817,8 @@ async def post_guided_respond(
             #     field to kind=COMPLETED.  No information is lost: the
             #     yaml is recoverable from composition_state at any time,
             #     and the COMPLETED transition that produced the yaml was
-            #     already audit-recorded by the preceding
-            #     handle_step_*_accept call.
+            #     already audit-recorded by the preceding STEP_4_WIRE confirm
+            #     dispatch.
             #   * reason=USER_PRESSED_EXIT matches the
             #     state-machine-driven mid-wizard exit (state_machine.py:549).
             if (

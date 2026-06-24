@@ -344,6 +344,27 @@ def _enveloped_state_column(value: Any) -> Any:
     return {"_version": 1, "data": raw}
 
 
+def _strip_guided_profile_in_meta(composer_meta: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Reset a forked GuidedSession's WorkflowProfile to the empty profile.
+
+    ``composer_meta`` is copied verbatim on fork. A tutorial profile must not
+    leak into an ordinary forked session, so the strip lives inside
+    ``fork_session`` where the composer_meta copies happen.
+    """
+    from elspeth.web.composer.guided.profile import EMPTY_PROFILE
+
+    if composer_meta is None:
+        return None
+    thawed: dict[str, Any] = dict(deep_thaw(composer_meta))
+    guided_raw = thawed.get("guided_session")
+    if not isinstance(guided_raw, dict) or "profile" not in guided_raw:
+        return thawed
+    guided_copy = dict(guided_raw)
+    guided_copy["profile"] = EMPTY_PROFILE.to_dict()
+    thawed["guided_session"] = guided_copy
+    return thawed
+
+
 def _current_adr019_counter_subsets_hold(
     *,
     rows_succeeded: int,
@@ -4983,6 +5004,14 @@ class SessionServiceImpl:
                 source_session_id,
             )
 
+        # Profile strip (finding 10, rev 4): never let a tutorial WorkflowProfile
+        # leak into a forked session. Computed once, used by BOTH verbatim
+        # composer_meta copies below (the :5150 persist copy and the :5227 return
+        # copy). The route-layer blob-rewrite save preserves composer_meta
+        # verbatim and never strips the profile (and is not in this service
+        # method's path), so the strip must live here — independent of rewritten.
+        forked_composer_meta = _strip_guided_profile_in_meta(source_state_record.composer_meta) if source_state_record is not None else None
+
         # Prepare IDs and timestamps upfront
         new_session_id = uuid.uuid4()
         new_session_id_str = str(new_session_id)
@@ -5147,7 +5176,7 @@ class SessionServiceImpl:
                                     metadata_=source_state_record.metadata_,
                                     is_valid=source_state_record.is_valid,
                                     validation_errors=source_state_record.validation_errors,
-                                    composer_meta=source_state_record.composer_meta,
+                                    composer_meta=forked_composer_meta,
                                 ),
                                 derived_from_state_id=None,
                             ),
@@ -5224,7 +5253,7 @@ class SessionServiceImpl:
                 validation_errors=source_state_record.validation_errors,
                 created_at=now,
                 derived_from_state_id=None,
-                composer_meta=source_state_record.composer_meta,
+                composer_meta=forked_composer_meta,
             )
 
         return new_session, new_messages, copied_state

@@ -700,6 +700,106 @@ class TestForkSession:
         child = await service.get_session(child_session.id)
         assert child.forked_from_session_id == session.id
 
+    @pytest.mark.asyncio
+    async def test_fork_strips_tutorial_profile_from_guided_session(self, service) -> None:
+        """Forking a tutorial-profile guided session yields the EMPTY profile.
+
+        Critical case (finding 10, rev 4 — CORRECTED). The canonical tutorial
+        source MATERIALISES (set_pipeline from ``source.inline_blob``) to a real
+        ``json`` source whose ``options`` carry ``blob_ref``
+        (``composer/tools/sessions.py:425``), so the route-layer blob-rewrite save
+        DOES fire (``rewritten=True``). This fixture uses that real shape on
+        purpose: it proves the strip survives EVEN on the path that re-saves the
+        state — because the blob-rewrite re-save preserves ``composer_meta``
+        verbatim (``sessions/routes/sessions.py:479-480``) and never strips the
+        profile. The strip therefore lives in ``fork_session`` (both the :5150
+        persist copy and the :5227 return copy) and is independent of
+        ``rewritten``. (The earlier "no blob_ref => rewritten=False" framing was a
+        false premise — see the spec's two-objects ``blob_ref`` note in §5/B4.)
+        """
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE
+        from elspeth.web.composer.guided.state_machine import GuidedSession
+
+        session = await service.create_session("alice", "Tutorial", "local")
+        tutorial_guided = GuidedSession.initial(profile=TUTORIAL_PROFILE)
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                # Materialised canonical URL source (sessions.py:420-427): a real
+                # ``json`` plugin with ``blob_ref`` in options => rewritten=True.
+                # The blob-rewrite save fires but preserves composer_meta verbatim,
+                # so the profile strip must still come from fork_session.
+                sources={
+                    "urls": {
+                        "plugin": "json",
+                        "options": {
+                            "path": "composer_blobs/canonical-url-list.json",
+                            "blob_ref": "a1b2c3d4-0000-0000-0000-000000000099",
+                        },
+                    }
+                },
+                is_valid=True,
+                composer_meta={"guided_session": tutorial_guided.to_dict()},
+            ),
+            provenance="session_seed",
+        )
+        fork_msg = await service.add_message(
+            session.id,
+            "user",
+            "Build this",
+            composition_state_id=state.id,
+            writer_principal="route_user_message",
+        )
+
+        _, _, copied_state = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="Build something else",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+
+        assert copied_state is not None
+        # Returned record (the :5227 copy) carries the EMPTY profile. The record
+        # freezes composer_meta (CompositionStateRecord.__post_init__), so thaw
+        # before GuidedSession.from_dict — the canonical read in converters.py:67.
+        forked_meta = dict(deep_thaw(copied_state.composer_meta))
+        forked_guided = GuidedSession.from_dict(forked_meta["guided_session"])
+        assert forked_guided.profile == EMPTY_PROFILE
+        # And it is PERSISTED that way (the :5150 copy) — re-read from the DB.
+        persisted = await service.get_current_state(copied_state.session_id)
+        persisted_meta = dict(deep_thaw(persisted.composer_meta))
+        persisted_guided = GuidedSession.from_dict(persisted_meta["guided_session"])
+        assert persisted_guided.profile == EMPTY_PROFILE
+
+    @pytest.mark.asyncio
+    async def test_fork_without_guided_session_passes_meta_through(self, service) -> None:
+        """An ordinary (non-guided) fork is unaffected by the profile strip."""
+        session = await service.create_session("alice", "Plain", "local")
+        state = await service.save_composition_state(
+            session.id,
+            CompositionStateData(
+                sources={"s": {"plugin": "csv", "options": {"path": "x.csv"}}},
+                is_valid=True,
+                composer_meta={"repair_turns_used": 2},
+            ),
+            provenance="session_seed",
+        )
+        fork_msg = await service.add_message(
+            session.id, "user", "Build", composition_state_id=state.id, writer_principal="route_user_message"
+        )
+        _, _, copied_state = await service.fork_session(
+            source_session_id=session.id,
+            fork_message_id=fork_msg.id,
+            new_message_content="Build other",
+            user_id="alice",
+            auth_provider_type="local",
+        )
+        assert copied_state is not None
+        # composer_meta passes through verbatim (no guided_session key to strip).
+        assert copied_state.composer_meta == {"repair_turns_used": 2}
+
 
 # ── Route-level tests ───────────────────────────────────────────────────
 

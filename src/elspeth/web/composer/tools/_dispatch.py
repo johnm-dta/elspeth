@@ -127,8 +127,9 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freez
             "request, not per session lifetime) and exhausting it returns a "
             "structured error rather than crashing — inspect budget_remaining "
             "in each response. Do NOT call this tool in a loop, do NOT use it "
-            "as a substitute for reading validator output. Disabled by default; "
-            "only available when the operator has explicitly enabled it."
+            "as a substitute for reading validator output. Availability is "
+            "operator-configured; the mandatory END sign-off checkpoint runs "
+            "independently of this on-demand escape."
         ),
         "parameters": {
             "type": "object",

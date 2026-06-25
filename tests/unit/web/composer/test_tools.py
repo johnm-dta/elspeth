@@ -9119,11 +9119,11 @@ class TestGetPluginAssistance:
         payload = result.to_dict()["data"]
         assert payload["issue_code"] is None
         hints = " ".join(payload["composer_hints"])
-        assert "internet content" in hints
-        assert "prompt-injection shielding is important" in hints
+        assert "reviewed for EVERY LLM node" in hints
+        assert "surfaced as an advisory (never blocking)" in hints
         assert "azure_prompt_shield" in hints
         assert "only when discovery lists it" in hints
-        assert "surface this to the user as a strong recommendation" in hints
+        assert "whenever no authorized shield is upstream (State B/C)" in hints
         assert "recommendation is not permission to add a node" in hints
         assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints
         assert "copying it verbatim" in hints

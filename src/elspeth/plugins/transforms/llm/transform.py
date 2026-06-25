@@ -1124,7 +1124,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:bd14eb75b0b8ede6"
+    source_file_hash: str | None = "sha256:cae1833d43364ba4"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1711,11 +1711,11 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
                     "If downstream cleanup, sink, mapper, or transform needs the LLM response, guarantee the response_field by name in the LLM node schema. If downstream also needs source or scrape fields that pass through the LLM, also guarantee pass-through fields such as URL or identifier fields.",
                     "Single-query LLM output is written to response_field. Prompt-requested JSON keys are not separate pipeline fields unless another transform parses them; preserve response_field through cleanup instead of invented prompt-internal keys.",
                     "The LLM transform preserves upstream row fields while adding response_field; it does not remove raw scrape fields. If a web_scrape-to-LLM workflow must save results without raw HTML or fingerprints, put a field_mapper cleanup node between the LLM and the sink.",
-                    "If internet content, public web content, search results, crawled pages, or other untrusted remote text will flow into this LLM, prompt-injection shielding is important: surface this to the user as a strong recommendation.",
+                    "Prompt-injection shielding is reviewed for EVERY LLM node, not only when untrusted web content is upstream: an unshielded LLM is always surfaced as an advisory (never blocking).",
                     "Recommend an available authorized prompt-injection shield before the LLM; use azure_prompt_shield only when discovery lists it.",
                     "Use the deployment's equivalent when available; recommendation is not permission to add a node, so do not insert it automatically unless requested, policy-required, or explicitly high-risk.",
-                    "If the workflow proceeds without an authorized prompt shield, stage a pipeline_decision review on the LLM node with user_term prompt_injection_shield_recommendation.",
-                    "Its draft should recommend an available authorized prompt-injection shield while stating that internet-controlled text will otherwise flow directly to the LLM.",
+                    "Stage a pipeline_decision review on the LLM node with user_term prompt_injection_shield_recommendation whenever no authorized shield is upstream (State B/C). Skip it only when an authorized shield is already wired upstream (State A).",
+                    "Pick the state-appropriate draft: State B (an authorized shield is available in this deployment) recommends wiring it in; State C (no shield available) is the high-risk reconsider advisory. Default to the State-C draft when availability is unknown.",
                     "LLM-node reviews stack: an authored web-content scoring prompt can need llm_prompt_template, vague_term, and prompt_injection_shield_recommendation requirements on the same LLM node.",
                     "Interpretation reviews are not transform stages. Do not create passthrough, review, recommendation, or placeholder nodes for LLM reviews; put the review objects in this LLM node's interpretation_requirements list.",
                     "For prompt-injection shielding recommendations, do not add passthrough, placeholder, no-op, or renamed utility nodes to imply protection; recommendation prose is not a graph step.",

@@ -654,9 +654,13 @@ _RECIPE_WEB_SCRAPE_SLOTS: Final[dict[str, SlotSpec]] = {
         description=(
             "SSRF allowlist for the web_scrape node, as a list of CIDR strings. "
             "Empty (the default) omits the key so the web_scrape field default "
-            "'public_only' applies — the correct value for a public host. Set by "
-            "the tutorial seam to a tight loopback CIDR for local dev; NEVER set "
-            "by the LLM (this is an SSRF control)."
+            "'public_only' applies — the correct value for a public host. "
+            "Intended source: the server-side resolve_tutorial_allowed_hosts "
+            "output (a tight loopback CIDR for local dev). SSRF safety comes "
+            "from the web_scrape enforcement boundary (CidrStr validation + the "
+            "'public_only' field default), not from the slot being unreachable — "
+            "apply_pipeline_recipe is a Tier-3 boundary that can forward an "
+            "LLM-authored value, which the enforcement boundary still constrains."
         ),
     ),
 }

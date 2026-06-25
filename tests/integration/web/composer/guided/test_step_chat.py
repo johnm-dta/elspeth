@@ -542,6 +542,56 @@ class TestStep1SourceResolution:
         assert body["next_turn"]["payload"]["plugin"] == "csv"
         assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
 
+    def test_step_1_chat_advisory_prose_at_phase_entry_does_not_mutate_source(self, composer_test_client) -> None:
+        """Prose-only chat at STEP_1 phase entry (SINGLE_SELECT) stays advisory.
+
+        Hardening for the guard-widening in Task 3 (2a): SINGLE_SELECT is now
+        a valid entry type for ``resolve_step_1_source_chat_with_auto_drop``.
+        When the resolver returns no tool call (``source_resolution is None``)
+        the route MUST remain advisory:
+          (a) ``next_turn`` is None — no re-render
+          (b) ``guided.step`` is unchanged (still ``step_1_source``)
+          (c) no source committed (``step_1_result`` unmutated)
+          (d) the reply lands in ``chat_history``, NOT wizard ``history``
+
+        The pin catches a regression where ``if source_resolution is not None:``
+        is removed: the route would then crash at ``source_resolution.filename``
+        with AttributeError → 500, failing assertion (a).
+        """
+        client = composer_test_client
+        session_id = _create_session(client)
+        # Phase-entry precondition: same setup as test_step_1_chat_drives_source_from_phase_entry.
+        _seed_persisted_step1(client, session_id)
+        entry = _seed_guided_session(client, session_id)
+        history_before = entry["guided_session"]["history"]
+        assert len(history_before) == 1, "expected exactly 1 TurnRecord after seeded GET"
+
+        # _fake_llm_reply has no tool_calls attribute; maybe_resolve_step_1_source_chat
+        # hits AttributeError on message.tool_calls, which resolve_step_1_source_chat_with_auto_drop
+        # catches and maps to the synthetic-unavailable fallback
+        # (source_resolution=None, fallback_chat=StepChatResult(synthetic_message)).
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("Try using the wizard plugin picker.")),
+        ):
+            status, body = _post_chat(
+                client,
+                session_id,
+                message="what should I do?",
+                step_index="step_1_source",
+            )
+        assert status == 200, body
+        # (a) advisory: no re-render
+        assert body["next_turn"] is None
+        # (b) step unchanged
+        assert body["guided_session"]["step"] == "step_1_source"
+        # (c) no source committed
+        source_slot = (body["composition_state"]["sources"] or {}).get("source")
+        assert source_slot is None, f"expected no committed source, got {source_slot!r}"
+        # (d) reply in chat_history (user+assistant), wizard history unchanged
+        assert len(body["guided_session"]["chat_history"]) == 2
+        assert body["guided_session"]["history"] == history_before
+
 
 class TestStepChatRejections:
     def test_step_mismatch_returns_409(self, composer_test_client: TestClient) -> None:

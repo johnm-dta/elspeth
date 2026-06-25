@@ -227,6 +227,74 @@ async def test_solve_chain_without_repair_context_has_no_repair_section() -> Non
     assert "REPAIR ATTEMPT" not in system_content
 
 
+def test_build_revise_addendum_frames_user_instruction_not_validation() -> None:
+    """build_revise_addendum frames the text as a proposal-change request,
+    NOT as a validation-failure repair."""
+    from elspeth.web.composer.guided.prompts import build_revise_addendum
+
+    instruction = "just pass the rows through"
+    addendum = build_revise_addendum(revise_instruction=instruction)
+    assert "REVISE REQUEST" in addendum
+    assert instruction in addendum
+    # It must NOT borrow the repair framing — a revise is not a validation error.
+    assert "failed validation" not in addendum
+    assert "REPAIR ATTEMPT" not in addendum
+
+
+@pytest.mark.asyncio
+async def test_revise_context_appears_in_system_prompt() -> None:
+    """solve_chain with revise_context= appends the REVISE addendum (not the
+    repair addendum) to the system prompt."""
+    from elspeth.web.composer.guided.chain_solver import solve_chain
+    from elspeth.web.composer.guided.state_machine import (
+        SinkOutputResolved,
+        SinkResolved,
+        SourceResolved,
+    )
+
+    revise_instruction = "just pass the rows through"
+    fake_response = _make_propose_chain_response()
+    captured_calls: list = []
+
+    async def _capture(**kwargs):  # type: ignore[no-untyped-def]
+        captured_calls.append(kwargs)
+        return fake_response
+
+    with patch(
+        "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+        side_effect=_capture,
+    ):
+        await solve_chain(
+            model="anthropic/claude-3-opus",
+            source=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("price",),
+                sample_rows=({"price": "1.99"},),
+            ),
+            sink=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={},
+                        required_fields=("price",),
+                        schema_mode="fixed",
+                    ),
+                )
+            ),
+            revise_context=revise_instruction,
+            temperature=None,
+            seed=None,
+        )
+
+    assert len(captured_calls) == 1
+    system_content = captured_calls[0]["messages"][0]["content"]
+    # The REVISE addendum is present; the REPAIR addendum is NOT.
+    assert "REVISE REQUEST" in system_content
+    assert revise_instruction in system_content
+    assert "REPAIR ATTEMPT" not in system_content
+
+
 # ---------------------------------------------------------------------------
 # Schema and shape-failure tests (P2 — chain-solver response-shape constraint).
 #

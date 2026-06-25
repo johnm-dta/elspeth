@@ -158,6 +158,26 @@ def build_repair_addendum(*, validation_error: str) -> str:
     )
 
 
+def build_revise_addendum(*, revise_instruction: str) -> str:
+    """Render the REVISE REQUEST addendum appended to a revise solve_chain call.
+
+    Distinct from :func:`build_repair_addendum`: a revise is a user instruction
+    to CHANGE the current proposal, not a report that the proposal failed
+    validation. Framing it as the latter (the repair addendum) misleads the
+    model into "correcting errors" that do not exist.
+
+    Args:
+        revise_instruction: The user's revise message, verbatim; Tier 1 audit
+            data, no paraphrasing.
+    """
+    return (
+        "REVISE REQUEST — the user wants to change the current proposal as "
+        "follows:\n"
+        f"{revise_instruction}\n\n"
+        "Propose an updated chain that applies this change."
+    )
+
+
 def build_step_3_context_block(
     *,
     source: SourceResolved,

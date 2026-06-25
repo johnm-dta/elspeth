@@ -13,6 +13,7 @@ from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.prompts import (
     build_repair_addendum,
+    build_revise_addendum,
     build_step_3_context_block,
     load_guided_skill,
 )
@@ -134,6 +135,7 @@ async def solve_chain(
     sink: SinkResolved,
     recipe_match: RecipeMatch | None = None,
     repair_context: str | None = None,
+    revise_context: str | None = None,
     recorder: BufferingRecorder | None = None,
     temperature: float | None,
     seed: int | None,
@@ -149,6 +151,11 @@ async def solve_chain(
         repair_context: Verbatim validation error text from the failing ToolResult.
             When set, the LLM is asked to correct the named errors rather than
             propose an independent first-pass chain.
+        revise_context: Verbatim user revise instruction. When set, the LLM is
+            asked to UPDATE the current proposal per the instruction (via
+            build_revise_addendum) — distinct from repair_context, which frames the
+            text as a validation-failure to correct. The STEP_3 /guided/chat branch
+            uses this; the genuine validation-repair loop uses repair_context.
         recorder: Optional :class:`BufferingRecorder` to receive a
             :class:`ComposerLLMCall` audit row for the LLM invocation. When
             supplied, exactly one record is appended via ``record_llm_call`` on
@@ -171,11 +178,15 @@ async def solve_chain(
 
     skill = load_guided_skill()
     context_block = build_step_3_context_block(source=source, sink=sink, recipe_match=recipe_match)
+    # Additive, branch-total render: repair_context and revise_context are
+    # mutually exclusive by call-site, but appending each independently keeps the
+    # function total (a raise here would 500 and brick the phase). Neither-set and
+    # repair-only render byte-identically to the prior nested form.
+    system_prompt = f"{skill}\n\n{context_block}"
     if repair_context is not None:
-        repair_addendum = build_repair_addendum(validation_error=repair_context)
-        system_prompt = f"{skill}\n\n{context_block}\n\n{repair_addendum}"
-    else:
-        system_prompt = f"{skill}\n\n{context_block}"
+        system_prompt = f"{system_prompt}\n\n{build_repair_addendum(validation_error=repair_context)}"
+    if revise_context is not None:
+        system_prompt = f"{system_prompt}\n\n{build_revise_addendum(revise_instruction=revise_context)}"
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
     kwargs: dict[str, Any] = {
         "model": model,

@@ -1828,9 +1828,11 @@ gets the tight CIDR list from the Task 2 resolver.
               },
   ```
 
-  > `slots.get("allowed_hosts")` is the validated, coerced value — `str_list`
-  > with `default=()`, coerced by `_coerce_default` to a tuple, so it is always a
-  > tuple. The `or []` guards a `None` only defensively, and `list(...)` normalises
+  > `slots.get("allowed_hosts")` is the validated value — `str_list` with
+  > `default=()`; when omitted, `validate_slots` assigns the default verbatim
+  > (`coerced[slot_name] = spec.default`, recipes.py:142) and `()` is already a
+  > tuple; when supplied, `_coerce_slot` (recipes.py:51) returns `tuple(items)` —
+  > either way a tuple. The `or []` guards a `None` only defensively, and `list(...)` normalises
   > the tuple to the list the node options expect. Confirm `Any` is imported in
   > `recipes.py` (it is — used
   > throughout, e.g. `:122`).
@@ -1839,7 +1841,7 @@ gets the tight CIDR list from the Task 2 resolver.
   In `src/elspeth/web/composer/guided/recipe_match.py`, `_web_scrape_slot_resolver`
   (begins `:266`; the return map is at `:296-300`) returns a partial slot map. The
   slot is `required=False, default=()`, so `validate_slots` supplies the empty
-  default (coerced to a tuple, see Step 2) when the resolver omits it — existing
+  default verbatim (`spec.default`, already a tuple — see Step 2) when the resolver omits it — existing
   `match_recipe` flows are unchanged and this file needs NO edit. Confirm by
   running the existing recipe-match tests:
   ```

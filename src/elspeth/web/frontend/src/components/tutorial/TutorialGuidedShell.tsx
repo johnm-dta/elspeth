@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { startGuidedSession } from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
+import { CANONICAL_TUTORIAL_PROMPT } from "./tutorialMachine";
 
 interface TutorialGuidedShellProps {
   sessionId: string;
@@ -146,7 +147,7 @@ export function TutorialGuidedShell({
           {error}
         </p>
       )}
-      <ChatPanel isTutorial />
+      <ChatPanel isTutorial lockedChatPrompt={CANONICAL_TUTORIAL_PROMPT} />
     </section>
   );
 }

@@ -490,6 +490,15 @@ interface ChatPanelProps {
   // "Open freeform editor" button, and (iii) redirects the discriminator's
   // freeform fall-through to a guided placeholder (Task 3).
   isTutorial?: boolean;
+  /**
+   * Tutorial locked prompt. When set, the guided STEP_1 "Describe what you
+   * want" chat input is prepopulated with this text and locked read-only, so
+   * the tutorial learner steps through the normal guided flow without typing.
+   * Supplied by TutorialGuidedShell (the canonical worked-example prompt +
+   * resolved synthetic URLs). Absent for a normal session (the input behaves
+   * as the editable freeform-intent box).
+   */
+  lockedChatPrompt?: string;
 }
 
 /**
@@ -502,6 +511,7 @@ export function ChatPanel({
   onOpenSecrets,
   onOpenComposerPreferences,
   isTutorial,
+  lockedChatPrompt,
 }: ChatPanelProps) {
   const messages = useSessionStore((s) => s.messages);
   // Project audit-grade message rows onto user-visible turns. One bubble per
@@ -1354,6 +1364,11 @@ export function ChatPanel({
             inputRef={inputRef}
             placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
             maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
+            value={lockedChatPrompt}
+            onChange={
+              lockedChatPrompt !== undefined ? () => undefined : undefined
+            }
+            readOnly={lockedChatPrompt !== undefined}
           />
         </section>
         <section

@@ -33,6 +33,15 @@ interface ChatInputProps {
    * freeform composer wording when absent.
    */
   placeholder?: string;
+  /**
+   * Tutorial lock: when true the textarea is read-only (the prepopulated
+   * prompt cannot be edited) and the source-composition affordances
+   * (file upload, blob manager, secrets) are hidden. The learner still
+   * presses Send to submit the locked value. Used by the guided tutorial
+   * so the worked-example prompt is prepopulated-and-locked — the learner
+   * steps through the normal flow but types nothing.
+   */
+  readOnly?: boolean;
 }
 
 type ChatInputIconName = "folder" | "upload" | "key";
@@ -68,6 +77,7 @@ export function ChatInput({
   onChange: controlledOnChange,
   maxLength,
   placeholder,
+  readOnly = false,
 }: ChatInputProps) {
   // Stable id for the keyboard-hint element, wired into the textarea's
   // aria-describedby so screen readers announce "Shift+Enter for new line"
@@ -249,6 +259,7 @@ export function ChatInput({
           onKeyDown={handleKeyDown}
           placeholder={effectivePlaceholder}
           maxLength={maxLength}
+          readOnly={readOnly}
           aria-label="Message input"
           aria-describedby={hintId}
           rows={2}
@@ -256,7 +267,7 @@ export function ChatInput({
         />
 
         {/* File manager toggle */}
-          {onToggleBlobManager && (
+          {!readOnly && onToggleBlobManager && (
             <button
               type="button"
               onClick={onToggleBlobManager}
@@ -269,28 +280,32 @@ export function ChatInput({
           )}
 
         {/* File upload button — using a visible button that clicks a hidden input */}
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={!activeSessionId}
-          className="chat-input-icon-btn"
-          title="Upload file"
-          aria-label="Upload file"
-        >
-          <ChatInputIcon name="upload" />
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          onChange={handleFileSelect}
-          disabled={!activeSessionId}
-          style={{ display: "none" }}
-          aria-hidden="true"
-          tabIndex={-1}
-        />
+        {!readOnly && (
+          <>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!activeSessionId}
+              className="chat-input-icon-btn"
+              title="Upload file"
+              aria-label="Upload file"
+            >
+              <ChatInputIcon name="upload" />
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              onChange={handleFileSelect}
+              disabled={!activeSessionId}
+              style={{ display: "none" }}
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+          </>
+        )}
 
         {/* Secrets button — key icon, co-located with file actions (A5) */}
-        {onOpenSecrets && (
+        {!readOnly && onOpenSecrets && (
           <button
             type="button"
             onClick={onOpenSecrets}

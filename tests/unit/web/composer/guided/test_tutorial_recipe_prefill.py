@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from elspeth.web.composer.guided.emitters import build_step_2_5_recipe_offer_turn
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.recipe_match import RecipeMatch, match_recipe
 from elspeth.web.composer.guided.resolved import (
@@ -130,6 +131,32 @@ def test_prefill_fails_closed_when_secret_ref_not_allowlisted(tmp_path: Path) ->
     settings = _settings(tmp_path, allowlist=("ANTHROPIC_API_KEY",))
     with pytest.raises(InvariantError):
         prefill_tutorial_recipe_slots(recipe_match=match, settings=settings)
+
+
+def test_prefilled_offer_emits_empty_knobs(tmp_path: Path) -> None:
+    """The real web-scrape tutorial offer: all 4 slots prefilled -> knobs.fields == [].
+
+    This is the brand-new empty-knobs UI state the passive web-scrape learner
+    hits at STEP_2.5 (before this change every offer had >=1 unsatisfied slot).
+    Pin that the emitter produces a well-formed empty-knobs payload whose
+    ``prefilled`` carries all seven slots for the frontend to resubmit.
+    """
+    match = _web_scrape_match()
+    prefilled = prefill_tutorial_recipe_slots(recipe_match=match, settings=_settings(tmp_path))
+    turn = build_step_2_5_recipe_offer_turn(prefilled)
+    payload = turn["payload"]
+
+    assert payload["mode"] == "recipe_decision"
+    assert payload["knobs"]["fields"] == []
+    assert set(payload["prefilled"]) == {
+        "source_blob_id",
+        "source_plugin",
+        "output_path",
+        "model",
+        "api_key_secret",
+        "abuse_contact",
+        "scraping_reason",
+    }
 
 
 def test_prefill_noop_when_no_overlap(tmp_path: Path) -> None:

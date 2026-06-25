@@ -1113,6 +1113,28 @@ describe("ChatPanel mode discriminator", () => {
       screen.queryByRole("button", { name: "Exit to freeform" }),
     ).toBeNull();
   });
+
+  it("suppresses ExitToFreeformButton when isTutorial (concern B)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    // The form still renders (manual path is never gated)...
+    expect(
+      screen.getByRole("group", { name: "Which source plugin should we use?" }),
+    ).toBeInTheDocument();
+    // ...but the freeform exit affordance is gone — a tutorial must never
+    // expose a switch-to-freeform path (spec §"Frontend" concern B).
+    expect(
+      screen.queryByRole("button", { name: "Exit to freeform" }),
+    ).toBeNull();
+  });
 });
 
 // ── Focus-on-step-advance tests (Phase 8 fix-up, spec §7.4) ─────────────────

@@ -481,6 +481,15 @@ interface ChatPanelProps {
   // the account menu). The link opens the same modal the account menu
   // does; threaded as a prop from App.tsx for parity with onOpenSecrets.
   onOpenComposerPreferences?: () => void;
+  // Concern B (LLM-primary spec §"Frontend"): a TUTORIAL session must never
+  // reach a freeform surface. This client-only flag is passed truthy ONLY by
+  // TutorialGuidedShell. It is deliberately NOT a wire/profile field — there
+  // is no tutorial discriminator on the wire (ground truth Q2/Q4), and
+  // inferring tutorial from profile booleans is fragile. When true it (i)
+  // suppresses ExitToFreeformButton, (ii) suppresses CompletionSummary's
+  // "Open freeform editor" button, and (iii) redirects the discriminator's
+  // freeform fall-through to a guided placeholder (Task 3).
+  isTutorial?: boolean;
 }
 
 /**
@@ -492,6 +501,7 @@ interface ChatPanelProps {
 export function ChatPanel({
   onOpenSecrets,
   onOpenComposerPreferences,
+  isTutorial,
 }: ChatPanelProps) {
   const messages = useSessionStore((s) => s.messages);
   // Project audit-grade message rows onto user-visible turns. One bubble per
@@ -1259,7 +1269,7 @@ export function ChatPanel({
         {error && (
           <GuidedErrorBanner error={error} onDismiss={clearError} />
         )}
-        <CompletionSummary terminal={guidedSession.terminal} />
+        <CompletionSummary terminal={guidedSession.terminal} isTutorial={isTutorial} />
         <InlineRunResults />
       </div>
     );
@@ -1373,7 +1383,7 @@ export function ChatPanel({
             </p>
           )}
         </section>
-        <ExitToFreeformButton />
+        {!isTutorial && <ExitToFreeformButton />}
         {/* Phase 1B inline opt-out: footer-weight affordance to flip the
             account-level default-mode preference from guided→freeform (or
             back). Same backend row as the Settings → Composer pane. */}

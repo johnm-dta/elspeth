@@ -642,6 +642,23 @@ _RECIPE_WEB_SCRAPE_SLOTS: Final[dict[str, SlotSpec]] = {
         default="outputs/ratings.jsonl",
         description="JSONL output path",
     ),
+    "allowed_hosts": SlotSpec(
+        slot_type="str_list",
+        required=False,
+        # Tuple default (not []): recipes.py warns a mutable list default would
+        # silently bypass the frozen contract; the sibling str_list slot
+        # required_input_fields uses default=() (recipes.py:190). _coerce_slot
+        # (recipes.py:51) returns tuple(items) for a SUPPLIED str_list; an omitted
+        # slot gets spec.default verbatim (recipes.py:142) — () is already a tuple.
+        default=(),
+        description=(
+            "SSRF allowlist for the web_scrape node, as a list of CIDR strings. "
+            "Empty (the default) omits the key so the web_scrape field default "
+            "'public_only' applies — the correct value for a public host. Set by "
+            "the tutorial seam to a tight loopback CIDR for local dev; NEVER set "
+            "by the LLM (this is an SSRF control)."
+        ),
+    ),
 }
 
 
@@ -674,6 +691,26 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
         user_term=RAW_HTML_CLEANUP_USER_TERM,
         draft=RAW_HTML_CLEANUP_REVIEW_DRAFT,
     )
+    web_scrape_options: dict[str, Any] = {
+        "schema": {"mode": "observed"},
+        "url_field": "url",
+        "content_field": content_field,
+        "fingerprint_field": fingerprint_field,
+        "format": "markdown",
+        "http": {
+            # OPERATOR: these values are visible to scraped third
+            # parties. They are required slots, not tutorial
+            # defaults: use a monitored operator-owned inbox and an
+            # accurate reason, or do not apply the recipe.
+            "abuse_contact": slots["abuse_contact"],
+            "scraping_reason": slots["scraping_reason"],
+        },
+    }
+    allowed_hosts = slots.get("allowed_hosts") or []
+    if allowed_hosts:
+        # SSRF allowlist supplied by the deterministic seam (tutorial loopback
+        # CIDR). Empty -> omitted -> the web_scrape field default public_only.
+        web_scrape_options["allowed_hosts"] = list(allowed_hosts)
     return {
         "source": {
             "plugin": slots["source_plugin"],
@@ -692,21 +729,7 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
                 "input": "rows",
                 "on_success": "scraped",
                 "on_error": "discard",
-                "options": {
-                    "schema": {"mode": "observed"},
-                    "url_field": "url",
-                    "content_field": content_field,
-                    "fingerprint_field": fingerprint_field,
-                    "format": "markdown",
-                    "http": {
-                        # OPERATOR: these values are visible to scraped third
-                        # parties. They are required slots, not tutorial
-                        # defaults: use a monitored operator-owned inbox and an
-                        # accurate reason, or do not apply the recipe.
-                        "abuse_contact": slots["abuse_contact"],
-                        "scraping_reason": slots["scraping_reason"],
-                    },
-                },
+                "options": web_scrape_options,
             },
             {
                 "id": "rate_pages",

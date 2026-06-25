@@ -316,6 +316,15 @@ class WebSettings(BaseModel):
             raise ValueError("must not be blank (omit the field to disable encryption)")
         return v
 
+    @field_validator("tutorial_sample_base_url")
+    @classmethod
+    def _reject_blank_tutorial_sample_base_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        if not v.strip():
+            raise ValueError("must not be blank (omit the field or set to a non-empty base URL)")
+        return v
+
     @field_validator("secret_key")
     @classmethod
     def _reject_blank_secret_key(cls, v: str) -> str:

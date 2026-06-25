@@ -714,7 +714,10 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     if allowed_hosts:
         # SSRF allowlist supplied by the deterministic seam (tutorial loopback
         # CIDR). Empty -> omitted -> the web_scrape field default public_only.
-        web_scrape_options["allowed_hosts"] = list(allowed_hosts)
+        # The allowlist is a field of ``WebScrapeHTTPConfig`` (web_scrape.py),
+        # so it MUST nest under ``http`` beside abuse_contact/scraping_reason —
+        # a top-level key is rejected by the plugin (extra:forbid).
+        web_scrape_options["http"]["allowed_hosts"] = list(allowed_hosts)
     return {
         "source": {
             "plugin": slots["source_plugin"],

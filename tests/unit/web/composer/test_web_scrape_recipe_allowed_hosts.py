@@ -35,6 +35,9 @@ def test_default_omits_allowed_hosts() -> None:
     args = recipe.build(slots)
     node = _web_scrape_node(args)
     # Behaviour-preserving: no allowed_hosts key -> field default public_only.
+    # The allowlist is a WebScrapeHTTPConfig field, so its canonical location is
+    # under ``http`` (and it must not be stranded at the top level either).
+    assert "allowed_hosts" not in node["options"]["http"]
     assert "allowed_hosts" not in node["options"]
 
 
@@ -46,7 +49,12 @@ def test_loopback_cidr_list_is_emitted() -> None:
     slots = validate_slots(recipe, {**_BASE_SLOTS, "allowed_hosts": hosts})
     args = recipe.build(slots)
     node = _web_scrape_node(args)
-    assert node["options"]["allowed_hosts"] == ["127.0.0.1/32", "::1/128"]
+    # allowed_hosts is a WebScrapeHTTPConfig field -> nests under ``http`` (the
+    # plugin rejects a top-level key with extra:forbid). The previous assertion
+    # checked the top level and only passed because it never applied the dict
+    # through WebScrapeConfig.
+    assert node["options"]["http"]["allowed_hosts"] == ["127.0.0.1/32", "::1/128"]
+    assert "allowed_hosts" not in node["options"]
 
 
 def test_public_resolver_yields_omit() -> None:
@@ -60,4 +68,5 @@ def test_public_resolver_yields_omit() -> None:
     slots = validate_slots(recipe, {**_BASE_SLOTS, "allowed_hosts": []})
     args = recipe.build(slots)
     node = _web_scrape_node(args)
+    assert "allowed_hosts" not in node["options"]["http"]
     assert "allowed_hosts" not in node["options"]

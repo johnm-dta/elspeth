@@ -399,6 +399,24 @@ class GetGuidedResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None
 
 
+class TutorialSampleResponse(_StrictResponse):
+    """Response for GET /api/sessions/{id}/guided/tutorial-sample.
+
+    Runtime-derived inputs for the tutorial passive auto-drive: the 3 synthetic
+    sample-page URLs and the SSRF host-class (``allowed_hosts``) for the active
+    tutorial session's resolved origin. The URLs are computed from the resolved
+    base at request time (they cannot ride the frozen profile constants), and
+    ``allowed_hosts`` is the deterministic resolver output — ``"public_only"``
+    for a public base, or a tight CIDR list for a loopback/private dev base.
+
+    ``entry_seed`` (the server-side framing prompt) is NEVER on this wire —
+    mirrors :class:`WorkflowProfileResponse`'s exclusion of the seed.
+    """
+
+    sample_urls: list[str]
+    allowed_hosts: Literal["public_only"] | list[str]
+
+
 class GuidedRespondRequest(_RequestModel):
     """Request body for POST /api/sessions/{id}/guided/respond.
 

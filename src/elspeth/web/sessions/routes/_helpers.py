@@ -84,7 +84,7 @@ from elspeth.web.composer.guided.emitters import (
     rebuild_wire_turn_after_reconciliation,
 )
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE, WorkflowProfile
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
@@ -136,7 +136,9 @@ from elspeth.web.composer.telemetry_phase8 import (
     record_session_switched,
 )
 from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
+from elspeth.web.composer.tutorial_sample import resolve_tutorial_allowed_hosts, tutorial_sample_base_url
 from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
 from elspeth.web.execution.validation import validate_pipeline
@@ -2741,6 +2743,8 @@ async def _dispatch_guided_respond(
     seed: int | None,
     composer_service: ComposerService | None = None,  # compatibility default; tutorial profile fails closed on None (P5.6)
     advisor_checkpoint_max_passes: int | None = None,  # compatibility default; tutorial profile requires positive int (P5.6)
+    settings: WebSettings | None = None,  # compatibility default; tutorial recipe accept fails closed on None (p4 Task 8a)
+    request_origin: str | None = None,  # dev fallback for tutorial_sample_base_url; a configured setting wins
 ) -> tuple[CompositionState, GuidedSession, Any | None]:
     """Dispatch a guided respond to the correct step handler and next-turn emitter.
 
@@ -3435,6 +3439,39 @@ async def _dispatch_guided_respond(
             # at apply time ``handle_step_2_5_recipe_apply`` consumes only
             # ``recipe_name`` and ``slots``, so an empty mapping is correct.
             match = _RecipeMatch(recipe_name=recipe_name, slots=slots, unsatisfied_slots={})
+
+            # SSRF crux (p4 Task 8a). For a TUTORIAL session ONLY, the
+            # ``web_scrape.allowed_hosts`` egress allowlist is a server-controlled
+            # SSRF set. It must be the deterministic resolver output keyed on the
+            # session's resolved origin — NEVER a client/LLM-authored value. The
+            # Task 6 slot is not self-defending (it accepts any CIDR incl.
+            # ``0.0.0.0/0``), so we OVERRIDE (or STRIP) any client-supplied
+            # ``allowed_hosts`` here, after ``slots`` is built from the request
+            # body. This is the only place the value is set; the client cannot
+            # carry it. A non-tutorial accept is left untouched (the enforcement
+            # boundary's CidrStr validation + ``public_only`` field default remain
+            # the SSRF control for the general Tier-3 apply path). ``match`` is
+            # frozen, so we ``_replace`` rather than mutate.
+            if guided.profile == TUTORIAL_PROFILE:
+                if settings is None:
+                    # Fail closed: without settings we cannot resolve the SSRF
+                    # allowlist, and silently skipping would leave the client's
+                    # value (or a scrape-blocking ``public_only``) in place.
+                    raise InvariantError(
+                        "tutorial recipe accept reached the dispatcher without settings; "
+                        "the web_scrape allowed_hosts SSRF set cannot be resolved (fail-closed)."
+                    )
+                tutorial_base_url = tutorial_sample_base_url(settings=settings, request_origin=request_origin)
+                resolved_hosts = resolve_tutorial_allowed_hosts(base_url=tutorial_base_url)
+                if resolved_hosts == "public_only":
+                    # Public base: OMIT the slot so the web_scrape field default
+                    # ``public_only`` applies (the tightest correct value).
+                    tutorial_slots = {k: v for k, v in match.slots.items() if k != "allowed_hosts"}
+                else:
+                    # Loopback / private dev base: inject the tight CIDR list verbatim.
+                    tutorial_slots = {**match.slots, "allowed_hosts": resolved_hosts}
+                match = _replace(match, slots=tutorial_slots)
+
             # Clear the staged offer atomically before passing to the handler
             # so it cannot be re-read by a later step.
             guided = _replace(guided, step_2_5_recipe_offer=None)

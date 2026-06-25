@@ -2,13 +2,18 @@ from __future__ import annotations
 
 import json
 
-from elspeth.web.composer.guided.profile import WorkflowProfileKind, profile_for_kind
+from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.guided.protocol import Turn
 from elspeth.web.composer.protocol import ComposerService
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.composer.tools._shield_availability import azure_prompt_shield_available
+from elspeth.web.composer.tutorial_sample import (
+    resolve_tutorial_allowed_hosts,
+    resolve_tutorial_sample_urls,
+    tutorial_sample_base_url,
+)
 from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_availability
-from elspeth.web.sessions.schemas import StartGuidedRequest
+from elspeth.web.sessions.schemas import StartGuidedRequest, TutorialSampleResponse
 
 from .._helpers import (
     _SYNTHETIC_UNAVAILABLE_MESSAGE,
@@ -650,6 +655,68 @@ async def get_guided(
                             exc_class=type(persist_exc).__name__,
                             frames=_safe_frame_strings(persist_exc),
                         )
+
+
+def _request_origin(request: Request) -> str:
+    """Externally-visible origin (scheme://host[:port]) of this request.
+
+    Used ONLY as the dev fallback for ``tutorial_sample_base_url`` — a
+    configured ``WebSettings.tutorial_sample_base_url`` takes precedence.
+    ``request.base_url`` honours forwarded-proto/host middleware when present.
+    The host-class resolver never echoes this host into the allowlist (it maps
+    to a fixed loopback CIDR list or ``public_only``), so a spoofed Host cannot
+    widen egress beyond loopback.
+    """
+    return str(request.base_url).rstrip("/")
+
+
+@router.get("/{session_id}/guided/tutorial-sample", response_model=TutorialSampleResponse)
+async def get_guided_tutorial_sample(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> TutorialSampleResponse:
+    """Return the runtime-derived synthetic-scrape inputs for a TUTORIAL session.
+
+    Exposes the 3 synthetic sample-page URLs + the SSRF host-class
+    (``allowed_hosts``) for the active tutorial session's resolved origin. The
+    base is resolved via ``tutorial_sample_base_url`` (a configured
+    ``WebSettings.tutorial_sample_base_url`` wins, else the request origin).
+    ``entry_seed`` is server-side only and is NEVER exposed here (Global
+    Constraint); the URLs are a separate runtime-derived payload.
+
+    Read-only: this route never mutates state. Returns 404 if the session does
+    not exist or does not belong to the requesting user. Returns 400 if the
+    session has no guided session, or is not a tutorial session (a
+    live/freeform session has no tutorial sample surface).
+    """
+    await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+
+    state_record = await service.get_current_state(session_id)
+    if state_record is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No active guided session for this session; start a tutorial session first.",
+        )
+    state = _state_from_record(state_record)
+    guided = state.guided_session
+    if guided is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Session is not in guided mode; the tutorial sample surface is guided-only.",
+        )
+    if guided.profile != TUTORIAL_PROFILE:
+        raise HTTPException(
+            status_code=400,
+            detail="Session is not a tutorial session; no tutorial sample surface is available.",
+        )
+
+    settings = request.app.state.settings
+    base_url = tutorial_sample_base_url(settings=settings, request_origin=_request_origin(request))
+    sample_urls = resolve_tutorial_sample_urls(base_url=base_url)
+    allowed_hosts = resolve_tutorial_allowed_hosts(base_url=base_url)
+    return TutorialSampleResponse(sample_urls=list(sample_urls), allowed_hosts=allowed_hosts)
 
 
 @router.post("/{session_id}/guided/reenter", response_model=GetGuidedResponse)
@@ -1430,6 +1497,10 @@ async def post_guided_respond(
                         seed=settings.composer_seed,
                         composer_service=request.app.state.composer_service,
                         advisor_checkpoint_max_passes=settings.composer_advisor_checkpoint_max_passes,
+                        # p4 Task 8a: the tutorial STEP_2.5 accept seam resolves the
+                        # web_scrape SSRF allowed_hosts server-side from these.
+                        settings=settings,
+                        request_origin=_request_origin(request),
                     )
                 except HTTPException:
                     # Dispatcher-level 400s happen after the turn has been

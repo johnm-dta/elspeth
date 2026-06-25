@@ -2,10 +2,18 @@ import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TutorialGuidedShell } from "./TutorialGuidedShell";
+import { CANONICAL_TUTORIAL_PROMPT } from "./tutorialMachine";
 import { useSessionStore } from "@/stores/sessionStore";
 
 const startGuidedSessionMock = vi.fn();
 const startGuidedMock = vi.fn();
+const getTutorialSampleMock = vi.fn();
+
+const SAMPLE_URLS = [
+  "https://elspeth.example/tutorial-site/project-1.html",
+  "https://elspeth.example/tutorial-site/project-2.html",
+  "https://elspeth.example/tutorial-site/project-3.html",
+];
 
 type TerminalKind = "completed" | "exited_to_freeform";
 
@@ -25,13 +33,15 @@ function guidedSessionPayload(terminalKind: TerminalKind | null): unknown {
 
 vi.mock("@/api/client", () => ({
   startGuidedSession: (...args: unknown[]) => startGuidedSessionMock(...args),
+  getTutorialSample: (...args: unknown[]) => getTutorialSampleMock(...args),
 }));
 
 vi.mock("@/components/chat/ChatPanel", () => ({
-  ChatPanel: (props: { isTutorial?: boolean }) => (
+  ChatPanel: (props: { isTutorial?: boolean; lockedChatPrompt?: string }) => (
     <div
       data-testid="chat-panel-stub"
       data-is-tutorial={String(props.isTutorial)}
+      data-locked-prompt={props.lockedChatPrompt}
     />
   ),
 }));
@@ -40,6 +50,9 @@ describe("TutorialGuidedShell", () => {
   beforeEach(() => {
     startGuidedSessionMock.mockReset().mockResolvedValue(undefined);
     startGuidedMock.mockReset().mockResolvedValue(undefined);
+    getTutorialSampleMock
+      .mockReset()
+      .mockResolvedValue({ sample_urls: SAMPLE_URLS, allowed_hosts: "public_only" });
     // Start with NO active session so the test exercises the real production
     // path: TutorialGuidedShell must itself bind activeSessionId (D3/B4). A
     // pre-set activeSessionId here would mask a shell that forgot to bind it.
@@ -90,6 +103,52 @@ describe("TutorialGuidedShell", () => {
     const stub = await screen.findByTestId("chat-panel-stub");
     expect(stub).toBeInTheDocument();
     expect(stub.dataset.isTutorial).toBe("true");
+  });
+
+  it("appends the resolved sample URLs to the locked STEP_1 prompt", async () => {
+    // The frozen CANONICAL_TUTORIAL_PROMPT names no URLs; the source driver
+    // parses them out of the Sent message, so the shell must append the
+    // runtime-resolved synthetic URLs fetched from the 8a GET surface.
+    render(<TutorialGuidedShell sessionId="sess-1" onCompleted={vi.fn()} />);
+    await waitFor(() =>
+      expect(getTutorialSampleMock).toHaveBeenCalledWith("sess-1"),
+    );
+    const stub = await screen.findByTestId("chat-panel-stub");
+    const locked = stub.dataset.lockedPrompt ?? "";
+    expect(locked).toContain(CANONICAL_TUTORIAL_PROMPT);
+    for (const url of SAMPLE_URLS) {
+      expect(locked).toContain(url);
+    }
+    // URLs come AFTER the canonical prose (appended, not interleaved).
+    expect(locked.indexOf(SAMPLE_URLS[0])).toBeGreaterThan(
+      locked.indexOf(CANONICAL_TUTORIAL_PROMPT),
+    );
+  });
+
+  it("gates the chat panel until the sample URLs resolve (never an editable box)", async () => {
+    // Hold the sample fetch open so we can observe the pre-resolve state: the
+    // ChatPanel (and thus the locked input) must NOT render yet — a loading
+    // status stands in. This is the correctness gate: the learner can never
+    // Send the URL-less canonical prompt.
+    let resolveSample: (value: unknown) => void = () => undefined;
+    getTutorialSampleMock.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSample = resolve;
+      }),
+    );
+    render(<TutorialGuidedShell sessionId="sess-1" onCompleted={vi.fn()} />);
+    await waitFor(() =>
+      expect(getTutorialSampleMock).toHaveBeenCalledWith("sess-1"),
+    );
+    // Pre-resolve: no chat panel, loading status visible.
+    expect(screen.queryByTestId("chat-panel-stub")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("Preparing the tutorial's sample pages…"),
+    ).toBeInTheDocument();
+    // Resolve and the panel appears with the URL-bearing locked prompt.
+    resolveSample({ sample_urls: SAMPLE_URLS, allowed_hosts: "public_only" });
+    const stub = await screen.findByTestId("chat-panel-stub");
+    expect(stub.dataset.lockedPrompt).toContain(SAMPLE_URLS[2]);
   });
 
   it("clears stale completed guided state before starting a new tutorial session", async () => {

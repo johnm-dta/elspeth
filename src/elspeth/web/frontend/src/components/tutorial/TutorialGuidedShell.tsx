@@ -1,8 +1,19 @@
 import { useEffect, useRef, useState } from "react";
-import { startGuidedSession } from "@/api/client";
+import { getTutorialSample, startGuidedSession } from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
 import { CANONICAL_TUTORIAL_PROMPT } from "./tutorialMachine";
+
+/**
+ * The locked STEP_1 prompt the passive learner Sends verbatim. The frozen
+ * `CANONICAL_TUTORIAL_PROMPT` says "scrape these three synthetic project-brief
+ * pages" but carries NO URLs — the source driver parses URLs out of the message
+ * and the LLM cannot guess the runtime-served addresses, so the resolved
+ * synthetic URLs (fetched per-session from the 8a GET surface) are appended.
+ */
+function buildLockedPrompt(sampleUrls: string[]): string {
+  return `${CANONICAL_TUTORIAL_PROMPT}\n${sampleUrls.join("\n")}`;
+}
 
 interface TutorialGuidedShellProps {
   sessionId: string;
@@ -36,6 +47,11 @@ export function TutorialGuidedShell({
   const sawActiveRef = useRef(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The runtime-resolved synthetic sample URLs for THIS tutorial session
+  // (8a GET surface). null until they resolve; the ChatPanel is gated on them
+  // so the box is never an editable/empty placeholder and the learner can never
+  // Send the URL-less canonical prompt before the source driver has addresses.
+  const [sampleUrls, setSampleUrls] = useState<string[] | null>(null);
 
   // Start the TUTORIAL-profile guided session exactly once. The start
   // endpoint is idempotent server-side (P7.1): a second POST for a session
@@ -82,6 +98,12 @@ export function TutorialGuidedShell({
       });
       try {
         await startGuidedSession(sessionId, "tutorial");
+        // Fetch the runtime-resolved synthetic URLs BEFORE entering the wizard.
+        // The GET requires the TUTORIAL profile to be persisted (done by the
+        // start above). Appended to the locked STEP_1 prompt; the box stays
+        // gated (never editable) until they arrive.
+        const sample = await getTutorialSample(sessionId);
+        setSampleUrls(sample.sample_urls);
         await startGuided(sessionId);
       } catch (err) {
         setError(formatError(err));
@@ -147,7 +169,26 @@ export function TutorialGuidedShell({
           {error}
         </p>
       )}
-      <ChatPanel isTutorial lockedChatPrompt={CANONICAL_TUTORIAL_PROMPT} />
+      {sampleUrls !== null ? (
+        // Gate the wizard on the resolved URLs: the locked STEP_1 prompt must
+        // carry them so the source driver can parse the runtime-served
+        // addresses. The box is read-only in tutorial mode (ChatPanel's
+        // lockedChatPrompt), so the only learner action — Send — is never
+        // exposed with a URL-less prompt.
+        <ChatPanel
+          isTutorial
+          lockedChatPrompt={buildLockedPrompt(sampleUrls)}
+        />
+      ) : (
+        error === null && (
+          // Plain text, NOT role="status": the sr-only "Starting guided
+          // composer" status above already announces this loading phase;
+          // a second live region would double-announce.
+          <p className="tutorial-sample-loading">
+            Preparing the tutorial's sample pages…
+          </p>
+        )
+      )}
     </section>
   );
 }

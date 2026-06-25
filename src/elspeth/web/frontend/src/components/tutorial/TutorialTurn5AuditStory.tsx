@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getRunAuditSummary } from "@/api/client";
 import type { RunAuditStoryResponse } from "@/types/api";
-import { TURN_5_PRIMARY_BUTTON } from "./copy";
+import { TUTORIAL_ASSUMPTION_CALLOUT, TURN_5_PRIMARY_BUTTON } from "./copy";
 
 const COPY_FEEDBACK_DURATION_MS = 2_000;
 
@@ -51,6 +51,7 @@ export function TutorialTurn5AuditStory({
         The LLM made a judgment call on each page. ELSPETH keeps the evidence
         needed to explain that judgment later.
       </p>
+      <p className="tutorial-callout">{TUTORIAL_ASSUMPTION_CALLOUT}</p>
       {summary === null && error === null && (
         <p role="status" className="tutorial-muted">
           Loading audit evidence...
@@ -91,9 +92,10 @@ export function TutorialTurn5AuditStory({
             </div>
           </dl>
           <p>
-            If someone asks why a page received its score, the run has the
-            prompt, response, model details, source hash, and plugin
-            versions tied together.
+            If someone asks how the LLM derived a project's facts — the top
+            risk it picked or the total it summed — the run has the prompt,
+            response, model details, source hash, and plugin versions tied
+            together.
           </p>
           <div className="tutorial-actions">
             <button type="button" className="btn btn-primary" onClick={onContinue}>

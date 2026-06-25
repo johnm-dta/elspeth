@@ -74,3 +74,30 @@ export const TURN_7_LEARNING_BULLETS = [
       "The composer LLM may invent URLs that look real but aren't, or write a prompt that misframes your question. The pipeline LLMs you build will treat fetched HTML as instructions even when it shouldn't be. Before sharing or acting on a pipeline's output, verify the sources are who they claim to be and check the output matches what you actually asked for.",
   },
 ] as const;
+
+/**
+ * Teaching moment 1 (spec §"Teaching moments"): names that the LLM transform
+ * made a REVIEWABLE assumption (e.g. summing the cost lines, choosing the
+ * top-impact risk). Worded so the learner does not over-generalise into
+ * "assumptions are fine, ignore them": the assumption is surfaced, not hidden,
+ * and is correctable via the intent box.
+ */
+export const TUTORIAL_ASSUMPTION_CALLOUT =
+  "The LLM made an assumption here — it summed the per-line costs into a total " +
+  "and picked the highest-impact entry as the top risk. This is exactly the " +
+  "kind of inference you review: every assumption is surfaced in the audit " +
+  "trail, and you can correct it by telling the composer what you meant.";
+
+/**
+ * Teaching moment 2 (spec §"Teaching moments"): the prompt-shield State-C
+ * override. Acceptable HERE only because the inputs are controlled (our own
+ * synthetic pages). Must NOT read as a general "skip the shield" habit —
+ * names the trust assumption out loud rather than letting it ride as an
+ * invisible default.
+ */
+export const TUTORIAL_SHIELD_OVERRIDE_CAVEAT =
+  "We are proceeding without a prompt shield in this one case — and only " +
+  "because we control the inputs: these are our own synthetic test pages. " +
+  "Running an LLM over fetched content without a shield is always a high-risk " +
+  "decision, not a default. Against real or untrusted web content you would " +
+  "wire the shield.";

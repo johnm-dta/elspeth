@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { runTutorialPipeline } from "@/api/client";
 import type { TutorialRunResponse } from "@/types/api";
-import { TUTORIAL_RUN_PREAMBLE, TURN_4_PRIMARY_BUTTON } from "./copy";
+import { TUTORIAL_RUN_PREAMBLE, TUTORIAL_SHIELD_OVERRIDE_CAVEAT, TURN_4_PRIMARY_BUTTON } from "./copy";
 import type { RunResultRow, TutorialRunResult } from "./tutorialMachine";
 
 interface TutorialTurn4RunProps {
@@ -171,6 +171,7 @@ export function TutorialTurn4Run({
         Running your pipeline.
       </h2>
       <p className="tutorial-muted">{TUTORIAL_RUN_PREAMBLE}</p>
+      <p className="tutorial-callout">{TUTORIAL_SHIELD_OVERRIDE_CAVEAT}</p>
       {result === null && error === null && (
         <>
           <div
@@ -305,7 +306,7 @@ function TutorialResultTable({ rows }: { rows: RunResultRow[] }): JSX.Element {
 function preferredColumns(rows: RunResultRow[]): string[] {
   const keys = new Set<string>();
   rows.forEach((row) => Object.keys(row).forEach((key) => keys.add(key)));
-  const preferred = ["url", "page", "title", "score", "coolness", "rationale", "error"];
+  const preferred = ["url", "project_name", "top_risk", "key_date", "total_cost", "error"];
   const ordered = preferred.filter((key) => keys.has(key));
   for (const key of keys) {
     if (!ordered.includes(key)) {

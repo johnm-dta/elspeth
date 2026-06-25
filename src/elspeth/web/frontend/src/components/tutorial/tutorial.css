@@ -112,6 +112,15 @@
   color: var(--color-text-muted);
 }
 
+.tutorial-callout {
+  margin-top: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-input);
+  color: var(--color-text);
+}
+
 .tutorial-preamble {
   /* Small subdued line under the welcome cards and above the Turn 4 run
      indicator. Signals "here is what happens next" before the LLM call. */

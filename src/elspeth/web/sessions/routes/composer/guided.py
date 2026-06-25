@@ -1765,7 +1765,7 @@ async def post_guided_chat(
             if (
                 existing_record_for_chat is not None
                 and guided.step is GuidedStep.STEP_1_SOURCE
-                and current_turn_type is TurnType.SCHEMA_FORM
+                and current_turn_type in (TurnType.SINGLE_SELECT, TurnType.SCHEMA_FORM, TurnType.INSPECT_AND_CONFIRM)
             ):
                 plugin_hint: str | None = None
                 selected_record = next(
@@ -1789,6 +1789,7 @@ async def post_guided_chat(
                     model=settings.composer_model,
                     user_message=body.message,
                     plugin_hint=plugin_hint,
+                    current_source=guided.step_1_result,
                     temperature=settings.composer_temperature,
                     seed=settings.composer_seed,
                     recorder=recorder,
@@ -1837,62 +1838,88 @@ async def post_guided_chat(
                             detail="Step 1 source commit failed",
                         )
 
-                    turn_response: TurnResponse = {
-                        "chosen": None,
-                        "edited_values": {
-                            "plugin": source_resolution.plugin,
-                            "options": dict(source_resolution.options),
-                            "observed_columns": list(source_resolution.observed_columns),
-                            "sample_rows": [dict(row) for row in source_resolution.sample_rows],
-                        },
-                        "custom_inputs": None,
-                        "accepted_step_index": None,
-                        "edit_step_index": None,
-                        "control_signal": None,
-                    }
-                    response_hash = stable_hash(turn_response)
-                    answered_record = _replace(
-                        existing_record_for_chat,
-                        response_hash=response_hash,
-                        summary=_summarize_guided_response(TurnType.SCHEMA_FORM, turn_response),
-                    )
-                    answered_history = tuple(answered_record if r is existing_record_for_chat else r for r in guided.history)
-                    guided = _replace(handler_result.session, history=answered_history)
+                    # Adopt the post-commit state FIRST, BEFORE either leg — the
+                    # answered-record emit below reads `state.version`, and
+                    # CompositionState bumps version in-memory on every edit
+                    # (state.py: each edit returns a new instance; set_source =>
+                    # version+1). If this assignment stayed after the if/else, the
+                    # answered record would stamp the STALE pre-commit version — a
+                    # silent audit-correctness regression.
                     state = handler_result.state
+                    if current_turn_type is TurnType.SCHEMA_FORM:
+                        turn_response: TurnResponse = {
+                            "chosen": None,
+                            "edited_values": {
+                                "plugin": source_resolution.plugin,
+                                "options": dict(source_resolution.options),
+                                "observed_columns": list(source_resolution.observed_columns),
+                                "sample_rows": [dict(row) for row in source_resolution.sample_rows],
+                            },
+                            "custom_inputs": None,
+                            "accepted_step_index": None,
+                            "edit_step_index": None,
+                            "control_signal": None,
+                        }
+                        response_hash = stable_hash(turn_response)
+                        answered_record = _replace(
+                            existing_record_for_chat,
+                            response_hash=response_hash,
+                            summary=_summarize_guided_response(TurnType.SCHEMA_FORM, turn_response),
+                        )
+                        answered_history = tuple(answered_record if r is existing_record_for_chat else r for r in guided.history)
+                        guided = _replace(
+                            handler_result.session,
+                            history=answered_history,
+                            step_1_chosen_plugin=None,
+                            step_1_source_intent=None,
+                        )
+                        emit_turn_answered(
+                            recorder,
+                            step=GuidedStep.STEP_1_SOURCE,
+                            turn_type=TurnType.SCHEMA_FORM,
+                            response_hash=response_hash,
+                            response_payload_id=_store_guided_audit_payload(
+                                getattr(request.app.state, "payload_store", None), turn_response
+                            ),
+                            control_signal=None,
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+                    else:
+                        # SINGLE_SELECT / INSPECT_AND_CONFIRM entry: no prior
+                        # schema-form answer to stamp. Just adopt the committed session
+                        # and clear the staging fields.
+                        guided = _replace(
+                            handler_result.session,
+                            step_1_chosen_plugin=None,
+                            step_1_source_intent=None,
+                        )
 
-                    emit_turn_answered(
-                        recorder,
-                        step=GuidedStep.STEP_1_SOURCE,
-                        turn_type=TurnType.SCHEMA_FORM,
-                        response_hash=response_hash,
-                        response_payload_id=_store_guided_audit_payload(getattr(request.app.state, "payload_store", None), turn_response),
-                        control_signal=None,
-                        composition_version=state.version,
-                        actor=user.user_id,
-                    )
-
-                    guided = _replace(guided, step=GuidedStep.STEP_2_SINK)
-                    next_turn = build_step_2_single_select_turn(catalog)
+                    # Apply-in-place: the source is committed (step_1_result set by
+                    # handle_step_1_source); the phase STAYS STEP_1 so the user can
+                    # revise by typing again. NO step advance, NO emit_step_advanced.
+                    # Re-render the source schema_form POPULATED from the committed
+                    # source (Task 2.5 builder) — the same turn GET /guided now emits
+                    # for this state, so apply and refresh agree.
+                    applied_step_1_result = handler_result.session.step_1_result
+                    if applied_step_1_result is None:
+                        raise InvariantError(
+                            "step_1_result is None after successful handle_step_1_source — "
+                            "handler set tool_result.success=True but did not set step_1_result"
+                        )
+                    next_turn = build_step_1_schema_form_turn_from_resolved(applied_step_1_result, catalog)
                     next_turn_type = TurnType(next_turn["type"])
                     next_payload_hash = stable_hash(next_turn["payload"])
                     new_record = TurnRecord(
-                        step=GuidedStep.STEP_2_SINK,
+                        step=GuidedStep.STEP_1_SOURCE,
                         turn_type=next_turn_type,
                         payload_hash=next_payload_hash,
                         response_hash=None,
                         emitter="server",
                     )
-                    emit_step_advanced(
-                        recorder,
-                        prev=GuidedStep.STEP_1_SOURCE,
-                        next_=GuidedStep.STEP_2_SINK,
-                        reason="user_advanced",
-                        composition_version=state.version,
-                        actor=user.user_id,
-                    )
                     emit_turn_emitted(
                         recorder,
-                        step=GuidedStep.STEP_2_SINK,
+                        step=GuidedStep.STEP_1_SOURCE,
                         turn_type=next_turn_type,
                         payload_hash=next_payload_hash,
                         payload_payload_id=_store_guided_audit_payload(

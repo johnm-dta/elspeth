@@ -252,8 +252,10 @@ def build_step_1_schema_form_turn_from_resolved(
     chat-apply in-place re-render and by GET /guided when ``step_1_result`` is
     set on a STEP_1 session.
     """
+    from elspeth.contracts.freeze import deep_thaw
+
     schema_info = catalog.get_schema("source", source.plugin)
-    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(source.options)}
+    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(deep_thaw(source.options))}
     payload: SchemaFormPayload = {
         "mode": "plugin_options",
         "plugin": source.plugin,

@@ -88,6 +88,8 @@ cites them; do not re-discover them.
     (`chat_solver.py:233`). Returns `None` on prose/no-tool-call.
   - `solve_chain(*, model, source, sink, recipe_match=None, repair_context=None,
     recorder=None, temperature, seed) -> ChainProposal` (`chain_solver.py:130`).
+    Task 4 adds a `revise_context=None` param (revise-mode addendum, distinct from
+    `repair_context`); see Task 4 Steps 3a/3b.
   - `solve_step_chat(...) -> str` (`chat_solver.py:346`) — advisory prose.
 - **Auto-drop wrappers** (`src/elspeth/web/sessions/_guided_step_chat.py`):
   - `resolve_step_1_source_chat_with_auto_drop(*, site, session_id, user_id,
@@ -156,7 +158,8 @@ NOT bump `GUIDED_SESSION_SCHEMA_VERSION` (=6) or `SESSION_SCHEMA_EPOCH` (=24).
 - Consumes: `maybe_resolve_step_1_source_chat(*, model, user_message, plugin_hint,
   temperature, seed, recorder=None) -> Step1SourceChatResolution | None`
   (current signature, `chat_solver.py:233`); `_build_step_1_source_tool_prompt(*,
-  plugin_hint)` (`:134`); `Step1SourceChatResolution` (`:37`).
+  plugin_hint)` (`:134`); `Step1SourceChatResolution` (class statement `:38`,
+  `@dataclass` decorator `:37`).
 - Produces (later tasks/p4 rely on): `maybe_resolve_step_1_source_chat` gains a
   keyword `current_source: SourceResolved | None = None` (default `None` keeps the
   STEP_1 cold-start call at `_guided_step_chat.py:134` source-compatible until
@@ -452,6 +455,13 @@ EOF
   Step2SinkChatResult` where `Step2SinkChatResult` carries `sink_resolution:
   SinkResolved | None`, `assistant_message: str | None`, and `fallback_chat:
   StepChatResult | None`.
+- **Return shape is `tuple[SinkResolved, str] | None`, not `SinkResolved | None`.**
+  The `str` carries the `assistant_message` STEP_2 chat must surface for STEP_1/
+  STEP_2 parity (STEP_1 surfaces `source_resolution.assistant_message`), so this
+  tuple SUPERSEDES the decided contract §2.2's `SinkResolved | None` stub. The
+  tuple is consumed only within p1 (Task 4); no other plan consumes this return
+  shape, so the supersession is self-documented here and needs no cross-plan
+  coordination to land.
 
 > **Contract supersession (signature).** The shared contract §2.2 lists the sink
 > driver as `-> SinkResolved | None` (a stub recommendation). THIS plan body's
@@ -1606,6 +1616,15 @@ EOF
   > record stamps the POST-commit version (handler_result.state). Do NOT leave it
   > after the else, and do NOT duplicate it onto both legs — a single assignment
   > before the branch covers both. Hoist `TurnResponse` into the `if` body as shown.
+  > **DELETE the original unconditional `turn_response: TurnResponse = {...}` binding
+  > at `:1829`** (it lives OUTSIDE the wrapped `:1843`→`emit_turn_answered` range, so
+  > the wrap alone leaves it behind). The new code binds `turn_response` only inside
+  > the SCHEMA_FORM `if` leg; if the `:1829` binding survives it runs unconditionally
+  > — a dead/duplicate binding that also executes on the SINGLE_SELECT/INSPECT leg
+  > where there is no schema-form answer, and Task 6 Step 2's ruff (F841) would flag
+  > the now-shadowed assignment. Move that dict body verbatim into the `if` leg
+  > (already shown above at lines `turn_response: TurnResponse = {...}`) and remove
+  > the `:1829` original.
 
   **2c — Clear the STEP_1 staging fields on commit (apply/refresh must agree).**
   `handle_step_1_source` sets `step_1_result` but does NOT clear
@@ -1867,18 +1886,28 @@ EOF
 > (STEP_1 in-place pattern this mirrors).** Do those first.
 
 **Files:**
+- Modify: `src/elspeth/web/composer/guided/prompts.py` (add
+  `build_revise_addendum`, the revise-mode sibling of `build_repair_addendum` at
+  `:147`)
+- Modify: `src/elspeth/web/composer/guided/chain_solver.py` (add a
+  `revise_context: str | None = None` param to `solve_chain` at `:130`, rendered
+  next to the existing `repair_context` render at `:174-178`)
 - Modify: `src/elspeth/web/sessions/routes/composer/guided.py` (`post_guided_chat`;
   add a STEP_2 apply branch and a STEP_3 apply branch alongside the STEP_1 branch,
   before the advisory fall-through at `:2005`)
 - Test: `tests/integration/web/composer/guided/test_step_chat_apply.py` (Create)
+- Test: `tests/integration/web/composer/guided/test_chain_solver.py` (Modify —
+  add the `revise_context` render test alongside the existing `repair_context`
+  ones at `:124`/`:183`)
 
 **Interfaces:**
 - Consumes: `resolve_step_2_sink_chat_with_auto_drop` / `Step2SinkChatResult`
   (Task 2, with `.assistant_message`); `handle_step_2_sink` (`steps.py:147`);
   `build_step_2_schema_form_turn_from_resolved(sink, catalog)` (Task 2.5);
   `solve_chain(*, model, source, sink,
-  recipe_match=None, repair_context=None, recorder=None, temperature, seed) ->
-  ChainProposal` (`chain_solver.py:130`) — STEP_3 calls THIS directly, NOT
+  recipe_match=None, repair_context=None, revise_context=None, recorder=None,
+  temperature, seed) -> ChainProposal` (`chain_solver.py:130`; `revise_context`
+  added by Steps 3a/3b below) — STEP_3 calls THIS directly, NOT
   `solve_chain_with_auto_drop` (`_guided_solve_chain.py:68`), because that wrapper
   marks the session `solver_exhausted` (TERMINAL) and returns `(None,
   new_terminal_session)` on transient failure — which would brick the phase,
@@ -1901,24 +1930,29 @@ EOF
 > `handle_step_3_chain_accept` (which commits the pipeline and advances to
 > `STEP_4_WIRE`). Accepting the proposal stays on `/guided/respond` (the existing
 > PROPOSE_CHAIN accept branch, `_helpers.py:3627`). Revise = type again →
-> `solve_chain` with `repair_context` set to the user's revision message → new
+> `solve_chain` with `revise_context` set to the user's revision message → new
 > proposal turn. There is NO recipe-apply chat driver (deterministic confirm).
 >
-> **KNOWN LIMITATION (do NOT silently expand Task 4 to fix it).** Passing the
-> user's revise instruction as `repair_context` reuses `solve_chain`'s
-> `build_repair_addendum`, which renders to the LLM as "your previous proposal
-> failed validation: {message} … Propose a corrected chain." A legitimate revise
-> ("just pass the rows through") is therefore MISFRAMED to the model as a
-> validation-failure repair, which can degrade revise quality. The cold-start
-> `else None` gate is effectively unreachable here (STEP_3 chat re-solves only when
-> `step_3_proposal` is already set, so `repair_context=body.message` fires on
-> ~100% of revises). The proper fix — a distinct `build_revise_addendum` + a
-> separate revise-context param on `solve_chain` — lives in `prompts.py` /
-> `chain_solver.py`, OUTSIDE Task 4's declared Files list, and originates in the
-> DECIDED contract §2.2. This plan does NOT expand into those files. SURFACE this
-> to the contract owner (tracked in the review's deferred list); until resolved,
-> ship the limitation as-is and note in the commit body that STEP_3 revise
-> instructions are presented to the LLM as repair-of-validation-errors.
+> **REVISE IS A DISTINCT MODE — not a validation-repair (this is the fix, not a
+> limitation).** A STEP_3 chat revise is a user instruction to *change* the
+> current proposal, NOT a report that the proposal failed validation. Reusing
+> `repair_context` (which renders via `build_repair_addendum` as "your previous
+> proposal failed validation: {message} … Propose a corrected chain") would
+> MISFRAME a legitimate revise ("just pass the rows through") as error-repair —
+> and because STEP_3 chat re-solves only when `step_3_proposal` is already set,
+> that misframing fires on ~100% of revises. So Task 4 adds a distinct revise
+> path: a new `build_revise_addendum(*, revise_instruction: str)` in `prompts.py`
+> (frames the text as "the user wants to change the current proposal as follows:
+> … Propose an updated chain") and a separate `revise_context: str | None = None`
+> param on `solve_chain` rendered analogously to (and independently of)
+> `repair_context`. The STEP_3 chat branch passes `revise_context=body.message`
+> (Step 4), never `repair_context`. `repair_context` and `build_repair_addendum`
+> stay UNCHANGED for the genuine validation-repair loop. Steps 3a/3b below add the
+> addendum function and the param under TDD before the branch that calls them;
+> Task 4's **Files:** list is expanded accordingly. (The shared-contract §2.2 text
+> still lists the old single-param shape; correcting that DOC is the owner-owed
+> edit at the end of this blockquote's prior deferral — the CODE contract is fixed
+> here, intra-p1, since `solve_chain` has no cross-plan caller of `revise_context`.)
 
 - [ ] **Step 1: Write the failing STEP_2 sink apply-in-place integration test.**
   Create `tests/integration/web/composer/guided/test_step_chat_apply.py`. Reuse
@@ -2404,14 +2438,16 @@ EOF
 
   > **Drive helper — avoid the nested-patch hazard (verified).**
   > `_drive_to_step_3_propose_chain` (`test_step_3_e2e.py:121`) reaches STEP_3 by
-  > driving the STEP_2→STEP_3 advance, which fires `solve_chain` — so it manages
-  > its OWN patch of `chain_solver._litellm_acompletion` (the helper's callers wrap
-  > it, `test_step_3_e2e.py:184-189`). There is NO manual no-solve path to STEP_3
-  > in this tree. The fix is therefore to keep the drive and the STEP_3-chat
-  > re-solve in SEPARATE, sequential `with patch(...)` blocks (as written above) so
-  > the two patches never overlap — the drive's patch is torn down before this
+  > driving the STEP_2→STEP_3 advance, which fires `solve_chain` — but the helper
+  > itself patches NOTHING (its body is `:131-170`, all plain `_respond` calls). It
+  > is the helper's CALLERS that wrap the call in `with patch(
+  > chain_solver._litellm_acompletion)` (`test_step_3_e2e.py:184-189`), so the
+  > caller controls the stub. There is NO manual no-solve path to STEP_3 in this
+  > tree. The fix is therefore to keep the drive and the STEP_3-chat re-solve in
+  > SEPARATE, sequential `with patch(...)` blocks (as written above) so the two
+  > patches never overlap — the drive's wrapping patch is torn down before this
   > test's opens. Do NOT nest them. `_fake_llm_response_for_passthrough` is the
-  > helper's own stub shape (`test_step_3_e2e.py`); import it alongside the drive
+  > caller-side stub shape (`test_step_3_e2e.py`); import it alongside the drive
   > helper.
 
   Run to fail:
@@ -2421,11 +2457,190 @@ EOF
   Expected failure: the STEP_3 chat falls through to advisory (`next_turn` is
   `None`), so `body["next_turn"]["type"]` raises `TypeError`/assertion fails.
 
+- [ ] **Step 3a: Add `build_revise_addendum` (revise-mode prompt addendum).**
+  The STEP_3 chat branch (Step 4) must frame a user revise instruction as "update
+  this proposal", NOT as a validation-failure repair. Add a distinct addendum
+  builder alongside `build_repair_addendum` (`prompts.py:147`); leave
+  `build_repair_addendum` untouched (it serves the genuine validation-repair loop).
+
+  Append the failing test to `tests/integration/web/composer/guided/test_chain_solver.py`
+  (the addendum-render assertion rides the existing chain-solver suite — same file
+  as the `repair_context` tests at `:124`/`:183` so the two addenda are covered
+  side by side):
+
+  ```python
+  def test_build_revise_addendum_frames_user_instruction_not_validation() -> None:
+      """build_revise_addendum frames the text as a proposal-change request,
+      NOT as a validation-failure repair."""
+      from elspeth.web.composer.guided.prompts import build_revise_addendum
+
+      instruction = "just pass the rows through"
+      addendum = build_revise_addendum(revise_instruction=instruction)
+      assert "REVISE REQUEST" in addendum
+      assert instruction in addendum
+      # It must NOT borrow the repair framing — a revise is not a validation error.
+      assert "failed validation" not in addendum
+      assert "REPAIR ATTEMPT" not in addendum
+  ```
+
+  Run to fail:
+  ```
+  cd /home/john/elspeth && uv run pytest "tests/integration/web/composer/guided/test_chain_solver.py::test_build_revise_addendum_frames_user_instruction_not_validation" -x -q
+  ```
+  Expected failure: `ImportError: cannot import name 'build_revise_addendum' from 'elspeth.web.composer.guided.prompts'`.
+
+  Add to `prompts.py`, immediately after `build_repair_addendum` (`:158`):
+
+  ```python
+  def build_revise_addendum(*, revise_instruction: str) -> str:
+      """Render the REVISE REQUEST addendum appended to a revise solve_chain call.
+
+      Distinct from :func:`build_repair_addendum`: a revise is a user instruction
+      to CHANGE the current proposal, not a report that the proposal failed
+      validation. Framing it as the latter (the repair addendum) misleads the
+      model into "correcting errors" that do not exist.
+
+      Args:
+          revise_instruction: The user's revise message, verbatim; Tier 1 audit
+              data, no paraphrasing.
+      """
+      return (
+          "REVISE REQUEST — the user wants to change the current proposal as "
+          "follows:\n"
+          f"{revise_instruction}\n\n"
+          "Propose an updated chain that applies this change."
+      )
+  ```
+
+  Run to pass:
+  ```
+  cd /home/john/elspeth && uv run pytest "tests/integration/web/composer/guided/test_chain_solver.py::test_build_revise_addendum_frames_user_instruction_not_validation" -x -q
+  ```
+  Expected: `1 passed`.
+
+- [ ] **Step 3b: Add the `revise_context` param to `solve_chain`.**
+  `solve_chain` (`chain_solver.py:130`) renders `repair_context` via
+  `build_repair_addendum` at `:174-178`. Add a SEPARATE `revise_context` param that
+  renders via `build_revise_addendum`, independent of (and in addition to)
+  `repair_context`, so the STEP_3 chat branch can pass a revise instruction without
+  it being misframed as a validation repair.
+
+  Append the failing test to `test_chain_solver.py`, mirroring
+  `test_repair_context_appears_in_system_prompt` (`:124`):
+
+  ```python
+  @pytest.mark.asyncio
+  async def test_revise_context_appears_in_system_prompt() -> None:
+      """solve_chain with revise_context= appends the REVISE addendum (not the
+      repair addendum) to the system prompt."""
+      from elspeth.web.composer.guided.chain_solver import solve_chain
+      from elspeth.web.composer.guided.state_machine import (
+          SinkOutputResolved,
+          SinkResolved,
+          SourceResolved,
+      )
+
+      revise_instruction = "just pass the rows through"
+      fake_response = _make_propose_chain_response()
+      captured_calls: list = []
+
+      async def _capture(**kwargs):  # type: ignore[no-untyped-def]
+          captured_calls.append(kwargs)
+          return fake_response
+
+      with patch(
+          "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+          side_effect=_capture,
+      ):
+          await solve_chain(
+              model="anthropic/claude-3-opus",
+              source=SourceResolved(
+                  plugin="csv",
+                  options={},
+                  observed_columns=("price",),
+                  sample_rows=({"price": "1.99"},),
+              ),
+              sink=SinkResolved(
+                  outputs=(
+                      SinkOutputResolved(
+                          plugin="json",
+                          options={},
+                          required_fields=("price",),
+                          schema_mode="fixed",
+                      ),
+                  )
+              ),
+              revise_context=revise_instruction,
+              temperature=None,
+              seed=None,
+          )
+
+      assert len(captured_calls) == 1
+      system_content = captured_calls[0]["messages"][0]["content"]
+      # The REVISE addendum is present; the REPAIR addendum is NOT.
+      assert "REVISE REQUEST" in system_content
+      assert revise_instruction in system_content
+      assert "REPAIR ATTEMPT" not in system_content
+  ```
+
+  Run to fail:
+  ```
+  cd /home/john/elspeth && uv run pytest "tests/integration/web/composer/guided/test_chain_solver.py::test_revise_context_appears_in_system_prompt" -x -q
+  ```
+  Expected failure: `TypeError: solve_chain() got an unexpected keyword argument 'revise_context'`.
+
+  In `chain_solver.py`, add the param to the `solve_chain` signature (after
+  `repair_context: str | None = None`, `:136`):
+
+  ```python
+      repair_context: str | None = None,
+      revise_context: str | None = None,
+  ```
+
+  Document it in the docstring next to `repair_context`:
+
+  ```python
+      revise_context: Verbatim user revise instruction. When set, the LLM is
+          asked to UPDATE the current proposal per the instruction (via
+          build_revise_addendum) — distinct from repair_context, which frames the
+          text as a validation-failure to correct. The STEP_3 /guided/chat branch
+          uses this; the genuine validation-repair loop uses repair_context.
+  ```
+
+  Then extend the render block at `:172-178`. Import `build_revise_addendum`
+  alongside `build_repair_addendum`, and append the revise addendum independently
+  so the two are total and never raise (mutually exclusive by call-site, but the
+  function stays branch-total — a raise here would 500 and brick the phase):
+
+  ```python
+      skill = load_guided_skill()
+      context_block = build_step_3_context_block(source=source, sink=sink, recipe_match=recipe_match)
+      system_prompt = f"{skill}\n\n{context_block}"
+      if repair_context is not None:
+          system_prompt = f"{system_prompt}\n\n{build_repair_addendum(validation_error=repair_context)}"
+      if revise_context is not None:
+          system_prompt = f"{system_prompt}\n\n{build_revise_addendum(revise_instruction=revise_context)}"
+  ```
+  (Add `build_revise_addendum` to the existing `from .prompts import (...)` block
+  that already imports `build_repair_addendum` / `build_step_3_context_block` —
+  grep `grep -n "build_repair_addendum" src/elspeth/web/composer/guided/chain_solver.py`
+  to confirm the import line, then add the name to it.) This refactor is
+  behavior-preserving for the existing repair tests: neither-set and repair-only
+  render byte-identically to today.
+
+  Run to pass (the new revise test AND the two pre-existing repair tests, proving
+  no regression):
+  ```
+  cd /home/john/elspeth && uv run pytest "tests/integration/web/composer/guided/test_chain_solver.py::test_revise_context_appears_in_system_prompt" "tests/integration/web/composer/guided/test_chain_solver.py::test_repair_context_appears_in_system_prompt" "tests/integration/web/composer/guided/test_chain_solver.py::test_solve_chain_without_repair_context_has_no_repair_section" -x -q
+  ```
+  Expected: `3 passed`.
+
 - [ ] **Step 4: Add the STEP_3 propose-in-place branch.**
   In `guided.py`, after the STEP_2 branch and before `if chat_result is None:`,
   add a STEP_3 branch that re-runs `solve_chain` DIRECTLY (passing
   `guided.step_1_result` as source, `guided.step_2_result` as sink, and the user's
-  message as `repair_context` so it's a revise) and re-renders the proposal turn.
+  message as `revise_context` — the new revise-mode param from Step 3a/3b, NOT
+  `repair_context`) and re-renders the proposal turn.
   It records `step_3_proposal` for re-render but does NOT call
   `handle_step_3_chain_accept`. It does NOT use `solve_chain_with_auto_drop` —
   that wrapper TERMINATES the session (`solver_exhausted`) on transient failure,
@@ -2484,17 +2699,23 @@ EOF
                           )
                           from litellm.exceptions import OpenAIError as _LLMOpenAIError
 
-                          # repair_context flips solve_chain's prompt to a
-                          # repair addendum (chain_solver.py:174). On the FIRST
-                          # STEP_3 chat (no prior proposal) this is an initial
-                          # propose, not a repair — gate it so a cold start is
-                          # not mis-framed as error-correction.
-                          repair_context = body.message if guided.step_3_proposal is not None else None
+                          # revise_context flips solve_chain's prompt to the
+                          # REVISE addendum (build_revise_addendum, the new
+                          # render branch at chain_solver.py:174-178 — Step 3a/3b)
+                          # which frames the user's text as "update the current
+                          # proposal", NOT as a validation-failure repair. Pass
+                          # the user's revise instruction as revise_context, never
+                          # repair_context (repair_context stays reserved for the
+                          # genuine validation-repair loop on /guided/respond). On
+                          # the FIRST STEP_3 chat (no prior proposal) there is
+                          # nothing to revise yet, so gate to None — a cold start
+                          # is a plain initial propose, not a revision.
+                          revise_context = body.message if guided.step_3_proposal is not None else None
                           proposal = await solve_chain(
                               model=settings.composer_model,
                               source=guided.step_1_result,
                               sink=guided.step_2_result,
-                              repair_context=repair_context,
+                              revise_context=revise_context,
                               recorder=recorder,
                               temperature=settings.composer_temperature,
                               seed=settings.composer_seed,
@@ -2666,8 +2887,9 @@ EOF
   > `except (IndexError, AttributeError, json.JSONDecodeError,
   > ChainSolverResponseShapeError)` clause — that inner clause is only the
   > shape-failure layer and omits the 8 typed LiteLLM exceptions `solve_chain`
-  > re-raises. The `repair_context` gate is at `chain_solver.py:174-175`. Confirm
-  > the wrapper's tuple is unchanged before writing.
+  > re-raises. The `revise_context` render gate is the new branch added next to
+  > the `repair_context` gate at `chain_solver.py:174-178` (Step 3a/3b below).
+  > Confirm the wrapper's tuple is unchanged before writing.
 
   Add `build_step_3_propose_chain_turn` to the route imports if absent (grep
   first). `solve_chain` + `ChainSolverResponseShapeError` are imported inline in
@@ -2813,16 +3035,20 @@ EOF
 
 - [ ] **Step 8: Commit.**
   ```
-  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/web/sessions/routes/composer/guided.py tests/integration/web/composer/guided/test_step_chat_apply.py && git commit -m "$(cat <<'EOF'
+  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/web/composer/guided/prompts.py src/elspeth/web/composer/guided/chain_solver.py src/elspeth/web/sessions/routes/composer/guided.py tests/integration/web/composer/guided/test_chain_solver.py tests/integration/web/composer/guided/test_step_chat_apply.py && git commit -m "$(cat <<'EOF'
 feat(composer/guided): STEP_2 sink + STEP_3 transform /guided/chat apply
 
 Generalize the STEP_1 chat-apply pattern to STEP_2 and STEP_3. STEP_2
 drives the sink driver and commits via handle_step_2_sink, re-rendering
 the sink form in place. STEP_3 re-runs solve_chain (user message as
-repair_context) and re-renders the propose_chain turn IN PLACE without
-committing — accept stays on /guided/respond. Both stay at their current
-step (apply-in-place); non-actionable prose/failure falls back to advisory
-(next_turn=None, no mutation). 400/409 guards preserved.
+revise_context, NOT repair_context) and re-renders the propose_chain turn
+IN PLACE without committing — accept stays on /guided/respond. Adds
+build_revise_addendum + a distinct revise_context param on solve_chain so
+a user revise instruction is framed as "update this proposal", not as a
+validation-failure repair; repair_context stays intact for genuine
+validation-error repair. Both stay at their current step (apply-in-place);
+non-actionable prose/failure falls back to advisory (next_turn=None, no
+mutation). 400/409 guards preserved.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
@@ -3016,7 +3242,7 @@ ready for operator re-sign + push.
 - [ ] **Step 2: Run the static-analysis surface this slice touches (ruff + mypy on
   the changed files).**
   ```
-  cd /home/john/elspeth && uv run ruff check src/elspeth/web/composer/guided/chat_solver.py src/elspeth/web/composer/guided/emitters.py src/elspeth/web/sessions/_guided_step_chat.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py && uv run mypy src/elspeth/web/composer/guided/chat_solver.py src/elspeth/web/composer/guided/emitters.py src/elspeth/web/sessions/_guided_step_chat.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py
+  cd /home/john/elspeth && uv run ruff check src/elspeth/web/composer/guided/prompts.py src/elspeth/web/composer/guided/chain_solver.py src/elspeth/web/composer/guided/chat_solver.py src/elspeth/web/composer/guided/emitters.py src/elspeth/web/sessions/_guided_step_chat.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py && uv run mypy src/elspeth/web/composer/guided/prompts.py src/elspeth/web/composer/guided/chain_solver.py src/elspeth/web/composer/guided/chat_solver.py src/elspeth/web/composer/guided/emitters.py src/elspeth/web/sessions/_guided_step_chat.py src/elspeth/web/sessions/routes/_helpers.py src/elspeth/web/sessions/routes/composer/guided.py
   ```
   Expected: no new ruff findings; mypy clean on the changed files (a pre-existing
   baseline red in `guided.py` that this slice did not introduce is operator-owed —
@@ -3038,13 +3264,18 @@ ready for operator re-sign + push.
   ```
   cd /home/john/elspeth && git --no-pager diff --stat release/0.7.0..HEAD
   ```
-  Expected: `chat_solver.py`, `emitters.py`, `_guided_step_chat.py`,
-  `routes/_helpers.py`, `routes/composer/guided.py`, and the new test files.
+  Expected: `prompts.py`, `chain_solver.py`, `chat_solver.py`, `emitters.py`,
+  `_guided_step_chat.py`, `routes/_helpers.py`, `routes/composer/guided.py`, and
+  the new test files (`test_step_chat_apply.py`, `test_chain_solver.py` modified,
+  plus the Task 2/3/5 test files).
 
   **This plan's edits DO touch tier-model-tracked web files** — do NOT claim "no
   re-sign owed." The `config/cicd/enforce_tier_model/web.yaml` allowlist tracks
   THREE files this plan edits (verified against the live web.yaml on
-  `release/0.7.0`):
+  `release/0.7.0`). Note: Task 4's new `prompts.py` and `chain_solver.py` edits are
+  NOT in the allowlist (verified — no `web/composer/guided/prompts.py` or
+  `web/composer/guided/chain_solver.py` entry), so they owe no tier-model re-sign;
+  the three tracked files are:
   - `web/composer/guided/chat_solver.py` — a `pattern:` entry with `max_hits: 12`
     (web.yaml `:3709`/`:3717`). Tasks 1 AND 2 add to this file (Task 2 adds the
     new Tier-3 `resolve_sink` parse boundary, R5, which consumes the max_hits

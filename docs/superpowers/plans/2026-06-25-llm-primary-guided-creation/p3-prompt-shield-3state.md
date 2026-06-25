@@ -154,7 +154,8 @@ and gives p4 a precise A/B/C surface where context exists.
       "An authorized prompt-injection shield (azure_prompt_shield) IS available in "
       "this deployment. Wire it between the external-content fetch step and this LLM: "
       "untrusted remote text routed straight into the LLM is a prompt-injection "
-      "exposure, and the shield is configured and ready to use. "
+      "exposure, and the shield is configured and ready to use. Wiring it in is "
+      "strongly recommended, but you may proceed without it. "
       "[user_term: prompt_injection_shield_recommendation]"
   )
   ```
@@ -395,6 +396,16 @@ and gives p4 a precise A/B/C surface where context exists.
   ```
   Expected: all pass. If `test_prompt_shield_warning_is_advisory_not_blocking`
   fails, the `validate()` default is the defect (must be C) — fix Step 4, not the test.
+
+  > **Commit boundary.** This step verifies only `test_interpretation_state.py`, but
+  > the always-on change is a cross-file behavior shift (every unshielded LLM node now
+  > warns). A cross-file scan of the candidate breakers (the `== ()` sites at
+  > `test_tools.py` and `test_state.py`; the direct callers in
+  > `tests/unit/web/composer/`) found NO actual breakers — those sites either contain
+  > no `llm` node or assert PRESENCE of the advisory, not an exact count — so the
+  > broad blast-radius surface is DELIBERATELY deferred to Task 6 Step 2 (which runs
+  > `tests/unit/web/composer/` + `tests/integration/web/composer/guided/`). This
+  > commit is sound to land on the single-module green.
 
 - [ ] **Step 8: Commit.**
   ```
@@ -690,7 +701,7 @@ EOF
 
 **Interfaces:**
 - Consumes: `PROMPT_SHIELD_AVAILABLE_DRAFT` / `PROMPT_SHIELD_WARNING_DRAFT` (Task 1); `azure_prompt_shield_available(context: ToolContext) -> bool` (Task 2); `ToolContext` (`composer/tools/_common.py:1640`); the `confirm_wiring` turn dict shape `{"type": TurnType.CONFIRM_WIRING.value, "step_index": int, "payload": {"warnings": [{"component","message","severity"}, ...], ...}}`; `TurnType.CONFIRM_WIRING` (`composer/guided/turns.py` or wherever `TurnType` is defined — confirm in Step 1); the route's `request` + `user` (held at `post_guided_respond` `:919`, `get_guided`).
-- Produces: `refine_prompt_shield_warnings_for_availability(warnings: list[dict], *, shield_available: bool) -> list[dict]` (NEW, pure; operates on the already-`to_dict`'d warning dicts in a turn payload); a guided wire-stage `next_turn` whose shield warnings carry the B-draft when a shield IS configured, on BOTH the advance and re-render paths.
+- Produces: `refine_prompt_shield_warnings_for_availability(warnings: Sequence[Mapping[str, Any]], *, shield_available: bool) -> list[dict[str, Any]]` (NEW, pure; operates on the already-`to_dict`'d warning dicts in a turn payload); a guided wire-stage `next_turn` whose shield warnings carry the B-draft when a shield IS configured, on BOTH the advance and re-render paths.
 
 - [ ] **Step 1: Confirm the turn dict shape + `TurnType.CONFIRM_WIRING` + the route response sites.**
   ```
@@ -777,10 +788,15 @@ EOF
   > `Mapping` / `Sequence` / `Any` imports: confirm with
   > `grep -n "from collections.abc import\|from typing import" src/elspeth/web/interpretation_state.py`.
   > The file already uses `Mapping`, `Sequence`, `Final` — add `Any` if absent.
-  > Operating on dicts (not `ValidationEntry`) AVOIDS importing `composer.state`
-  > into `interpretation_state.py` (composer.state imports interpretation_state at
-  > `:2418` — a `ValidationEntry` import here would risk a cycle). Verify no cycle:
-  > `python -c "import elspeth.web.interpretation_state; print('ok')"`.
+  > Operating on dicts (not `ValidationEntry`) keeps the refiner DECOUPLED from the
+  > `ValidationEntry` model — it works on the already-`to_dict`'d turn-payload shape
+  > the route hands it, so it never needs to know the model. (Note this is a
+  > decoupling choice, NOT a cycle break: `interpretation_state.py` ALREADY imports
+  > `CompositionState`/`NodeSpec`/`SourceSpec` from `composer.state` at module level
+  > (`:22`), and `composer.state`'s reverse use of `interpretation_state` is the lazy
+  > import at `state.py:2418`, so adding `ValidationEntry` to the existing
+  > module-level import would introduce no new cycle.) Verify the module still
+  > imports clean: `python -c "import elspeth.web.interpretation_state; print('ok')"`.
   >
   > **Provenance the refiner depends on (verified — makes Step 5's integration
   > assertion testable).** The `confirm_wiring` turn's `payload["warnings"]` is the
@@ -1045,8 +1061,12 @@ EOF
   (test-to-UPDATE), do not revert.
 
 - [ ] **Step 9: Commit.**
+  Stage explicit file paths only (NEVER a directory or `git add .` — Global
+  Constraints): the new integration test created in Step 5, plus — if Step 8
+  updated any pre-existing sibling integration test to the B-draft — that
+  sibling by its explicit path (so the slice does not land red):
   ```
-  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/web/interpretation_state.py src/elspeth/web/sessions/routes/composer/guided.py tests/unit/web/test_interpretation_state.py tests/integration/web/composer/guided/ && git commit -m "$(cat <<'EOF'
+  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/web/interpretation_state.py src/elspeth/web/sessions/routes/composer/guided.py tests/unit/web/test_interpretation_state.py tests/integration/web/composer/guided/test_wire_turn_shield_state.py && git commit -m "$(cat <<'EOF'
 feat(composer/guided): surface State-B prompt-shield advisory at the route
 
 Wire the B-vs-C availability signal into the user-facing wire-stage warnings
@@ -1340,8 +1360,8 @@ EOF
   - **`test_interpretation_state.py:524` (`..._through_prompt_shield_emits_no_warning`)** —
     State A (`assert warning_pairs == ()`); the decoupled `_llm_has_authorized_shield_upstream`
     keeps it silent. SURVIVES.
-  - **`test_step_3_e2e.py`** proposes a `passthrough`-only chain (NO llm node) ⇒ no
-    new warning. SURVIVES.
+  - **`tests/integration/web/composer/guided/test_step_3_e2e.py`** proposes a
+    `passthrough`-only chain (NO llm node) ⇒ no new warning. SURVIVES.
   Any OTHER enumerated test that asserts a SPECIFIC `len(warnings) == N` on a
   pipeline containing an unshielded `llm` node MUST be updated to `N + 1` (the
   shield warning) per Global-Constraints test-to-UPDATE — verify each by reading

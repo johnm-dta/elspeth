@@ -131,7 +131,8 @@ does NOT deflect the value to p1.
 **Concrete owner + seam (verified against the live tree):** the recipe-offer
 ACCEPT path is the injection point. At STEP_2.5, `response["chosen"] ==
 ["accept"]` dispatches through `_dispatch_guided_respond` →
-`handle_step_2_5_recipe_apply` (`composer/guided/steps.py:223`), which builds
+`handle_step_2_5_recipe_apply` (currently `composer/guided/steps.py:219` — confirm
+by grep), which builds
 `arguments["slots"] = dict(match.slots)` from the `RecipeMatch` whose slots were
 prefilled by `_web_scrape_slot_resolver` (`recipe_match.py:266`). The resolver
 takes only `(source, sink)` and has NO session/origin context, so it CANNOT
@@ -194,6 +195,13 @@ verbatim into `dist/`, so they serve through the existing SPA `StaticFiles` moun
 > build; it asserts the page CONTENT and structure. The mount-serving path is
 > exercised by the operator-owed staging run (P7-pattern known gap).
 
+> **Placement note (intentional).** This file lives under `tests/integration/`
+> (auto-marked `integration` by `conftest.py:28-32`) yet reads source files with
+> no DB / fixtures / services, so it is semantically a unit test. It is placed
+> here deliberately, consistent with its sibling `tests/integration/web/` tutorial
+> tests; do NOT relocate it to `tests/unit/` (that would break the sibling
+> convention for a harmless classification nuance).
+
 - [ ] **Step 1: Write the failing test that the 3 pages exist, are banner-marked,
   noindexed, and carry the three tables with differing cost totals.**
   Create `tests/integration/web/test_tutorial_site_pages.py`:
@@ -248,6 +256,36 @@ verbatim into `dist/`, so they serve through the existing SPA `StaticFiles` moun
           assert figures, f"{name} has no dollar figures"
           totals.append(sum(figures))
       assert len(set(totals)) == 3, f"cost totals must differ across pages, got {totals}"
+
+
+  def test_synthetic_pages_have_distinct_go_live_dates() -> None:
+      # The derived key_date must vary: every page's Go-live row carries a
+      # different ISO date. Steps 3-4 copy project-1 verbatim and change ONLY the
+      # values, so this guards a forgotten date edit at CI (cheap) instead of at
+      # the expensive staging judge run.
+      import re
+
+      dates: list[str] = []
+      for name in _PAGES:
+          html = (_PUBLIC / name).read_text(encoding="utf-8")
+          m = re.search(r"Go-live</td><td>(\d{4}-\d{2}-\d{2})</td>", html)
+          assert m, f"{name} has no Go-live date row"
+          dates.append(m.group(1))
+      assert len(set(dates)) == 3, f"go-live dates must differ across pages, got {dates}"
+
+
+  def test_synthetic_pages_have_distinct_project_names() -> None:
+      # The derived project_name must vary: each hero <h1> names a distinct
+      # project. Guards a forgotten title edit (same copy-verbatim risk).
+      import re
+
+      names: list[str] = []
+      for name in _PAGES:
+          html = (_PUBLIC / name).read_text(encoding="utf-8")
+          m = re.search(r"<h1>([^<]+)</h1>", html)
+          assert m, f"{name} has no hero <h1>"
+          names.append(m.group(1).strip())
+      assert len(set(names)) == 3, f"project names must differ across pages, got {names}"
   ```
 
   Run to fail:
@@ -381,7 +419,8 @@ verbatim into `dist/`, so they serve through the existing SPA `StaticFiles` moun
   ```
   cd /home/john/elspeth && uv run pytest tests/integration/web/test_tutorial_site_pages.py -x -q
   ```
-  Expected: `7 passed` (3 banner + 3 table + 1 distinct-totals).
+  Expected: `9 passed` (3 banner + 3 table + 1 distinct-totals + 1 distinct
+  go-live-dates + 1 distinct project-names).
 
 - [ ] **Step 6: Commit.**
   ```
@@ -738,8 +777,11 @@ TutorialCache retire-vs-rekey decision explicit (ground truth Q1b).
 > `tutorial_cache.py` (other code imports `CANONICAL_SEED_PROMPT` /
 > `TutorialCache` / `tutorial_cache_key`); it retargets the constant to the new
 > intent and leaves the cache machinery in place but effectively dormant for the
-> synthetic scenario. **Operator-owed:** stale cache files keyed on the old
-> `model_id` simply miss; the operator clears `{data_dir}/tutorial_cache/` (the
+> synthetic scenario. **Operator-owed:** the cache key is
+> `SHA-256(canonical_prompt:model_id)` (`tutorial_cache.py:76-82`), so retargeting
+> `CANONICAL_SEED_PROMPT` changes the canonical-PROMPT half of the key (a prompt
+> edit does NOT change `tutorial_model_id`); stale cache files keyed on the old
+> prompt simply miss, and the operator clears `{data_dir}/tutorial_cache/` (the
 > documented artifact-delete pattern, `tutorial_cache.py:20-32`). Surface this as
 > an operator chore in the commit body; the agent does not delete operator data.
 
@@ -956,7 +998,8 @@ no longer byte-stable) — kept, not deleted. NO service restart and NO
 composer_skill_hash re-bake: the recipe/skill are scenario-agnostic.
 
 Operator-owed: clear stale {data_dir}/tutorial_cache/ files (they miss
-on the new model_id; documented artifact-delete pattern).
+on the new canonical_prompt half of the SHA-256(canonical_prompt:model_id)
+key; documented artifact-delete pattern).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
@@ -987,6 +1030,10 @@ verified by re-running staging, not by grepping prompts).
 - Modify: `src/elspeth/web/frontend/src/components/tutorial/TutorialTurn4Run.tsx`
   — render the shield-override caveat (Turn 4 is the run, where the State-C
   override is forced on screen).
+- Modify: `src/elspeth/web/frontend/src/components/tutorial/tutorial.css` — add the
+  `.tutorial-callout` rule (Steps 3-4 render this class but it does NOT yet
+  exist; tutorial.css defines only `tutorial-muted`/`tutorial-error`, so the copy
+  would otherwise render as unstyled body text). See Step 4b.
 - Create: `src/elspeth/web/frontend/src/components/tutorial/teachingMoments.test.tsx`
 
 **Interfaces:**
@@ -1189,6 +1236,27 @@ verified by re-running staging, not by grepping prompts).
         expect(screen.getByText(/top risk it picked or the total it summed/i)).toBeInTheDocument();
     ```
 
+- [ ] **Step 4b: Add the `.tutorial-callout` CSS rule (the class is used but does
+  not yet exist).**
+  Steps 3 and 4 render `<p className="tutorial-callout">`, but `tutorial.css`
+  defines only `tutorial-muted` / `tutorial-error` — with no rule the callout
+  renders as unstyled body text and reads as ordinary copy, not an advisory.
+  In `src/elspeth/web/frontend/src/components/tutorial/tutorial.css`, after
+  `.tutorial-muted` (`:111-113`), add an advisory-callout rule in the same
+  design-token family as `.tutorial-error` (`:140-147`) but with neutral/surface
+  colours (it is advisory, not an error):
+
+  ```css
+  .tutorial-callout {
+    margin-top: var(--space-lg);
+    padding: var(--space-md);
+    border: 1px solid var(--color-border-strong);
+    border-radius: var(--radius-md);
+    background: var(--color-surface-input);
+    color: var(--color-text);
+  }
+  ```
+
 - [ ] **Step 5: Run to pass.**
   ```
   cd /home/john/elspeth/src/elspeth/web/frontend && npm run test -- teachingMoments.test.tsx --run
@@ -1206,6 +1274,7 @@ verified by re-running staging, not by grepping prompts).
     src/elspeth/web/frontend/src/components/tutorial/copy.ts \
     src/elspeth/web/frontend/src/components/tutorial/TutorialTurn4Run.tsx \
     src/elspeth/web/frontend/src/components/tutorial/TutorialTurn5AuditStory.tsx \
+    src/elspeth/web/frontend/src/components/tutorial/tutorial.css \
     src/elspeth/web/frontend/src/components/tutorial/teachingMoments.test.tsx && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git commit -m "$(cat <<'EOF'
 feat(tutorial): add assumption + shield-override teaching-moment copy
 
@@ -1246,6 +1315,12 @@ component end-to-end).
 - Modify: `src/elspeth/web/frontend/tests/e2e/tutorial-reliability.staging.spec.ts`
   (consumes the rubric; the 5-source heuristics `:164-178` + `minReachableSources`
   expectations retarget to 3 pages + the shield-state expectation).
+- Modify: `src/elspeth/web/frontend/tests/e2e/harness/aggregate.mjs` — it carries
+  its OWN duplicate version literal `const harnessVersion = "1.0.0"` (`:18`) instead
+  of importing the source-of-truth, so bumping `HARNESS_VERSION` in
+  `prompt-and-rubric.ts` alone would leave the aggregator's batch-record stamp
+  (`:28`, `:40`) stale and divergent. Bump the literal in lockstep (Step 1a —
+  plain-Node script, cannot import the `.ts` constant at runtime).
 
 **Interfaces:**
 - Consumes: the retargeted scenario constants (Task 3) — the harness `FIXED_PROMPT`
@@ -1295,6 +1370,27 @@ component end-to-end).
     "https://elspeth.foundryside.dev/tutorial-site/project-2.html\n" +
     "https://elspeth.foundryside.dev/tutorial-site/project-3.html";
   ```
+
+- [ ] **Step 1a: Bump `aggregate.mjs`'s version stamp in lockstep.**
+  `aggregate.mjs` carries its OWN duplicate literal `const harnessVersion =
+  "1.0.0";` (`:18`) rather than importing the constant, so the Step 1 bump would
+  leave the aggregator's batch-record stamp stale (`harness: ${harnessVersion}` at
+  `:28`/`:40`), diverging the two stamps in produced records. The aggregator is run
+  as a plain Node script (`node tests/e2e/harness/aggregate.mjs <batch_id>`, see
+  `harness/README.md:125`) and imports only `node:fs` / `node:child_process` — it
+  CANNOT `import` from a `.ts` module at runtime (that is precisely why the literal
+  is duplicated here rather than imported). So bump the `:18` literal in lockstep
+  with Step 1:
+
+  ```javascript
+  const harnessVersion = "2.0.0";
+  ```
+
+  (A cleaner single-source fix — `import { HARNESS_VERSION } from
+  "./prompt-and-rubric.js"` — only works if the constant is moved to a plain
+  `.js`/`.mjs` module or the aggregator is moved to a TS-aware runner; both are
+  out of scope here. The lockstep bump keeps the two stamps in sync for this
+  change.)
 
 - [ ] **Step 2: Retarget `ASSUMPTION_RUBRIC` (drop vague_term; expect the shield
   recommendation).**
@@ -1512,6 +1608,7 @@ component end-to-end).
   ```
   cd /home/john/elspeth && git add \
     src/elspeth/web/frontend/tests/e2e/harness/prompt-and-rubric.ts \
+    src/elspeth/web/frontend/tests/e2e/harness/aggregate.mjs \
     src/elspeth/web/frontend/tests/e2e/tutorial-reliability.staging.spec.ts && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git commit -m "$(cat <<'EOF'
 test(tutorial): retarget staging harness rubric to synthetic extraction
 
@@ -1522,7 +1619,8 @@ prompt_injection_shield_recommendation now that p3's shield review fires
 every run (the harness thereby verifies the 3-state shield end-to-end).
 JUDGE_RUBRIC grades the derived fields (project_name / top_risk /
 key_date / summed total_cost); minReachableSources 5 -> 3. Bump
-HARNESS_VERSION 1.0.0 -> 2.0.0.
+HARNESS_VERSION 1.0.0 -> 2.0.0 and re-point aggregate.mjs at the
+single-source constant so the batch-record stamp can't drift.
 
 Operator-owed: run tutorial-reliability.staging.spec.ts against staging
 to verify live shield-state + extraction (live run is operator-env).
@@ -1551,7 +1649,8 @@ gets the tight CIDR list from the Task 2 resolver.
 > run is supplied by p4 itself (NOT deflected to p1): Task 8 threads
 > `resolve_tutorial_allowed_hosts(...)` into the match's `allowed_hosts` slot at
 > the STEP_2.5 recipe-offer-accept seam (`sessions/routes/composer/guided.py`
-> accept dispatch → `handle_step_2_5_recipe_apply`, `composer/guided/steps.py:223`)
+> accept dispatch → `handle_step_2_5_recipe_apply`, currently
+> `composer/guided/steps.py:219` — confirm by grep)
 > via `dataclasses.replace` on the frozen `RecipeMatch` (or an extra-slots arg),
 > mapping the scalar `"public_only"` to an empty list (omit). p4 makes the slot
 > EXIST and tested here (Task 6); p4 injects the tutorial value (Task 8).
@@ -1730,8 +1829,10 @@ gets the tight CIDR list from the Task 2 resolver.
   ```
 
   > `slots.get("allowed_hosts")` is the validated, coerced value — `str_list`
-  > with `default=[]`, so it is always a list. The `or []` guards a `None` only
-  > defensively. Confirm `Any` is imported in `recipes.py` (it is — used
+  > with `default=()`, coerced by `_coerce_default` to a tuple, so it is always a
+  > tuple. The `or []` guards a `None` only defensively, and `list(...)` normalises
+  > the tuple to the list the node options expect. Confirm `Any` is imported in
+  > `recipes.py` (it is — used
   > throughout, e.g. `:122`).
 
 - [ ] **Step 4: Confirm the resolver needs NO edit (existing matches unchanged).**
@@ -1763,7 +1864,7 @@ gets the tight CIDR list from the Task 2 resolver.
 feat(recipe): add optional allowed_hosts SSRF slot to web-scrape recipe
 
 Add an additive, behaviour-preserving allowed_hosts (str_list, default
-[]) slot to web-scrape-llm-rate-jsonl. Empty default omits the node key
+()) slot to web-scrape-llm-rate-jsonl. Empty default omits the node key
 so the web_scrape field default public_only applies (every existing
 caller unchanged); a non-empty CIDR list (the tutorial loopback case
 from the p4 resolver) is emitted into the node. allowed_hosts is an SSRF
@@ -1908,7 +2009,8 @@ explicit and unowned-no-more; implement it after p1 + p2 merge.
   are runtime-derived — they cannot ride the frozen constants).
 - Modify: the STEP_2.5 recipe-offer-ACCEPT seam in
   `src/elspeth/web/sessions/routes/composer/guided.py` (the accept dispatch that
-  reaches `handle_step_2_5_recipe_apply`, `composer/guided/steps.py:223`) — for a
+  reaches `handle_step_2_5_recipe_apply`, currently `composer/guided/steps.py:219`
+  — confirm by grep) — for a
   TUTORIAL session, thread the resolved `allowed_hosts` into the match's
   `allowed_hosts` slot (the Task 6 slot) before the apply builds
   `arguments["slots"] = dict(match.slots)`. `RecipeMatch` is `frozen=True`, so do

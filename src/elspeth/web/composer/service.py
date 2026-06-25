@@ -716,6 +716,12 @@ def _pending_interpretation_review_repair_message(
         "the target field_mapper node first with an interpretation_requirements "
         "entry whose kind is 'pipeline_decision', status is 'pending', and draft is "
         f"{RAW_HTML_CLEANUP_REVIEW_DRAFT!r}. "
+        # B-vs-C is resolved deterministically at the wire-stage route
+        # (azure_prompt_shield_available; see routes/composer/guided.py). The repair
+        # turn cannot observe true shield availability (available_plugins is a
+        # superset of resolvable secrets), so it stages the fail-safe C-draft
+        # unconditionally; the route refiner upgrades the user-facing warning to
+        # State B where the secret is reachable.
         f"If user_term is {PROMPT_SHIELD_USER_TERM!r}, patch the target LLM node first "
         "with an interpretation_requirements entry whose kind is 'pipeline_decision', "
         f"status is 'pending', and draft is {PROMPT_SHIELD_WARNING_DRAFT!r}; if the "

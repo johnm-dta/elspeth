@@ -1410,3 +1410,26 @@ def test_wiring_count_wrong_term_is_unresolvable() -> None:
         "prompt_template": "Rate how {{interpretation:important}} this row is.",
     }
     assert vague_term_wiring_count(options, user_term="cool") == 0
+
+
+# ---------------------------------------------------------------------------
+# prompt_shield_state_for_node — A/B/C state helper
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_shield_state_for_node_returns_A_when_shielded() -> None:
+    from elspeth.web.interpretation_state import prompt_shield_state_for_node
+
+    state = _state_with_web_scrape_gate_shield_to_llm()
+    llm = next(n for n in state.nodes if n.plugin == "llm")
+    assert prompt_shield_state_for_node(llm, state.nodes, shield_available=True) == "A"
+    assert prompt_shield_state_for_node(llm, state.nodes, shield_available=False) == "A"
+
+
+def test_prompt_shield_state_for_node_B_vs_C() -> None:
+    from elspeth.web.interpretation_state import prompt_shield_state_for_node
+
+    state = _state_with_plain_llm_only()
+    llm = next(n for n in state.nodes if n.plugin == "llm")
+    assert prompt_shield_state_for_node(llm, state.nodes, shield_available=True) == "B"
+    assert prompt_shield_state_for_node(llm, state.nodes, shield_available=False) == "C"

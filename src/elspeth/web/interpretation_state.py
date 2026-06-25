@@ -365,6 +365,34 @@ def _llm_has_authorized_shield_upstream(
     return False
 
 
+def prompt_shield_state_for_node(
+    node: NodeSpec,
+    all_nodes: Sequence[NodeSpec],
+    *,
+    shield_available: bool,
+) -> str:
+    """Return the prompt-shield review state for ``node``: ``"A"`` / ``"B"`` / ``"C"``.
+
+    - ``"A"`` — an authorized shield is reachable upstream (silent; no advisory).
+    - ``"B"`` — no upstream shield, but an authorized shield IS available in this
+      deployment (``shield_available is True``): strong "wire it in" advisory.
+    - ``"C"`` — no upstream shield and no shield available (``shield_available is
+      False``): high-risk "reconsider" advisory.
+
+    The caller resolves ``shield_available`` from deployment context (see
+    :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`);
+    the contract default when availability is undeterminable is ``False`` (State C,
+    fail-safe).
+    """
+
+    if node.plugin != "llm":
+        return "A"
+    producer_by_output_stream = _producer_by_output_stream(all_nodes)
+    if _llm_has_authorized_shield_upstream(node, producer_by_output_stream):
+        return "A"
+    return "B" if shield_available else "C"
+
+
 def _llm_has_shield_recommendation(node: NodeSpec) -> bool:
     requirements = _requirements(node.options)
     if requirements is None:

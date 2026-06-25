@@ -29,9 +29,14 @@ import structlog
 
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
 from elspeth.web.composer.audit import BufferingRecorder
-from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution, maybe_resolve_step_1_source_chat, solve_step_chat
+from elspeth.web.composer.guided.chat_solver import (
+    Step1SourceChatResolution,
+    maybe_resolve_step_1_source_chat,
+    maybe_resolve_step_2_sink_chat,
+    solve_step_chat,
+)
 from elspeth.web.composer.guided.protocol import GuidedStep
-from elspeth.web.composer.guided.resolved import SourceResolved
+from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
 
 slog = structlog.get_logger()
 
@@ -173,6 +178,97 @@ async def resolve_step_1_source_chat_with_auto_drop(
         )
         return Step1SourceChatResult(
             source_resolution=None,
+            fallback_chat=StepChatResult(
+                assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
+                status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                latency_ms=latency_ms,
+                error_class=type(exc).__name__,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class Step2SinkChatResult:
+    """Outcome of a Step-2 sink chat attempt with auto-drop fall-back.
+
+    ``sink_resolution`` carries a valid ``resolve_sink`` tool result, or
+    ``None`` when the model replied in prose (the route continues to the
+    advisory guided-chat path). ``assistant_message`` carries the LLM's reply
+    that accompanied the tool call (``None`` on prose/failure).
+    ``fallback_chat`` carries the synthetic unavailable message on transient
+    LLM failure.
+    """
+
+    sink_resolution: SinkResolved | None
+    assistant_message: str | None
+    fallback_chat: StepChatResult | None
+
+
+async def resolve_step_2_sink_chat_with_auto_drop(
+    *,
+    site: str,
+    session_id: str,
+    user_id: str,
+    model: str,
+    user_message: str,
+    current_sink: SinkResolved | None,
+    temperature: float | None,
+    seed: int | None,
+    recorder: BufferingRecorder | None = None,
+) -> Step2SinkChatResult:
+    """Wrap Step-2 ``resolve_sink`` chat with the guided-chat fallback contract."""
+    from litellm.exceptions import APIError as LiteLLMAPIError
+    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+    from litellm.exceptions import (
+        BlockedPiiEntityError,
+        BudgetExceededError,
+        GuardrailInterventionNormalStringError,
+        GuardrailRaisedException,
+    )
+
+    started = time.perf_counter()
+    try:
+        resolved = await maybe_resolve_step_2_sink_chat(
+            model=model,
+            user_message=user_message,
+            current_sink=current_sink,
+            temperature=temperature,
+            seed=seed,
+            recorder=recorder,
+        )
+        if resolved is None:
+            return Step2SinkChatResult(sink_resolution=None, assistant_message=None, fallback_chat=None)
+        sink, assistant_message = resolved
+        return Step2SinkChatResult(sink_resolution=sink, assistant_message=assistant_message, fallback_chat=None)
+    except (
+        LiteLLMAPIError,
+        LiteLLMAuthError,
+        LiteLLMBadRequestError,
+        BudgetExceededError,
+        BlockedPiiEntityError,
+        GuardrailRaisedException,
+        GuardrailInterventionNormalStringError,
+        TimeoutError,
+        IndexError,
+        AttributeError,
+        json.JSONDecodeError,
+        ValueError,
+    ) as exc:
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.step_2_sink_chat_transient_failure",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=GuidedStep.STEP_2_SINK.value,
+            exc_class=type(exc).__name__,
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return Step2SinkChatResult(
+            sink_resolution=None,
+            assistant_message=None,
             fallback_chat=StepChatResult(
                 assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
                 status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,

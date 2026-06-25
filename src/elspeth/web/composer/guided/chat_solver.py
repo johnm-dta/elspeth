@@ -30,7 +30,7 @@ from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
-from elspeth.web.composer.guided.resolved import SourceResolved
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
 from elspeth.web.composer.llm_response_parsing import attach_llm_calls, build_llm_call_record
 from elspeth.web.composer.service import _litellm_acompletion
 
@@ -315,6 +315,237 @@ async def maybe_resolve_step_1_source_chat(
             result = _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
             status = ComposerLLMCallStatus.SUCCESS
             return result
+        status = ComposerLLMCallStatus.SUCCESS
+        return None
+    except TimeoutError:
+        status = ComposerLLMCallStatus.TIMEOUT
+        error_class = "TimeoutError"
+        error_message = "TimeoutError"
+        raise
+    except asyncio.CancelledError as exc:
+        status = ComposerLLMCallStatus.CANCELLED
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMAuthError as exc:
+        status = ComposerLLMCallStatus.AUTH_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMBadRequestError as exc:
+        status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except LiteLLMAPIError as exc:
+        status = ComposerLLMCallStatus.API_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    except (IndexError, AttributeError, json.JSONDecodeError, ValueError) as exc:
+        status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+        error_class = type(exc).__name__
+        error_message = "malformed_response"
+        raise
+    except Exception as exc:
+        status = ComposerLLMCallStatus.API_ERROR
+        error_class = type(exc).__name__
+        error_message = type(exc).__name__
+        raise
+    finally:
+        _record_llm_call(
+            recorder=recorder,
+            model=model,
+            messages=messages,
+            tools=tools,
+            status=status,
+            started_at=started_at,
+            started_ns=started_ns,
+            temperature=temperature,
+            seed=seed,
+            response=response,
+            error_class=error_class,
+            error_message=error_message,
+        )
+
+
+_STEP_2_SINK_TOOL: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "resolve_sink",
+        "description": (
+            "Use when the Step 2 chat message contains enough information to "
+            "configure the pipeline output(s). Do not use for general advice."
+        ),
+        "parameters": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["resolution", "outputs", "assistant_message"],
+            "properties": {
+                "resolution": {"type": "string", "enum": ["sink"]},
+                "outputs": {
+                    "type": "array",
+                    "minItems": 1,
+                    # MVP single-output constraint enforced at the schema boundary:
+                    # handle_step_2_sink loops outputs as sink_name="main"
+                    # (last-write-wins) and the from-resolved re-render shows
+                    # outputs[0] — so >1 output would silently disagree. Cap at 1.
+                    "maxItems": 1,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["plugin", "options", "required_fields", "schema_mode"],
+                        "properties": {
+                            "plugin": {"type": "string", "minLength": 1},
+                            # Bare object: option shape varies by sink plugin.
+                            # Validated downstream by handle_step_2_sink ->
+                            # _execute_set_output.
+                            "options": {"type": "object"},
+                            "required_fields": {"type": "array", "items": {"type": "string"}},
+                            "schema_mode": {"type": "string", "enum": ["fixed", "flexible", "observed"]},
+                        },
+                    },
+                },
+                "assistant_message": {"type": "string", "minLength": 1},
+            },
+        },
+    },
+}
+
+
+def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
+    """Compose the Step-2 sink tool prompt."""
+    revise_block = ""
+    if current_sink is not None:
+        revise_block = (
+            "\n## Current applied sink (revise relative to this)\n\n"
+            "A sink has already been applied. The user's message is a REVISION "
+            "instruction against it — re-emit the COMPLETE updated outputs (not a "
+            "diff). Current sink:\n"
+            f"{json.dumps(current_sink.to_dict(), sort_keys=True)}\n"
+        )
+    return (
+        f"{load_step_chat_skill(GuidedStep.STEP_2_SINK).rstrip()}\n\n"
+        "## Step 2 Sink Tool\n\n"
+        f"{revise_block}"
+        "If the user's message provides enough information to configure the "
+        "pipeline output, call `resolve_sink` with the complete list of outputs "
+        "(plugin, options, required_fields, schema_mode) and a brief "
+        "assistant_message. If the message is only a question or lacks enough "
+        "detail, reply in prose and do not call a tool.\n"
+    )
+
+
+def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str]:
+    """Validate the resolve_sink tool arguments. Returns (sink, assistant_message)."""
+    data = json.loads(arguments)
+    if not isinstance(data, Mapping):
+        raise ValueError(f"resolve_sink arguments must decode to an object; got {type(data).__name__}")
+    missing = {"resolution", "outputs", "assistant_message"} - set(data.keys())
+    if missing:
+        raise ValueError(f"resolve_sink arguments missing required keys: {sorted(missing)}")
+    if data["resolution"] != "sink":
+        raise ValueError(f"resolve_sink resolution must be 'sink'; got {data['resolution']!r}")
+    outputs_raw = data["outputs"]
+    if not isinstance(outputs_raw, list) or not outputs_raw:
+        raise ValueError("resolve_sink outputs must be a non-empty list")
+    # Enforce the MVP single-output cap SERVER-SIDE, not only via the schema's
+    # advisory `maxItems: 1`. A model emitting 2 outputs would otherwise sail
+    # through here and handle_step_2_sink would silently last-write-wins on
+    # sink_name="main" — the "silently disagree" the schema comment warns about.
+    # ELSPETH doctrine: strict validation at the parse boundary for Tier-3
+    # LLM-originated input. The ValueError routes to MALFORMED_RESPONSE -> advisory.
+    if len(outputs_raw) > 1:
+        raise ValueError(f"resolve_sink accepts at most one output (MVP single-output cap); got {len(outputs_raw)}")
+    outputs: list[SinkOutputResolved] = []
+    for idx, item in enumerate(outputs_raw):
+        if not isinstance(item, Mapping):
+            raise ValueError(f"resolve_sink outputs[{idx}] must be an object; got {type(item).__name__}")
+        plugin = item.get("plugin")
+        if not isinstance(plugin, str) or not plugin:
+            raise ValueError(f"resolve_sink outputs[{idx}].plugin must be a non-empty string; got {plugin!r}")
+        options = item.get("options")
+        if not isinstance(options, Mapping):
+            raise ValueError(f"resolve_sink outputs[{idx}].options must be an object")
+        required_fields_raw = item.get("required_fields")
+        if not isinstance(required_fields_raw, list):
+            raise ValueError(f"resolve_sink outputs[{idx}].required_fields must be a list")
+        required_fields: list[str] = []
+        for col_idx, col in enumerate(required_fields_raw):
+            if not isinstance(col, str) or not col:
+                raise ValueError(f"resolve_sink outputs[{idx}].required_fields[{col_idx}] must be a non-empty string")
+            required_fields.append(col)
+        schema_mode = item.get("schema_mode")
+        if schema_mode not in ("fixed", "flexible", "observed"):
+            raise ValueError(f"resolve_sink outputs[{idx}].schema_mode must be fixed/flexible/observed; got {schema_mode!r}")
+        outputs.append(
+            SinkOutputResolved(
+                plugin=plugin,
+                options=dict(options),
+                required_fields=tuple(required_fields),
+                schema_mode=schema_mode,
+            )
+        )
+    assistant_message = data["assistant_message"]
+    if not isinstance(assistant_message, str) or not assistant_message.strip():
+        raise ValueError("resolve_sink assistant_message must be a non-empty string")
+    return SinkResolved(outputs=tuple(outputs)), assistant_message
+
+
+async def maybe_resolve_step_2_sink_chat(
+    *,
+    model: str,
+    user_message: str,
+    current_sink: SinkResolved | None,
+    temperature: float | None,
+    seed: int | None,
+    recorder: BufferingRecorder | None = None,
+) -> tuple[SinkResolved, str] | None:
+    """Try to resolve a Step-2 chat message into a sink config.
+
+    Returns ``(sink, assistant_message)`` on a ``resolve_sink`` tool call, or
+    ``None`` when the model replies in prose, allowing the route to fall back
+    to advisory chat. Mirrors :func:`maybe_resolve_step_1_source_chat`.
+    """
+    if not user_message:
+        raise InvariantError("maybe_resolve_step_2_sink_chat: user_message is empty (route validation gap)")
+
+    from litellm.exceptions import APIError as LiteLLMAPIError
+    from litellm.exceptions import AuthenticationError as LiteLLMAuthError
+    from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
+
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": _build_step_2_sink_tool_prompt(current_sink=current_sink)},
+        {"role": "user", "content": user_message},
+    ]
+    tools = [_STEP_2_SINK_TOOL]
+    kwargs: dict[str, Any] = {"model": model, "messages": messages, "tools": tools}
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    if seed is not None:
+        kwargs["seed"] = seed
+    started_at = datetime.now(UTC)
+    started_ns = time.monotonic_ns()
+    status: ComposerLLMCallStatus | None = None
+    response: Any = None
+    error_class: str | None = None
+    error_message: str | None = None
+    try:
+        response = await _litellm_acompletion(**kwargs)
+        message = response.choices[0].message
+        tool_calls = message.tool_calls or ()
+        for tool_call in tool_calls:
+            function = tool_call.function
+            if function is None:
+                continue
+            if function.name != "resolve_sink":
+                continue
+            arguments = function.arguments
+            if not isinstance(arguments, str):
+                raise ValueError(f"resolve_sink function.arguments must be a JSON string; got {type(arguments).__name__}")
+            sink, assistant = _parse_step_2_sink_tool_arguments(arguments)
+            status = ComposerLLMCallStatus.SUCCESS
+            return sink, assistant
         status = ComposerLLMCallStatus.SUCCESS
         return None
     except TimeoutError:

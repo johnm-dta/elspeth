@@ -3709,12 +3709,14 @@ per_file_rules:
 - pattern: web/composer/guided/chat_solver.py
   rules:
   - R5
-  reason: Tier 3 boundary — Step-1 source chat solver parses LLM tool-call JSON. isinstance
-    checks reject malformed plugin, filename, mime_type, content, options, observed_columns,
-    sample_rows, assistant_message, and function.arguments fields before the route
-    writes blobs or mutates guided state.
+  reason: Tier 3 boundary — Step-1 source and Step-2 sink chat solvers parse LLM
+    tool-call JSON. isinstance checks reject malformed fields (plugin, filename, mime_type,
+    content, options, observed_columns, sample_rows, assistant_message, function.arguments
+    for the source parser; outputs, plugin, options, required_fields, schema_mode,
+    assistant_message, function.arguments for the sink parser) before the route writes
+    blobs or mutates guided state.
   expires: null
-  max_hits: 12
+  max_hits: 21
 - pattern: web/composer/service.py
   rules:
   - R6

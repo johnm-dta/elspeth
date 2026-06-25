@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+
 from elspeth.web.composer.guided.profile import WorkflowProfileKind, profile_for_kind
+from elspeth.web.composer.guided.protocol import Turn
 from elspeth.web.composer.protocol import ComposerService
 from elspeth.web.sessions.schemas import StartGuidedRequest
 
 from .._helpers import (
+    _SYNTHETIC_UNAVAILABLE_MESSAGE,
     UTC,
     UUID,
     Any,
@@ -19,6 +23,7 @@ from .._helpers import (
     ComposerChatInitiator,
     ComposerChatTurn,
     ComposerChatTurnStatus,
+    CompositionState,
     CompositionStateData,
     CompositionStateRecord,
     ControlSignal,
@@ -37,6 +42,7 @@ from .._helpers import (
     Request,
     SessionServiceProtocol,
     SourceResolved,
+    StepChatResult,
     TerminalKind,
     TerminalReason,
     TerminalState,
@@ -85,8 +91,10 @@ from .._helpers import (
     emit_turn_emitted,
     get_current_user,
     handle_step_1_source,
+    handle_step_2_sink,
     match_recipe,
     resolve_step_1_source_chat_with_auto_drop,
+    resolve_step_2_sink_chat_with_auto_drop,
     slog,
     solve_step_chat_with_auto_drop,
     stable_hash,
@@ -1644,6 +1652,88 @@ async def post_guided_respond(
                         )
 
 
+async def _build_guided_chat_apply_response(
+    *,
+    guided: GuidedSession,
+    state: CompositionState,
+    next_turn: Turn,
+    assistant_message: str,
+    service: SessionServiceProtocol,
+    session_id: UUID,
+    state_record: CompositionStateRecord | None,
+) -> tuple[GuidedChatResponse, CompositionStateRecord]:
+    """Persist the in-place-applied state and build the chat-apply response.
+
+    Shared tail for the STEP_1/STEP_2/STEP_3 /guided/chat apply branches: build
+    CompositionStateData from ``state`` + the committed ``guided``, persist via
+    ``save_composition_state(provenance="convergence_persist")``, and assemble the
+    GuidedChatResponse with the populated ``next_turn``. ``guided`` and ``state``
+    must already carry the committed result, the appended history/chat_history,
+    and cleared staging fields — this helper does NOT mutate them.
+
+    Returns the response AND the freshly-saved ``CompositionStateRecord`` so the
+    caller can re-bind its outer ``state_record_out`` before returning. That
+    binding is load-bearing: the route's ``finally`` audit-drain threads
+    ``state_record_out.id`` into every persisted ComposerChatTurn/LLMCall/Tool
+    row, so a stale record here would mis-correlate the audit trail.
+    """
+    new_state = _replace(state, guided_session=guided)
+    existing_meta: dict[str, Any] = {}
+    if state_record is not None and state_record.composer_meta is not None:
+        existing_meta = dict(deep_thaw(state_record.composer_meta))
+    new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
+    state_d = new_state.to_dict()
+    state_data = CompositionStateData(
+        sources=state_d["sources"],
+        nodes=state_d["nodes"],
+        edges=state_d["edges"],
+        outputs=state_d["outputs"],
+        metadata_=state_d["metadata"],
+        is_valid=False,
+        validation_errors=None,
+        composer_meta=new_composer_meta,
+    )
+    state_record_out = await service.save_composition_state(session_id, state_data, provenance="convergence_persist")
+    response = GuidedChatResponse(
+        assistant_message=assistant_message,
+        guided_session=GuidedSessionResponse(
+            step=guided.step.value,
+            history=[
+                TurnRecordResponse(
+                    step=r.step.value,
+                    turn_type=r.turn_type.value,
+                    payload_hash=r.payload_hash,
+                    response_hash=r.response_hash,
+                    summary=r.summary,
+                    emitter=r.emitter,
+                )
+                for r in guided.history
+            ],
+            terminal=None,
+            chat_history=[
+                ChatTurnResponse(
+                    role=t.role.value,
+                    content=t.content,
+                    seq=t.seq,
+                    step=t.step.value,
+                    ts_iso=t.ts_iso,
+                )
+                for t in guided.chat_history
+            ],
+            chat_turn_seq=guided.chat_turn_seq,
+            profile=_workflow_profile_response(guided),
+        ),
+        next_turn=TurnPayloadResponse(
+            type=next_turn["type"],
+            step_index=next_turn["step_index"],
+            payload=dict(next_turn["payload"]),
+        ),
+        terminal=None,
+        composition_state=_state_response(state_record_out),
+    )
+    return response, state_record_out
+
+
 @router.post("/{session_id}/guided/chat", response_model=GuidedChatResponse)
 async def post_guided_chat(
     session_id: UUID,
@@ -1968,66 +2058,346 @@ async def post_guided_chat(
                         )
                     )
 
-                    new_state = _replace(state, guided_session=guided)
-                    source_existing_meta: dict[str, Any] = {}
-                    if state_record is not None and state_record.composer_meta is not None:
-                        source_existing_meta = dict(deep_thaw(state_record.composer_meta))
-                    new_composer_meta = {**source_existing_meta, "guided_session": guided.to_dict()}
-
-                    state_d = new_state.to_dict()
-                    state_data = CompositionStateData(
-                        sources=state_d["sources"],
-                        nodes=state_d["nodes"],
-                        edges=state_d["edges"],
-                        outputs=state_d["outputs"],
-                        metadata_=state_d["metadata"],
-                        is_valid=False,
-                        validation_errors=None,
-                        composer_meta=new_composer_meta,
-                    )
-                    state_record_out = await service.save_composition_state(
-                        session_id,
-                        state_data,
-                        provenance="convergence_persist",
-                    )
-
-                    return GuidedChatResponse(
+                    response, state_record_out = await _build_guided_chat_apply_response(
+                        guided=guided,
+                        state=state,
+                        next_turn=next_turn,
                         assistant_message=source_resolution.assistant_message,
-                        guided_session=GuidedSessionResponse(
-                            step=guided.step.value,
-                            history=[
-                                TurnRecordResponse(
-                                    step=r.step.value,
-                                    turn_type=r.turn_type.value,
-                                    payload_hash=r.payload_hash,
-                                    response_hash=r.response_hash,
-                                    summary=r.summary,
-                                    emitter=r.emitter,
-                                )
-                                for r in guided.history
-                            ],
-                            terminal=None,
-                            chat_history=[
-                                ChatTurnResponse(
-                                    role=t.role.value,
-                                    content=t.content,
-                                    seq=t.seq,
-                                    step=t.step.value,
-                                    ts_iso=t.ts_iso,
-                                )
-                                for t in guided.chat_history
-                            ],
-                            chat_turn_seq=guided.chat_turn_seq,
-                            profile=_workflow_profile_response(guided),
-                        ),
-                        next_turn=TurnPayloadResponse(
-                            type=next_turn["type"],
-                            step_index=next_turn["step_index"],
-                            payload=dict(next_turn["payload"]),
-                        ),
-                        terminal=None,
-                        composition_state=_state_response(state_record_out),
+                        service=service,
+                        session_id=session_id,
+                        state_record=state_record,
                     )
+                    return response
+
+            elif guided.step is GuidedStep.STEP_2_SINK:
+                sink_chat_result = await resolve_step_2_sink_chat_with_auto_drop(
+                    site="post_guided_chat",
+                    session_id=str(session_id),
+                    user_id=user.user_id,
+                    model=settings.composer_model,
+                    user_message=body.message,
+                    current_sink=guided.step_2_result,
+                    temperature=settings.composer_temperature,
+                    seed=settings.composer_seed,
+                    recorder=recorder,
+                )
+                chat_result = sink_chat_result.fallback_chat
+                sink_resolution = sink_chat_result.sink_resolution
+                if sink_resolution is not None:
+                    finished_at = datetime.now(UTC)
+                    latency_ms = int((_perf_counter() - started_perf) * 1000)
+                    data_dir = str(settings.data_dir) if settings.data_dir else None
+                    handler_result = handle_step_2_sink(
+                        state=state,
+                        session=guided,
+                        resolved=sink_resolution,
+                        catalog=catalog,
+                        data_dir=data_dir,
+                    )
+                    if not handler_result.tool_result.success:
+                        # Non-actionable: the strict commit seam rejected the
+                        # proposal. Fall back to advisory (no mutation).
+                        chat_result = StepChatResult(
+                            assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
+                            status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                            latency_ms=latency_ms,
+                            error_class="StepHandlerRejected",
+                        )
+                        sink_resolution = None
+                if sink_resolution is not None:
+                    # Clear the STEP_2 staging fields on commit so the next GET
+                    # hits the from-resolved sub-case (Task 2.5), not the empty
+                    # chosen-plugin form. handle_step_2_sink sets step_2_result
+                    # but does NOT clear these (verified steps.py:214). Mirrors
+                    # the STEP_1 staging clear (Task 3 2c). No epoch bump.
+                    guided = _replace(
+                        handler_result.session,
+                        step_2_chosen_plugin=None,
+                        step_2_sink_intent=None,
+                    )
+                    state = handler_result.state
+                    # Audit parity with STEP_1 (guided.py:1843-1861): if the prior
+                    # STEP_2 turn was an answerable SCHEMA_FORM (the user was
+                    # editing the sink form), stamp it answered so its TurnRecord
+                    # does not stay response_hash=None forever. Gated on the turn
+                    # type for the same reason STEP_1's leg is (a SINGLE_SELECT/
+                    # MULTI_SELECT entry record has no schema-form answer to stamp).
+                    if existing_record_for_chat is not None and current_turn_type is TurnType.SCHEMA_FORM:
+                        sink_turn_response: TurnResponse = {
+                            "chosen": None,
+                            "edited_values": {
+                                "plugin": sink_resolution.outputs[0].plugin,
+                                "options": dict(sink_resolution.outputs[0].options),
+                                "observed_columns": [],
+                                "sample_rows": [],
+                            },
+                            "custom_inputs": None,
+                            "accepted_step_index": None,
+                            "edit_step_index": None,
+                            "control_signal": None,
+                        }
+                        sink_response_hash = stable_hash(sink_turn_response)
+                        sink_answered_record = _replace(
+                            existing_record_for_chat,
+                            response_hash=sink_response_hash,
+                            summary=_summarize_guided_response(TurnType.SCHEMA_FORM, sink_turn_response),
+                        )
+                        guided = _replace(
+                            guided,
+                            history=tuple(sink_answered_record if r is existing_record_for_chat else r for r in guided.history),
+                        )
+                        emit_turn_answered(
+                            recorder,
+                            step=GuidedStep.STEP_2_SINK,
+                            turn_type=TurnType.SCHEMA_FORM,
+                            response_hash=sink_response_hash,
+                            response_payload_id=_store_guided_audit_payload(
+                                getattr(request.app.state, "payload_store", None), sink_turn_response
+                            ),
+                            control_signal=None,
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+                    ts_iso = finished_at.isoformat()
+                    # POPULATED re-render from the committed sink (Task 2.5
+                    # builder) — same turn GET /guided emits for this state.
+                    applied_step_2_result = handler_result.session.step_2_result
+                    if applied_step_2_result is None:
+                        raise InvariantError(
+                            "step_2_result is None after successful handle_step_2_sink — "
+                            "handler set tool_result.success=True but did not set step_2_result"
+                        )
+                    next_turn = build_step_2_schema_form_turn_from_resolved(applied_step_2_result, catalog)
+                    next_turn_type = TurnType(next_turn["type"])
+                    next_payload_hash = stable_hash(next_turn["payload"])
+                    new_record = TurnRecord(
+                        step=GuidedStep.STEP_2_SINK,
+                        turn_type=next_turn_type,
+                        payload_hash=next_payload_hash,
+                        response_hash=None,
+                        emitter="server",
+                    )
+                    emit_turn_emitted(
+                        recorder,
+                        step=GuidedStep.STEP_2_SINK,
+                        turn_type=next_turn_type,
+                        payload_hash=next_payload_hash,
+                        payload_payload_id=_store_guided_audit_payload(
+                            getattr(request.app.state, "payload_store", None), next_turn["payload"]
+                        ),
+                        emitter="server",
+                        composition_version=state.version,
+                        actor=user.user_id,
+                    )
+                    user_turn = ChatTurn(
+                        role=ChatRole.USER,
+                        content=body.message,
+                        seq=guided.chat_turn_seq,
+                        step=GuidedStep.STEP_2_SINK,
+                        ts_iso=ts_iso,
+                    )
+                    assistant_message = sink_chat_result.assistant_message or "Output configured."
+                    assistant_turn = ChatTurn(
+                        role=ChatRole.ASSISTANT,
+                        content=assistant_message,
+                        seq=guided.chat_turn_seq + 1,
+                        step=GuidedStep.STEP_2_SINK,
+                        ts_iso=ts_iso,
+                    )
+                    guided = _replace(
+                        guided,
+                        history=(*guided.history, new_record),
+                        chat_history=(*guided.chat_history, user_turn, assistant_turn),
+                        chat_turn_seq=guided.chat_turn_seq + 2,
+                    )
+                    recorder.record_chat_turn(
+                        ComposerChatTurn(
+                            step=GuidedStep.STEP_2_SINK.value,
+                            initiator=ComposerChatInitiator.USER,
+                            chat_turn_seq=user_turn.seq,
+                            user_message_hash=stable_hash(body.message),
+                            assistant_message_hash=stable_hash(assistant_message),
+                            latency_ms=latency_ms,
+                            model=settings.composer_model,
+                            status=ComposerChatTurnStatus.SUCCESS,
+                            started_at=started_at,
+                            finished_at=finished_at,
+                            error_class=None,
+                        )
+                    )
+                    response, state_record_out = await _build_guided_chat_apply_response(
+                        guided=guided,
+                        state=state,
+                        next_turn=next_turn,
+                        assistant_message=assistant_message,
+                        service=service,
+                        session_id=session_id,
+                        state_record=state_record,
+                    )
+                    return response
+
+            elif guided.step is GuidedStep.STEP_3_TRANSFORMS:
+                if guided.step_1_result is None or guided.step_2_result is None:
+                    # Cannot propose a chain without a committed source + sink;
+                    # fall through to advisory prose (no mutation).
+                    chat_result = None
+                else:
+                    from elspeth.web.composer.guided.chain_solver import (
+                        ChainSolverResponseShapeError,
+                        solve_chain,
+                    )
+
+                    try:
+                        # The transient set MUST be byte-identical to the
+                        # auto-drop wrapper's except at
+                        # `_guided_solve_chain.py:170-183` — that wrapper wraps a
+                        # direct `solve_chain` call, so its set is the proven set
+                        # of what `solve_chain` propagates. All 13 (8 typed +
+                        # IndexError/AttributeError/json.JSONDecodeError +
+                        # ChainSolverResponseShapeError). A GuardrailRaisedException
+                        # (expected on a Tier-3 user free-text revise) or
+                        # OpenAIError/BudgetExceededError that escaped the tuple
+                        # would 500 and brick the phase — violating the
+                        # advisory-never-blocks contract this branch exists to honour.
+                        from litellm.exceptions import APIError as _LLMAPIError
+                        from litellm.exceptions import AuthenticationError as _LLMAuthError
+                        from litellm.exceptions import BadRequestError as _LLMBadReq
+                        from litellm.exceptions import (
+                            BlockedPiiEntityError as _LLMBlockedPii,
+                        )
+                        from litellm.exceptions import (
+                            BudgetExceededError as _LLMBudgetExceeded,
+                        )
+                        from litellm.exceptions import (
+                            GuardrailInterventionNormalStringError as _LLMGuardrailNormalString,
+                        )
+                        from litellm.exceptions import (
+                            GuardrailRaisedException as _LLMGuardrailRaised,
+                        )
+                        from litellm.exceptions import OpenAIError as _LLMOpenAIError
+
+                        # revise_context flips solve_chain's prompt to the
+                        # REVISE addendum (build_revise_addendum) which frames the
+                        # user's text as "update the current proposal", NOT as a
+                        # validation-failure repair. Pass the user's revise
+                        # instruction as revise_context, never repair_context
+                        # (repair_context stays reserved for the genuine
+                        # validation-repair loop on /guided/respond). On the FIRST
+                        # STEP_3 chat (no prior proposal) there is nothing to
+                        # revise yet, so gate to None — a cold start is a plain
+                        # initial propose, not a revision.
+                        revise_context = body.message if guided.step_3_proposal is not None else None
+                        proposal = await solve_chain(
+                            model=settings.composer_model,
+                            source=guided.step_1_result,
+                            sink=guided.step_2_result,
+                            revise_context=revise_context,
+                            recorder=recorder,
+                            temperature=settings.composer_temperature,
+                            seed=settings.composer_seed,
+                        )
+                    except (
+                        _LLMAPIError,
+                        _LLMAuthError,
+                        _LLMBadReq,
+                        _LLMBudgetExceeded,
+                        _LLMBlockedPii,
+                        _LLMGuardrailRaised,
+                        _LLMGuardrailNormalString,
+                        _LLMOpenAIError,
+                        TimeoutError,
+                        IndexError,
+                        AttributeError,
+                        json.JSONDecodeError,
+                        ChainSolverResponseShapeError,
+                    ):
+                        # asyncio.CancelledError is deliberately NOT in the set
+                        # (client-disconnect cancellation must propagate), matching
+                        # the auto-drop wrapper's docstring at _guided_solve_chain.py.
+                        # Non-load-bearing: a transient solve failure on the
+                        # STEP_3 chat path must NOT terminate the session (that
+                        # is what solve_chain_with_auto_drop would do). Fall back
+                        # to advisory prose with NO mutation.
+                        proposal = None
+                    if proposal is None:
+                        chat_result = None  # advisory fall-through
+                    else:
+                        finished_at = datetime.now(UTC)
+                        latency_ms = int((_perf_counter() - started_perf) * 1000)
+                        # Record the transient proposal for in-place re-render.
+                        # NOT committed: handle_step_3_chain_accept (commit +
+                        # advance to WIRE) stays on /guided/respond.
+                        guided = _replace(guided, step_3_proposal=proposal)
+                        state = _replace(state, guided_session=guided)
+                        next_turn = build_step_3_propose_chain_turn(proposal)
+                        next_turn_type = TurnType(next_turn["type"])
+                        next_payload_hash = stable_hash(next_turn["payload"])
+                        new_record = TurnRecord(
+                            step=GuidedStep.STEP_3_TRANSFORMS,
+                            turn_type=next_turn_type,
+                            payload_hash=next_payload_hash,
+                            response_hash=None,
+                            emitter="server",
+                        )
+                        emit_turn_emitted(
+                            recorder,
+                            step=GuidedStep.STEP_3_TRANSFORMS,
+                            turn_type=next_turn_type,
+                            payload_hash=next_payload_hash,
+                            payload_payload_id=_store_guided_audit_payload(
+                                getattr(request.app.state, "payload_store", None), next_turn["payload"]
+                            ),
+                            emitter="server",
+                            composition_version=state.version,
+                            actor=user.user_id,
+                        )
+                        ts_iso = finished_at.isoformat()
+                        assistant_message = "Here is an updated proposal."
+                        user_turn = ChatTurn(
+                            role=ChatRole.USER,
+                            content=body.message,
+                            seq=guided.chat_turn_seq,
+                            step=GuidedStep.STEP_3_TRANSFORMS,
+                            ts_iso=ts_iso,
+                        )
+                        assistant_turn = ChatTurn(
+                            role=ChatRole.ASSISTANT,
+                            content=assistant_message,
+                            seq=guided.chat_turn_seq + 1,
+                            step=GuidedStep.STEP_3_TRANSFORMS,
+                            ts_iso=ts_iso,
+                        )
+                        guided = _replace(
+                            guided,
+                            history=(*guided.history, new_record),
+                            chat_history=(*guided.chat_history, user_turn, assistant_turn),
+                            chat_turn_seq=guided.chat_turn_seq + 2,
+                        )
+                        recorder.record_chat_turn(
+                            ComposerChatTurn(
+                                step=GuidedStep.STEP_3_TRANSFORMS.value,
+                                initiator=ComposerChatInitiator.USER,
+                                chat_turn_seq=user_turn.seq,
+                                user_message_hash=stable_hash(body.message),
+                                assistant_message_hash=stable_hash(assistant_message),
+                                latency_ms=latency_ms,
+                                model=settings.composer_model,
+                                status=ComposerChatTurnStatus.SUCCESS,
+                                started_at=started_at,
+                                finished_at=finished_at,
+                                error_class=None,
+                            )
+                        )
+                        response, state_record_out = await _build_guided_chat_apply_response(
+                            guided=guided,
+                            state=state,
+                            next_turn=next_turn,
+                            assistant_message=assistant_message,
+                            service=service,
+                            session_id=session_id,
+                            state_record=state_record,
+                        )
+                        return response
 
             # InvariantError from solve_step_chat (empty / whitespace LLM
             # content) indicates a defective model response we cannot

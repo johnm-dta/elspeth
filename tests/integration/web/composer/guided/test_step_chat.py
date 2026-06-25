@@ -124,8 +124,15 @@ def _seed_persisted_step1(client: TestClient, session_id: str) -> None:
 
 
 def _fake_llm_reply(text: str) -> SimpleNamespace:
-    """LiteLLM-shaped response carrying a plain assistant message (no tool calls)."""
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+    """LiteLLM-shaped response carrying a plain assistant message (no tool calls).
+
+    ``tool_calls=None`` mirrors a real LiteLLM message, which always carries the
+    attribute (None when the model did not call a tool). The STEP_2/STEP_3 chat
+    apply branches drive their step solver first; that solver reads
+    ``message.tool_calls or ()`` and classifies a None as advisory prose, so a
+    faithful mock must present the attribute rather than omit it.
+    """
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None))])
 
 
 def _fake_source_resolution_tool_call(arguments: dict) -> SimpleNamespace:

@@ -280,11 +280,16 @@ def build_step_2_schema_form_turn_from_resolved(
     Used by the chat-apply in-place re-render and by GET /guided when
     ``step_2_result`` is set on a STEP_2 session.
     """
+    from elspeth.contracts.freeze import deep_thaw
+
     if not sink.outputs:
         raise InvariantError("build_step_2_schema_form_turn_from_resolved: sink has no outputs")
     output = sink.outputs[0]
     schema_info = catalog.get_schema("sink", output.plugin)
-    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(output.options)}
+    # deep_thaw: a rehydrated SinkResolved (GET /guided after apply) carries
+    # deep-frozen ``mappingproxy`` options whose NESTED maps (e.g. ``schema``)
+    # Pydantic rejects on serialisation. Mirror the step_1 builder's thaw.
+    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(deep_thaw(output.options))}
     payload: SchemaFormPayload = {
         "mode": "plugin_options",
         "plugin": output.plugin,

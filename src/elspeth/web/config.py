@@ -56,6 +56,12 @@ class WebSettings(BaseModel):
     # Phase 4A: cache directory for the tutorial-seed run cache. Defaults
     # to ``data_dir / "tutorial_cache"`` after ``data_dir`` is normalized.
     tutorial_cache_dir: Path | None = Field(default=None)
+    # Phase p4: explicit public base URL the tutorial synthetic-scrape pages
+    # are reachable at (e.g. "https://elspeth.foundryside.dev"). When None, the
+    # base is derived from the inbound request origin at compose time. Used ONLY
+    # to build {base}/tutorial-site/project-N.html and the SSRF allowed_hosts
+    # for the tutorial's web_scrape node — never a general egress allowlist.
+    tutorial_sample_base_url: str | None = Field(default=None)
     composer_model: str = "gpt-5.5"
     # Operator-set LLM sampling. Default None means omitted from the
     # provider request, which is the coherent default for reasoning-model

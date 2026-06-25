@@ -23,8 +23,8 @@
   (b) the tier-model fingerprint cascade (`trust-tier-model`; adding imports
   shifts `Module.body` indices) — allowlists `config/cicd/enforce_tier_model/plugins.yaml`
   (plugin files) and `.../web.yaml` (web files: interpretation_state.py, state.py),
-  rotated via `elspeth_lints.rules.trust_tier.tier_model.rotate`
-  (scripts/cicd/rotate_tier_model_fingerprints.py). Co-land the fingerprint/hash
+  rotated via `python -m elspeth_lints.core.cli rotate` (the standalone
+  scripts/cicd/rotate_tier_model_fingerprints.py was REMOVED). Co-land the fingerprint/hash
   updates with the source change; the operator re-signs.
 - The canonical tutorial prompt couples FOUR things in lockstep: the backend
   constant `CANONICAL_SEED_PROMPT` (`web/preferences/tutorial_cache.py`), its

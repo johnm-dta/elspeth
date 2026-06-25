@@ -164,11 +164,19 @@ scrapes 3 ELSPETH-served synthetic pages and lands in prompt-shield State C.
   `source_file_hash` gate (`plugin-contract-plugin-hashes`) — refresh via
   `scripts/cicd/plugin_hash.py` (`compute_source_file_hash`/`fix_source_file_hash`);
   (b) the tier-model fingerprint cascade (`trust-tier-model`; adding imports
-  shifts `Module.body` indices) — allowlists `config/cicd/enforce_tier_model/plugins.yaml`
-  (plugin files) and `.../web.yaml` (web files: interpretation_state.py, state.py),
-  rotated via `elspeth_lints.rules.trust_tier.tier_model.rotate`
-  (scripts/cicd/rotate_tier_model_fingerprints.py). Co-land the fingerprint/hash
-  updates with the source change; the operator re-signs.
+  shifts `Module.body` indices) — allowlists live under
+  `config/cicd/enforce_tier_model/` (web files like `interpretation_state.py`,
+  `composer/service.py` in `web.yaml`; plugin files in `plugins.yaml`). The CLI is
+  `elspeth_lints.core.cli` (VERIFIED present at
+  `elspeth-lints/src/elspeth_lints/core/cli.py`): `check` detects drift, `rotate`
+  repairs DRIFT on existing allowlisted sites, `justify` routes a NEW boundary
+  finding to the cicd-judge. There is NO `rotate.py` CLI and NO
+  `scripts/cicd/rotate_tier_model_fingerprints.py` (only a stale `.pyc` remains) —
+  do not invoke either. Run from the repo root with `PYTHONPATH=elspeth-lints/src`
+  (e.g. `PYTHONPATH=elspeth-lints/src python -m elspeth_lints.core.cli check
+  --rules trust_tier.tier_model --root src/elspeth --files <slice files>
+  --format json`). Co-land the fingerprint/hash updates with the source change;
+  the operator re-signs.
 - The canonical tutorial prompt couples FOUR things in lockstep: the backend
   constant `CANONICAL_SEED_PROMPT` (`web/preferences/tutorial_cache.py`), its
   byte-identical FRONTEND MIRROR `CANONICAL_TUTORIAL_PROMPT`
@@ -227,7 +235,7 @@ scrapes 3 ELSPETH-served synthetic pages and lands in prompt-shield State C.
 
 ## Cross-plan consistency — findings
 
-The three named shared interfaces all match the contract and each other:
+The four named shared interfaces all match the contract and each other:
 
 - **Apply-response (p2 ← p1):** p1 Task 3/4 produce `step` unchanged + populated
   `next_turn` from `step_N_result`; p2 consumes via the unchanged `chatGuided`
@@ -235,10 +243,30 @@ The three named shared interfaces all match the contract and each other:
 - **Source-driver output (p4 ← p1):** inline `json`/`csv` URL-row `SourceResolved`
   (url column + `blob_ref`); `web_scrape` routed to the transform stage via
   `_web_scrape_predicate` + the `web-scrape-llm-rate-jsonl` recipe. Match (p1's
-  cross-plan summary block restates this verbatim).
+  cross-plan summary block restates this verbatim). p4 consumes this by
+  construction via contract §2.2 — it does NOT rely on p1's Task 5 test as a
+  "driver won't emit `web_scraper`" guard (p1 Task 5 and its cross-plan summary
+  both disclaim that role). Match.
 - **Prompt-shield (p4 ← p3):** `prompt_shield_state_for_node(...) -> "A"|"B"|"C"` +
   the B/C drafts; p4 consumes the State-C *result* (its override copy is
   hand-written, not an imported constant). Match.
+- **`allowed_hosts` seam (p4):** p4 wires `resolve_tutorial_allowed_hosts` into
+  `handle_step_2_5_recipe_apply` (`composer/guided/steps.py`, a real, present
+  consumer); no plan points at the non-existent `composer/guided/_helpers.py`
+  `edited_values['slots']` path (p4 explicitly disclaims it). Match.
 
-Residual cross-plan items are documented/owner-pending, not blocking — see the
-StructuredOutput `crossPlanIssues` list.
+Two residual cross-plan items — documented, non-blocking:
+
+- **Stale rotate-script reference (corrected here):** the contract's §4 verbatim
+  Global Constraints block still cites the removed
+  `scripts/cicd/rotate_tier_model_fingerprints.py`; p1/p2/p4 are faithful pastes of
+  that stale block and inherit it. p3 corrected ahead of the contract to
+  `python -m elspeth_lints.core.cli`. This overview's Global Constraints rotate line
+  has now been re-synced to p3's corrected wording. Operator follow-up: update the
+  contract §4 block and re-paste into p1/p2/p4.
+- **Sink-driver signature supersession (p1, documented):** contract §2.2 lists
+  `maybe_resolve_step_2_sink_chat -> SinkResolved | None`; p1 Task 2 implements
+  `-> tuple[SinkResolved, str] | None` and self-documents it as the authoritative
+  supersession (carries the `assistant_message` STEP_2 parity needs). Only p1 Task 4
+  consumes it — no cross-plan consumer — so it is intra-p1 consistent; owner-owed
+  contract-file sync is deferred.

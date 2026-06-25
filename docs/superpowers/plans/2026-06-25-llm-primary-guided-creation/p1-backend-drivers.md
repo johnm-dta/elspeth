@@ -30,8 +30,8 @@
   is also tracked in web.yaml but this plan does NOT edit it — Tasks 3/4 only CALL
   its handlers from the route `guided.py`; no re-sign owed for steps.py.) Task 6
   Step 4 RUNS the gate to confirm the exact owed set), rotated via
-  `elspeth_lints.rules.trust_tier.tier_model.rotate`
-  (scripts/cicd/rotate_tier_model_fingerprints.py). Co-land the fingerprint/hash
+  `python -m elspeth_lints.core.cli rotate` (the standalone
+  scripts/cicd/rotate_tier_model_fingerprints.py was REMOVED). Co-land the fingerprint/hash
   updates with the source change; the operator re-signs.
 - The canonical tutorial prompt couples FOUR things in lockstep: the backend
   constant `CANONICAL_SEED_PROMPT` (`web/preferences/tutorial_cache.py`), its

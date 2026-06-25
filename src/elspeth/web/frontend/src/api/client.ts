@@ -43,6 +43,7 @@ import type {
   GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
+  TutorialSampleResponse,
 } from "@/types/guided";
 import type {
   InterpretationEvent,
@@ -605,6 +606,32 @@ export async function getGuided(
     signal,
   });
   return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
+ * Fetch the runtime-derived synthetic-scrape sample URLs + SSRF host-class for
+ * the active TUTORIAL session's resolved origin (p4 Task 8a GET surface).
+ *
+ * Consumed by the tutorial passive auto-drive (`TutorialGuidedShell`): the URLs
+ * are computed server-side from the resolved base at request time (they cannot
+ * ride the frozen profile constants), so the shell fetches them rather than
+ * hard-coding them. `allowed_hosts` is surfaced informationally only — the
+ * client never sends it back; the SSRF allowlist is set server-side at the
+ * STEP_2.5 recipe accept seam. `entry_seed` is NEVER on this wire.
+ */
+export async function getTutorialSample(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<TutorialSampleResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/guided/tutorial-sample`,
+    {
+      method: "GET",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  return parseResponse<TutorialSampleResponse>(response);
 }
 
 /**

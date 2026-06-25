@@ -155,6 +155,27 @@ export interface GuidedRespondResponse {
 }
 
 /**
+ * Response for GET /api/sessions/{id}/guided/tutorial-sample
+ * (schemas.py — TutorialSampleResponse, p4 Task 8a).
+ *
+ * Runtime-derived inputs for the tutorial passive auto-drive: the 3 synthetic
+ * sample-page URLs (`sample_urls`) computed from the active tutorial session's
+ * resolved origin, and the SSRF host-class (`allowed_hosts`) — `"public_only"`
+ * for a public base, or a tight CIDR list for a loopback/private dev base.
+ *
+ * The auto-drive consumes only `sample_urls` (the URLs it seeds into the
+ * scripted intent). `allowed_hosts` is NEVER sent back over the wire by the
+ * client: the SSRF allowlist is injected server-side at the STEP_2.5 recipe
+ * accept seam (Task 8a) — surfacing it here is informational only. The
+ * server-side `entry_seed` framing prompt is NOT on this wire (mirrors
+ * WorkflowProfileResponse's exclusion).
+ */
+export interface TutorialSampleResponse {
+  sample_urls: string[];
+  allowed_hosts: "public_only" | string[];
+}
+
+/**
  * Request body for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatRequest).
  *
  * `step_index` is the wire form of the user's current step. The server

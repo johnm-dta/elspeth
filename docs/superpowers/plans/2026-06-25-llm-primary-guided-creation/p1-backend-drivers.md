@@ -22,8 +22,15 @@
   `scripts/cicd/plugin_hash.py` (`compute_source_file_hash`/`fix_source_file_hash`);
   (b) the tier-model fingerprint cascade (`trust-tier-model`; adding imports
   shifts `Module.body` indices) — allowlists `config/cicd/enforce_tier_model/plugins.yaml`
-  (plugin files) and `.../web.yaml` (web files: interpretation_state.py, state.py),
-  rotated via `elspeth_lints.rules.trust_tier.tier_model.rotate`
+  (plugin files) and `.../web.yaml` (web files — NB: this list is NOT limited to
+  interpretation_state.py/state.py; it also TRACKS files THIS plan EDITS, namely
+  `web/composer/guided/chat_solver.py` (a `pattern:`+`max_hits: 12` budget entry,
+  edited by Tasks 1/2) and `web/sessions/routes/_helpers.py` (per-function `fp=`
+  entries, edited by Task 2.5) — so a re-sign IS likely owed. (`web/composer/guided/steps.py`
+  is also tracked in web.yaml but this plan does NOT edit it — Tasks 3/4 only CALL
+  its handlers from the route `guided.py`; no re-sign owed for steps.py.) Task 6
+  Step 4 RUNS the gate to confirm the exact owed set), rotated via
+  `elspeth_lints.rules.trust_tier.tier_model.rotate`
   (scripts/cicd/rotate_tier_model_fingerprints.py). Co-land the fingerprint/hash
   updates with the source change; the operator re-signs.
 - The canonical tutorial prompt couples FOUR things in lockstep: the backend
@@ -389,8 +396,16 @@ fall-back); only the prompt and signature change here, not the parse boundary.
   ```
   cd /home/john/elspeth && uv run pytest tests/integration/web/composer/guided/test_step_chat_source_driver.py tests/integration/web/composer/guided/test_step_chat.py -q
   ```
-  Expected: all pass EXCEPT `test_step_1_chat_can_commit_generated_csv_source_and_emit_step_2`
-  — which is the auto-advance test Task 3 updates. Note it; do not fix it here.
+  Expected: **ALL pass**, including
+  `test_step_1_chat_can_commit_generated_csv_source_and_emit_step_2`. Task 1
+  changes ONLY an optional defaulted kwarg (`current_source=None`) plus prompt
+  text; it does NOT remove the STEP_1 auto-advance (the route never passes
+  `current_source`, the cold-start prompt path is byte-identical, and that test
+  asserts `step == "step_2_sink"` which still holds). The auto-advance removal and
+  the test rename are **Task 3's scope** — do NOT pull them into Task 1 to "make a
+  test fail" (that would bleed the Task 1↔Task 3 boundary). If
+  `test_step_chat.py` is unexpectedly RED after this step, you have introduced an
+  out-of-scope change — revert to the kwarg+prompt-only diff.
 
 - [ ] **Step 5: Commit.**
   ```
@@ -526,12 +541,16 @@ EOF
   Expected failure: `ImportError: cannot import name 'maybe_resolve_step_2_sink_chat' from 'elspeth.web.composer.guided.chat_solver'`.
 
 - [ ] **Step 2: Add the sink tool schema, parser, and driver.**
-  In `chat_solver.py`, after `maybe_resolve_step_1_source_chat` (ends `:343`), add
-  the import (top of file, with the SourceResolved import from Task 1):
+  In `chat_solver.py`, after `maybe_resolve_step_1_source_chat` (ends `:343`),
+  EXTEND the existing resolved-types import (Task 1 already added
+  `from elspeth.web.composer.guided.resolved import SourceResolved` to this file —
+  do NOT re-add `SourceResolved` as a second import line; that would duplicate it).
+  Add only the two new names to Task 1's line so it reads:
   ```python
   from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
   ```
-  Then add:
+  (Task 2 itself does not reference `SourceResolved`; it rides along on Task 1's
+  import. If executing Task 2 standalone before Task 1, add the full line.) Then add:
 
   ```python
   _STEP_2_SINK_TOOL: dict[str, Any] = {
@@ -614,6 +633,16 @@ EOF
       outputs_raw = data["outputs"]
       if not isinstance(outputs_raw, list) or not outputs_raw:
           raise ValueError("resolve_sink outputs must be a non-empty list")
+      # Enforce the MVP single-output cap SERVER-SIDE, not only via the schema's
+      # advisory `maxItems: 1`. A model emitting 2 outputs would otherwise sail
+      # through here and handle_step_2_sink would silently last-write-wins on
+      # sink_name="main" — the "silently disagree" the schema comment warns about.
+      # ELSPETH doctrine: strict validation at the parse boundary for Tier-3
+      # LLM-originated input. The ValueError routes to MALFORMED_RESPONSE -> advisory.
+      if len(outputs_raw) > 1:
+          raise ValueError(
+              f"resolve_sink accepts at most one output (MVP single-output cap); got {len(outputs_raw)}"
+          )
       outputs: list[SinkOutputResolved] = []
       for idx, item in enumerate(outputs_raw):
           if not isinstance(item, Mapping):
@@ -931,6 +960,56 @@ EOF
   ```
   Expected: `ok` then `3 passed`.
 
+- [ ] **Step 4b: Directly test the sink wrapper's transient-failure → synthetic-
+  unavailable fallback path (owner-pinned coverage).**
+  The wrapper's `fallback_chat` (synthetic-unavailable) path is otherwise NOT
+  exercised by any test in this slice — Task 4's enumerated route tests cover
+  prose-advisory and apply-in-place, NOT the transient fallback. Pin the coverage
+  HERE (Task 2 owns the wrapper) with a direct unit test that patches the driver to
+  raise a transient error and asserts the wrapper absorbs it into a
+  `SYNTHETIC_UNAVAILABLE` `fallback_chat` (no exception propagates). Append to
+  `test_step_chat_sink_driver.py`:
+
+  ```python
+  from elspeth.web.sessions._guided_step_chat import (
+      Step2SinkChatResult,
+      resolve_step_2_sink_chat_with_auto_drop,
+  )
+
+
+  @pytest.mark.asyncio
+  async def test_sink_wrapper_absorbs_transient_into_synthetic_unavailable() -> None:
+      with patch(
+          "elspeth.web.sessions._guided_step_chat.maybe_resolve_step_2_sink_chat",
+          new=AsyncMock(side_effect=TimeoutError("provider timeout")),
+      ):
+          result = await resolve_step_2_sink_chat_with_auto_drop(
+              site="test",
+              session_id="s1",
+              user_id="u1",
+              model="anthropic/claude-sonnet-4.6",
+              user_message="write a jsonl file",
+              current_sink=None,
+              temperature=None,
+              seed=None,
+          )
+      assert isinstance(result, Step2SinkChatResult)
+      assert result.sink_resolution is None
+      assert result.fallback_chat is not None
+      assert result.fallback_chat.error_class == "TimeoutError"
+  ```
+
+  > Match the `ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE` / `_SYNTHETIC_
+  > UNAVAILABLE_MESSAGE` symbols the wrapper sets; if the wrapper's `StepChatResult`
+  > exposes `status`, also assert
+  > `result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE`.
+
+  Run to pass:
+  ```
+  cd /home/john/elspeth && uv run pytest tests/integration/web/composer/guided/test_step_chat_sink_driver.py -q
+  ```
+  Expected: `4 passed`.
+
 - [ ] **Step 5: Commit.**
   ```
   cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/web/composer/guided/chat_solver.py src/elspeth/web/sessions/_guided_step_chat.py tests/integration/web/composer/guided/test_step_chat_sink_driver.py && git commit -m "$(cat <<'EOF'
@@ -986,7 +1065,7 @@ EOF
 - Test: `tests/unit/web/composer/guided/test_prefill_from_resolved.py` (Create)
 - Test: `tests/unit/web/composer/guided/test_get_rebuild_from_resolved.py` (Create;
   the HTTP apply-and-refresh `test_guided_refresh_applied.py` is created in Task 3
-  Step 3, once in-place apply exists)
+  Step 5, once in-place apply exists)
 
 **Interfaces:**
 - Consumes: `SourceResolved` / `SinkResolved` (`resolved.py`); `CatalogServiceProtocol`;
@@ -1070,9 +1149,21 @@ EOF
   Expected failure: `ImportError: cannot import name 'build_step_1_schema_form_turn_from_resolved'`.
 
 - [ ] **Step 2: Add the two from-resolved builders.**
-  In `emitters.py`, after `build_step_2_schema_form_turn` (`:238`), add (the
-  `SourceResolved`/`SinkResolved` imports may already be present; grep first and
-  add to the existing `from ...resolved import` block if not):
+  In `emitters.py`, after `build_step_2_schema_form_turn` (`:238`), add the two
+  builders. First ensure the module-level imports they reference are present —
+  `emitters.py` has ZERO tier-model fingerprints, so adding top-level imports here
+  is safe re: the gate. Add to (or create) the appropriate import blocks at the top
+  of `emitters.py`:
+  ```python
+  from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
+  from elspeth.web.composer.guided.errors import InvariantError  # today imported
+      # only locally at emitters.py:288 (inside _build_step_2_5_recipe_offer_turn);
+      # hoist to module level OR keep a local import inside
+      # build_step_2_schema_form_turn_from_resolved. Use this exact path.
+  ```
+  (Grep first: `grep -n "InvariantError\|import SourceResolved\|import SinkResolved" src/elspeth/web/composer/guided/emitters.py`
+  — add ONLY the names that are absent, and use the exact `InvariantError` import
+  source the local import already uses.) Then add the builders:
 
   ```python
   def build_step_1_schema_form_turn_from_resolved(
@@ -1151,7 +1242,7 @@ EOF
   staging fields `None`) and asserts `_build_get_guided_turn` returns the populated
   from-resolved turn. This goes red before Step 4 and green after, with no
   cross-task ordering hazard. The HTTP apply-and-refresh invariant is owned by
-  Task 3 Step 3 (which creates `test_guided_refresh_applied.py`).
+  Task 3 Step 5 (which creates `test_guided_refresh_applied.py`).
 
   Create `tests/unit/web/composer/guided/test_get_rebuild_from_resolved.py`:
 
@@ -1451,6 +1542,15 @@ EOF
   `:1843-1861` answered-record block (`response_hash = ...` through the
   `emit_turn_answered(...)` call) in:
   ```python
+                  # Adopt the post-commit state FIRST, BEFORE either leg — the
+                  # answered-record emit below reads `state.version`, and
+                  # CompositionState bumps version in-memory on every edit
+                  # (state.py: each edit returns a new instance; set_source =>
+                  # version+1). If this assignment stayed after the if/else (as it
+                  # was at :1850), the answered record would stamp the STALE
+                  # pre-commit version — a silent audit-correctness regression.
+                  # Nothing between here and emit_turn_answered reads the old state.
+                  state = handler_result.state
                   if current_turn_type is TurnType.SCHEMA_FORM:
                       turn_response: TurnResponse = {
                           "chosen": None,
@@ -1497,12 +1597,15 @@ EOF
                           step_1_chosen_plugin=None,
                           step_1_source_intent=None,
                       )
-                  state = handler_result.state
   ```
   > The original `:1849` line `guided = _replace(handler_result.session,
-  > history=answered_history)` is REPLACED by the guarded form above (note the
-  > `state = handler_result.state` assignment at `:1850` moves out of the `if` to
-  > run on both legs). Hoist `TurnResponse` into the `if` body as shown.
+  > history=answered_history)` is REPLACED by the guarded form above. The
+  > `state = handler_result.state` assignment that lived at `:1850` (after the old
+  > block) moves to BEFORE the `if/else` — it MUST precede the
+  > `emit_turn_answered(composition_version=state.version)` call so the answered
+  > record stamps the POST-commit version (handler_result.state). Do NOT leave it
+  > after the else, and do NOT duplicate it onto both legs — a single assignment
+  > before the branch covers both. Hoist `TurnResponse` into the `if` body as shown.
 
   **2c — Clear the STEP_1 staging fields on commit (apply/refresh must agree).**
   `handle_step_1_source` sets `step_1_result` but does NOT clear
@@ -1627,11 +1730,19 @@ EOF
           assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
   ```
 
-  > Reuse the same `_litellm_acompletion` source stub the in-place test in Step 1
-  > uses (factor it to a module helper `_fake_resolve_source_response_csv()` if the
-  > existing test inlines it). `_create_session` / `_get_guided` / `_post_chat`
-  > are the verbatim helpers already used by `TestStep1SourceResolution`; if the
-  > class drives chat through a different helper, match it.
+  > **Stub + helper anchors (verified — correct these before writing).** The real
+  > source stub in `test_step_chat.py` is `_fake_source_resolution_tool_call(arguments)`
+  > (`:131`) — it takes a `dict` of resolve_source arguments; there is NO zero-arg
+  > `_fake_resolve_source_response_csv()`. Either call
+  > `_fake_source_resolution_tool_call({...csv args...})` directly, or factor a
+  > zero-arg `_fake_resolve_source_response_csv()` wrapper in Step 4 (do this
+  > NON-conditionally, before Step 5 imports it — Step 5's
+  > `test_guided_refresh_applied.py` imports `_fake_resolve_source_response_csv`).
+  > `_get_guided` is defined in `test_step_3_e2e.py:36` (NOT `test_step_chat.py`) —
+  > if this test file lacks it, import it from `test_step_3_e2e` (as Steps 5's file
+  > does) or use the class's own GET helper. `_create_session` / `_post_chat` are
+  > the helpers `TestStep1SourceResolution` uses; if the class drives chat through a
+  > different helper, match it.
 
   Run to pass (this is RED before Step 2's guard widening, GREEN after):
   ```
@@ -1722,6 +1833,11 @@ EOF
   change. List any such test in the commit body.
 
 - [ ] **Step 7: Commit.**
+  Stage the three files below PLUS any additional test file(s) you updated in
+  Step 6 (a locked-in old-contract test elsewhere in the suite). Stage explicit
+  paths only — never `git add -A`/`.`. If Step 6 updated e.g.
+  `tests/integration/web/composer/guided/test_audit_emission.py`, append it to the
+  `git add` list here so the fix is not dropped from the commit.
   ```
   cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/web/sessions/routes/composer/guided.py tests/integration/web/composer/guided/test_step_chat.py tests/integration/web/composer/guided/test_guided_refresh_applied.py && git commit -m "$(cat <<'EOF'
 feat(composer/guided): STEP_1 chat applies source in place at phase entry
@@ -1787,6 +1903,22 @@ EOF
 > PROPOSE_CHAIN accept branch, `_helpers.py:3627`). Revise = type again →
 > `solve_chain` with `repair_context` set to the user's revision message → new
 > proposal turn. There is NO recipe-apply chat driver (deterministic confirm).
+>
+> **KNOWN LIMITATION (do NOT silently expand Task 4 to fix it).** Passing the
+> user's revise instruction as `repair_context` reuses `solve_chain`'s
+> `build_repair_addendum`, which renders to the LLM as "your previous proposal
+> failed validation: {message} … Propose a corrected chain." A legitimate revise
+> ("just pass the rows through") is therefore MISFRAMED to the model as a
+> validation-failure repair, which can degrade revise quality. The cold-start
+> `else None` gate is effectively unreachable here (STEP_3 chat re-solves only when
+> `step_3_proposal` is already set, so `repair_context=body.message` fires on
+> ~100% of revises). The proper fix — a distinct `build_revise_addendum` + a
+> separate revise-context param on `solve_chain` — lives in `prompts.py` /
+> `chain_solver.py`, OUTSIDE Task 4's declared Files list, and originates in the
+> DECIDED contract §2.2. This plan does NOT expand into those files. SURFACE this
+> to the contract owner (tracked in the review's deferred list); until resolved,
+> ship the limitation as-is and note in the commit body that STEP_3 revise
+> instructions are presented to the LLM as repair-of-validation-errors.
 
 - [ ] **Step 1: Write the failing STEP_2 sink apply-in-place integration test.**
   Create `tests/integration/web/composer/guided/test_step_chat_apply.py`. Reuse
@@ -2169,6 +2301,19 @@ EOF
     — grep first (`grep -n "_SYNTHETIC_UNAVAILABLE_MESSAGE\|StepChatResult"
     src/elspeth/web/sessions/routes/composer/guided.py`); add via the same path the
     STEP_1 branch already uses for its fallback.
+  - `CompositionState` and `Turn` — REQUIRED by the Step 6 extracted helper's
+    annotations (`state: CompositionState`, `next_turn: Turn`). `guided.py` today
+    imports `CompositionStateData` and `GuidedSession` but NOT these two (verified:
+    only `CompositionStateData` `:22` and `GuidedSession` `:31` are in the
+    `.._helpers` block). `CompositionState` is exported from `_helpers.py`'s
+    `__all__` (`:4207`) — add it to the `.._helpers` import block. `Turn` is the
+    TypedDict at `web/composer/guided/protocol.py:137` — add
+    `from elspeth.web.composer.guided.protocol import Turn` (or via `.._helpers` if
+    it re-exports `Turn`; grep `grep -n '"Turn"' src/elspeth/web/sessions/routes/_helpers.py`
+    and use that path if present, else import direct). With
+    `from __future__ import annotations` there is no runtime NameError, but Step 6's
+    mypy gate (and Task 6 Step 2's mypy on guided.py) flags `name-defined` without
+    these imports — so add them or the Step 6 mypy gate fails.
   Do NOT add `handle_step_3_chain_accept`: the STEP_3 branch is propose-only and
   calls `solve_chain` directly (never the accept handler), so importing it would be
   an unused import that Task 6 Step 2's ruff check (F401) fails on.
@@ -2285,12 +2430,18 @@ EOF
   `handle_step_3_chain_accept`. It does NOT use `solve_chain_with_auto_drop` —
   that wrapper TERMINATES the session (`solver_exhausted`) on transient failure,
   which would brick the phase; STEP_3 chat must be non-load-bearing. Wrap
-  `solve_chain` in a local try/except over the same transient set the auto-drop
-  wrapper absorbs (LiteLLM API/auth/bad-request, `TimeoutError`, malformed-shape
-  `IndexError`/`AttributeError`/`json.JSONDecodeError`, and
-  `ChainSolverResponseShapeError`) and route those to advisory (`chat_result =
-  None`) WITHOUT terminating; let `InvariantError`/`ValueError` propagate (real
-  bugs), matching the existing solver discipline:
+  `solve_chain` in a local try/except over the **byte-identical** transient set the
+  auto-drop wrapper absorbs at `_guided_solve_chain.py:170-183` — all 13: the 8
+  typed LiteLLM exceptions (`APIError`, `AuthenticationError`, `BadRequestError`,
+  `BudgetExceededError`, `BlockedPiiEntityError`, `GuardrailRaisedException`,
+  `GuardrailInterventionNormalStringError`, `OpenAIError`), `TimeoutError`, the
+  malformed-shape trio `IndexError`/`AttributeError`/`json.JSONDecodeError`, and
+  `ChainSolverResponseShapeError`. Route those to advisory (`chat_result = None`)
+  WITHOUT terminating; let `InvariantError`/`ValueError` propagate (real bugs),
+  matching the existing solver discipline. Do NOT omit the guardrail/budget/PII/
+  OpenAIError members: a `GuardrailRaisedException` (expected on a Tier-3 user
+  free-text revise) escaping the tuple would 500 and brick the phase, directly
+  violating contract §1.2/§2.2 (advisory-never-blocks):
 
   ```python
               elif guided.step is GuidedStep.STEP_3_TRANSFORMS:
@@ -2305,9 +2456,33 @@ EOF
                       )
 
                       try:
+                          # The transient set MUST be byte-identical to the
+                          # auto-drop wrapper's except at
+                          # `_guided_solve_chain.py:170-183` — that wrapper wraps a
+                          # direct `solve_chain` call, so its set is the proven set
+                          # of what `solve_chain` propagates. All 13 (8 typed +
+                          # IndexError/AttributeError/json.JSONDecodeError +
+                          # ChainSolverResponseShapeError). A GuardrailRaisedException
+                          # (expected on a Tier-3 user free-text revise) or
+                          # OpenAIError/BudgetExceededError that escaped the tuple
+                          # would 500 and brick the phase — violating the
+                          # advisory-never-blocks contract this branch exists to honour.
                           from litellm.exceptions import APIError as _LLMAPIError
                           from litellm.exceptions import AuthenticationError as _LLMAuthError
                           from litellm.exceptions import BadRequestError as _LLMBadReq
+                          from litellm.exceptions import (
+                              BlockedPiiEntityError as _LLMBlockedPii,
+                          )
+                          from litellm.exceptions import (
+                              BudgetExceededError as _LLMBudgetExceeded,
+                          )
+                          from litellm.exceptions import (
+                              GuardrailInterventionNormalStringError as _LLMGuardrailNormalString,
+                          )
+                          from litellm.exceptions import (
+                              GuardrailRaisedException as _LLMGuardrailRaised,
+                          )
+                          from litellm.exceptions import OpenAIError as _LLMOpenAIError
 
                           # repair_context flips solve_chain's prompt to a
                           # repair addendum (chain_solver.py:174). On the FIRST
@@ -2328,12 +2503,20 @@ EOF
                           _LLMAPIError,
                           _LLMAuthError,
                           _LLMBadReq,
+                          _LLMBudgetExceeded,
+                          _LLMBlockedPii,
+                          _LLMGuardrailRaised,
+                          _LLMGuardrailNormalString,
+                          _LLMOpenAIError,
                           TimeoutError,
                           IndexError,
                           AttributeError,
                           json.JSONDecodeError,
                           ChainSolverResponseShapeError,
                       ):
+                          # asyncio.CancelledError is deliberately NOT in the set
+                          # (client-disconnect cancellation must propagate), matching
+                          # the auto-drop wrapper's docstring at _guided_solve_chain.py.
                           # Non-load-bearing: a transient solve failure on the
                           # STEP_3 chat path must NOT terminate the session (that
                           # is what solve_chain_with_auto_drop would do). Fall back
@@ -2475,13 +2658,16 @@ EOF
   > WRONG for the chat path, which must stay non-load-bearing. So STEP_3 chat calls
   > `solve_chain` directly and catches the same transient set into an advisory
   > fall-through. `solve_chain` itself records exactly one `ComposerLLMCall` via the
-  > `recorder` you pass, so audit is preserved. Verify the transient exception set
-  > against `solve_chain`'s own `except` clauses (the typed-except block begins at
-  > `chain_solver.py:282` — the `except (IndexError, AttributeError,
-  > json.JSONDecodeError, ChainSolverResponseShapeError)` clause — and runs through
-  > `:328`; the `repair_context` gate is at `:174-175`; the
-  > `ChainSolverResponseShapeError` is raised in the validation block at `:215-225`)
-  > before writing.
+  > `recorder` you pass, so audit is preserved. The authoritative transient set is
+  > the **auto-drop wrapper's** `except` tuple at `_guided_solve_chain.py:170-183`
+  > (the wrapper wraps a direct `solve_chain` call, so that tuple is the proven set
+  > of what `solve_chain` actually propagates — all 13). Copy that set verbatim into
+  > the inline tuple above; do NOT under-count from `solve_chain`'s own *inner*
+  > `except (IndexError, AttributeError, json.JSONDecodeError,
+  > ChainSolverResponseShapeError)` clause — that inner clause is only the
+  > shape-failure layer and omits the 8 typed LiteLLM exceptions `solve_chain`
+  > re-raises. The `repair_context` gate is at `chain_solver.py:174-175`. Confirm
+  > the wrapper's tuple is unchanged before writing.
 
   Add `build_step_3_propose_chain_turn` to the route imports if absent (grep
   first). `solve_chain` + `ChainSolverResponseShapeError` are imported inline in
@@ -2655,14 +2841,26 @@ EOF
   chokepoint); `SourceResolved`; `match_recipe(source, sink)` (`recipe_match.py:489`);
   `_web_scrape_predicate` (`recipe_match.py:230`); `SinkResolved` /
   `SinkOutputResolved`.
-- Produces: a regression that the source driver's URL-list output routes
-  `web_scrape` into the transform stage (no `web_scraper` source). This pins the
-  p1→p4 contract: p4's tutorial worked example consumes EXACTLY this shape.
+- Produces: a regression that pins TWO things — (a) the
+  Step1SourceChatResolution → `SourceResolved` field bridge (the near-no-op
+  mapping the driver applies), and (b) the recipe-routing layer
+  (`match_recipe`/`_web_scrape_predicate`) routing a json+`url`+`blob_ref` source +
+  single-json sink to `web-scrape-llm-rate-jsonl` (web_scrape lands in the
+  TRANSFORM stage, no `web_scraper` source plugin).
 
-> No new implementation here — this task asserts the existing scrape-routing
-> already works for a driver-produced URL-row source. If the assertion fails, the
-> source driver is producing the wrong shape (a scraper source) and the defect is
-> in Task 1, not in the recipe layer.
+> **What this test actually covers (and what it does NOT).** Under the mocked
+> provider chokepoint, the `SourceResolved` fed to `match_recipe` is HAND-BUILT in
+> the fixture (`plugin="json"`, observed `url`, simulated `blob_ref`) — it is
+> dictated by the test, NOT produced by Task 1's real driver. So a failure here
+> does NOT localize to Task 1's source driver, and this test is NOT a guard that
+> "the Task-1 driver won't emit a web_scraper source" (that guard would require
+> asserting prompt content, which project doctrine disallows, and is illusory under
+> a mock). The genuinely novel slice this test pins is the resolution→SourceResolved
+> field bridge plus the recipe-routing decision. The pure routing half overlaps
+> existing coverage (`test_recipe_match.py:615-624`); keep it for the end-to-end
+> readability of the driver→recipe path, but do not treat it as new routing
+> coverage. **p4 must NOT depend on this test as the source-driver-output
+> contract** — see the cross-plan summary correction below.
 
 - [ ] **Step 1: Write the test that a driver-produced URL-row source matches the
   web_scrape recipe.**
@@ -2835,24 +3033,53 @@ ready for operator re-sign + push.
   validates every field), not the sink. Re-scan to confirm exit 0.
 
 - [ ] **Step 4: Reconcile the slice diff and surface owed re-signs to the
-  operator.**
+  operator — by RUNNING the gate, not by predicting its outcome.**
+  First confirm only the files this plan owns changed:
   ```
   cd /home/john/elspeth && git --no-pager diff --stat release/0.7.0..HEAD
   ```
-  Confirm only the files this plan owns changed:
-  `chat_solver.py`, `_guided_step_chat.py`, `routes/_helpers.py`,
-  `routes/composer/guided.py`, and the new test files. **No re-sign gate trips for
-  this plan's file set.** The plugin `source_file_hash` gate keys on `plugins/*`
-  (none edited); the tier-model `web.yaml` allowlist tracks
-  `interpretation_state.py` and `state.py` (neither edited). `_helpers.py` and
-  `routes/composer/guided.py` are not in either tracked set. So the Global
-  Constraints re-sign hedging is INAPPLICABLE here — do not re-sign anything, and
-  do not flag a re-sign chore unless a later step incidentally edited a plugin or a
-  `web.yaml`-tracked web file. (If `git diff --stat` shows any `plugins/*`,
-  `interpretation_state.py`, or `state.py` change, THEN surface the owed re-sign;
-  otherwise there is none.) State in your completion report: branch is
-  `release/0.7.0`, agent signed nothing, no re-sign owed (or the specific file if
-  one slipped in), and the test counts added.
+  Expected: `chat_solver.py`, `emitters.py`, `_guided_step_chat.py`,
+  `routes/_helpers.py`, `routes/composer/guided.py`, and the new test files.
+
+  **This plan's edits DO touch tier-model-tracked web files** — do NOT claim "no
+  re-sign owed." The `config/cicd/enforce_tier_model/web.yaml` allowlist tracks
+  THREE files this plan edits (verified against the live web.yaml on
+  `release/0.7.0`):
+  - `web/composer/guided/chat_solver.py` — a `pattern:` entry with `max_hits: 12`
+    (web.yaml `:3709`/`:3717`). Tasks 1 AND 2 add to this file (Task 2 adds the
+    new Tier-3 `resolve_sink` parse boundary, R5, which consumes the max_hits
+    budget). Whether the post-edit R5 count exceeds `max_hits: 12` is NOT knowable
+    from this plan and MUST be confirmed by running the gate.
+  - `web/sessions/routes/_helpers.py` — per-function `fp=` entries (web.yaml
+    `:1218`/`:1237`/`:1259`/`:3226`, etc.). Task 2.5 edits its import block +
+    `__all__`; adding `ImportFrom` statements shifts `Module.body` indices and can
+    cascade the AST fingerprints.
+  - `web/composer/guided/steps.py` — `R1:handle_step_1_source:fp=...` (web.yaml
+    `:910`). Tasks 3/4 do NOT edit `steps.py` directly, but confirm via the gate
+    (if any incidental edit landed). The plugin `source_file_hash` gate keys on
+    `plugins/*` (none edited) — that one is genuinely inapplicable.
+
+  Because Task 6 is a VERIFICATION task, do NOT reason about the gate — RUN it and
+  surface whatever it reports as the owed operator re-sign:
+  ```
+  cd /home/john/elspeth && env PYTHONPATH=elspeth-lints/src \
+    ELSPETH_JUDGE_METADATA_SIGNATURE_VERIFY_MODE=shape-only-when-key-missing \
+    .venv/bin/python -m elspeth_lints.core.cli check --rules trust_tier.tier_model \
+    --root src/elspeth
+  ```
+  (This is exactly the `elspeth-lints-trust-tier` pre-commit hook — the gate
+  `SKIP`ped on every commit in this plan because the operator holds the HMAC key.)
+  - If the gate reports stale/over-budget fingerprints on `chat_solver.py`,
+    `_helpers.py`, or `steps.py`, that is the owed re-sign. The AGENT SIGNS
+    NOTHING: do not run `rotate`, do not edit `web.yaml`. Capture the gate's exact
+    output (which keys, whether `max_hits` is exceeded) and surface it to the
+    operator as the owed re-sign chore.
+  - If the gate is clean, report "tier-model gate clean, no re-sign owed" — but
+    only on the strength of the run, never on the strength of the file-set claim.
+
+  State in your completion report: branch is `release/0.7.0`, agent signed nothing,
+  the EXACT tier-model gate output (clean, or the specific owed keys + whether
+  `chat_solver.py` exceeded `max_hits: 12`), and the test counts added.
 
 ---
 
@@ -2880,6 +3107,14 @@ ready for operator re-sign + push.
   `web-scrape-llm-rate-jsonl` recipe. p4's tutorial worked example feeds the
   runtime-derived synthetic URLs as the concrete dataset into this driver. The
   driver also accepts `current_source` for in-place revise.
+- **Task 5 is NOT a guarantee that the live driver emits this shape.** Task 5's
+  test mocks the provider and HAND-BUILDS the `SourceResolved` it feeds to
+  `match_recipe`, so it pins the resolution→SourceResolved field bridge + the
+  recipe-routing decision, NOT the driver's actual LLM output (asserting prompt
+  content is disallowed by doctrine). p4 must treat the output shape above as a
+  CONTRACT it relies on by construction (the driver's parse boundary in Task 1/2),
+  not as something Task 5 empirically guards. Do NOT cite Task 5 as the
+  "driver won't emit a web_scraper source" proof.
 
 **p1 does NOT own:** the frontend reorder/concern-B (p2), the prompt-shield A/B/C
 surface (p3), the tutorial base-URL seam / synthetic pages / constants (p4). No

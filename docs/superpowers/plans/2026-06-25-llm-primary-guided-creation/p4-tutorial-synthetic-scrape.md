@@ -119,15 +119,42 @@ methodology forbids). Task 8 therefore documents the consumer at SIGNATURE level
 now and is implemented after p1+p2 land. **Operator: confirm p4 is the right home
 (the alternative is a dedicated p5); do not leave it unowned.**
 
-### `allowed_hosts` node injection (OWNER: p4 — Task 6, value supply via Task 8)
+### `allowed_hosts` node injection (OWNER: p4 end-to-end — slot Task 6, value Task 8)
 
 The `web-scrape-llm-rate-jsonl` recipe builder (`recipes.py:687-710`) sets NO
 `allowed_hosts`, so the node defaults to `"public_only"` (`web_scrape.py:129`).
 **On a loopback dev base the tutorial scrape would fail — the exact loopback case
 the spec mandates testing.** p4 adds the OPTIONAL `allowed_hosts` slot (Task 6,
-empty-default-omit, behaviour-preserving) and the tutorial-consumer (Task 8) fills
-it from `resolve_tutorial_allowed_hosts(...)`. The slot EXISTS and is tested
-end-to-end in Task 6; its tutorial VALUE is supplied by Task 8.
+empty-default-omit, behaviour-preserving) AND owns the value supply (Task 8): p4
+does NOT deflect the value to p1.
+
+**Concrete owner + seam (verified against the live tree):** the recipe-offer
+ACCEPT path is the injection point. At STEP_2.5, `response["chosen"] ==
+["accept"]` dispatches through `_dispatch_guided_respond` →
+`handle_step_2_5_recipe_apply` (`composer/guided/steps.py:223`), which builds
+`arguments["slots"] = dict(match.slots)` from the `RecipeMatch` whose slots were
+prefilled by `_web_scrape_slot_resolver` (`recipe_match.py:266`). The resolver
+takes only `(source, sink)` and has NO session/origin context, so it CANNOT
+prefill `allowed_hosts` (and Task 6 keeps `recipe_match.py` un-edited). The seam
+that DOES have context is the STEP_2.5 accept dispatch in
+`sessions/routes/composer/guided.py` (it holds `request.app.state.settings` and
+the request for the origin, and the loaded tutorial profile). Task 8 injects the
+resolver output into the match's `allowed_hosts` slot there for tutorial sessions
+— `RecipeMatch` is `frozen=True`, so this is a `dataclasses.replace(match,
+slots={**match.slots, "allowed_hosts": hosts})` (or an extra-slots arg threaded
+into `handle_step_2_5_recipe_apply`), NOT an in-place mutation of `match.slots`
+(see Task 8 Step 3 + its apply-time test). The scalar→list mapping
+(`"public_only" → []`, an empty list → omit) lives at this seam too, subsuming
+Task 6's `public_only`→`[]` facet. The slot EXISTS and is tested in Task 6; its
+tutorial VALUE is injected by Task 8 at the named guided.py accept seam.
+
+> **Note on the finding's stale anchor.** Earlier review framing referenced a
+> `_helpers.py` STEP_2.5 seam injecting into `edited_values['slots']`. That path
+> does not exist in the live tree: there is no `composer/guided/_helpers.py`, and
+> the `recipe_offer` accept response carries `chosen=["accept"]` with no
+> `edited_values` slot merge — the slots come from the resolver-prefilled
+> `match.slots`, applied in `handle_step_2_5_recipe_apply`. The seam named above
+> is the verified-correct equivalent.
 
 ---
 
@@ -528,6 +555,14 @@ materializer.
       settings = _settings()
       with pytest.raises(ValueError):
           tutorial_sample_base_url(settings=settings, request_origin=None)
+
+
+  def test_allowed_hosts_none_host_fails_safe_to_loopback() -> None:
+      # A base whose urlsplit().hostname is None (e.g. a bare/relative string)
+      # must fail SAFE to the tight loopback CIDR list, NEVER widen egress. This
+      # exercises the resolver's `if host is None` fail-safe arm directly — a real
+      # branch, not a caller-error-only path.
+      assert resolve_tutorial_allowed_hosts(base_url="not-a-url") == ["127.0.0.1/32", "::1/128"]
   ```
 
   Run to fail:
@@ -594,8 +629,12 @@ materializer.
       host = urlsplit(base_url).hostname
       if host is None:
           # Undeterminable host: fail safe to the tight loopback list rather than
-          # widening egress. A malformed base is the caller's error, surfaced by
-          # tutorial_sample_base_url before this is reached in the live path.
+          # widening egress. This is a genuine fail-safe, not dead code:
+          # tutorial_sample_base_url returns the configured/origin value VERBATIM
+          # with no URL validation, so a malformed base (e.g. a bare/relative
+          # string whose urlsplit().hostname is None) reaches this arm. Failing to
+          # the tightest list is the safe-by-default choice. Covered by
+          # test_allowed_hosts_none_host_fails_safe_to_loopback.
           return list(_LOOPBACK_CIDRS)
       try:
           address = ipaddress.ip_address(host)
@@ -635,9 +674,20 @@ materializer.
 - [ ] **Step 4: Verify `WebSettings` still constructs (frozen/extra=forbid does
   not reject the new field).**
   ```
-  cd /home/john/elspeth && uv run python -c "from pydantic import SecretBytes; from elspeth.web.config import WebSettings; s = WebSettings(composer_max_composition_turns=1, composer_max_discovery_turns=1, composer_timeout_seconds=1.0, composer_rate_limit_per_minute=1, shareable_link_signing_key=SecretBytes(b'\x00' * 32)); print('tutorial_sample_base_url=', s.tutorial_sample_base_url)"
+  cd /home/john/elspeth && ELSPETH_ENV=test uv run python -c "from pydantic import SecretBytes; from elspeth.web.config import WebSettings; s = WebSettings(composer_max_composition_turns=1, composer_max_discovery_turns=1, composer_timeout_seconds=1.0, composer_rate_limit_per_minute=1, shareable_link_signing_key=SecretBytes(b'\x00' * 32)); print('tutorial_sample_base_url=', s.tutorial_sample_base_url)"
   ```
   Expected: `tutorial_sample_base_url= None`.
+
+  > **`ELSPETH_ENV=test` is REQUIRED here.** This `-c` invocation runs OUTSIDE
+  > pytest, and the default host `127.0.0.1` is loopback, so without the env var
+  > `_allow_insecure_test_keys` is False (`config.py:34` needs `pytest` in
+  > `sys.modules` OR `ELSPETH_ENV=="test"`) and the `secret_key` / weak-signing-key
+  > production guards (`config.py:540,570`) raise `ValidationError` ("secret_key
+  > must be set to a secure value outside explicit test contexts") instead of
+  > printing the expected line. `ELSPETH_ENV=test` flips the flag (host is already
+  > loopback). This step is largely redundant with Step 1/3's
+  > `test_base_url_prefers_configured_setting` (which constructs `WebSettings` under
+  > pytest); keep it only as a no-pytest smoke check.
 
 - [ ] **Step 5: Commit.**
   ```
@@ -700,6 +750,11 @@ TutorialCache retire-vs-rekey decision explicit (ground truth Q1b).
 - Modify: `src/elspeth/web/composer/guided/profile.py:29` (`_TUTORIAL_ENTRY_SEED`).
 - Modify: `src/elspeth/web/frontend/src/components/tutorial/copy.ts:14`
   (`HELLO_WORLD_SESSION_TITLE`).
+- Test (UPDATE): `src/elspeth/web/frontend/src/components/tutorial/TutorialTurn7Graduation.test.tsx:124-127`
+  — the `renameSession` assertion hardcodes the OLD title literal
+  `"hello-world (cool government pages)"` (`:126`), NOT the imported constant, so
+  retargeting `HELLO_WORLD_SESSION_TITLE` (Step 6) makes it fail. Update the
+  `toHaveBeenCalledWith` literal to the new title (Step 6a).
 - Test (UPDATE): `tests/unit/web/preferences/test_tutorial_cache.py:46-57`
   (`test_canonical_seed_prompt_constant_is_exact`) — retarget the verbatim string.
 - Test (UPDATE): `src/elspeth/web/frontend/src/components/tutorial/tutorialMachine.test.ts:10-20`
@@ -843,6 +898,27 @@ TutorialCache retire-vs-rekey decision explicit (ground truth Q1b).
   pages"`, update that assertion to the new title — it is an about-to-change
   value, contract Global Constraint "update, don't revert".)
 
+- [ ] **Step 6a: Update the Turn-7 graduation test's hardcoded title literal.**
+  `TutorialTurn7Graduation.test.tsx:124-127` asserts `renameSession` was called
+  with the OLD title as a raw string literal (NOT the imported constant), so
+  Step 6's retarget makes it fail (the component calls
+  `renameSession(sessionId, HELLO_WORLD_SESSION_TITLE)`). Replace the literal:
+
+  ```tsx
+      expect(useSessionStore.getState().renameSession).toHaveBeenCalledWith(
+        "sess-new",
+        "hello-world (synthetic project briefs)",
+      ),
+  ```
+
+  Run to confirm:
+  ```
+  cd /home/john/elspeth/src/elspeth/web/frontend && npm run test -- TutorialTurn7Graduation.test.tsx --run
+  ```
+  Expected: pass. (The Step 6 `src/components/tutorial` run already exercises this
+  file; this step makes the required literal edit explicit so it is not left
+  unstaged at Step 8.)
+
 - [ ] **Step 7: Reconcile the backend cache-path tests in `test_tutorial_service.py`.**
   `tests/unit/web/composer/test_tutorial_service.py` constructs cache entries
   with `canonical_prompt=CANONICAL_SEED_PROMPT` (`:247`) and example rows like
@@ -865,6 +941,7 @@ TutorialCache retire-vs-rekey decision explicit (ground truth Q1b).
     src/elspeth/web/frontend/src/components/tutorial/tutorialMachine.ts \
     src/elspeth/web/frontend/src/components/tutorial/tutorialMachine.test.ts \
     src/elspeth/web/frontend/src/components/tutorial/copy.ts \
+    src/elspeth/web/frontend/src/components/tutorial/TutorialTurn7Graduation.test.tsx \
     tests/unit/web/preferences/test_tutorial_cache.py && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git commit -m "$(cat <<'EOF'
 feat(tutorial): retarget canonical scenario to synthetic-scrape extraction
 
@@ -1077,6 +1154,41 @@ verified by re-running staging, not by grepping prompts).
   render synchronously (not gated on the run resolving), so the State-C override
   is justified on screen before the run proceeds.
 
+- [ ] **Step 4a: Retarget the stale OLD-scenario "scoring" prose in the two
+  files this task already edits.**
+  Both turn components still narrate the retired 5-gov-pages SCORING scenario;
+  the synthetic-extraction scenario has no "score". No sibling task retargets this
+  in-component prose (Task 3 = constants, Task 5 = harness, Task 8 =
+  `TutorialGuidedShell`), so it is p4-Task-4-owned.
+  - In `TutorialTurn5AuditStory.tsx` (`:93-97`), the closing audit paragraph reads
+    `If someone asks why a page received its score, the run has the prompt,
+    response, model details, source hash, and plugin versions tied together.`
+    Retarget to extraction-accurate phrasing, e.g.:
+    ```tsx
+            <p>
+              If someone asks how the LLM derived a project's facts — the top
+              risk it picked or the total it summed — the run has the prompt,
+              response, model details, source hash, and plugin versions tied
+              together.
+            </p>
+    ```
+  - In `TutorialTurn4Run.tsx` (`preferredColumns`, `:308`), the curated column
+    list is the old rating scenario's
+    `["url", "page", "title", "score", "coolness", "rationale", "error"]` — none of
+    which are the derived facts. Retarget to the extraction output fields:
+    ```tsx
+      const preferred = ["url", "project_name", "top_risk", "key_date", "total_cost", "error"];
+    ```
+  - Add a Turn-5-wording assertion to `teachingMoments.test.tsx` so the
+    extraction-accurate phrasing is guarded (the synthetic-extraction worked
+    example must not regress to "score" copy): in the Turn-5 render test, after the
+    `TUTORIAL_ASSUMPTION_CALLOUT` assertion, also assert the audit paragraph names
+    the derived facts and NOT "score", e.g.:
+    ```tsx
+        expect(screen.queryByText(/received its score/i)).not.toBeInTheDocument();
+        expect(screen.getByText(/top risk it picked or the total it summed/i)).toBeInTheDocument();
+    ```
+
 - [ ] **Step 5: Run to pass.**
   ```
   cd /home/john/elspeth/src/elspeth/web/frontend && npm run test -- teachingMoments.test.tsx --run
@@ -1160,12 +1272,28 @@ component end-to-end).
   // not subjective, so vague_term is NOT expected here (contrast the old scoring
   // prompt). The always-on prompt-shield (p3) fires every run regardless, so
   // prompt_injection_shield_recommendation IS expected.
+  //
+  // The prompt MUST carry the 3 concrete scrape targets (mirroring the old
+  // prompt's 5 literal gov URLs): driveGuidedWalk seeds FIXED_PROMPT as the
+  // sole driving message (:106/:115), and the Tier-1 no-fabrication source
+  // driver (p1, contract §2.2) builds rows ONLY from concrete URLs present IN
+  // the message — it never invents them. A URL-less prompt yields zero scrape
+  // targets, so the run produces no rows and JUDGE_RUBRIC.minReachableSources:3
+  // / minSubstantiveRows:3 become UNSATISFIABLE (dim-c/dim-d permanently fail).
+  // These are staging-absolute URLs because this is a .staging.spec.ts driving
+  // the live staging origin; there is no harness base-URL constant to resolve
+  // {base} from. If a deployment serves the tutorial pages elsewhere, change
+  // these three literals to that origin.
   export const FIXED_PROMPT =
-    "Fetch each of the three synthetic project-brief pages and use an LLM to " +
-    "read the tables and produce, per page, a JSON row containing the project " +
-    "name, the single highest-impact risk together with its mitigation, the " +
-    "go-live milestone date, and the total cost computed by summing the cost " +
-    "line items. Drop the raw HTML and write the rows to a JSON file.";
+    "Fetch each of these three synthetic project-brief pages and use an LLM " +
+    "to read the tables and produce, per page, a JSON row containing the " +
+    "project name, the single highest-impact risk together with its " +
+    "mitigation, the go-live milestone date, and the total cost computed by " +
+    "summing the cost line items. Drop the raw HTML and write the rows to a " +
+    "JSON file.\n" +
+    "https://elspeth.foundryside.dev/tutorial-site/project-1.html\n" +
+    "https://elspeth.foundryside.dev/tutorial-site/project-2.html\n" +
+    "https://elspeth.foundryside.dev/tutorial-site/project-3.html";
   ```
 
 - [ ] **Step 2: Retarget `ASSUMPTION_RUBRIC` (drop vague_term; expect the shield
@@ -1188,10 +1316,23 @@ component end-to-end).
     // acceptable-but-not-required (neither under- nor over-flagging).
     allowOptional: ["llm_prompt_template"] as const,
     // Over-flagging: the USER named the 3 pages and the 4 fields explicitly, so
-    // raising an invented_source or a review on those stated targets is an
-    // over-flag. (These are matched on the review's user_term, not kind.)
+    // raising an invented_source review, or a review on those stated targets, is
+    // an over-flag. MIXED targets: "invented_source" is an InterpretationKind
+    // (matched on the event KIND); "project_name"/"total_cost" are user_terms
+    // (matched on the review's user_term). Step 4b below makes the overFlagged
+    // grader match EITHER kind OR user_term so the kind-valued entry can fire —
+    // without it, the user_term-only grader at :380-383 can NEVER match
+    // invented_source (a dead check, the exact class :374-379 was written to
+    // eliminate).
     overFlagTerms: ["invented_source", "project_name", "total_cost"] as const,
-    overFlagTermPatterns: [/invent|fabricat/i, /project\s*name/i, /total\s*cost|sum/i] as const,
+    // Patterns are ANCHORED so they cannot spuriously fail dim-c on a legitimate
+    // review. /\bproject[_\s-]?name\b/i matches only the field name "project_name"
+    // (not e.g. "the project's name as written"), and /\btotal[_\s-]?cost\b/i drops
+    // the bare "sum" alternative which would substring-match "assume"/"consume"/
+    // "summary"/"summarize" in legitimate llm_prompt_template / allowOptional
+    // reviews. Confirm the expected prompt_injection_shield_recommendation and the
+    // allowOptional llm_prompt_template user_terms match NO over-flag pattern.
+    overFlagTermPatterns: [/invent|fabricat/i, /\bproject[_\s-]?name\b/i, /\btotal[_\s-]?cost\b/i] as const,
   };
   ```
 
@@ -1273,6 +1414,51 @@ component end-to-end).
   > should now report no hits — the diagnostic map at `:447` builds its own
   > `events.map((e) => ({ kind: e.kind, term: e.user_term }))` and is unaffected).
   > Verify with `npx tsc --noEmit` in Step 5.
+
+- [ ] **Step 4b: Fix the dim-c `overFlagged` grader to match kind-valued
+  entries against `e.kind` as well as `e.user_term` (REQUIRED — without this the
+  `invented_source` over-flag check is dead).**
+  In `src/elspeth/web/frontend/tests/e2e/tutorial-reliability.staging.spec.ts`,
+  the `overFlagged` classifier currently matches the pattern against the event
+  `user_term` ONLY (`:380-383`):
+
+  ```typescript
+  const overFlagged = ASSUMPTION_RUBRIC.overFlagTerms.filter((_label, i) => {
+    const pattern = ASSUMPTION_RUBRIC.overFlagTermPatterns[i];
+    return events.some((e) => typeof e.user_term === "string" && pattern.test(e.user_term));
+  });
+  ```
+
+  `overFlagTerms` now mixes a kind-valued entry (`invented_source`) with
+  user_term-valued entries (`project_name`/`total_cost`). A real
+  `invented_source` over-flag carries `kind="invented_source"` with a DIFFERENT
+  `user_term`, so a user_term-only match can never fire `/invent|fabricat/i` →
+  the `invented_source` over-flag is undetectable (a dead check). Replace the
+  classifier above with one that tests the pattern against EITHER the event
+  `kind` OR its `user_term` (symmetric with the Step 4a `underFlagged` fix):
+
+  ```typescript
+  // overFlagTerms mixes InterpretationKind-valued entries (e.g.
+  // "invented_source", whose pattern /invent|fabricat/i matches the KIND) with
+  // user_term-valued entries (e.g. "project_name"/"total_cost", matched on the
+  // review's user_term). Test each term's pattern against EITHER the event kind
+  // OR its user_term so the kind-valued entry is recognised. Kinds are enum
+  // values and user_terms are field-path strings, so the OR cannot false-match
+  // across the two namespaces.
+  const overFlagged = ASSUMPTION_RUBRIC.overFlagTerms.filter((_label, i) => {
+    const pattern = ASSUMPTION_RUBRIC.overFlagTermPatterns[i];
+    return events.some(
+      (e) =>
+        (typeof e.kind === "string" && pattern.test(e.kind)) ||
+        (typeof e.user_term === "string" && pattern.test(e.user_term)),
+    );
+  });
+  ```
+
+  > This is the symmetric counterpart to Step 4a: Step 4a fixed the
+  > kind-OR-user_term gap on the `underFlagged` (expectVerify) side; Step 4b
+  > fixes it on the `overFlagged` (overFlagTerms) side now that the rubric adds a
+  > kind-valued over-flag term. Verify with `npx tsc --noEmit` in Step 5.
 
 - [ ] **Step 4: Retarget the staging spec's input-key heuristic.**
   VERIFIED: the spec already reads source count from `JUDGE_RUBRIC.minReachableSources`
@@ -1361,11 +1547,14 @@ gets the tight CIDR list from the Task 2 resolver.
 
 > **This is the one application point p4 owns end-to-end.** Adding an SSRF-control
 > slot is p4's security concern (the contract leaves `allowed_hosts` unthreaded).
-> The slot is ADDITIVE and behaviour-preserving. The remaining hand-off — who
-> supplies the slot VALUE for the tutorial run — is named in "Cross-plan
-> hand-offs #1" (the p1 tutorial-consumer / recipe-offer threads the resolver's
-> `resolve_tutorial_allowed_hosts(...)` result into the slot). p4 makes the slot
-> EXIST and tested; p1 connects the tutorial value.
+> The slot is ADDITIVE and behaviour-preserving. The slot VALUE for the tutorial
+> run is supplied by p4 itself (NOT deflected to p1): Task 8 threads
+> `resolve_tutorial_allowed_hosts(...)` into the match's `allowed_hosts` slot at
+> the STEP_2.5 recipe-offer-accept seam (`sessions/routes/composer/guided.py`
+> accept dispatch → `handle_step_2_5_recipe_apply`, `composer/guided/steps.py:223`)
+> via `dataclasses.replace` on the frozen `RecipeMatch` (or an extra-slots arg),
+> mapping the scalar `"public_only"` to an empty list (omit). p4 makes the slot
+> EXIST and tested here (Task 6); p4 injects the tutorial value (Task 8).
 
 **Files:**
 - Modify: `src/elspeth/web/composer/recipes.py` — add an `allowed_hosts` `SlotSpec`
@@ -1580,8 +1769,8 @@ caller unchanged); a non-empty CIDR list (the tutorial loopback case
 from the p4 resolver) is emitted into the node. allowed_hosts is an SSRF
 control set deterministically by the seam, never by the LLM. Without this
 the tutorial scrape fails on a loopback dev base. The tutorial VALUE is
-threaded by the p1 tutorial-consumer (cross-plan hand-off #1); this task
-makes the slot exist and tested.
+injected by p4 itself (Task 8) at the STEP_2.5 recipe-offer-accept seam in
+guided.py; this task makes the slot exist and tested.
 
 Note: adds a recipe slot, which changes the tutorial_model_id recipe_hash
 (the already-vestigial canonical cache invalidates — no behaviour change).
@@ -1632,18 +1821,43 @@ p1; p4 only adds the deterministic resolver + static content + copy).
   predicate/routing logic. If any sibling-slice change appears, it is out of scope
   — revert it.
 
+  > **Task 7 reconciles the p4-CORE slice ONLY; Task 8 is a SEPARATE
+  > post-p1/p2 consumer slice with its own reconciliation boundary.** Task 8
+  > (the passive auto-drive) lands AFTER p1+p2 merge and owns files Task 7's
+  > p4-core manifest does NOT list:
+  > `src/elspeth/web/frontend/src/components/tutorial/TutorialGuidedShell.tsx`,
+  > the NEW backend GET surface that exposes the Task 2 resolver output, and the
+  > STEP_2.5 recipe-offer-accept edit in
+  > `src/elspeth/web/sessions/routes/composer/guided.py` (the `allowed_hosts`
+  > value injection). Task 7 must NOT flag or revert these — they are Task-8-owned
+  > and reconciled at Task 8's own slice boundary (Task 8 Step 4), not here. The
+  > "revert any unlisted file" rule above applies ONLY to the p1/p2/p3 SIBLING
+  > slices, never to Task 8's deliverables.
+
 - [ ] **Step 3: Run the affected backend + frontend test surface together.**
   ```
   cd /home/john/elspeth && uv run pytest \
     tests/integration/web/test_tutorial_site_pages.py \
     tests/unit/web/composer/test_tutorial_sample.py \
     tests/unit/web/composer/test_web_scrape_recipe_allowed_hosts.py \
+    tests/unit/web/composer/test_web_scrape_recipe_apply.py \
+    tests/unit/web/composer/test_web_scrape_recipe_contract.py \
+    tests/unit/web/composer/test_web_scrape_recipe_zero_llm.py \
+    tests/unit/web/composer/test_recipes.py \
     tests/unit/web/preferences/test_tutorial_cache.py \
     tests/unit/web/composer/guided/ \
     tests/unit/web/composer/test_tutorial_service.py \
+    tests/integration/web/test_tutorial_routes.py \
     tests/unit/web/sessions/test_guided_start.py -q
   cd /home/john/elspeth/src/elspeth/web/frontend && npm run test -- src/components/tutorial --run
   ```
+  > The four web-scrape recipe tests
+  > (`test_web_scrape_recipe_apply.py` / `_contract.py` / `_zero_llm.py`) plus
+  > `test_recipes.py` directly cover the `recipes.py` code Task 6 changes — a
+  > reconciliation gate that excludes them could pass green on a Task 6 recipe
+  > regression. `test_tutorial_routes.py` covers the tutorial route surface Task 8
+  > eventually touches.
+
   Expected: all pass. `test_guided_start.py::test_guided_start_persists_profile_without_materializing_topology`
   must still PASS — it confirms p4 did NOT overload the no-op materializer (the
   invariant this plan deliberately preserved).
@@ -1681,19 +1895,38 @@ explicit and unowned-no-more; implement it after p1 + p2 merge.
 **Files (when implemented):**
 - Modify: `src/elspeth/web/frontend/src/components/tutorial/TutorialGuidedShell.tsx`
   — replace the learner-driven embed with an auto-drive that composes the scripted
-  intent + resolved URLs and submits via p2's intent box (p1's `chatGuided`
-  action, `sessionStore.ts:1333-1392`, contract §2.1).
+  intent + resolved URLs, seeds it via p2's intent box (p1's `chatGuided` action,
+  `src/elspeth/web/frontend/src/stores/sessionStore.ts:1333-1392`, contract §2.1),
+  AND then runs the multi-phase auto-confirm walker (a scripted `respondGuided` /
+  POST `/guided/respond` sequence through STEP_1 → STEP_2 → STEP_2.5 → STEP_3 →
+  STEP_4) so the wizard advances without learner input under p1's no-auto-advance
+  contract. See Produces + Step 3.
 - Create (likely): a backend GET surface that returns
   `resolve_tutorial_sample_urls(...)` + `resolve_tutorial_allowed_hosts(...)` for
   the active tutorial session's resolved origin (Task 2 owns the pure resolver;
   this exposes it to the shell since `entry_seed` is server-side-only and the URLs
   are runtime-derived — they cannot ride the frozen constants).
-- Modify: the p1 tutorial-consumer path that applies the recipe — pass the
-  resolved `allowed_hosts` into the Task 6 recipe slot.
+- Modify: the STEP_2.5 recipe-offer-ACCEPT seam in
+  `src/elspeth/web/sessions/routes/composer/guided.py` (the accept dispatch that
+  reaches `handle_step_2_5_recipe_apply`, `composer/guided/steps.py:223`) — for a
+  TUTORIAL session, thread the resolved `allowed_hosts` into the match's
+  `allowed_hosts` slot (the Task 6 slot) before the apply builds
+  `arguments["slots"] = dict(match.slots)`. `RecipeMatch` is `frozen=True`, so do
+  this via `dataclasses.replace(match, slots={**match.slots, "allowed_hosts":
+  hosts})` (or an extra-slots arg into `handle_step_2_5_recipe_apply`), NOT an
+  in-place mutation. This seam holds
+  `request.app.state.settings` and the request origin, so it can call
+  `tutorial_sample_base_url(settings=..., request_origin=...)` →
+  `resolve_tutorial_allowed_hosts(...)`, mapping the scalar `"public_only"` to an
+  empty list (omit). This is p4-OWNED (NOT deflected to p1); the resolver
+  (`recipe_match.py`) takes only `(source, sink)` and cannot reach this context,
+  so the value is supplied at the accept seam, not in the resolver.
 - Create: `src/elspeth/web/frontend/src/components/tutorial/TutorialGuidedShell.autodrive.test.tsx`
-  + a backend integration test that the auto-drive builds the
-  `inline_blob → web_scrape → llm → json` pipeline with the loopback CIDR on a
-  loopback base.
+  + a backend integration / apply-time test (Step 1) that the auto-drive builds
+  the `inline_blob → web_scrape → llm → json` pipeline and that, on a loopback
+  base, the committed `web_scrape` node carries
+  `allowed_hosts == ["127.0.0.1/32", "::1/128"]` (and on a public base the key is
+  omitted → `public_only`).
 
 **Interfaces:**
 - Consumes (from sibling plans):
@@ -1710,20 +1943,45 @@ explicit and unowned-no-more; implement it after p1 + p2 merge.
   - `tutorial_sample_base_url(*, settings, request_origin) -> str` (Task 2).
   - the Task 6 recipe `allowed_hosts` slot.
   - `_TUTORIAL_ENTRY_SEED` (Task 3) as the scripted intent.
-- Produces: the passive worked example — the auto-drive message
-  `f"{_TUTORIAL_ENTRY_SEED}\n" + "\n".join(urls)` submitted to the guided panel
-  without learner input; the recipe-applied pipeline carries the host-class
-  `allowed_hosts`.
+- Produces: the passive worked example — a multi-phase AUTO-CONFIRM
+  orchestration, NOT a single submit. The auto-drive seeds the intent message
+  `f"{_TUTORIAL_ENTRY_SEED}\n" + "\n".join(urls)` via `chatGuided`, then drives
+  the EXPLICIT advancing confirm at each phase via `respondGuided` (POST
+  `/guided/respond`) through STEP_1 → STEP_2 → STEP_2.5 → STEP_3 → STEP_4 — the
+  learner clicks nothing. The STEP_2.5 `respondGuided` carries
+  `chosen=["accept"]` and is the seam that injects the host-class `allowed_hosts`
+  into the applied recipe (see Files). The auto-confirm walker is a NEW
+  product-side orchestration (TutorialGuidedShell + a scripted `respondGuided`
+  sequence); the existing phase-walker `driveGuidedWalk` is HARNESS-only and
+  cannot be reused at runtime.
+
+> **No-auto-advance contract (acknowledged).** Under p1's DECIDED
+> apply-in-place / no-auto-advance model, p1 removes the STEP_1 → STEP_2
+> auto-advance currently at `guided.py:~1862` (the `user_advanced`
+> `_replace(guided, step=GuidedStep.STEP_2_SINK)` + `emit_step_advanced`). After
+> p1 lands, each phase transition is an EXPLICIT confirm on POST
+> `/guided/respond` — a passive learner is not present to click it, so the
+> tutorial MUST drive those confirms itself. The single-`chatGuided`-submit
+> framing earlier in this task is insufficient on its own: it seeds the intent
+> but does not advance the wizard. The auto-confirm walker (Step 3) closes that
+> gap.
 
 - [ ] **Step 1 (deferred — author after p1 + p2 land): Write the failing
   auto-drive test.** Component test: mount `TutorialGuidedShell` for a tutorial
-  session with a stubbed loopback origin; assert it calls the `chatGuided` action
-  with a message that contains `_TUTORIAL_ENTRY_SEED` and all 3 synthetic URLs,
-  and that the learner is presented no input affordance (passive). Backend
-  integration test: drive the tutorial-consumer apply on a loopback base; assert
-  the committed pipeline is `inline source → web_scrape → llm → json` and the
-  `web_scrape` node carries `allowed_hosts == ["127.0.0.1/32","::1/128"]`; on a
-  public base assert `allowed_hosts` is omitted (`public_only`).
+  session with a stubbed loopback origin; assert it (a) calls the `chatGuided`
+  action with a message that contains `_TUTORIAL_ENTRY_SEED` and all 3 synthetic
+  URLs, (b) then drives the explicit phase confirms via `respondGuided` (the
+  auto-confirm walker) through to the run turn WITHOUT the learner clicking any
+  affordance — i.e. assert the scripted `respondGuided` sequence fires (including
+  the STEP_2.5 `chosen=["accept"]` confirm), not merely a single `chatGuided`
+  submit. This is what makes "passive, no input affordance" actually hold under
+  the no-auto-advance contract. Backend integration / apply-time test: drive the
+  tutorial-consumer accept on a loopback base; assert the committed pipeline is
+  `inline source → web_scrape → llm → json` and the `web_scrape` node carries
+  `allowed_hosts == ["127.0.0.1/32","::1/128"]`; on a public base assert
+  `allowed_hosts` is omitted (`public_only`). This apply-time assertion is the
+  test the mustFix for the loopback SSRF value requires; it lives here (Task 8)
+  because Task 8 owns the value injection at the accept seam.
 
 - [ ] **Step 2 (deferred): Expose the resolved URLs + host-class to the shell.**
   Add the GET surface returning the Task 2 resolver output for the active
@@ -1731,11 +1989,21 @@ explicit and unowned-no-more; implement it after p1 + p2 merge.
   Keep `entry_seed` off the wire (Global Constraint); the URLs are a separate
   runtime-derived payload, not the profile seed.
 
-- [ ] **Step 3 (deferred): Auto-drive the panel.**
+- [ ] **Step 3 (deferred): Auto-drive the panel as a multi-phase auto-confirm
+  walker.**
   In `TutorialGuidedShell`, compose `message = f"{_TUTORIAL_ENTRY_SEED}\n" +
-  urls.join("\n")` and submit via the p2 intent box / `chatGuided` action once the
-  guided session is started; render the build passively (no learner input). Pass
-  the host-class `allowed_hosts` into the recipe apply (Task 6 slot).
+  urls.join("\n")` and seed it via the p2 intent box / `chatGuided` action once
+  the guided session is started. Then, because p1 removes the auto-advance
+  (no-auto-advance contract, see Produces), drive each phase's EXPLICIT confirm
+  via `respondGuided` (POST `/guided/respond`) through STEP_1 → STEP_2 → STEP_2.5
+  → STEP_3 → STEP_4, with NO learner input (render passively). This is a NEW
+  product-side scripted-confirm sequence owned by `TutorialGuidedShell` (the
+  harness's `driveGuidedWalk` is not reusable at runtime). At the STEP_2.5
+  `respondGuided` (`chosen=["accept"]`), the backend accept seam injects the
+  host-class `allowed_hosts` into the recipe apply (Task 6 slot) per the Files
+  list — the resolved `allowed_hosts` is supplied server-side at that seam, not
+  passed by the shell, because `allowed_hosts` is an SSRF control set by the seam,
+  never carried over the wire by the client.
 
 - [ ] **Step 4 (deferred): Run to pass + wardline + commit.**
   Run the component + backend integration tests to green; `wardline scan .

@@ -21,10 +21,23 @@
   `source_file_hash` gate (`plugin-contract-plugin-hashes`) — refresh via
   `scripts/cicd/plugin_hash.py` (`compute_source_file_hash`/`fix_source_file_hash`);
   (b) the tier-model fingerprint cascade (`trust-tier-model`; adding imports
-  shifts `Module.body` indices) — allowlists `config/cicd/enforce_tier_model/plugins.yaml`
-  (plugin files) and `.../web.yaml` (web files: interpretation_state.py, state.py),
-  rotated via `elspeth_lints.rules.trust_tier.tier_model.rotate`
-  (scripts/cicd/rotate_tier_model_fingerprints.py). Co-land the fingerprint/hash
+  shifts `Module.body` indices) — allowlists live under
+  `config/cicd/enforce_tier_model/` (web files like `interpretation_state.py`,
+  `composer/service.py` in `web.yaml`; plugin files in `plugins.yaml`). The CLI is
+  `elspeth_lints.core.cli` (VERIFIED present at
+  `elspeth-lints/src/elspeth_lints/core/cli.py`): `check` detects drift, `rotate`
+  repairs DRIFT on existing allowlisted sites, `justify` routes a NEW boundary
+  finding to the cicd-judge. There is NO `rotate.py` CLI and NO
+  `scripts/cicd/rotate_tier_model_fingerprints.py` (only a stale `.pyc` remains) —
+  do not invoke either. Run from the repo root with `PYTHONPATH=elspeth-lints/src`.
+  Slice-scoped drift check (real flags):
+  `PYTHONPATH=elspeth-lints/src python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth --files <slice files> --format json`.
+  Tree-wide rotate (no `--files` flag exists; `--remove-stale` is OFF by default so
+  stale entries are SURFACED not deleted), dry-run first:
+  `PYTHONPATH=elspeth-lints/src python -m elspeth_lints.core.cli rotate --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --dry-run`
+  then without `--dry-run`. `rotate` only repairs drift on EXISTING entries — it
+  cannot create an entry for a NEW file/finding; a new Tier-3 boundary needs
+  `justify` (operator-owed judge), not `rotate`. Co-land the fingerprint/hash
   updates with the source change; the operator re-signs.
 - The canonical tutorial prompt couples FOUR things in lockstep: the backend
   constant `CANONICAL_SEED_PROMPT` (`web/preferences/tutorial_cache.py`), its
@@ -107,10 +120,14 @@ The contract (§2.3) says p3 DECIDES how shield availability reaches the pure
    `upstream_chain`, never the draft), so adding a
    second draft does not invalidate stored/in-flight reviews.
 
-5. **Repair-turn prose** (`composer/service.py:719-722`) selects the
-   state-appropriate draft: it must accept EITHER the C-draft
-   (`PROMPT_SHIELD_WARNING_DRAFT`) or the B-draft (`PROMPT_SHIELD_AVAILABLE_DRAFT`)
-   as the staged requirement draft for `user_term=PROMPT_SHIELD_USER_TERM`.
+5. **Repair-turn prose** (`composer/service.py:719-722`, inside
+   `_pending_interpretation_review_repair_message` def `:688`) stages the **fail-safe
+   C-draft (`PROMPT_SHIELD_WARNING_DRAFT`) unconditionally** for
+   `user_term=PROMPT_SHIELD_USER_TERM` — which is what the live prose already does.
+   The repair turn does NOT pick the B-draft: it cannot reliably observe shield
+   availability (`available_plugins` is a superset of resolvable secrets), and B-vs-C
+   is resolved deterministically at the wire-stage route (item 3 / Task 3). Task 4 is
+   therefore a confirm-and-document pass, not a B-vs-C selection in the prose.
 
 This keeps `validate()` pure, keeps the always-on warning firing everywhere at the
 safe default, surfaces the live State-B advisory at the wire-stage turn (Task 3),
@@ -126,7 +143,7 @@ and gives p4 a precise A/B/C surface where context exists.
 
 **Interfaces:**
 - Consumes: `_producer_by_output_stream(nodes) -> dict[str, NodeSpec]` (`:265`); `_AUTHORIZED_PROMPT_SHIELD_PLUGINS` (`:53`); `_llm_has_shield_recommendation(node) -> bool` (`:313`); `PROMPT_SHIELD_WARNING_DRAFT` (`:34`); `NodeSpec`.
-- Produces: `PROMPT_SHIELD_AVAILABLE_DRAFT: Final[str]` (State-B draft; consumed by Task 3 dict-refiner, Task 4 repair-turn prose, and p4); `_llm_has_authorized_shield_upstream(node: NodeSpec, producer_by_output_stream: Mapping[str, NodeSpec]) -> bool` (NEW, pure; consumed by Task 2's `prompt_shield_state_for_node`); `prompt_shield_recommendation_warning_pairs(state, *, shield_available: bool | None = None)` now fires for every unshielded LLM node (State B/C), silent only for State A.
+- Produces: `PROMPT_SHIELD_AVAILABLE_DRAFT: Final[str]` (State-B draft; consumed by the Task 3 dict-refiner and p4 — NOT by Task 4, whose repair turn stages the C-draft unconditionally); `_llm_has_authorized_shield_upstream(node: NodeSpec, producer_by_output_stream: Mapping[str, NodeSpec]) -> bool` (NEW, pure; consumed by Task 2's `prompt_shield_state_for_node`); `prompt_shield_recommendation_warning_pairs(state, *, shield_available: bool | None = None)` now fires for every unshielded LLM node (State B/C), silent only for State A.
 
 - [ ] **Step 1: Add the State-B draft constant FIRST (so later steps import-resolve).**
   In `interpretation_state.py`, immediately after the closing `)` of
@@ -492,6 +509,9 @@ EOF
   ```python
   from __future__ import annotations
 
+  from unittest.mock import MagicMock
+
+  from elspeth.web.catalog.protocol import CatalogService
   from elspeth.web.composer.tools._common import ToolContext
   from elspeth.web.composer.tools._shield_availability import azure_prompt_shield_available
 
@@ -505,7 +525,16 @@ EOF
 
 
   def _ctx(secret_service, user_id: str | None) -> ToolContext:
-      return ToolContext(secret_service=secret_service, user_id=user_id)
+      # ToolContext.catalog (`_common.py:1700`) is REQUIRED with no default —
+      # the FIRST frozen field. azure_prompt_shield_available never reads it, but
+      # the dataclass constructor demands it, so inject a spec'd mock (CatalogService
+      # Protocol lives at catalog/protocol.py:14, NOT catalog/service.py — matching
+      # test_tools.py:21).
+      return ToolContext(
+          catalog=MagicMock(spec=CatalogService),
+          secret_service=secret_service,
+          user_id=user_id,
+      )
 
 
   def test_shield_available_when_key_configured() -> None:
@@ -524,11 +553,13 @@ EOF
       assert azure_prompt_shield_available(_ctx(_FakeSecretService({"AZURE_CONTENT_SAFETY_KEY"}), None)) is False
   ```
 
-  > `ToolContext` is a dataclass with `secret_service`/`user_id` defaulting to
-  > `None` (`_common.py:1704-1705`); construct it with only those two kwargs. If
-  > `ToolContext` has other required fields, build it via its existing test factory
-  > — grep `tests/unit/web/composer/tools/` for `ToolContext(` to find the
-  > minimal constructor used by sibling tests and mirror it.
+  > `ToolContext` (`@dataclass(frozen=True, slots=True)`, `_common.py:1639`) has ONE
+  > required field — `catalog: CatalogService` (`:1700`, no default, first field) —
+  > which the `_ctx` helper above injects as `MagicMock(spec=CatalogService)`;
+  > `secret_service`/`user_id` default to `None` (`:1704-1705`). Do NOT grep the new
+  > `tests/unit/web/composer/tools/` dir for a sibling `ToolContext(` factory: Step 3
+  > creates that dir EMPTY, so there is none — the catalog kwarg in `_ctx` is the
+  > minimal constructor.
 
   Run to fail:
   ```
@@ -902,15 +933,22 @@ EOF
   > no-ops on every non-`confirm_wiring` turn), and is the mechanical, can't-skip
   > form the dead-B bug demands.
   >
-  > **No-op-today note (architecture):** the `post_guided_reenter` (`:592`) and
-  > `post_guided_start` (`:718`) handlers — feeding the GET-style sites `:476`/`:707`
-  > (and `:906`) — structurally never emit a `confirm_wiring` turn today (STEP_4_WIRE
-  > is reached only via recipe-apply / chain-accept through `post_guided_respond`).
-  > The wrapper no-ops there safely; wrapping them adds no current behavior but is
-  > the can't-skip form (a future caller that DOES emit a wire turn through those
-  > sites is covered automatically). Leave a one-line `# no-op for non-confirm_wiring
-  > turns today; covers future wire-turn emission` comment at those sites so a future
-  > reader does not assume the refiner fires there now.
+  > **No-op-today note (architecture — handler-verified, NOT line-number-assumed):**
+  > of the three GET-style `TurnPayloadResponse(` sites, `:476` is inside
+  > **`get_guided`** (`:248`), which re-renders the wire turn at STEP_4_WIRE via
+  > `_build_get_guided_turn` (`:98`) → `build_step_4_wire_turn(state)` (`:209-210`).
+  > The refiner GENUINELY FIRES at `:476` — it is exactly what Step 5's reload test
+  > (`test_get_guided_reload_at_wire_surfaces_state_b_with_key`) guards. Do NOT mark
+  > `:476` no-op. The genuinely no-op-today sites are `:707` (inside
+  > `post_guided_reenter`, `:592`) and `:906` (inside `post_guided_start`, `:718`):
+  > those handlers structurally never emit a `confirm_wiring` turn today (STEP_4_WIRE
+  > is reached only via recipe-apply / chain-accept through `post_guided_respond`,
+  > and on GET re-render through `get_guided`). The wrapper no-ops at `:707`/`:906`
+  > safely; wrapping them adds no current behavior but is the can't-skip form (a
+  > future caller that DOES emit a wire turn through those sites is covered
+  > automatically). Leave a one-line `# no-op for non-confirm_wiring turns today;
+  > covers future wire-turn emission` comment ONLY at `:707` and `:906` — never at
+  > `:476`, where the refiner fires now.
 
   In `src/elspeth/web/sessions/routes/composer/guided.py`, add module-level helpers
   (TurnType is ALREADY imported at `:48`; do NOT re-import it):
@@ -1030,99 +1068,113 @@ EOF
 
 ---
 
-### Task 4: Select the state-appropriate draft in the forced-repair-turn prose
+### Task 4: Confirm the forced-repair-turn prose stages the fail-safe C-draft unconditionally
+
+> **DECISION (closes the Task 4↔3 surface mismatch).** The repair turn must NOT ask
+> the agent to judge shield availability and pick the B-draft. The agent's only
+> in-turn signal is `available_plugins.transforms` (a SUPERSET of true
+> availability — a plugin can be listed while its secret is missing = not actually
+> available), so a guessed B-draft can produce a staged-requirement vs route-refined
+> warning mismatch (Task 3 refines only the warning-message surface for B-vs-C, not
+> the staged-requirement draft this repair turn drives). B-vs-C is already resolved
+> DETERMINISTICALLY at the wire-stage route (Task 3) via `azure_prompt_shield_available`
+> (secret resolvability). So the repair prose stages the **fail-safe C-draft
+> (`PROMPT_SHIELD_WARNING_DRAFT`) unconditionally** — which is exactly what the live
+> prose already does. This task is therefore a CONFIRM-and-document pass, not a
+> prose rewrite: NO B-draft, NO new import.
 
 **Files:**
-- Modify: `src/elspeth/web/composer/service.py` — repair-turn prose (`:719-722`); import block (`:131-139`).
-- Test: `tests/unit/web/composer/test_prompts.py` OR the test that exercises the repair-turn text. Locate it first (Step 1).
+- Modify (documentation comment only): `src/elspeth/web/composer/service.py` — the repair-turn shield clause inside `_pending_interpretation_review_repair_message` (def `:688`; the shield clause at `:719-722`). The staged-draft text is UNCHANGED; add only a brief in-function comment recording the deterministic-at-route decision. NO import-block change.
+- Test: none added (the repair prose has no shield-specific assertion; see Step 5).
 
 **Interfaces:**
-- Consumes: `PROMPT_SHIELD_USER_TERM` (`:134`), `PROMPT_SHIELD_WARNING_DRAFT` (`:135`); add `PROMPT_SHIELD_AVAILABLE_DRAFT` to the import (Task 1 produced it).
-- Produces: repair-turn prose that names BOTH drafts as acceptable staged-requirement drafts for the shield user_term.
+- Consumes: `PROMPT_SHIELD_USER_TERM` (`:134`), `PROMPT_SHIELD_WARNING_DRAFT` (`:135`) — both already imported; do NOT add `PROMPT_SHIELD_AVAILABLE_DRAFT` (the repair turn never uses the B-draft).
+- Produces: nothing new — confirms the repair turn stages the C-draft unconditionally; B-vs-C is owned by the Task 3 route refiner.
 
-- [ ] **Step 1: Locate the test that asserts the repair-turn prose.**
+- [ ] **Step 1: Confirm which tests render the repair message (none asserts the shield clause).**
   ```
-  cd /home/john/elspeth && grep -rn "prompt_injection_shield_recommendation\|keep going with the warning\|forced repair turn" tests/unit/web/composer/ tests/unit/web/
+  cd /home/john/elspeth && grep -rn "_pending_interpretation_review_repair_message\|prompt_injection_shield_recommendation\|keep going with the warning\|forced repair turn" tests/unit/web/composer/ tests/unit/web/
   ```
-  Note the test file + name that asserts the `:719-722` text. If none asserts the
-  shield clause directly, the repair-turn prose is covered only by a broad
-  prompt-snapshot test; in that case Step 3's edit will shift that snapshot and the
-  snapshot test is the test-to-UPDATE.
+  Confirmed live: the repair message is rendered only by
+  `tests/unit/web/composer/test_compose_loop_interpretation_review_dispatch.py::test_pending_interpretation_repair_message_requires_one_call_per_site`
+  (`:1442`), which asserts only the one-call-per-site substrings — NOT the shield
+  clause. `tests/unit/web/composer/test_prompts.py` tests `build_system_prompt()`
+  (a DIFFERENT path that never renders the repair message). So no test asserts the
+  shield repair draft; adding the in-function comment in Step 3 changes no assertion
+  and keeps the one-call-per-site test green.
 
-- [ ] **Step 2: Read the exact current block to anchor the edit.**
+- [ ] **Step 2: Read the exact current shield clause to confirm it already stages the C-draft.**
   ```
   cd /home/john/elspeth && sed -n '714,724p' src/elspeth/web/composer/service.py
   ```
-  Confirm the verbatim text matches the `old_string` in Step 3.
+  Confirm the live clause already reads
+  `draft is {PROMPT_SHIELD_WARNING_DRAFT!r}; if the workflow cannot add the shield,
+  keep going with the warning instead of blocking.` — i.e. the C-draft is already
+  staged unconditionally. No prose substitution is needed; Step 3 only adds a comment.
 
-- [ ] **Step 3: Edit the repair-turn prose to name both drafts.**
-  In `src/elspeth/web/composer/service.py`, replace (`:719-722`):
+- [ ] **Step 3: Add the deterministic-at-route comment above the shield clause (no prose/draft change).**
+  In `src/elspeth/web/composer/service.py` `_pending_interpretation_review_repair_message`,
+  immediately ABOVE the existing
+  `f"If user_term is {PROMPT_SHIELD_USER_TERM!r}, patch the target LLM node first "`
+  line (`:719`), insert a comment recording why the repair turn stages the C-draft
+  unconditionally:
   ```python
-          f"If user_term is {PROMPT_SHIELD_USER_TERM!r}, patch the target LLM node first "
-          "with an interpretation_requirements entry whose kind is 'pipeline_decision', "
-          f"status is 'pending', and draft is {PROMPT_SHIELD_WARNING_DRAFT!r}; if the "
-          "workflow cannot add the shield, keep going with the warning instead of blocking. "
+          # B-vs-C is resolved deterministically at the wire-stage route
+          # (azure_prompt_shield_available; see routes/composer/guided.py). The repair
+          # turn cannot observe true shield availability (available_plugins is a
+          # superset of resolvable secrets), so it stages the fail-safe C-draft
+          # unconditionally; the route refiner upgrades the user-facing warning to
+          # State B where the secret is reachable.
   ```
-  with:
-  ```python
-          f"If user_term is {PROMPT_SHIELD_USER_TERM!r}, patch the target LLM node first "
-          "with an interpretation_requirements entry whose kind is 'pipeline_decision' and "
-          "status is 'pending'. Use the state-appropriate draft: if an authorized "
-          f"prompt-injection shield is available in this deployment, draft is {PROMPT_SHIELD_AVAILABLE_DRAFT!r}; "
-          f"otherwise (or if availability is unknown) draft is {PROMPT_SHIELD_WARNING_DRAFT!r}. If the "
-          "workflow cannot add the shield, keep going with the warning instead of blocking. "
-  ```
+  The shield clause itself (`:719-722`, the `PROMPT_SHIELD_WARNING_DRAFT` staging)
+  is UNCHANGED. Do NOT introduce `PROMPT_SHIELD_AVAILABLE_DRAFT` here.
   > **Repair-budget interaction (architecture, non-blocking).** The repair loop is
-  > bounded by `_MAX_REPAIR_TURNS = 2`; asking the LLM to resolve B-vs-C inside the
-  > repair turn could consume budget. This is SAFE because the prose defaults to the
-  > C-draft when availability is unknown (the fail-safe), AND the live B-vs-C
-  > refinement is already done deterministically at the wire-stage route (Task 3) —
-  > the repair turn does not need to compute availability to be correct. If a future
-  > change tightens the budget, default the repair case to the C-draft outright.
+  > bounded by `_MAX_REPAIR_TURNS = 2`. Staging the C-draft unconditionally keeps the
+  > repair turn from spending budget on a B-vs-C judgement it cannot make reliably,
+  > and stays correct because the live B-vs-C refinement is already done
+  > deterministically at the wire-stage route (Task 3).
 
-- [ ] **Step 4: Add `PROMPT_SHIELD_AVAILABLE_DRAFT` to the import block.**
-  In `src/elspeth/web/composer/service.py`, the `from elspeth.web.interpretation_state import (`
-  block (`:131-139`) imports `PROMPT_SHIELD_USER_TERM` then `PROMPT_SHIELD_WARNING_DRAFT`.
-  Add `PROMPT_SHIELD_AVAILABLE_DRAFT` in alphabetical position (before
-  `PROMPT_SHIELD_USER_TERM`):
-  ```python
-      PROMPT_SHIELD_AVAILABLE_DRAFT,
-      PROMPT_SHIELD_USER_TERM,
-      PROMPT_SHIELD_WARNING_DRAFT,
+- [ ] **Step 4: Confirm the import block is untouched (no `PROMPT_SHIELD_AVAILABLE_DRAFT`).**
+  This task does NOT add `PROMPT_SHIELD_AVAILABLE_DRAFT` to the
+  `from elspeth.web.interpretation_state import (` block (`:131-139`) — the repair
+  turn never references the B-draft. Adding an unused import would trip ruff F401.
+  Verify the only shield constants the file imports remain `PROMPT_SHIELD_USER_TERM`
+  and `PROMPT_SHIELD_WARNING_DRAFT`:
   ```
-  (If `ruff check --fix` reorders, accept the autofix.)
+  cd /home/john/elspeth && grep -n "PROMPT_SHIELD" src/elspeth/web/composer/service.py | head
+  ```
 
-  > **W1 — writer draft-equality is satisfied either way.** The writer boundary
-  > (`sessions/service.py` `create_pending_interpretation_event`, PIPELINE_DECISION
-  > branch) pins `llm_draft == the staged requirement's draft` — it does NOT pin the
-  > exact module constant. Whether the agent stages the B-draft or the C-draft, the
-  > event-draft equality check accepts it. No writer change is needed.
-
-- [ ] **Step 5: Run the located test (or the snapshot test) and the composer prompt tests.**
+- [ ] **Step 5: Verify by re-running the repair flow, NOT by a string test (honest verification).**
+  The repair prose has no shield-specific unit test, and per the
+  no-tests-for-skill-prompt-content doctrine a literal-string test would be theatre —
+  do NOT add one. Run the existing render test as a no-regression smoke check (it
+  asserts unrelated one-call-per-site substrings, so it stays green):
   ```
-  cd /home/john/elspeth && uv run pytest tests/unit/web/composer/test_prompts.py -q
+  cd /home/john/elspeth && uv run pytest tests/unit/web/composer/test_compose_loop_interpretation_review_dispatch.py::test_pending_interpretation_repair_message_requires_one_call_per_site -q
   ```
-  Expected: pass. If a snapshot/value test fails because the repair-turn text
-  changed, UPDATE that test's expected string to the new prose (test-to-UPDATE per
-  Global Constraints) — do not revert the prose.
+  Expected: pass (the comment-only edit changes no rendered text). Do NOT treat
+  `test_prompts.py` (`build_system_prompt`) as proof of this change — it never
+  renders the repair message. The behavioral verification is re-running the
+  interpretation-review repair flow and confirming the staged C-draft (parity with
+  Task 5's skill-prompt-content doctrine).
 
 - [ ] **Step 6: Commit.**
   ```
-  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/web/composer/service.py tests/unit/web/composer/test_prompts.py && git commit -m "$(cat <<'EOF'
-feat(composer): repair-turn selects state-appropriate prompt-shield draft
+  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/web/composer/service.py && git commit -m "$(cat <<'EOF'
+docs(composer): record why repair turn stages the fail-safe shield C-draft
 
-The forced-repair-turn prose now names BOTH the State-B
-(PROMPT_SHIELD_AVAILABLE_DRAFT) and State-C (PROMPT_SHIELD_WARNING_DRAFT)
-drafts and instructs the agent to stage whichever matches deployment
-availability. The writer draft-equality check accepts either; no writer
-change. Advisory polarity ("keep going with the warning") preserved.
+The forced-repair-turn shield clause stages PROMPT_SHIELD_WARNING_DRAFT (State
+C) unconditionally — the repair turn cannot reliably observe shield
+availability (available_plugins is a superset of resolvable secrets), and
+B-vs-C is already resolved deterministically at the wire-stage route
+(azure_prompt_shield_available, Task 3). Comment-only: the staged draft and
+the import block are unchanged. Advisory polarity ("keep going with the
+warning") preserved.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
 )"
   ```
-  > If Step 1 found no test asserting the repair-turn text, drop the test path from
-  > the `git add` and commit only `service.py`.
 
 ---
 
@@ -1130,6 +1182,7 @@ EOF
 
 **Files:**
 - Modify: `src/elspeth/plugins/transforms/llm/transform.py` — `get_agent_assistance()` `composer_hints` tuple (`:1714-1722`).
+- Modify: `tests/unit/web/composer/test_tools.py` — `test_llm_discovery_recommends_prompt_shield_for_internet_content` (`:9105`) hard-asserts the exact prose this task changes; surgically update its 3 affected assertions (Step 3).
 
 **Interfaces:**
 - Consumes: nothing (prose only).
@@ -1183,40 +1236,70 @@ EOF
   ```
   Expected: `ok`.
 
-- [ ] **Step 3: Run the broad LLM-transform + composer-prompt test surface to catch any prose-string assertion.**
+- [ ] **Step 3: Surgically update the live test that asserts the changed prose, then run the surface.**
+  An in-tree test DOES assert this prose verbatim:
+  `tests/unit/web/composer/test_tools.py::TestGetPluginAssistance::test_llm_discovery_recommends_prompt_shield_for_internet_content`
+  (`:9105`) drives the real `get_plugin_assistance` for plugin `"llm"` and hard-asserts
+  the three substrings Step 1 deleted. It WILL fail with 3 assertion errors. The
+  no-tests-for-skill-prompt-content doctrine governs whether to ADD new prose tests;
+  it does NOT license deleting an existing in-tree assertion, and the slice cannot
+  land red — so UPDATE these 3 assertions to the new always-on strings (the other
+  ~14 assertions in this test ride unchanged hint lines — `azure_prompt_shield`,
+  `only when discovery lists it`, `recommendation is not permission to add a node`,
+  `copying it verbatim`, etc. — and STAY GREEN; do not touch them).
+  Replace the three deleted-prose assertions:
+  ```python
+      assert "internet content" in hints
+      assert "prompt-injection shielding is important" in hints
+  ```
+  ```python
+      assert "surface this to the user as a strong recommendation" in hints
+  ```
+  with assertions on the new always-on substrings (drawn verbatim from Step 1):
+  ```python
+      assert "reviewed for EVERY LLM node" in hints
+      assert "surfaced as an advisory (never blocking)" in hints
+  ```
+  ```python
+      assert "whenever no authorized shield is upstream (State B/C)" in hints
+  ```
+  Then run the surface:
   ```
   cd /home/john/elspeth && uv run pytest tests/unit/web/composer/test_tools.py tests/unit/web/composer/test_prompts.py -q
   ```
-  Expected: pass. If a test asserts the OLD conditional shield prose verbatim,
-  UPDATE it to the new always-on text (test-to-UPDATE) — but per doctrine, prefer
-  to confirm no such brittle prose assertion exists; if one does, that assertion is
-  itself suspect (it asserts skill-prompt content). Stage the updated test if you
-  must change one.
+  Expected: pass (the 3 rewritten assertions now match the new prose; all other
+  assertions unchanged and green).
 
 - [ ] **Step 4: Compute the new plugin source_file_hash and stage it as an operator-owed chore.**
   > The agent SIGNS NOTHING but CO-LANDS the hash so the diff is complete; the
-  > operator re-signs the gate. Run the refresh helper to compute (NOT to commit
-  > unilaterally):
+  > operator re-signs the gate. `scripts/cicd/plugin_hash.py` has NO CLI (no
+  > `__main__`/`argparse` — verified live; `--help` exits 0 with no output, a silent
+  > no-op). Call its library functions directly, naming the plugin class
+  > `LLMTransform` (the unified plugin class at `transform.py:1109`) that
+  > `fix_source_file_hash(file_path, class_name, correct_hash)` requires:
   ```
-  cd /home/john/elspeth && python scripts/cicd/plugin_hash.py --help
+  cd /home/john/elspeth && python -c "from pathlib import Path; from scripts.cicd.plugin_hash import compute_source_file_hash, fix_source_file_hash; p = Path('src/elspeth/plugins/transforms/llm/transform.py'); fix_source_file_hash(p, 'LLMTransform', compute_source_file_hash(p))"
   ```
-  Then use `fix_source_file_hash` per its help to update the
-  `source_file_hash="sha256:..."` literal at `transform.py:1127`. Verify it changed:
+  Verify it changed:
   ```
   cd /home/john/elspeth && grep -n 'source_file_hash' src/elspeth/plugins/transforms/llm/transform.py | head -1
   ```
   Expected: the sha differs from `sha256:bd14eb75b0b8ede6`.
 
 - [ ] **Step 5: Commit (with the gate skips; operator re-signs).**
+  Stage BOTH the plugin and the surgically-updated test (the slice must not land
+  red — Step 3's assertion update co-lands with the prose change):
   ```
-  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/plugins/transforms/llm/transform.py && git commit -m "$(cat <<'EOF'
+  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add src/elspeth/plugins/transforms/llm/transform.py tests/unit/web/composer/test_tools.py && git commit -m "$(cat <<'EOF'
 docs(plugins/llm): reword shield agent-prose to always-on A/B/C
 
 The composer_hints prose now describes the always-on 3-state prompt-shield
 review (A shielded upstream / B available-not-wired / C none available)
-instead of the old "if untrusted content" conditional. Prose only — the
-runtime substance is in interpretation_state.py. Plugin source_file_hash
-restaged (operator re-signs the plugin-hash + tier-model gates).
+instead of the old "if untrusted content" conditional. Surgically updates the
+3 affected assertions in test_llm_discovery_recommends_prompt_shield_for_internet_content
+to the new always-on strings. Prose only — the runtime substance is in
+interpretation_state.py. Plugin source_file_hash restaged (operator re-signs
+the plugin-hash gate).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
@@ -1228,7 +1311,7 @@ EOF
 ### Task 6: Co-land tier-model + plugin-hash fingerprint updates; full-slice reconciliation
 
 **Files:**
-- Modify (co-land, operator re-signs): `config/cicd/enforce_tier_model/web.yaml` (the web files this slice edited: `interpretation_state.py`, `composer/service.py`, `sessions/routes/composer/guided.py`, and the NEW `composer/tools/_shield_availability.py` if it is fingerprinted), `config/cicd/enforce_tier_model/plugins.yaml` (`transforms/llm/transform.py`). NOTE: this plan does NOT edit `composer/state.py` (`validate()` is unchanged) or `composer/guided/emitters.py` (Task 3 chokes at the route handler, not the builder) — do not restage their fingerprints.
+- Modify (co-land, operator re-signs) — ONLY if the Step-4 slice-scoped check reports drift: `config/cicd/enforce_tier_model/web.yaml`. The only slice-edited file that CAN carry a tier-model fingerprint is `interpretation_state.py` (its existing `web.yaml` per-line entries can shift). The other two slice-edited web files have **ZERO** `web.yaml` entries (verified live: `grep -c "_shield_availability" web.yaml` = 0; `grep -n "routes/composer/guided" web.yaml` = no hits — guided.py is the NEW decomposed route, the OLD `web/sessions/routes/composer.py` monolith entries are unrelated). `rotate` only repairs drift on EXISTING entries — it CANNOT create an entry for the new `composer/tools/_shield_availability.py` or for `routes/composer/guided.py`; if either edit introduced a NEW Tier-3 boundary finding, that is the operator-owed `justify` (cicd-judge) path, NOT a mechanical `rotate`, and would CONTRADICT Step 6's "no new external-input boundary" wardline claim. So both new/new-decomposed files are EXPECTED inert here (Step 4 confirms); do not invent fingerprint entries for them. NOTE: `config/cicd/enforce_tier_model/plugins.yaml` is NOT touched — `transform.py` has NO per-line plugins.yaml fingerprint entries (it is covered only by pattern-based per-file rules), and Task 5's prose edit adds no `ImportFrom`, so no `Module.body` index shift and no tier-model cascade; `transform.py`'s only operator-owed gate is its inline `source_file_hash` (Task 5). This plan also does NOT edit `composer/state.py` (`validate()` is unchanged) or `composer/guided/emitters.py` (Task 3 chokes at the route handler, not the builder) — do not restage their fingerprints.
 - No new source. This task reconciles the slice and produces the operator hand-off.
 
 **Interfaces:**
@@ -1289,32 +1372,65 @@ EOF
   service.py per project memory are operator-owed — do NOT chase them here).
 
 - [ ] **Step 4: Run the tier-model fingerprint check to see which fingerprints went stale.**
+  Use the REAL CLI (`elspeth_lints.core.cli`, per Global Constraints). Slice-scoped
+  drift check first (the `check` verb supports `--files`):
   ```
-  cd /home/john/elspeth && uv run python -m elspeth_lints.rules.trust_tier.tier_model.rotate --help 2>/dev/null || cat scripts/cicd/rotate_tier_model_fingerprints.py >/dev/null; echo "rotation tool located"
+  cd /home/john/elspeth && PYTHONPATH=elspeth-lints/src python -m elspeth_lints.core.cli check --rules trust_tier.tier_model --root src/elspeth --files src/elspeth/web/interpretation_state.py src/elspeth/web/composer/service.py src/elspeth/web/sessions/routes/composer/guided.py --format json
   ```
-  Use the rotation tool's `check --format json` (per project memory) to list stale
-  fingerprints in `web.yaml` (interpretation_state.py / service.py / sessions/routes/composer/guided.py) and
-  `plugins.yaml` (transform.py). **The agent computes and co-lands the updated
-  fingerprints in those YAML files so the diff is complete; the OPERATOR re-signs
-  the gate (HMAC key isolation).** Do not invent fingerprints; run the tool.
-  > Caveat (project memory): rotate deletes BOTH copies of a duplicate key —
-  > restore stale first, git-diff after, re-run if a dup-key data-loss appears. The
-  > tooling is Python-version sensitive: the worktree venv MUST match main's
-  > Python 3.13 or ~300 spurious violations appear.
+  This lists stale fingerprints in `web.yaml` (interpretation_state.py — and
+  service.py only if it carries entries). **Expect `_shield_availability.py` and
+  `routes/composer/guided.py` to produce NO `trust_tier.tier_model` drift** — both
+  have zero `web.yaml` entries (verified) and `rotate` cannot create new ones. If
+  the check instead reports a NEW Tier-3 boundary FINDING on either file (not a
+  stale-fingerprint drift on an existing entry), do NOT rotate: that is a new
+  external-input boundary requiring the operator-owed `justify` (cicd-judge / Opus)
+  path, and it CONTRADICTS Step 6's "no new external-input boundary" wardline claim
+  — reconcile the contradiction (confirm inert and proceed, or surface the
+  `justify`-owed finding to the operator as a separate heavier gate) before
+  treating the slice as clean. To repair genuine drift, rotate (dry-run first;
+  `rotate` has no `--files` flag, so it runs tree-wide — see the stale-entry caveat
+  below):
+  ```
+  cd /home/john/elspeth && PYTHONPATH=elspeth-lints/src python -m elspeth_lints.core.cli rotate --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model --dry-run
+  ```
+  then without `--dry-run`. **The agent computes and co-lands the updated
+  fingerprints in `web.yaml` so the diff is complete; the OPERATOR re-signs the gate
+  (HMAC key isolation).** Do not invent fingerprints; run the tool.
+  > `transform.py` is NOT a tier-model concern here — it has NO per-line `plugins.yaml`
+  > fingerprint entries (`grep -ic llm/transform config/cicd/enforce_tier_model/plugins.yaml`
+  > returns 0; it is covered only by the pattern-based per-file rules `pattern:
+  > plugins/transforms/llm/*` at `plugins.yaml:15` and `:24`). Its only operator-owed
+  > gate is the inline `source_file_hash` at `transform.py:1127` — already Task 5's
+  > concern. Do NOT rotate or restage `plugins.yaml`; no tier-model fingerprint is owed
+  > for it.
+  > Caveat (project memory): `rotate` deletes BOTH copies of a duplicate key —
+  > restore stale first, git-diff after, re-run if a dup-key data-loss appears. It
+  > does NOT auto-remove stale entries (`--remove-stale` is OFF by default), so a
+  > tree-wide run will SURFACE the ~32 stale `web/sessions/routes/composer.py`
+  > entries (the OLD route monolith, decomposed into `routes/composer/`) — that is
+  > pre-existing routes-decomposition reconciliation debt, NOT this slice's drift;
+  > leave those untouched. The tooling is Python-version sensitive: the worktree venv
+  > MUST match main's Python 3.13 or ~300 spurious violations appear.
 
 - [ ] **Step 5: Stage the co-landed YAML and commit (gates skipped; operator re-signs).**
   ```
-  cd /home/john/elspeth && git status --porcelain config/cicd/enforce_tier_model/web.yaml config/cicd/enforce_tier_model/plugins.yaml
+  cd /home/john/elspeth && git status --porcelain config/cicd/enforce_tier_model/web.yaml
   ```
-  If both are modified by the rotation tool:
+  If `web.yaml` is modified by the rotation tool:
   ```
-  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add config/cicd/enforce_tier_model/web.yaml config/cicd/enforce_tier_model/plugins.yaml && git commit -m "$(cat <<'EOF'
+  cd /home/john/elspeth && SKIP=elspeth-lints-freeze-guards,elspeth-lints-trust-tier git add config/cicd/enforce_tier_model/web.yaml && git commit -m "$(cat <<'EOF'
 chore(cicd): co-land tier-model fingerprints for always-on prompt-shield
 
-Restage the AST fingerprints shifted by the interpretation_state.py /
-service.py / transform.py edits in the always-on prompt-shield slice.
-Operator re-signs the trust-tier and plugin-hash gates per the release-train
-process; the agent signs nothing.
+Restage the AST fingerprints in web.yaml that the slice's edits to
+interpretation_state.py shifted (the only slice-edited web file carrying
+per-line tier-model entries). The new composer/tools/_shield_availability.py
+and the decomposed routes/composer/guided.py have NO web.yaml entries and
+rotate cannot create them, so neither contributes a fingerprint here. The
+pre-existing stale routes/composer.py monolith entries (routes-decomposition
+debt) are left untouched. plugins.yaml is unchanged: transform.py has no
+per-line tier-model entries and its prose edit added no imports, so no
+fingerprint cascade is owed there. Operator re-signs the trust-tier gate per
+the release-train process; the agent signs nothing.
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
@@ -1333,10 +1449,12 @@ EOF
 - [ ] **Step 7: State the operator hand-off (in the PR/branch summary, not a file).**
   The slice is complete and green locally except the two operator-owed re-sign
   gates. Surface to the operator: (a) `transform.py` plugin `source_file_hash`
-  re-sign (`plugin-contract-plugin-hashes`); (b) tier-model fingerprint re-sign
-  for `web.yaml` + `plugins.yaml` (`trust-tier-model`). The agent has co-landed the
-  computed hash + fingerprints; the operator holds the HMAC key and re-signs per
-  the release-train process. No `GUIDED_SESSION_SCHEMA_VERSION`/`SESSION_SCHEMA_EPOCH`
+  re-sign (`plugin-contract-plugin-hashes`) — this is `transform.py`'s ONLY gate
+  (it has no per-line `plugins.yaml` tier-model entry, so no `plugins.yaml`
+  re-sign is owed); (b) tier-model fingerprint re-sign for `web.yaml` only
+  (`trust-tier-model`). The agent has co-landed the computed hash + `web.yaml`
+  fingerprints; the operator holds the HMAC key and re-signs per the release-train
+  process. No `GUIDED_SESSION_SCHEMA_VERSION`/`SESSION_SCHEMA_EPOCH`
   bump (contract §3 p3): no new `InterpretationKind`, no DB recreate, no boot
   fail-close — persisted interpretation-row shape already supports
   `pipeline_decision` + `prompt_injection_shield_recommendation`; the B/C draft

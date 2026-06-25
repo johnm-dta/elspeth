@@ -161,7 +161,26 @@ Execute Task 1 → Task 2 → Task 3 → Task 4 in order.
     copy also changes — STEP_2_5_RECIPE_MATCH and STEP_3_TRANSFORMS — so all four
     changed `GUIDED_CHAT_PLACEHOLDERS` entries are pinned (only step_4_wire is
     unchanged and stays uncovered by a dedicated test, matching its today state).
+  - The EXISTING aria-label test at `:572-587` (`"visually separates guided
+    sidecar chat as ask about this step"`): the `aria-label` rename in Step 3
+    falsifies its selector at `:584` (`/ask about this step/i`). Rename the test
+    and re-target the selector to `/describe what you want/i` — folded INTO Step 3
+    (this test IS run by `vitest run`, so it goes red at Step 3's full-suite gate).
   - Add one new top-to-bottom DOM-order assertion.
+- Modify (co-land — the Step 3 `aria-label` rename breaks these selectors; this is
+  the Global-Constraint "update existing tests asserting about-to-change behavior"
+  obligation, NOT staging-harness evolution): the two staging E2E specs that drive
+  the guided walk via `getByRole("region", { name: "Ask about this step" })`:
+  - `src/elspeth/web/frontend/tests/e2e/tutorial-probe.staging.spec.ts` (`:97`).
+    NOTE: this file is currently UNTRACKED in the working tree; it is co-landed
+    here (the rename is what breaks it, so leaving a known-broken untracked file
+    would be the exact silent break this update prevents).
+  - `src/elspeth/web/frontend/tests/e2e/tutorial-reliability.staging.spec.ts`
+    (selector `:109`; describing comment `:95`).
+  These specs are NOT exercised by p2's in-task `vitest run` gate (they run only
+  against live staging), so the rename would break them SILENTLY off-suite unless
+  co-landed. Re-target both selectors to `{ name: "Describe what you want" }` and
+  fix the `:95` comment in Step 3.
 
 **Interfaces:**
 - Consumes: `chatGuided` and `respondGuided` store actions (UNCHANGED — see
@@ -234,6 +253,8 @@ contract Task 2 layers onto):
         activeSessionId: "session-guided",
         sessions: [guidedSessionFixture],
         messages: [],
+        // The placeholder keys on guidedSession.step (not the turn type), so
+        // singleSelectTurn() is fine regardless of step (verified ChatPanel.tsx:1375).
         guidedSession: { ...activeGuidedSession(), step: "step_2_5_recipe_match" },
         guidedNextTurn: singleSelectTurn(),
       });
@@ -370,6 +391,49 @@ contract Task 2 layers onto):
       // placeholder + onSend wiring are exercised in the dedicated tests below.
   ```
 
+  (c1) Re-target the EXISTING aria-label test that the rename falsifies. In
+  `ChatPanel.test.tsx`, the test at `:572` is named
+  `"visually separates guided sidecar chat as ask about this step"` and selects
+  the region by `/ask about this step/i` at `:584`. Both "sidecar" and "ask about
+  this step" are now stale framing. Rename the test and re-target the selector:
+  ```ts
+    it("visually separates the guided intent box as describe what you want", () => {
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: activeGuidedSession(),
+        guidedNextTurn: singleSelectTurn(),
+      });
+
+      render(<ChatPanel />);
+
+      const chatRegion = screen.getByRole("region", {
+        name: /describe what you want/i,
+      });
+      expect(chatRegion).toContainElement(screen.getByTestId("chat-input"));
+    });
+  ```
+  This test IS run by `vitest run`, so it goes RED at this Step's full-suite gate
+  if not updated alongside the `aria-label` flip — which is why it is folded into
+  Step 3 (not deferred): Step 3's "all pass" gate below would otherwise be unreachable.
+
+  (c2) Co-land the two staging E2E selectors that the rename breaks (they run only
+  against live staging, NOT under p2's `vitest run`, so the rename breaks them
+  SILENTLY off-suite). In `tutorial-probe.staging.spec.ts` (`:97`) and
+  `tutorial-reliability.staging.spec.ts` (`:109`), change:
+  ```ts
+    const stepChat = page.getByRole("region", { name: "Ask about this step" });
+  ```
+  to:
+  ```ts
+    const stepChat = page.getByRole("region", { name: "Describe what you want" });
+  ```
+  And fix the describing comment in `tutorial-reliability.staging.spec.ts` at
+  `:95` so it reads `step-1 "Describe what you want" chat` instead of
+  `step-1 "Ask about this step" chat`. (`tutorial-probe.staging.spec.ts` is
+  untracked; it is staged in Step 5 alongside the tracked changes.)
+
   (c) Rewrite the now-stale "ABOVE the wizard turn" comment at `:1299-1308`
   (it described GuidedChatHistory's placement relative to the wizard turn; that
   is still accurate, but it also said the ChatInput "at the bottom of the branch
@@ -392,7 +456,10 @@ contract Task 2 layers onto):
   ```
   cd /home/john/elspeth/src/elspeth/web/frontend && npm run typecheck && npx vitest run src/components/chat/ChatPanel.test.tsx
   ```
-  Expected: all pass. (If 964-1001 fails, the move accidentally nested the intent
+  Expected: all pass — INCLUDING the renamed `describe what you want` region test
+  from (c1) (if it still selects `/ask about this step/i` it goes red here; that
+  red means (c1) was skipped, not that the aria-label change is wrong). (If
+  964-1001 fails, the move accidentally nested the intent
   section inside the log region — re-check it sits as a sibling between
   `GuidedChatHistory` and `guided-current-decision`.)
 
@@ -441,7 +508,7 @@ contract Task 2 layers onto):
   ```
   cd /home/john/elspeth/src/elspeth/web/frontend && npm run typecheck && npm run lint && npx vitest run src/components/chat/ChatPanel.test.tsx
   cd /home/john/elspeth && git branch --show-current   # expect: release/0.7.0
-  git add src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx && git commit -m "$(cat <<'EOF'
+  git add src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx src/elspeth/web/frontend/tests/e2e/tutorial-probe.staging.spec.ts src/elspeth/web/frontend/tests/e2e/tutorial-reliability.staging.spec.ts && git commit -m "$(cat <<'EOF'
 feat(composer/guided-ui): lead each guided phase with an intent box above the form
 
 Move the per-phase chat input (the intent box) ABOVE the structured
@@ -458,6 +525,11 @@ changed entries are pinned, and add a DOM-order assertion pinning
 intent-above-form. The CSS classnames are kept unchanged (only the
 heading text + aria-label are recaptioned), so guided.css is untouched.
 
+The aria-label recaption ("Ask about this step" -> "Describe what you
+want") forces co-landed selector updates: the in-component region test
+plus the two staging E2E specs (tutorial-probe, tutorial-reliability)
+that drive the guided walk by that region name.
+
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
 )"
@@ -468,10 +540,17 @@ EOF
 ### Task 2: Add the `isTutorial` prop and suppress both freeform exits
 
 **Files:**
+> **Anchor note (Task 1 ran first):** Task 1 moves the `guided-step-chat`
+> `<section>` ABOVE `guided-current-decision`, so line numbers below the move
+> shift down from the pre-Task-1 tree these cites. All edits here are
+> NAME-anchored to unique symbols — locate by symbol (`ExitToFreeformButton`,
+> `CompletionSummary`), not by the stale line number.
+
 - Modify: `src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx`
   - `ChatPanelProps` interface (`:471-480`) — add `isTutorial?: boolean`.
   - `ChatPanel({...})` destructure (`:488-491`) — destructure `isTutorial`.
-  - Guided-active branch: gate `<ExitToFreeformButton/>` (`:1341`) on `!isTutorial`.
+  - Guided-active branch: gate `<ExitToFreeformButton/>` (`~:1341`, shifted by
+    Task 1 — find the unique `ExitToFreeformButton` occurrence) on `!isTutorial`.
   - Completed branch (`:1247-1262`): pass `isTutorial` into `<CompletionSummary/>`.
 - Modify: `src/elspeth/web/frontend/src/components/chat/guided/CompletionSummary.tsx`
   - `CompletionSummaryProps` (`:31-33`) — add `isTutorial?: boolean`.
@@ -515,12 +594,14 @@ EOF
     });
   ```
 
-  Run to fail (the prop does not exist yet → TS error AND the button still renders):
+  Run to fail (the button still renders):
   ```
   cd /home/john/elspeth/src/elspeth/web/frontend && npx vitest run src/components/chat/ChatPanel.test.tsx -t "suppresses ExitToFreeformButton"
   ```
-  Expected: FAIL — `<ChatPanel isTutorial />` is a type error (`isTutorial` not in
-  `ChatPanelProps`) and/or the `Exit to freeform` button is found.
+  Expected: FAIL on the runtime assertion — the `Exit to freeform` button is found.
+  NOTE: `vitest run` uses esbuild, which STRIPS TS types without type-checking, so
+  the `isTutorial`-not-in-`ChatPanelProps` type error does NOT fail this command;
+  it surfaces separately under `npm run typecheck`. These are two different gates.
 
 - [ ] **Step 2: Add the prop and gate the exit button.**
   In `ChatPanel.tsx`, extend `ChatPanelProps` (`:471-480`):
@@ -602,7 +683,10 @@ EOF
   ```
   cd /home/john/elspeth/src/elspeth/web/frontend && npx vitest run src/components/chat/guided/CompletionSummary.test.tsx -t "isTutorial"
   ```
-  Expected: FAIL — `isTutorial` not in props (type error) and the button is found.
+  Expected: FAIL on the runtime assertion — the `Open freeform editor` button is
+  found. (As in Task 2 Step 1: `vitest run` strips types via esbuild, so the
+  `isTutorial`-not-in-props type error does NOT fail this command — it surfaces
+  only under `npm run typecheck`. Two separate gates, not one combined failure.)
 
 - [ ] **Step 4: Add the prop to CompletionSummary and gate the button.**
   In `CompletionSummary.tsx`, extend props (`:31-33`):
@@ -688,9 +772,15 @@ EOF
 ### Task 3: Redirect the discriminator fall-through to a guided placeholder under tutorial
 
 **Files:**
+> **Anchor note (Tasks 1 + 2 ran first):** Task 1's section reorder shifts every
+> line cite below it (`:1384` freeform return, `:1247` completed branch, `:1264`
+> guided-active, `:1238-1242` discriminator prose) down from the pre-Task-1 tree.
+> Locate by symbol — the FINAL freeform `return (`, the `isTutorial` discriminator
+> comment, `GuidedWorkflowStepper`/`WorkflowStepId` — not by line number.
+
 - Modify: `src/elspeth/web/frontend/src/components/chat/ChatPanel.tsx`
-  - Insert a tutorial guard immediately BEFORE the final freeform `return` (`:1384`).
-  - Update the discriminator doc-comment (`:1225-1246`) to document the guard.
+  - Insert a tutorial guard immediately BEFORE the final freeform `return` (`~:1384`).
+  - Update the discriminator doc-comment (`~:1225-1246`) to document the guard.
 - Modify: `src/elspeth/web/frontend/src/components/chat/ChatPanel.test.tsx` (ADD
   two tutorial-variant fall-through tests; do NOT edit the green `931-962` test).
 
@@ -855,12 +945,17 @@ completion still graduates normally (the completed branch returns first).
   Run to pass (the Step-2 guard already handles this — `exited_to_freeform` falls
   past both branches, hits the `isTutorial` guard):
   ```
-  cd /home/john/elspeth/src/elspeth/web/frontend && npx vitest run src/components/chat/ChatPanel.test.tsx -t "exited_to_freeform (concern B"
+  cd /home/john/elspeth/src/elspeth/web/frontend && npx vitest run src/components/chat/ChatPanel.test.tsx -t "concern B defensive"
   ```
-  Expected: 1 passed.
+  Expected: 1 passed. (NOTE: `-t` is a REGEX, not a substring filter — a pattern
+  with an unbalanced `(` such as `"exited_to_freeform (concern B"` throws
+  `Invalid regular expression: Unterminated group` and never runs the test.
+  `"concern B defensive"` is a valid regex, unique to this test, and disjoint from
+  Step 1's `"concern B startup flash"`.)
 
 - [ ] **Step 4: Update the discriminator doc-comment.**
-  In `ChatPanel.tsx`, extend the precedence list in the comment at `:1227-1246`.
+  In `ChatPanel.tsx`, extend the precedence list in the comment at `~:1227-1246`
+  (line shifted by Task 1 — locate by the "Guided-mode discriminator" header).
   After the existing point 3, add a point 4:
   ```
   //   4. (tutorial only) when `isTutorial` is set, the fall-through in (3) is
@@ -868,6 +963,13 @@ completion still graduates normally (the completed branch returns first).
   //      so a tutorial can never land on a panel-less freeform screen (concern
   //      B). The completed branch (1) still wins for a tutorial completion.
   ```
+  Also amend the now-conditional `exited_to_freeform` prose (the
+  "Execution falls through to the existing freeform body — which is the correct
+  outcome" sentence, `~:1238-1242`): append `(non-tutorial only — see point 4)`
+  so it reads `…which is the correct outcome (non-tutorial only — see point 4)
+  (the user has exited; show them the chat surface).` Under a tutorial that
+  fall-through is now intercepted by the point-4 guard, so the unconditional
+  framing is stale.
 
   Run the full ChatPanel suite to confirm no regression:
   ```
@@ -911,6 +1013,20 @@ EOF
 - Produces: the only render site that passes `isTutorial` truthy — the seam p4
   relies on for "tutorial never reaches freeform." `App.tsx:385` keeps
   `<ChatPanel />` (prop absent) so non-tutorial guided/freeform is unchanged.
+
+> **Scope of this task's test (do not overstate):** ChatPanel is mocked at the
+> module boundary (`vi.mock`, `:30-32`), so Task 4 proves the WIRING — the shell
+> passes `isTutorial` truthy — NOT concern-B end-to-end. The actual suppression
+> behavior is unit-tested against the real ChatPanel in Tasks 2/3; the full
+> real-shell + real-ChatPanel integration is deferred to p4's E2E. The commit
+> message and summary should claim only the pass-through, not end-to-end suppression.
+>
+> **Step 1 is an in-place strengthening, not a new sibling test:** it RENAMES the
+> existing "mounts the ChatPanel guided surface" test to "…with isTutorial set"
+> and swaps `getByTestId`-in-`waitFor` for `findByTestId`. The new assertion
+> strictly supersedes the old (it still asserts the stub mounts, plus the prop), so
+> the TutorialGuidedShell test count is UNCHANGED and coverage is not weakened —
+> this does not contradict any "keep unchanged" checklist item.
 
 - [ ] **Step 1: Make the shell test capture the prop and assert it (failing first).**
   In `TutorialGuidedShell.test.tsx`, change the ChatPanel mock (`:30-32`) to
@@ -985,11 +1101,14 @@ EOF
   git add src/elspeth/web/frontend/src/components/tutorial/TutorialGuidedShell.tsx src/elspeth/web/frontend/src/components/tutorial/TutorialGuidedShell.test.tsx && git commit -m "$(cat <<'EOF'
 feat(tutorial): pass isTutorial to the embedded ChatPanel (concern B)
 
-TutorialGuidedShell renders the real ChatPanel with isTutorial set, so a
-tutorial session suppresses both freeform-exit affordances and never
-falls through to the panel-less freeform body. App.tsx keeps the propless
-render for the non-tutorial guided/freeform surface. Update the shell's
-ChatPanel module mock to capture and assert the prop pass-through.
+TutorialGuidedShell renders the real ChatPanel with isTutorial set,
+wiring the concern-B flag through the only render site that passes it
+truthy; the suppression behavior it enables (no freeform exits, no
+freeform fall-through) is unit-tested against the real ChatPanel in the
+prior tasks. App.tsx keeps the propless render for the non-tutorial
+guided/freeform surface. Update the shell's ChatPanel module mock to
+capture and assert the prop pass-through (this task proves the wiring,
+not concern-B end-to-end — that is p4's E2E).
 
 Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
 EOF
@@ -1028,4 +1147,9 @@ EOF
 - Per-phase drivers (source scrape routing, sink driver, transform revise): **p1**.
 - 3-state prompt-shield surface: **p3**.
 - Tutorial synthetic pages, base-URL/SSRF, scenario constants, prompt-shield
-  State-C copy, staging harness: **p4** (depends on this plan's `isTutorial`).
+  State-C copy, staging-harness EVOLUTION (new scenarios/assertions): **p4**
+  (depends on this plan's `isTutorial`). EXCEPTION: the two staging E2E selector
+  edits in Task 1 (`tutorial-probe`/`tutorial-reliability` region name) are NOT
+  harness evolution — they are forced by p2's own `aria-label` rename and are the
+  Global-Constraint obligation to update existing tests that assert about-to-change
+  behavior, so they co-land in Task 1, not p4.

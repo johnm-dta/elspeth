@@ -393,6 +393,38 @@ def prompt_shield_state_for_node(
     return "B" if shield_available else "C"
 
 
+def refine_prompt_shield_warnings_for_availability(
+    warnings: Sequence[Mapping[str, Any]],
+    *,
+    shield_available: bool,
+) -> list[dict[str, Any]]:
+    """Post-process already-serialised wire-turn warnings for B-vs-C shield state.
+
+    ``validate()`` always emits State-C wording (``PROMPT_SHIELD_WARNING_DRAFT``)
+    because it is called without deployment context.  This function upgrades
+    those entries to State-B wording (``PROMPT_SHIELD_AVAILABLE_DRAFT``) when the
+    route layer has confirmed that the authorized shield is present.
+
+    Non-shield warnings and the ``severity`` / ``component`` fields are
+    passed through unchanged.  The input sequence is not mutated.
+
+    Args:
+        warnings: Sequence of already-serialised warning dicts
+            (``{"component": str, "message": str, "severity": str}``).
+        shield_available: ``True`` iff
+            :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`
+            returned ``True`` for this request.
+    """
+    result: list[dict[str, Any]] = [dict(entry) for entry in warnings]
+    if not shield_available:
+        return result
+    for entry in result:
+        message = entry.get("message")
+        if isinstance(message, str) and PROMPT_SHIELD_WARNING_DRAFT in message:
+            entry["message"] = message.replace(PROMPT_SHIELD_WARNING_DRAFT, PROMPT_SHIELD_AVAILABLE_DRAFT)
+    return result
+
+
 def _llm_has_shield_recommendation(node: NodeSpec) -> bool:
     requirements = _requirements(node.options)
     if requirements is None:

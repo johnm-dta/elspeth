@@ -5,6 +5,9 @@ import json
 from elspeth.web.composer.guided.profile import WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.guided.protocol import Turn
 from elspeth.web.composer.protocol import ComposerService
+from elspeth.web.composer.tools._common import ToolContext
+from elspeth.web.composer.tools._shield_availability import azure_prompt_shield_available
+from elspeth.web.interpretation_state import refine_prompt_shield_warnings_for_availability
 from elspeth.web.sessions.schemas import StartGuidedRequest
 
 from .._helpers import (
@@ -101,6 +104,53 @@ from .._helpers import (
     step_advance,
     sys,
 )
+
+
+def _resolve_shield_available(request: Request, user_id: str) -> bool:
+    """Resolve whether the authorized prompt-injection shield is available for this user.
+
+    Delegates to :func:`azure_prompt_shield_available` via the request's
+    ``scoped_secret_resolver``.  Fail-safe: returns ``False`` (State C) when
+    the resolver is absent (no secret service configured) — see
+    :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`.
+    """
+    return azure_prompt_shield_available(
+        ToolContext(
+            catalog=request.app.state.catalog_service,
+            secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
+            user_id=user_id,
+        )
+    )
+
+
+def _turn_payload_response(
+    turn: Mapping[str, Any] | None,
+    *,
+    shield_available: bool,
+) -> TurnPayloadResponse | None:
+    """Build a ``TurnPayloadResponse``, refining shield warnings for B-vs-C state.
+
+    For ``confirm_wiring`` turns the ``payload["warnings"]`` list is
+    post-processed by :func:`refine_prompt_shield_warnings_for_availability` so
+    the caller receives State-B wording when the authorized shield is present in
+    this deployment.  All other turn types pass through unchanged.
+
+    Returns ``None`` when ``turn`` is ``None`` (terminal or no-turn step).
+    """
+    if turn is None:
+        return None
+    payload = dict(turn["payload"])
+    if turn["type"] == TurnType.CONFIRM_WIRING.value:
+        payload["warnings"] = refine_prompt_shield_warnings_for_availability(
+            payload.get("warnings") or [],
+            shield_available=shield_available,
+        )
+    return TurnPayloadResponse(
+        type=turn["type"],
+        step_index=turn["step_index"],
+        payload=payload,
+    )
+
 
 router = APIRouter()
 
@@ -458,6 +508,7 @@ async def get_guided(
             # Build response.  On re-fetch the same turn is returned (deterministic
             # rebuild) and the payload_hash matches what was recorded on first visit.
             terminal = guided.terminal
+            shield_available = _resolve_shield_available(request, user.user_id)
             return GetGuidedResponse(
                 guided_session=GuidedSessionResponse(
                     step=guided.step.value,
@@ -492,13 +543,7 @@ async def get_guided(
                     chat_turn_seq=guided.chat_turn_seq,
                     profile=_workflow_profile_response(guided),
                 ),
-                next_turn=TurnPayloadResponse(
-                    type=turn["type"],
-                    step_index=turn["step_index"],
-                    payload=dict(turn["payload"]),
-                )
-                if turn is not None
-                else None,
+                next_turn=_turn_payload_response(turn, shield_available=shield_available),
                 terminal=TerminalStateResponse(
                     kind=terminal.kind.value,
                     reason=terminal.reason.value if terminal.reason is not None else None,
@@ -695,6 +740,7 @@ async def post_guided_reenter(
             provenance="convergence_persist",
         )
 
+        shield_available = _resolve_shield_available(request, user.user_id)
         return GetGuidedResponse(
             guided_session=GuidedSessionResponse(
                 step=new_guided.step.value,
@@ -723,11 +769,7 @@ async def post_guided_reenter(
                 chat_turn_seq=new_guided.chat_turn_seq,
                 profile=_workflow_profile_response(new_guided),
             ),
-            next_turn=TurnPayloadResponse(
-                type=turn["type"],
-                step_index=turn["step_index"],
-                payload=dict(turn["payload"]),
-            ),
+            next_turn=_turn_payload_response(turn, shield_available=shield_available),
             terminal=None,
             composition_state=_state_response(state_record_out),
         )
@@ -894,6 +936,7 @@ async def post_guided_start(
             provenance="session_seed",
         )
 
+        shield_available = _resolve_shield_available(request, user.user_id)
         return GetGuidedResponse(
             guided_session=GuidedSessionResponse(
                 step=seeded_guided.step.value,
@@ -922,13 +965,7 @@ async def post_guided_start(
                 chat_turn_seq=seeded_guided.chat_turn_seq,
                 profile=_workflow_profile_response(seeded_guided),
             ),
-            next_turn=TurnPayloadResponse(
-                type=turn["type"],
-                step_index=turn["step_index"],
-                payload=dict(turn["payload"]),
-            )
-            if turn is not None
-            else None,
+            next_turn=_turn_payload_response(turn, shield_available=shield_available),
             terminal=None,
             composition_state=_state_response(state_record_out),
         )
@@ -1504,6 +1541,7 @@ async def post_guided_respond(
             # Recorder persistence happens in the finally block below so
             # rejection paths drain identically to the success path.
 
+            shield_available = _resolve_shield_available(request, user.user_id)
             return GuidedRespondResponse(
                 guided_session=GuidedSessionResponse(
                     step=guided.step.value,
@@ -1538,13 +1576,7 @@ async def post_guided_respond(
                     chat_turn_seq=guided.chat_turn_seq,
                     profile=_workflow_profile_response(guided),
                 ),
-                next_turn=TurnPayloadResponse(
-                    type=next_turn["type"],
-                    step_index=next_turn["step_index"],
-                    payload=dict(next_turn["payload"]),
-                )
-                if next_turn is not None
-                else None,
+                next_turn=_turn_payload_response(next_turn, shield_available=shield_available),
                 terminal=TerminalStateResponse(
                     kind=terminal.kind.value,
                     reason=terminal.reason.value if terminal.reason is not None else None,
@@ -1661,6 +1693,7 @@ async def _build_guided_chat_apply_response(
     service: SessionServiceProtocol,
     session_id: UUID,
     state_record: CompositionStateRecord | None,
+    shield_available: bool,
 ) -> tuple[GuidedChatResponse, CompositionStateRecord]:
     """Persist the in-place-applied state and build the chat-apply response.
 
@@ -1723,11 +1756,7 @@ async def _build_guided_chat_apply_response(
             chat_turn_seq=guided.chat_turn_seq,
             profile=_workflow_profile_response(guided),
         ),
-        next_turn=TurnPayloadResponse(
-            type=next_turn["type"],
-            step_index=next_turn["step_index"],
-            payload=dict(next_turn["payload"]),
-        ),
+        next_turn=_turn_payload_response(next_turn, shield_available=shield_available),
         terminal=None,
         composition_state=_state_response(state_record_out),
     )
@@ -1776,6 +1805,7 @@ async def post_guided_chat(
     await _verify_session_ownership(session_id, user, request)
     service: SessionServiceProtocol = request.app.state.session_service
     catalog: CatalogServiceProtocol = request.app.state.catalog_service
+    shield_available = _resolve_shield_available(request, user.user_id)
 
     # Tier-3 → Tier-2 coercion at the step_index boundary. A stale
     # client sending an unknown value gets a 400 with a clear message
@@ -2066,6 +2096,7 @@ async def post_guided_chat(
                         service=service,
                         session_id=session_id,
                         state_record=state_record,
+                        shield_available=shield_available,
                     )
                     return response
 
@@ -2233,6 +2264,7 @@ async def post_guided_chat(
                         service=service,
                         session_id=session_id,
                         state_record=state_record,
+                        shield_available=shield_available,
                     )
                     return response
 
@@ -2396,6 +2428,7 @@ async def post_guided_chat(
                             service=service,
                             session_id=session_id,
                             state_record=state_record,
+                            shield_available=shield_available,
                         )
                         return response
 

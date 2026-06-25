@@ -1433,3 +1433,29 @@ def test_prompt_shield_state_for_node_B_vs_C() -> None:
     llm = next(n for n in state.nodes if n.plugin == "llm")
     assert prompt_shield_state_for_node(llm, state.nodes, shield_available=True) == "B"
     assert prompt_shield_state_for_node(llm, state.nodes, shield_available=False) == "C"
+
+
+# refine_prompt_shield_warnings_for_availability — B-vs-C post-processor
+# ---------------------------------------------------------------------------
+
+
+def test_refine_prompt_shield_warnings_rewrites_c_to_b_when_available() -> None:
+    from elspeth.web.interpretation_state import (
+        PROMPT_SHIELD_AVAILABLE_DRAFT,
+        PROMPT_SHIELD_WARNING_DRAFT,
+        refine_prompt_shield_warnings_for_availability,
+    )
+
+    c_warnings = [
+        {"component": "node:rate_node", "message": f"lead {PROMPT_SHIELD_WARNING_DRAFT}", "severity": "medium"},
+        {"component": "node:other", "message": "unrelated warning", "severity": "medium"},
+    ]
+    refined = refine_prompt_shield_warnings_for_availability(c_warnings, shield_available=True)
+    shield = [w for w in refined if w["component"] == "node:rate_node"]
+    assert shield
+    assert PROMPT_SHIELD_AVAILABLE_DRAFT in shield[0]["message"]
+    assert PROMPT_SHIELD_WARNING_DRAFT not in shield[0]["message"]
+    other = [w for w in refined if w["component"] == "node:other"]
+    assert other[0]["message"] == "unrelated warning"
+    unchanged = refine_prompt_shield_warnings_for_availability(c_warnings, shield_available=False)
+    assert any(PROMPT_SHIELD_WARNING_DRAFT in w["message"] for w in unchanged)

@@ -67,9 +67,11 @@ from .._helpers import (
     build_initial_step_1_turn,
     build_step_1_inspect_and_confirm_turn_from_intent,
     build_step_1_schema_form_turn,
+    build_step_1_schema_form_turn_from_resolved,
     build_step_2_5_recipe_offer_turn,
     build_step_2_multi_select_turn,
     build_step_2_schema_form_turn,
+    build_step_2_schema_form_turn_from_resolved,
     build_step_2_single_select_turn,
     build_step_3_propose_chain_turn,
     build_step_3_schema_form_turn,
@@ -165,6 +167,12 @@ def _build_get_guided_turn(
                 catalog,
                 inspection_facts=guided.step_1_inspection_facts,
             )
+        if guided.step_1_result is not None:
+            # In-place applied source (chat apply): re-render the populated form.
+            # Reaches here only when the chat-apply branch (Task 3) cleared the
+            # staging fields after committing — so a manual in-progress plugin
+            # switch (chosen_plugin set) still wins above.
+            return build_step_1_schema_form_turn_from_resolved(guided.step_1_result, catalog)
         return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
     if step is GuidedStep.STEP_2_SINK:
         # Finding 2 (Codex #10): determine intra-step position and rebuild
@@ -178,6 +186,9 @@ def _build_get_guided_turn(
         if guided.step_2_chosen_plugin is not None:
             # SINGLE_SELECT was submitted; session is waiting for SCHEMA_FORM submission.
             return build_step_2_schema_form_turn(guided.step_2_chosen_plugin, catalog)
+        if guided.step_2_result is not None:
+            # In-place applied sink (chat apply): re-render the populated form.
+            return build_step_2_schema_form_turn_from_resolved(guided.step_2_result, catalog)
         # Initial state: no plugin chosen yet.  Emit the sink plugin list.
         return build_step_2_single_select_turn(catalog)
     if step is GuidedStep.STEP_2_5_RECIPE_MATCH:

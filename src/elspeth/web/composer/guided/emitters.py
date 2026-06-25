@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from elspeth.web.catalog.knob_schema import KnobSchema, lower_slot_specs_to_knob_schema
 from elspeth.web.composer._producer_resolver import source_producer_id
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import (
     GuidedStep,
     InspectAndConfirmPayload,
@@ -49,6 +50,7 @@ from elspeth.web.composer.tools._common import _semantic_contracts_payload, _ser
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
     from elspeth.web.composer.guided.recipe_match import RecipeMatch
+    from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
     from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
     from elspeth.web.composer.state import CompositionState
@@ -238,6 +240,62 @@ def build_step_2_schema_form_turn(
     )
 
 
+def build_step_1_schema_form_turn_from_resolved(
+    source: SourceResolved,
+    catalog: CatalogServiceProtocol,
+) -> Turn:
+    """Build the STEP_1 ``schema_form`` populated from an APPLIED source.
+
+    Unlike :func:`build_step_1_schema_form_turn` (which seeds an empty
+    ``prefilled``), this renders the committed ``source.options`` so the
+    editable form shows what the LLM (or the manual path) built. Used by the
+    chat-apply in-place re-render and by GET /guided when ``step_1_result`` is
+    set on a STEP_1 session.
+    """
+    schema_info = catalog.get_schema("source", source.plugin)
+    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(source.options)}
+    payload: SchemaFormPayload = {
+        "mode": "plugin_options",
+        "plugin": source.plugin,
+        "knobs": cast(KnobSchema, schema_info.knob_schema),
+        "prefilled": prefilled,
+    }
+    return Turn(
+        type=TurnType.SCHEMA_FORM.value,
+        step_index=_step_index(GuidedStep.STEP_1_SOURCE),
+        payload=payload,
+    )
+
+
+def build_step_2_schema_form_turn_from_resolved(
+    sink: SinkResolved,
+    catalog: CatalogServiceProtocol,
+) -> Turn:
+    """Build the STEP_2 ``schema_form`` populated from an APPLIED sink.
+
+    Renders the first output's committed ``options`` (MVP single-output
+    constraint, matching ``handle_step_2_sink``'s ``sink_name="main"`` loop).
+    Used by the chat-apply in-place re-render and by GET /guided when
+    ``step_2_result`` is set on a STEP_2 session.
+    """
+    if not sink.outputs:
+        raise InvariantError("build_step_2_schema_form_turn_from_resolved: sink has no outputs")
+    output = sink.outputs[0]
+    schema_info = catalog.get_schema("sink", output.plugin)
+    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(output.options)}
+    payload: SchemaFormPayload = {
+        "mode": "plugin_options",
+        "plugin": output.plugin,
+        "knobs": cast(KnobSchema, schema_info.knob_schema),
+        "prefilled": prefilled,
+    }
+    return Turn(
+        type=TurnType.SCHEMA_FORM.value,
+        step_index=_step_index(GuidedStep.STEP_2_SINK),
+        payload=payload,
+    )
+
+
 def build_step_2_multi_select_turn(
     observed_columns: Sequence[str],
 ) -> Turn:
@@ -285,7 +343,6 @@ def build_step_2_5_recipe_offer_turn(
         A ``Turn`` TypedDict ready for serialisation and hash.
     """
     from elspeth.contracts.freeze import deep_thaw
-    from elspeth.web.composer.guided.errors import InvariantError
     from elspeth.web.composer.recipes import get_recipe
 
     recipe = get_recipe(match.recipe_name)

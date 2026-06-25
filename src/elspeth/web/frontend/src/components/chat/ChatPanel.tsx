@@ -461,10 +461,14 @@ function isInlineSourceBlob(metadata: BlobMetadata): boolean {
  * error at the lookup site (see assertion in the lookup below).
  */
 const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
-  step_1_source: "Ask about source options, columns, or paste a sample row…",
-  step_2_sink: "Ask about sink config, outputs, or schema mode…",
-  step_2_5_recipe_match: "Ask about the suggested recipe or alternatives…",
-  step_3_transforms: "Ask about the proposed transform chain…",
+  step_1_source:
+    "Describe the source you want — e.g. a CSV, a store query, or pages to scrape…",
+  step_2_sink:
+    "Describe the output you want — the shape and fields the pipeline should produce…",
+  step_2_5_recipe_match:
+    "Describe how this recipe should change, or accept it as proposed…",
+  step_3_transforms:
+    "Describe what each row should become, or how to fix the proposed transforms…",
   step_4_wire: "Confirm how the steps connect, then continue.",
 };
 
@@ -1297,16 +1301,47 @@ export function ChatPanel({
         */}
         <GuidedHistory history={guidedSession.history} />
         {/*
-          Per-step chat log (Phase A slice 6).  Placed ABOVE the wizard
-          turn's role="log" region per handover guidance — the user
-          reads the chat above their current control surface, and the
-          ChatInput at the bottom of the branch is where they reply.
-          GuidedChatHistory carries its OWN role="log" + aria-live so
-          new chat turns are announced independently of wizard turn
-          advances.  Empty-state returns null; no DOM contribution
-          before the first chat exchange.
+          Per-step chat log (Phase A slice 6). Placed ABOVE the editable
+          form. GuidedChatHistory carries its OWN role="log" + aria-live so
+          new chat turns are announced independently of wizard turn advances.
+          The intent box (the reply surface) now renders directly below this
+          log and above the form — see the "Intent box" section. Empty-state
+          returns null; no DOM contribution before the first chat exchange.
         */}
         <GuidedChatHistory chatHistory={guidedSession.chat_history} />
+        {/*
+          Intent box (LLM-primary, spec §"Core model" point 1). This is the
+          PRIMARY input for the phase and renders ABOVE the editable form.
+          It routes the learner's plain English through `chatGuided`
+          (/guided/chat), which p1 makes apply-capable: an actionable submit
+          re-proposes + applies this phase's config IN PLACE (step pointer
+          unchanged) and the form below re-renders from the new step_N_result;
+          a question / prose / failure falls back to advisory prose with no
+          mutation. p2 owns only the layout + caption; the apply behavior is
+          p1's backend contract (chatGuided is unchanged here).
+
+          The caption is keyed on the live `guidedSession.step` via
+          GUIDED_CHAT_PLACEHOLDERS (closed list at module top), recaptioned
+          per phase to invite intent ("Describe the source you want…") rather
+          than advisory Q&A.
+
+          `disabled={guidedChatPending}` blocks rapid double-submits while a
+          /guided/chat round-trip is in flight.
+        */}
+        <section
+          className="guided-step-chat"
+          role="region"
+          aria-label="Describe what you want"
+        >
+          <h2 className="guided-step-chat-heading">Describe what you want</h2>
+          <ChatInput
+            onSend={(content) => void chatGuided(content)}
+            disabled={guidedChatPending}
+            inputRef={inputRef}
+            placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
+            maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
+          />
+        </section>
         <section
           className="guided-current-decision"
           aria-labelledby="guided-current-decision-heading"
@@ -1343,39 +1378,6 @@ export function ChatPanel({
             account-level default-mode preference from guided→freeform (or
             back). Same backend row as the Settings → Composer pane. */}
         <InlineOptOutCheckbox />
-        {/*
-          Per-step conversational chat input (Phase A slice 4).
-
-          Lives below the active wizard turn widget so the widget remains the
-          primary control surface; chat is a sidecar.  The textarea is its
-          own ChatInput instance separate from the freeform composer's
-          ChatInput at the bottom of the freeform branch — they have
-          independent uncontrolled state.
-
-          `placeholder` is keyed on the live `guidedSession.step` via the
-          GUIDED_CHAT_PLACEHOLDERS map (closed list at module top).  The
-          per-step skill briefing on the backend already scopes what the
-          LLM will engage with; the placeholder text is a UX nudge that
-          mirrors the playbook framing.
-
-          `disabled={guidedChatPending}` blocks rapid double-submits while
-          a chat round-trip is in flight.  The store's chatGuided action
-          flips the flag back on response (or error).
-        */}
-        <section
-          className="guided-step-chat"
-          role="region"
-          aria-label="Ask about this step"
-        >
-          <h2 className="guided-step-chat-heading">Ask about this step</h2>
-          <ChatInput
-            onSend={(content) => void chatGuided(content)}
-            disabled={guidedChatPending}
-            inputRef={inputRef}
-            placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
-            maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
-          />
-        </section>
         <InlineRunResults />
       </div>
     );

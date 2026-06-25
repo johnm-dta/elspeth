@@ -461,12 +461,10 @@ describe("ChatPanel mode discriminator", () => {
     expect(chatMain).not.toBeNull();
     expect(chatMain?.classList.contains("chat-panel--guided")).toBe(true);
 
-    // Phase A slice 4: ChatInput is rendered INSIDE the guided-active
-    // branch (below GuidedTurn + ExitToFreeformButton) so the user can
-    // ask scoped advisory questions of the LLM.  Previously this branch
-    // suppressed all ChatInput surfaces; the assertion is now positive.
-    // Per-step placeholder + onSend wiring are exercised in the two
-    // dedicated tests below.
+    // Phase A slice 4 / LLM-primary reorder: the intent ChatInput is rendered
+    // INSIDE the guided-active branch, now ABOVE the GuidedTurn form (it is
+    // the primary input). This test asserts presence only; per-step
+    // placeholder + onSend wiring are exercised in the dedicated tests below.
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
   });
@@ -569,7 +567,7 @@ describe("ChatPanel mode discriminator", () => {
     });
   });
 
-  it("visually separates guided sidecar chat as ask about this step", () => {
+  it("visually separates the guided intent box as describe what you want", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -581,7 +579,7 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     const chatRegion = screen.getByRole("region", {
-      name: /ask about this step/i,
+      name: /describe what you want/i,
     });
     expect(chatRegion).toContainElement(screen.getByTestId("chat-input"));
   });
@@ -698,7 +696,7 @@ describe("ChatPanel mode discriminator", () => {
     // string updates here.
     const chatInput = screen.getByTestId("chat-input");
     expect(chatInput.dataset.placeholder).toBe(
-      "Ask about source options, columns, or paste a sample row…",
+      "Describe the source you want — e.g. a CSV, a store query, or pages to scrape…",
     );
   });
 
@@ -714,7 +712,7 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
-      "Ask about sink config, outputs, or schema mode…",
+      "Describe the output you want — the shape and fields the pipeline should produce…",
     );
   });
 
@@ -732,6 +730,69 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
       "Confirm how the steps connect, then continue.",
     );
+  });
+
+  it("renders the per-step placeholder for STEP_2_5_RECIPE_MATCH", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      // The placeholder keys on guidedSession.step (not the turn type), so
+      // singleSelectTurn() is fine regardless of step (verified ChatPanel.tsx:1375).
+      guidedSession: { ...activeGuidedSession(), step: "step_2_5_recipe_match" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
+      "Describe how this recipe should change, or accept it as proposed…",
+    );
+  });
+
+  it("renders the per-step placeholder for STEP_3_TRANSFORMS", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
+      "Describe what each row should become, or how to fix the proposed transforms…",
+    );
+  });
+
+  it("renders the intent box ABOVE the editable form (LLM-primary layout)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // Classnames are unchanged (Option B): the intent box keeps
+    // `.guided-step-chat`; only its heading text + aria-label were recaptioned.
+    const intent = container.querySelector(".guided-step-chat");
+    const form = container.querySelector(".guided-current-decision");
+    expect(intent).not.toBeNull();
+    expect(form).not.toBeNull();
+    // Document-order: intent precedes form. compareDocumentPosition returns
+    // DOCUMENT_POSITION_FOLLOWING (4) when `form` follows `intent`.
+    expect(
+      intent!.compareDocumentPosition(form!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // The intent box's recaptioned heading is present.
+    expect(
+      screen.getByRole("region", { name: "Describe what you want" }),
+    ).toBeInTheDocument();
   });
 
   it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {

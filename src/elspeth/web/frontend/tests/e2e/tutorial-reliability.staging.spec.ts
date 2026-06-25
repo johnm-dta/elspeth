@@ -92,7 +92,7 @@ async function resolveVisibleReviews(page: Page): Promise<number> {
 // run is required to finalize it. See the task report.
 //
 // Shape: the canonical hello-world source is dynamic-source-from-chat — the user
-// DESCRIBES the URL scenario in the step-1 "Ask about this step" chat and the
+// DESCRIBES the URL scenario in the step-1 "Describe what you want" chat and the
 // LLM resolves a complete inline source request, advancing the wizard (guided.ts
 // GuidedChatResponse: "Step 1 source chat may resolve a complete inline source
 // request; then these fields mirror /guided/respond"). We seed FIXED_PROMPT into
@@ -106,7 +106,7 @@ async function resolveVisibleReviews(page: Page): Promise<number> {
 async function driveGuidedWalk(page: Page): Promise<void> {
   const guidedPanel = page.getByLabel(/guided composer/i);
   const runHeading = page.getByRole("heading", { name: /Running your pipeline/i });
-  const stepChat = page.getByRole("region", { name: "Ask about this step" });
+  const stepChat = page.getByRole("region", { name: "Describe what you want" });
   const stepChatInput = stepChat.getByLabel("Message input");
   const stepChatSend = stepChat.getByRole("button", { name: "Send message" });
 

@@ -15,7 +15,7 @@ const tutorialPassRate = tutorialDenom ? passes.length / tutorialDenom : 0;
 const infraRate = n ? infra.length / n : 0;
 
 const gitSha = execSync("git rev-parse --short HEAD").toString().trim();
-const harnessVersion = "1.0.0";
+const harnessVersion = "2.0.0";
 const skillHash = records.find((r) => r.stamp.composer_skill_hash)?.stamp.composer_skill_hash ?? "unknown";
 const modelId = records.find((r) => r.stamp.model_identifier)?.stamp.model_identifier ?? "unknown";
 

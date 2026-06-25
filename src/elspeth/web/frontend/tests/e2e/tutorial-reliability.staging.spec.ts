@@ -162,7 +162,7 @@ async function driveGuidedWalk(page: Page): Promise<void> {
 // "did we get a row" not "did the row carry a real extracted value", and the
 // minSubstantiveRows check never bit. This targets the extraction output.
 const DEGENERATE_VALUE = /cannot|unknown|n\/a|none|no clear|not (?:found|available|determined)/i;
-const KNOWN_INPUT_KEYS = /^(?:url|source|agency|abuse_contact|scraping_reason|html|html_content|raw_html)$/i;
+const KNOWN_INPUT_KEYS = /^(?:url|source|html|html_content|raw_html|content|content_fingerprint)$/i;
 function substantiveRowCount(
   rows: Array<Record<string, unknown>>,
   sourceInputKeys: string[],
@@ -367,19 +367,28 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
           failureDetail: null,
         }))
       : { operations: [], tokens: [], failureDetail: null };
-    const raisedKinds = events.map((e) => e.kind);
+    // expectVerify entries may be an InterpretationKind (e.g. "pipeline_decision")
+    // OR a user_term (e.g. "prompt_injection_shield_recommendation", the shield
+    // review's discriminating signal whose kind is pipeline_decision). Match on
+    // either, so the shield review is recognised by its user_term. Kinds are enum
+    // values and user_terms are field-path strings, so the OR cannot false-match.
     const underFlagged = ASSUMPTION_RUBRIC.expectVerify.filter(
-      (k) => !raisedKinds.includes(k),
+      (k) => !events.some((e) => e.kind === k || e.user_term === k),
     );
-    // Over-flagging (spec §5): the composer raised an interpretation review whose
-    // semantic TARGET is a value the user stated explicitly (abuse contact /
-    // scraping reason). We match the review's `user_term` against the rubric's
-    // term patterns — NOT the event `kind` (abuse_contact/scraping_reason are
-    // implicit-decision field paths, never InterpretationKind values, so a
-    // kind-comparison can never fire). See prompt-and-rubric.ts.
+    // overFlagTerms mixes InterpretationKind-valued entries (e.g.
+    // "invented_source", whose pattern /invent|fabricat/i matches the KIND) with
+    // user_term-valued entries (e.g. "project_name"/"total_cost", matched on the
+    // review's user_term). Test each term's pattern against EITHER the event kind
+    // OR its user_term so the kind-valued entry is recognised. Kinds are enum
+    // values and user_terms are field-path strings, so the OR cannot false-match
+    // across the two namespaces.
     const overFlagged = ASSUMPTION_RUBRIC.overFlagTerms.filter((_label, i) => {
       const pattern = ASSUMPTION_RUBRIC.overFlagTermPatterns[i];
-      return events.some((e) => typeof e.user_term === "string" && pattern.test(e.user_term));
+      return events.some(
+        (e) =>
+          (typeof e.kind === "string" && pattern.test(e.kind)) ||
+          (typeof e.user_term === "string" && pattern.test(e.user_term)),
+      );
     });
     const normalized =
       (comp.composer_meta as Record<string, unknown> | null)

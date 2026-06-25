@@ -146,7 +146,7 @@ export function TutorialGuidedShell({
           {error}
         </p>
       )}
-      <ChatPanel />
+      <ChatPanel isTutorial />
     </section>
   );
 }

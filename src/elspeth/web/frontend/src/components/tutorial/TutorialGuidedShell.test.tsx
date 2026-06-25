@@ -28,7 +28,12 @@ vi.mock("@/api/client", () => ({
 }));
 
 vi.mock("@/components/chat/ChatPanel", () => ({
-  ChatPanel: () => <div data-testid="chat-panel-stub" />,
+  ChatPanel: (props: { isTutorial?: boolean }) => (
+    <div
+      data-testid="chat-panel-stub"
+      data-is-tutorial={String(props.isTutorial)}
+    />
+  ),
 }));
 
 describe("TutorialGuidedShell", () => {
@@ -75,16 +80,16 @@ describe("TutorialGuidedShell", () => {
     expect(useSessionStore.getState().activeSessionId).toBe("sess-1");
   });
 
-  it("mounts the ChatPanel guided surface", async () => {
-    // ChatPanel is stubbed at the module boundary (see vi.mock above); this
-    // asserts only that TutorialGuidedShell mounts it. The real ChatPanel
-    // guided behaviour is covered by ChatPanel's own suite.
+  it("mounts the ChatPanel guided surface with isTutorial set", async () => {
+    // ChatPanel is stubbed at the module boundary (see vi.mock above). The
+    // tutorial shell MUST pass isTutorial so ChatPanel suppresses the
+    // freeform exits and never falls through to the freeform body (concern B).
     render(
       <TutorialGuidedShell sessionId="sess-1" onCompleted={vi.fn()} />,
     );
-    await waitFor(() =>
-      expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument(),
-    );
+    const stub = await screen.findByTestId("chat-panel-stub");
+    expect(stub).toBeInTheDocument();
+    expect(stub.dataset.isTutorial).toBe("true");
   });
 
   it("clears stale completed guided state before starting a new tutorial session", async () => {

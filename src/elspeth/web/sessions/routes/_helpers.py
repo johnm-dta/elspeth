@@ -106,6 +106,7 @@ from elspeth.web.composer.guided.steps import (
     handle_step_3_chain_accept,
     handle_step_4_wire_confirm,
 )
+from elspeth.web.composer.guided.tutorial_recipe_prefill import prefill_tutorial_recipe_slots
 from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_meta
 from elspeth.web.composer.progress import (
     ComposerProgressRegistry,
@@ -3263,6 +3264,24 @@ async def _dispatch_guided_respond(
 
         recipe_match = match_recipe(source, sink)
         if recipe_match is not None:
+            # Tutorial worked-example prefill (p4 Task 8b). A passive tutorial
+            # learner cannot TYPE the operator-fillable recipe slots, so for a
+            # TUTORIAL session we move them out of ``unsatisfied_slots`` into
+            # ``slots`` with honest config-sourced worked-example values. The
+            # offer then surfaces them PREFILLED (read-only) with no
+            # required-empty knob, so the learner's single "Apply recipe" click
+            # is enabled. A NON-tutorial offer is UNCHANGED (the operator fills
+            # them). This is separate from 8a's accept-seam allowed_hosts SSRF
+            # injection (an SSRF control, never a learner-visible slot).
+            if guided.profile == TUTORIAL_PROFILE:
+                if settings is None:
+                    # Fail closed: without settings we cannot source the
+                    # composer model / LLM secret-ref for the worked example.
+                    raise InvariantError(
+                        "tutorial recipe offer reached the dispatcher without settings; "
+                        "the worked-example slots cannot be sourced from config (fail-closed)."
+                    )
+                recipe_match = prefill_tutorial_recipe_slots(recipe_match=recipe_match, settings=settings)
             next_turn = build_step_2_5_recipe_offer_turn(recipe_match)
             new_record = TurnRecord(
                 step=GuidedStep.STEP_2_5_RECIPE_MATCH,

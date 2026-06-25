@@ -11,7 +11,7 @@ export const TURN_4_PRIMARY_BUTTON = "Continue";
 export const TURN_5_PRIMARY_BUTTON = "Continue";
 export const TURN_7_PRIMARY_BUTTON = "Take me to the composer";
 
-export const HELLO_WORLD_SESSION_TITLE = "hello-world (cool government pages)";
+export const HELLO_WORLD_SESSION_TITLE = "hello-world (synthetic project briefs)";
 
 // Set immediately after createSession in HelloWorldTutorial.onStart (before the
 // guided shell's external POST /guided/start) so the backend orphan-cleanup

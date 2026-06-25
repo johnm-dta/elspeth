@@ -5,13 +5,11 @@
 // silently never hits and every tutorial run goes live. The Python test
 // ``test_canonical_seed_matches_frontend_constant`` fails CI if they diverge.
 export const CANONICAL_TUTORIAL_PROMPT =
-  "Create a data source from these five Australian government pages: " +
-  "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, " +
-  "https://www.oaic.gov.au, and https://www.dta.gov.au. Use abuse contact " +
-  "noreply@dta.gov.au and scraping reason 'DTA technical demonstration'. " +
-  "Read the HTML for each page, have an LLM return a single fact about each " +
-  "government agency based on the page HTML. Remove the HTML and save the " +
-  "rest to a json file.";
+  "Scrape these three synthetic project-brief pages and, for each page, " +
+  "have an LLM read the tables and return one JSON row with the project " +
+  "name, the top risk (the highest-impact risk and its mitigation), the " +
+  "go-live date, and the total cost (the sum of the cost line items). " +
+  "Remove the raw HTML and write the rows to a json file.";
 
 export type TutorialStep =
   | "welcome"

@@ -123,7 +123,7 @@ describe("TutorialTurn7Graduation", () => {
     await waitFor(() =>
       expect(useSessionStore.getState().renameSession).toHaveBeenCalledWith(
         "sess-new",
-        "hello-world (cool government pages)",
+        "hello-world (synthetic project briefs)",
       ),
     );
     expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({

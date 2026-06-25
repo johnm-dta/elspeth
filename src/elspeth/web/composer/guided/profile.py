@@ -26,7 +26,7 @@ _PROFILE_KEYS = frozenset(
     }
 )
 
-_TUTORIAL_ENTRY_SEED = "Rate how 'cool' each Australian government web page is on a 1-10 scale, reading each URL from the list below."
+_TUTORIAL_ENTRY_SEED = "Scrape the three synthetic project-brief pages from the list below and, for each, extract the project name, top risk, go-live date, and total cost into one JSON row."
 
 
 @dataclass(frozen=True, slots=True)

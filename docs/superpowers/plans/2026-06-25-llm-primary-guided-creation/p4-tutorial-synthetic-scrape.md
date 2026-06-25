@@ -1773,8 +1773,9 @@ gets the tight CIDR list from the Task 2 resolver.
           required=False,
           # Tuple default (not []): recipes.py warns a mutable list default would
           # silently bypass the frozen contract; the sibling str_list slot
-          # required_input_fields uses default=() (recipes.py:190). _coerce_default
-          # returns tuple(raw) for str_list, so the validated value is always a tuple.
+          # required_input_fields uses default=() (recipes.py:190). _coerce_slot
+          # (recipes.py:51) returns tuple(items) for a SUPPLIED str_list; an omitted
+          # slot gets spec.default verbatim (recipes.py:142) — () is already a tuple.
           default=(),
           description=(
               "SSRF allowlist for the web_scrape node, as a list of CIDR strings. "

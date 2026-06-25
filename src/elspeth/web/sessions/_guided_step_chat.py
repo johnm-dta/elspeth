@@ -31,6 +31,7 @@ from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution, maybe_resolve_step_1_source_chat, solve_step_chat
 from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.resolved import SourceResolved
 
 slog = structlog.get_logger()
 
@@ -114,6 +115,7 @@ async def resolve_step_1_source_chat_with_auto_drop(
     model: str,
     user_message: str,
     plugin_hint: str | None,
+    current_source: SourceResolved | None = None,
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
@@ -135,6 +137,7 @@ async def resolve_step_1_source_chat_with_auto_drop(
             model=model,
             user_message=user_message,
             plugin_hint=plugin_hint,
+            current_source=current_source,
             temperature=temperature,
             seed=seed,
             recorder=recorder,

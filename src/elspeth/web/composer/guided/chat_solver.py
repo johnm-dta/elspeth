@@ -30,6 +30,7 @@ from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.resolved import SourceResolved
 from elspeth.web.composer.llm_response_parsing import attach_llm_calls, build_llm_call_record
 from elspeth.web.composer.service import _litellm_acompletion
 
@@ -131,17 +132,31 @@ def _record_llm_call(
         attach_llm_calls(current_exc, recorder)
 
 
-def _build_step_1_source_tool_prompt(*, plugin_hint: str | None) -> str:
+def _build_step_1_source_tool_prompt(
+    *,
+    plugin_hint: str | None,
+    current_source: SourceResolved | None = None,
+) -> str:
     """Compose the Step-1 source/data-schema tool prompt."""
     hint = (
         f"The current source plugin selected in the wizard is {plugin_hint!r}."
         if plugin_hint is not None
         else "The current source plugin is not persisted in server state; infer only when the chat message or tool context makes it explicit."
     )
+    revise_block = ""
+    if current_source is not None:
+        revise_block = (
+            "\n## Current applied source (revise relative to this)\n\n"
+            "A source has already been applied to this phase. The user's message "
+            "is a REVISION instruction against it — re-emit the COMPLETE updated "
+            "source (not a diff). Current source:\n"
+            f"{json.dumps(current_source.to_dict(), sort_keys=True)}\n"
+        )
     return (
         f"{load_step_chat_skill(GuidedStep.STEP_1_SOURCE).rstrip()}\n\n"
         "## Step 1 Source/Data Schema Tool\n\n"
         f"{hint}\n"
+        f"{revise_block}"
         "If the user's message provides enough information to create inline source data, "
         "call `resolve_source` with the complete file content, the source plugin, "
         "schema options, observed columns, representative sample rows, and a brief "
@@ -235,6 +250,7 @@ async def maybe_resolve_step_1_source_chat(
     model: str,
     user_message: str,
     plugin_hint: str | None,
+    current_source: SourceResolved | None = None,
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
@@ -244,6 +260,10 @@ async def maybe_resolve_step_1_source_chat(
     Returns ``None`` when the model replies in ordinary prose without a
     ``resolve_source`` tool call, allowing the route to fall back to the
     advisory chat path.
+
+    When ``current_source`` is supplied the tool prompt includes the current
+    applied source so a revision instruction ("add a url column", "make it
+    csv not json") resolves relative to it.
     """
     if not user_message:
         raise InvariantError("maybe_resolve_step_1_source_chat: user_message is empty (route validation gap)")
@@ -253,7 +273,13 @@ async def maybe_resolve_step_1_source_chat(
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
     messages: list[dict[str, Any]] = [
-        {"role": "system", "content": _build_step_1_source_tool_prompt(plugin_hint=plugin_hint)},
+        {
+            "role": "system",
+            "content": _build_step_1_source_tool_prompt(
+                plugin_hint=plugin_hint,
+                current_source=current_source,
+            ),
+        },
         {"role": "user", "content": user_message},
     ]
     tools = [_STEP_1_SOURCE_TOOL]

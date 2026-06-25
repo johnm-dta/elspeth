@@ -529,6 +529,61 @@ def test_gate_routed_web_scrape_through_prompt_shield_emits_no_warning() -> None
     assert warning_pairs == ()
 
 
+def _state_with_plain_llm_only() -> CompositionState:
+    """One llm node with NO upstream producer at all (no web_scrape, no shield)."""
+    return CompositionState(
+        source=None,
+        nodes=(
+            NodeSpec(
+                id="rate_node",
+                node_type="transform",
+                plugin="llm",
+                input="rows",
+                on_success="out",
+                on_error="stop",
+                options={
+                    "provider": "openrouter",
+                    "model": "anthropic/claude-sonnet-4.6",
+                    "prompt_template": "Rate {{ row.text }} and return JSON.",
+                    "temperature": 0,
+                },
+                condition=None,
+                routes=None,
+                fork_to=None,
+                branches=None,
+                policy=None,
+                merge=None,
+            ),
+        ),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def test_plain_unshielded_llm_warns_always_on() -> None:
+    # Always-on: an llm node with no upstream producer and no shield still
+    # surfaces the advisory (State C default). The pre-change code returned () here.
+    state = _state_with_plain_llm_only()
+    warning_pairs = prompt_shield_recommendation_warning_pairs(state)
+    assert warning_pairs
+    assert any(component == "node:rate_node" for component, _message in warning_pairs)
+
+
+def test_prompt_shield_warning_uses_available_draft_in_state_b() -> None:
+    from elspeth.web.interpretation_state import PROMPT_SHIELD_AVAILABLE_DRAFT
+
+    state = _state_with_plain_llm_only()
+    pairs_b = prompt_shield_recommendation_warning_pairs(state, shield_available=True)
+    assert pairs_b
+    assert any(PROMPT_SHIELD_AVAILABLE_DRAFT in message for _component, message in pairs_b)
+
+    pairs_c = prompt_shield_recommendation_warning_pairs(state, shield_available=False)
+    assert pairs_c
+    assert any("continuing without it is allowed" in message for _component, message in pairs_c)
+
+
 def test_field_mapper_projection_without_web_scrape_raw_fields_does_not_create_cleanup_review_site() -> None:
     state = _state_with_cleanup_node(
         {

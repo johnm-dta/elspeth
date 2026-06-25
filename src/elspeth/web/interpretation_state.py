@@ -38,6 +38,14 @@ PROMPT_SHIELD_WARNING_DRAFT: Final[str] = (
     "exposure on untrusted remote content, but continuing without it is allowed. "
     "[user_term: prompt_injection_shield_recommendation]"
 )
+PROMPT_SHIELD_AVAILABLE_DRAFT: Final[str] = (
+    "An authorized prompt-injection shield (azure_prompt_shield) IS available in "
+    "this deployment. Wire it between the external-content fetch step and this LLM: "
+    "untrusted remote text routed straight into the LLM is a prompt-injection "
+    "exposure, and the shield is configured and ready to use. Wiring it in is "
+    "strongly recommended, but you may proceed without it. "
+    "[user_term: prompt_injection_shield_recommendation]"
+)
 
 _RAW_HTML_CLEANUP_DRAFT_MARKERS: Final[tuple[str, ...]] = ("raw html", "fingerprint")
 
@@ -237,28 +245,47 @@ def composition_review_contract_error(state: CompositionState) -> str | None:
     return raw_html_cleanup_review_contract_error(state)
 
 
-def prompt_shield_recommendation_warning_pairs(state: CompositionState) -> tuple[tuple[str, str], ...]:
-    """Return advisory warnings for unshielded untrusted content entering an LLM."""
+def prompt_shield_recommendation_warning_pairs(
+    state: CompositionState,
+    *,
+    shield_available: bool | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Return always-on advisory warnings for unshielded LLM nodes.
+
+    The review is now ALWAYS-ON per LLM node, decoupled from whether an
+    untrusted remote producer (web_scrape) is upstream:
+
+    - **State A** (an authorized shield is reachable upstream) — silent, no warning.
+    - **State B** (``shield_available is True``) — an authorized shield IS
+      configured for this deployment; strong "wire it in" advisory.
+    - **State C** (``shield_available`` is ``False`` or ``None``) — no shield
+      available, or availability is undeterminable; high-risk "reconsider"
+      advisory. ``None`` is the FAIL-SAFE default because the pure
+      :meth:`CompositionState.validate` caller has no deployment/secret context
+      to distinguish B from C.
+
+    Advisory only — the caller appends these at "medium" severity into the
+    ``warnings`` list and they are excluded from the blocking contract.
+    """
 
     producer_by_output_stream = _producer_by_output_stream(state.nodes)
     warnings: list[tuple[str, str]] = []
     for node in state.nodes:
         if node.plugin != "llm":
             continue
-        if not _llm_consumes_untrusted_remote_content(node, producer_by_output_stream):
-            continue
+        if _llm_has_authorized_shield_upstream(node, producer_by_output_stream):
+            continue  # State A — already shielded, silent
         if _llm_has_shield_recommendation(node):
-            continue
-        warnings.append(
-            (
-                f"node:{node.id}",
-                (
-                    f"LLM node {node.id!r} consumes externally-fetched content from a web_scrape upstream "
-                    "without an authorized prompt-injection shield between them. "
-                    f"{PROMPT_SHIELD_WARNING_DRAFT}"
-                ),
-            )
+            continue  # review already staged on this node
+        draft = PROMPT_SHIELD_AVAILABLE_DRAFT if shield_available is True else PROMPT_SHIELD_WARNING_DRAFT
+        consumes_untrusted = _llm_consumes_untrusted_remote_content(node, producer_by_output_stream)
+        lead = (
+            f"LLM node {node.id!r} consumes externally-fetched content from a web_scrape upstream "
+            "without an authorized prompt-injection shield between them. "
+            if consumes_untrusted
+            else f"LLM node {node.id!r} has no authorized prompt-injection shield in front of it. "
         )
+        warnings.append((f"node:{node.id}", f"{lead}{draft}"))
     return tuple(warnings)
 
 
@@ -305,6 +332,34 @@ def _llm_consumes_untrusted_remote_content(
         if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
             return False
         if producer.plugin in _UNTRUSTED_REMOTE_CONTENT_PRODUCER_PLUGINS:
+            return True
+        stream = producer.input
+    return False
+
+
+def _llm_has_authorized_shield_upstream(
+    node: NodeSpec,
+    producer_by_output_stream: Mapping[str, NodeSpec],
+) -> bool:
+    """Walk upstream from ``node``; return True iff an authorized prompt-injection
+    shield is reachable on the input chain.
+
+    This is the always-on **State A** detector: it is judged on its own, NOT
+    coupled to first reaching an untrusted producer (the deliberate decoupling
+    from :func:`_llm_consumes_untrusted_remote_content`). A shielded LLM stays
+    silent regardless of what produces its input.
+    """
+
+    if node.plugin != "llm":
+        return False
+    stream = node.input
+    visited: set[str] = set()
+    while stream and stream not in visited:
+        visited.add(stream)
+        if stream not in producer_by_output_stream:
+            return False
+        producer = producer_by_output_stream[stream]
+        if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
             return True
         stream = producer.input
     return False

@@ -1244,6 +1244,10 @@ export function ChatPanel({
   //   3. anything else (no guidedSession, exited_to_freeform terminal, or a
   //      transient state where guidedSession is set but guidedNextTurn is null)
   //      → fall through to the freeform body below.
+  //   4. (tutorial only) when `isTutorial` is set, the fall-through in (3) is
+  //      replaced by a guided placeholder surface instead of the freeform body,
+  //      so a tutorial can never land on a panel-less freeform screen (concern
+  //      B). The completed branch (1) still wins for a tutorial completion.
   //
   // The completed branch is checked FIRST so that a stale `guidedNextTurn`
   // alongside a completed terminal still surfaces the summary (correct UX)
@@ -1252,8 +1256,8 @@ export function ChatPanel({
   // When `terminal.kind === "exited_to_freeform"`, branch 1 does not match
   // (kind !== "completed") and branch 2 does not match (`!guidedSession.terminal`
   // is false because `terminal` is set). Execution falls through to the existing
-  // freeform body — which is the correct outcome (the user has exited; show
-  // them the chat surface).
+  // freeform body — which is the correct outcome (non-tutorial only — see point 4)
+  // (the user has exited; show them the chat surface).
   //
   // Both branches preserve `id="chat-main"` so the skip-link target is honoured;
   // the modifier class (`--guided` / `--completed`) provides a per-branch hook
@@ -1389,6 +1393,43 @@ export function ChatPanel({
             back). Same backend row as the Settings → Composer pane. */}
         <InlineOptOutCheckbox />
         <InlineRunResults />
+      </div>
+    );
+  }
+
+  // ── Concern B: a tutorial must NEVER reach the panel-less freeform body ──
+  //
+  // Reaching this point means neither the completed branch nor the
+  // guided-active branch matched. For a non-tutorial session that is the
+  // legitimate freeform surface (below). For a TUTORIAL session it is one of
+  // two states that must NOT show freeform:
+  //   (a) the TutorialGuidedShell startup flash, where guidedSession /
+  //       guidedNextTurn are transiently null before the async start resolves
+  //       (TutorialGuidedShell.tsx:61-81); and
+  //   (b) an `exited_to_freeform` terminal (which a tutorial can no longer
+  //       trigger after Task 2 removed the exit affordances, but is guarded
+  //       here defensively in case a stale persisted session carries it).
+  // Both are caught by this single guard; the completed branch above returns
+  // first, so a tutorial completion still graduates normally.
+  //
+  // The rail reflects the ACTUAL session step when one is available
+  // (the exited_to_freeform case carries a real `guidedSession.step`); it
+  // falls back to "step_1_source" ONLY for the startup-flash case where
+  // `guidedSession === null` (no step exists yet). Hardcoding step_1 in the
+  // non-null case would show the wrong step in the rail — a fidelity gap.
+  if (isTutorial) {
+    const placeholderStep: WorkflowStepId = guidedSession?.step ?? "step_1_source";
+    return (
+      <div
+        id="chat-main"
+        className="chat-panel chat-panel--guided"
+        aria-label="Guided composer"
+        data-testid="tutorial-guided-loading"
+      >
+        <GuidedWorkflowStepper activeStep={placeholderStep} />
+        <p role="status" className="guided-loading-status">
+          Preparing your guided pipeline…
+        </p>
       </div>
     );
   }

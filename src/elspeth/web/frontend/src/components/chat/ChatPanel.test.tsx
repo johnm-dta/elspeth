@@ -1135,6 +1135,66 @@ describe("ChatPanel mode discriminator", () => {
       screen.queryByRole("button", { name: "Exit to freeform" }),
     ).toBeNull();
   });
+
+  it("renders a guided placeholder (not the freeform body) when isTutorial and the session is still loading (concern B startup flash)", () => {
+    // TutorialGuidedShell clears guidedSession/guidedNextTurn to null before
+    // the async start resolves (TutorialGuidedShell.tsx:61-81). Without the
+    // tutorial guard, ChatPanel would fall through to the panel-less freeform
+    // body during that window.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: null,
+      guidedNextTurn: null,
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    // Guided placeholder present...
+    expect(
+      screen.getByTestId("tutorial-guided-loading"),
+    ).toBeInTheDocument();
+    // ...and the freeform composer input is NOT rendered.
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+  });
+
+  it("renders a guided placeholder (not the freeform body) when isTutorial and terminal is exited_to_freeform (concern B defensive)", () => {
+    const terminal: TerminalState = {
+      kind: "exited_to_freeform",
+      reason: "user_pressed_exit",
+      pipeline_yaml: null,
+    };
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_3_transforms",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedNextTurn: null,
+      guidedTerminal: terminal,
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByTestId("tutorial-guided-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    // The placeholder rail reflects the ACTUAL session step, not a hardcoded
+    // step_1 (GuidedWorkflowStepper marks the current step with
+    // aria-current="step", ChatPanel.tsx:1759). The transform-step rail item
+    // must be the current one.
+    const current = screen
+      .getByTestId("tutorial-guided-loading")
+      .querySelector('[aria-current="step"]');
+    expect(current).not.toBeNull();
+    expect(current).toHaveTextContent(/transform/i);
+  });
 });
 
 // ── Focus-on-step-advance tests (Phase 8 fix-up, spec §7.4) ─────────────────

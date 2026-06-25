@@ -6,6 +6,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from elspeth.web.sessions._guided_step_chat import _SYNTHETIC_UNAVAILABLE_MESSAGE
+
 # Reuse the verbatim drive helpers from the sibling e2e test.
 from tests.integration.web.composer.guided.test_step_3_e2e import (
     _create_session,
@@ -211,6 +213,42 @@ def test_step_2_chat_from_schema_form_stamps_prior_record_answered(composer_test
     # The earliest STEP_2 schema_form record (the answered one) carries a hash;
     # the freshly re-rendered one is the new unanswered turn.
     assert any(r["response_hash"] is not None for r in step_2_schema_records)
+
+
+def test_step_2_chat_handler_rejection_falls_back_to_advisory_no_mutation(composer_test_client: TestClient) -> None:
+    """When the sink driver resolves a sink but handle_step_2_sink rejects it
+    (strict commit seam), the STEP_2 branch must fall back to advisory: synthetic
+    unavailable message, next_turn=None, NO mutation, phase unchanged.
+
+    This is the only consumer of the StepChatResult/_SYNTHETIC_UNAVAILABLE_MESSAGE
+    fallback in the STEP_2 branch — the handler-rejection leg.
+    """
+    client = composer_test_client
+    session_id = _create_session(client)
+    _drive_to_step_2(client, session_id)
+    before = _get_guided(client, session_id)
+    out = _outputs_path(client, "rejected_out.jsonl")
+    # The branch reads only handler_result.tool_result.success on rejection, so a
+    # duck-typed result with success=False exercises the synthetic-advisory leg.
+    rejected = SimpleNamespace(tool_result=SimpleNamespace(success=False))
+    with (
+        patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_resolve_sink_response(out)),
+        ),
+        patch(
+            "elspeth.web.sessions.routes.composer.guided.handle_step_2_sink",
+            return_value=rejected,
+        ),
+    ):
+        status, body = _post_chat(client, session_id, message="write the rows to a jsonl file", step_index="step_2_sink")
+    assert status == 200, body
+    # Advisory fall-back: no next_turn, phase unchanged, no outputs committed.
+    assert body["next_turn"] is None
+    assert body["guided_session"]["step"] == "step_2_sink"
+    assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
+    after = _get_guided(client, session_id)
+    assert before["composition_state"]["outputs"] == after["composition_state"]["outputs"]
 
 
 def test_step_3_chat_reproposes_in_place_without_committing(composer_test_client: TestClient) -> None:

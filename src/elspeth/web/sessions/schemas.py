@@ -402,8 +402,9 @@ class GetGuidedResponse(_StrictResponse):
 class TutorialSampleResponse(_StrictResponse):
     """Response for GET /api/sessions/{id}/guided/tutorial-sample.
 
-    Runtime-derived inputs for the tutorial passive auto-drive: the 3 synthetic
-    sample-page URLs and the SSRF host-class (``allowed_hosts``) for the active
+    Runtime-derived inputs for the tutorial's prefilled worked example: the 3
+    synthetic sample-page URLs (appended to the locked STEP_1 prompt the learner
+    Sends verbatim) and the SSRF host-class (``allowed_hosts``) for the active
     tutorial session's resolved origin. The URLs are computed from the resolved
     base at request time (they cannot ride the frozen profile constants), and
     ``allowed_hosts`` is the deterministic resolver output — ``"public_only"``

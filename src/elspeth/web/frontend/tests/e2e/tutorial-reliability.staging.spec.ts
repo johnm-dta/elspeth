@@ -18,7 +18,6 @@ import { test, expect, type Page } from "@playwright/test";
 
 import {
   ASSUMPTION_RUBRIC,
-  FIXED_PROMPT,
   JUDGE_RUBRIC,
 } from "./harness/prompt-and-rubric";
 import { classifyOutcome, type StepSignal } from "./harness/classify";
@@ -110,9 +109,12 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   const stepChatInput = stepChat.getByLabel("Message input");
   const stepChatSend = stepChat.getByRole("button", { name: "Send message" });
 
-  // Seed the source via the step-1 chat (dynamic-source-from-chat).
+  // The tutorial prompt is prepopulated AND locked (read-only) — the learner
+  // types nothing. Wait for the locked worked-example prompt to populate (the
+  // synthetic URLs are fetched + appended async; the box is gated until they
+  // resolve), then just press Send to submit it verbatim.
   await expect(stepChatInput).toBeVisible({ timeout: 30_000 });
-  await stepChatInput.fill(FIXED_PROMPT);
+  await expect(stepChatInput).not.toHaveValue("", { timeout: 30_000 });
   await stepChatSend.click();
 
   // Stage primary affordances, in priority order. "Confirm wiring" is the wire

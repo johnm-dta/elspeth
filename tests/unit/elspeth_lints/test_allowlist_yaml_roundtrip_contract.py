@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import io
 import os
+import textwrap
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -587,3 +588,87 @@ def test_pyyaml_resolver_set_is_exhaustive() -> None:
         f"{len(_YAML11_IMPLICIT_NON_STR_RESOLVERS)} regexes. If PyYAML added "
         f"a new resolver, lift its regex into cli.py and extend the tuple."
     )
+
+
+# ---------- dangling allow_hits entries: loader degrades gracefully ----------
+
+_FAKE_HEX_64 = "a" * 64  # 64 lowercase hex chars; valid shape for fp/sig/policy_hash fields
+
+
+def _judge_gated_entry_yaml(*, file_path: str, file_fingerprint: str) -> str:
+    """Minimal judge-gated allow_hits YAML for a v1 entry at the given file_path."""
+    return textwrap.dedent(
+        f"""\
+        allow_hits:
+        - key: "{file_path}:trust_tier.tier_model:some_fn:fp={file_fingerprint}"
+          owner: operator
+          reason: stale entry from deleted file
+          safety: reviewed
+          judge_verdict: ACCEPTED
+          judge_recorded_at: "2026-01-01T00:00:00+00:00"
+          judge_model: "anthropic/claude-sonnet-4.6"
+          judge_rationale: was fine at review time
+          judge_confidence: 0.9
+          ast_path: some_fn
+          file_fingerprint: "{file_fingerprint}"
+          judge_signature_version: 1
+          judge_policy_hash: "sha256:{_FAKE_HEX_64}"
+          judge_metadata_signature: "hmac-sha256:v1:{_FAKE_HEX_64}"
+        """
+    )
+
+
+def test_dangling_allow_hits_entry_skipped_with_warning(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A judge-gated allow_hits entry whose source file was deleted → skipped + warning, no crash.
+
+    RED before fix (loader raises ValueError on missing file), GREEN after.
+    """
+    root = tmp_path / "src"
+    root.mkdir()
+    # 'web/sessions/routes/deleted.py' does NOT exist under root — this is the dangling case
+    target = tmp_path / "web.yaml"
+    target.write_text(
+        _judge_gated_entry_yaml(
+            file_path="web/sessions/routes/deleted.py",
+            file_fingerprint=_FAKE_HEX_64,
+        ),
+        encoding="utf-8",
+    )
+
+    # load_allowlist must NOT raise — the dangling entry is skipped gracefully
+    allowlist = load_allowlist(target, valid_rule_ids={"trust_tier.tier_model"}, source_root=root)
+
+    assert len(allowlist.entries) == 0, "dangling entry must be skipped, not loaded"
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err, "a greppable warning must be emitted to stderr"
+    assert "deleted.py" in captured.err or "does not exist" in captured.err, f"warning must mention the missing path; got: {captured.err!r}"
+
+
+def test_fingerprint_mismatch_still_raises_for_tamper_detection(tmp_path: Path) -> None:
+    """A judge-gated entry where the file exists but its hash mismatches → ValueError.
+
+    The fingerprint-mismatch path signals potential tampering and MUST still crash.
+    The DanglingAllowlistEntry catch must not swallow this.
+    """
+    root = tmp_path / "src"
+    (root / "web" / "sessions" / "routes").mkdir(parents=True)
+    live_file = root / "web" / "sessions" / "routes" / "composer.py"
+    live_file.write_bytes(b"def some_fn(): pass\n")
+
+    # file_fingerprint is wrong (all-zeros ≠ SHA-256 of the live content)
+    wrong_fp = "0" * 64
+    target = tmp_path / "web.yaml"
+    target.write_text(
+        _judge_gated_entry_yaml(
+            file_path="web/sessions/routes/composer.py",
+            file_fingerprint=wrong_fp,
+        ),
+        encoding="utf-8",
+    )
+
+    # Must raise ValueError for fingerprint mismatch — tamper detection is NOT weakened
+    with pytest.raises(ValueError, match="file_fingerprint mismatch"):
+        load_allowlist(target, valid_rule_ids={"trust_tier.tier_model"}, source_root=root)

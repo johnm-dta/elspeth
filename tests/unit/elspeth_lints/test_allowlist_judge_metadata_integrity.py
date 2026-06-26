@@ -1674,8 +1674,18 @@ def test_v2_entry_loads_when_file_present_even_if_bytes_changed(tmp_path: Path, 
     assert len(reloaded.entries) == 1
 
 
-def test_v2_entry_crashes_at_load_when_source_file_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The version-independent file-exists guard still fires for v2 entries."""
+def test_v2_entry_skipped_at_load_when_source_file_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A v2 entry whose source file is missing is now skipped with a warning, not a crash.
+
+    The version-independent file-exists guard still fires (DanglingAllowlistEntry),
+    but the caller (_parse_allow_hits) catches it and degrades gracefully: the entry
+    is dropped from the loaded allowlist and a greppable WARNING is emitted to stderr.
+    The fingerprint-mismatch tamper path (file exists, hash wrong) is unaffected.
+    """
     source_root = tmp_path / "src"
     source_root.mkdir(parents=True, exist_ok=True)
     # Deliberately do NOT create gone.py under source_root.
@@ -1689,8 +1699,11 @@ def test_v2_entry_crashes_at_load_when_source_file_missing(tmp_path: Path, monke
         ast_path="body[0]",
     )
 
-    with pytest.raises(ValueError, match="does not exist"):
-        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+    loaded = load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+    assert len(loaded.entries) == 0, "dangling v2 entry must be skipped, not loaded"
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "gone.py" in captured.err or "does not exist" in captured.err
 
 
 def test_v1_entry_still_crashes_on_whole_file_byte_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -31,6 +31,17 @@ _MAX_ALLOWLIST_YAML_BYTES = 5 * 1024 * 1024
 _MIN_AUDIT_ANCHOR_ALNUM_CHARS = 2
 
 
+class DanglingAllowlistEntry(ValueError):
+    """Raised when a judge-gated allow_hits entry's bound source file no longer exists.
+
+    The entry is inert (the file that contained the violation it exempted is
+    gone), so callers may skip it with a warning rather than crashing. This
+    sentinel is distinct from plain ``ValueError`` to ensure that the separate
+    fingerprint-mismatch crash path (which signals tampering, not staleness) is
+    never accidentally swallowed by a broad ``except ValueError`` handler.
+    """
+
+
 class JudgeVerdict(StrEnum):
     """The verdict an allowlist entry carries from the cicd-judge.
 
@@ -478,7 +489,14 @@ def _parse_allow_hits(
         _validate_judge_metadata_atomic(allowlist_entry, context=ctx)
         _validate_audit_review_context(allowlist_entry, context=ctx)
         if source_root is not None and allowlist_entry.judge_verdict is not None:
-            _verify_source_binding_at_load(allowlist_entry, source_root=source_root, context=ctx)
+            try:
+                _verify_source_binding_at_load(allowlist_entry, source_root=source_root, context=ctx)
+            except DanglingAllowlistEntry as exc:
+                sys.stderr.write(
+                    f"WARNING: stale allowlist entry {ctx} binds to a deleted source file — "
+                    f"operator should remove it and re-sign. Detail: {exc}\n"
+                )
+                continue  # skip dangling entry; do NOT append; do NOT verify signature
             _verify_judge_metadata_signature_at_load(allowlist_entry, context=ctx)
         entries.append(allowlist_entry)
     return entries
@@ -886,7 +904,7 @@ def _verify_source_binding_at_load(entry: AllowlistEntry, *, source_root: Path, 
     file_path = _file_path_from_canonical_key(entry.key)
     source_path = source_root / file_path
     if not source_path.exists():
-        raise ValueError(
+        raise DanglingAllowlistEntry(
             f"{context}: judge-gated entry binds to {file_path!r} which does not exist "
             f"under {source_root}; either the source file was removed without removing "
             f"the dependent allowlist entry, or the entry's key was transplanted from a "

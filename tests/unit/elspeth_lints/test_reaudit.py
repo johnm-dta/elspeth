@@ -814,18 +814,17 @@ def test_entry_obsolete_when_no_current_finding(tmp_path: Path) -> None:
     assert report.outcomes[0].fresh_verdict is None
 
 
-def test_entry_obsolete_when_source_file_deleted(tmp_path: Path) -> None:
-    """Source-file deletion under a judge-gated entry now fails at load (C8-3).
+def test_entry_skipped_when_source_file_deleted(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Source-file deletion under a judge-gated entry → skip + warning, not a crash.
 
-    Before C8-3 binding enforcement, reaudit would classify this as
-    ENTRY_OBSOLETE (no live finding because the file is gone). With
-    binding enforcement, the load-time gate fires first: a judge-gated
-    entry bound to a missing file is corruption (the dependent entry
-    should have been removed when the source was deleted), and the
-    correct response is to refuse to load — surfacing the dangling
-    audit record rather than silently degrading it to "obsolete." The
-    operator removes the entry; reaudit is not the cleanup tool for
-    this class of drift.
+    Before the allow_hits runtime robustness fix, the loader raised ValueError
+    here (refusing to load the whole allowlist). After the fix, the dangling
+    entry is skipped at load time with a greppable WARNING to stderr, and
+    reaudit proceeds with an empty worklist (no entries to re-examine).
+    The fingerprint-mismatch tamper path (file exists, hash wrong) is unaffected.
     """
     root, target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
@@ -839,15 +838,19 @@ def test_entry_obsolete_when_source_file_deleted(tmp_path: Path) -> None:
     )
     target.unlink()
 
-    with pytest.raises(ValueError, match=r"judge-gated entry binds to .* which does not exist"):
-        reaudit_entries(
-            root=root.resolve(),
-            allowlist_dir=allowlist_dir,
-            rule_filter="trust_tier.tier_model",
-            since=None,
-            limit=None,
-            include_pre_judge=False,
-        )
+    # reaudit_entries must NOT raise — dangling entry is skipped gracefully
+    report = reaudit_entries(
+        root=root.resolve(),
+        allowlist_dir=allowlist_dir,
+        rule_filter="trust_tier.tier_model",
+        since=None,
+        limit=None,
+        include_pre_judge=False,
+    )
+    assert len(report.outcomes) == 0, "skipped dangling entry must produce no reaudit outcomes"
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "widget.py" in captured.err or "does not exist" in captured.err
 
 
 # =====================================================================

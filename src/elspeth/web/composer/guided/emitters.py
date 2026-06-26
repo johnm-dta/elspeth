@@ -45,6 +45,7 @@ from elspeth.web.composer.guided.protocol import (
     _Observed,
     _Option,
 )
+from elspeth.web.composer.guided.tutorial_schema_form_prefill import prefill_tutorial_schema_form_knobs
 from elspeth.web.composer.tools._common import _semantic_contracts_payload, _serialize_full_pipeline_state
 
 if TYPE_CHECKING:
@@ -243,6 +244,8 @@ def build_step_2_schema_form_turn(
 def build_step_1_schema_form_turn_from_resolved(
     source: SourceResolved,
     catalog: CatalogServiceProtocol,
+    *,
+    tutorial: bool = False,
 ) -> Turn:
     """Build the STEP_1 ``schema_form`` populated from an APPLIED source.
 
@@ -251,6 +254,13 @@ def build_step_1_schema_form_turn_from_resolved(
     editable form shows what the LLM (or the manual path) built. Used by the
     chat-apply in-place re-render and by GET /guided when ``step_1_result`` is
     set on a STEP_1 session.
+
+    ``tutorial`` (set from ``guided.profile == TUTORIAL_PROFILE`` at the call
+    site) injects honest worked-example defaults for required-no-default knobs
+    the passive learner cannot type — at minimum ``on_validation_failure`` for a
+    chat-committed source that never persisted it. Injected BEFORE the caller
+    hashes the turn, so the audit hash matches what the learner submits. Default
+    ``False`` leaves a non-tutorial form byte-unchanged.
     """
     from elspeth.contracts.freeze import deep_thaw
 
@@ -262,6 +272,7 @@ def build_step_1_schema_form_turn_from_resolved(
         "knobs": cast(KnobSchema, schema_info.knob_schema),
         "prefilled": prefilled,
     }
+    prefill_tutorial_schema_form_knobs(payload, tutorial=tutorial)
     return Turn(
         type=TurnType.SCHEMA_FORM.value,
         step_index=_step_index(GuidedStep.STEP_1_SOURCE),

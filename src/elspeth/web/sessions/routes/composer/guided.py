@@ -235,7 +235,7 @@ def _build_get_guided_turn(
             # Reaches here only when the chat-apply branch (Task 3) cleared the
             # staging fields after committing — so a manual in-progress plugin
             # switch (chosen_plugin set) still wins above.
-            return build_step_1_schema_form_turn_from_resolved(guided.step_1_result, catalog)
+            return build_step_1_schema_form_turn_from_resolved(guided.step_1_result, catalog, tutorial=guided.profile == TUTORIAL_PROFILE)
         return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
     if step is GuidedStep.STEP_2_SINK:
         # Finding 2 (Codex #10): determine intra-step position and rebuild
@@ -2108,7 +2108,9 @@ async def post_guided_chat(
                             "step_1_result is None after successful handle_step_1_source — "
                             "handler set tool_result.success=True but did not set step_1_result"
                         )
-                    next_turn = build_step_1_schema_form_turn_from_resolved(applied_step_1_result, catalog)
+                    next_turn = build_step_1_schema_form_turn_from_resolved(
+                        applied_step_1_result, catalog, tutorial=guided.profile == TUTORIAL_PROFILE
+                    )
                     next_turn_type = TurnType(next_turn["type"])
                     next_payload_hash = stable_hash(next_turn["payload"])
                     new_record = TurnRecord(

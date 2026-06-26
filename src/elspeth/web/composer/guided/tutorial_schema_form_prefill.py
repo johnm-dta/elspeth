@@ -38,22 +38,19 @@ Trust tier: L3 web layer. Pure function — no I/O, no clock, no uuid.
 
 from __future__ import annotations
 
-import copy
-
 from elspeth.web.catalog.knob_schema import SchemaFormPayload
 
 # The required-no-default plugin knobs a TUTORIAL schema_form may safely prefill,
 # and the honest worked-example value for each. Keep this MINIMAL: a required
 # knob with no obvious safe worked-example value is NOT here — it must surface as
 # a real blocker rather than be silently fabricated.
+#
+# The source's ``schema`` knob is deliberately NOT here: the emitters already
+# hardcode ``prefilled["schema"] = {"mode": "observed"}`` and (since the
+# knob-lowering alias fix) the knob lowers under that same ``schema`` name, so
+# it is satisfied for every user without tutorial-specific help.
 _TUTORIAL_SCHEMA_FORM_DEFAULTS: dict[str, object] = {
     "on_validation_failure": "discard",
-    # The source's schema config. The knob lowers under the internal field name
-    # ``schema_config`` (alias ``schema``), so a chat-committed source's options
-    # (keyed by the alias ``schema``) never satisfy it. The canonical observed
-    # mode is the SAME value the emitters hardcode under ``schema`` — a known,
-    # valid worked-example value, not a fabrication.
-    "schema_config": {"mode": "observed"},
 }
 
 
@@ -83,6 +80,4 @@ def prefill_tutorial_schema_form_knobs(
     prefilled = payload["prefilled"]
     for name, value in _TUTORIAL_SCHEMA_FORM_DEFAULTS.items():
         if name in required_no_default and name not in prefilled:
-            # deepcopy so a mutable worked-example value (e.g. the schema dict)
-            # cannot be mutated through ``prefilled`` back into the shared constant.
-            prefilled[name] = copy.deepcopy(value)
+            prefilled[name] = value

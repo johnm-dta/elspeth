@@ -101,8 +101,9 @@ class TestPrefillHelper:
 
 class _SourceCatalog:
     """Catalog stub whose json source schema declares the three required-no-default
-    knobs the live json source lowers: ``schema_config`` (json-value), ``path``,
-    and ``on_validation_failure`` (mirrors ``SourceDataConfig`` / ``DataPluginConfig``)."""
+    knobs the live json source lowers: ``schema`` (json-value; lowered under its
+    alias since the knob-lowering alias fix), ``path``, and ``on_validation_failure``
+    (mirrors ``SourceDataConfig`` / ``DataPluginConfig``)."""
 
     def get_schema(self, plugin_type: str, plugin_name: str) -> SimpleNamespace:
         return SimpleNamespace(
@@ -110,7 +111,7 @@ class _SourceCatalog:
             knob_schema={
                 "fields": [
                     {
-                        "name": "schema_config",
+                        "name": "schema",
                         "label": "Schema",
                         "kind": "json-value",
                         "required": True,
@@ -148,14 +149,16 @@ class TestEmitterIntegration:
 
     def test_tutorial_satisfies_every_required_no_default_knob(self) -> None:
         # The unblock invariant: after the tutorial prefill, EVERY required-no-default
-        # knob the json source declares (schema_config, path, on_validation_failure)
-        # is present in prefilled — so the frontend's canSubmit() enables Continue
-        # without the passive learner typing. schema_config rides the same canonical
-        # observed-mode schema the emitter hardcodes.
+        # knob the json source declares (schema, path, on_validation_failure) is
+        # present in prefilled — so the frontend's canSubmit() enables Continue
+        # without the passive learner typing. `schema` is satisfied by the emitter's
+        # hardcoded observed-mode value (NOT tutorial-specific, since the alias fix);
+        # `path` rides the committed source options; only `on_validation_failure`
+        # needs the tutorial worked-example value.
         turn = build_step_1_schema_form_turn_from_resolved(_committed_json_source(), _SourceCatalog(), tutorial=True)
         payload = turn["payload"]
         prefilled = payload["prefilled"]
-        assert prefilled["schema_config"] == {"mode": "observed"}
+        assert prefilled["schema"] == {"mode": "observed"}
         assert prefilled["on_validation_failure"] == "discard"
         required_no_default = {f["name"] for f in payload["knobs"]["fields"] if f["required"] and "default" not in f}
         assert required_no_default <= set(prefilled), f"unsatisfied required-no-default knobs: {required_no_default - set(prefilled)}"
@@ -171,14 +174,3 @@ class TestEmitterIntegration:
             "blob_ref": "blob-1",
         }
         assert default_turn == explicit_turn
-
-    def test_injected_dict_is_isolated_from_shared_default(self) -> None:
-        # A dict worked-example value (schema_config) must be deep-copied on inject,
-        # so mutating one turn's prefilled cannot corrupt the shared module constant
-        # (or a sibling turn). Pins the deepcopy guard.
-        first = build_step_1_schema_form_turn_from_resolved(_committed_json_source(), _SourceCatalog(), tutorial=True)
-        first_schema = first["payload"]["prefilled"]["schema_config"]
-        assert isinstance(first_schema, dict)
-        first_schema["mode"] = "MUTATED"
-        second = build_step_1_schema_form_turn_from_resolved(_committed_json_source(), _SourceCatalog(), tutorial=True)
-        assert second["payload"]["prefilled"]["schema_config"] == {"mode": "observed"}

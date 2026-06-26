@@ -2009,7 +2009,17 @@ async def post_guided_chat(
 
                     resolved = SourceResolved(
                         plugin=source_resolution.plugin,
-                        options={**dict(source_resolution.options), "path": source_blob.storage_path},
+                        # Inline chat-resolved sources (json/csv) infer column types
+                        # from the data they carry, so default `schema: {mode:
+                        # observed}` when the resolver omitted it — otherwise the
+                        # commit fails validation with "schema: Field required". An
+                        # explicit schema from the resolver still wins (it is spread
+                        # after this default).
+                        options={
+                            "schema": {"mode": "observed"},
+                            **dict(source_resolution.options),
+                            "path": source_blob.storage_path,
+                        },
                         observed_columns=source_resolution.observed_columns,
                         sample_rows=source_resolution.sample_rows,
                     )

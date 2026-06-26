@@ -161,7 +161,14 @@ def _build_step_1_source_tool_prompt(
         "call `resolve_source` with the complete file content, the source plugin, "
         "schema options, observed columns, representative sample rows, and a brief "
         "assistant_message. For CSV data, include a header row in `content` and set "
-        "`mime_type` to `text/csv`. Preserve user-supplied values exactly in the file "
+        "`mime_type` to `text/csv`. When the user wants to FETCH or SCRAPE one or more "
+        "URLs, the source is an INLINE `json` (or `csv`) dataset whose rows carry each "
+        "URL in a `url` column — e.g. json `content` of "
+        '`[{"url": "https://example/a"}, {"url": "https://example/b"}]` — and you '
+        "must NOT choose a `web_scraper`/`web_scrape` source: fetching pages is a "
+        "downstream TRANSFORM applied later, never a source plugin. The only valid "
+        "source plugins are `azure_blob`, `csv`, `dataverse`, `json`, `null`, `text`. "
+        "Preserve user-supplied values exactly in the file "
         "content; do not invent hidden pipeline transforms. If the message is only a "
         "question or lacks enough source detail, reply in prose and do not call a tool.\n"
     )

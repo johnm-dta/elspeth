@@ -22,7 +22,60 @@ function field(overrides: Partial<KnobField> & Pick<KnobField, "name" | "kind">)
   };
 }
 
+function recipeDecisionPayload(
+  fields: KnobField[],
+  prefilled: Record<string, unknown> = {},
+): SchemaFormPayload {
+  return {
+    mode: "recipe_decision",
+    knobs: { fields },
+    prefilled,
+    recipe_context: {
+      recipe_name: "web-scrape-llm-rate-jsonl",
+      description: "Scrape URLs, rate with an LLM, write JSONL.",
+      alternatives: ["build_manually"],
+    },
+  };
+}
+
 describe("SchemaFormTurn", () => {
+  it("renders an enabled Apply recipe and submits the prefilled slots when knobs are empty", async () => {
+    // The passive tutorial web-scrape offer prefills ALL required slots, so the
+    // emitted offer has knobs.fields == []. Pin that the recipe_decision widget
+    // still renders a usable, enabled "Apply recipe" and resubmits the prefilled
+    // slots verbatim (the accept-seam binding check requires every prefilled
+    // slot be echoed) — the state the passive learner hits at STEP_2.5.
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    const prefilled = {
+      source_blob_id: "blob-123",
+      source_plugin: "json",
+      output_path: "outputs/ratings.jsonl",
+      model: "anthropic/claude-sonnet-4.6",
+      api_key_secret: "OPENROUTER_API_KEY",
+      abuse_contact: "noreply@demo.com",
+      scraping_reason: "demo",
+    };
+    render(
+      <SchemaFormTurn
+        payload={recipeDecisionPayload([], prefilled)}
+        onSubmit={onSubmit}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Apply recipe" });
+    expect(button).toBeEnabled();
+    await user.click(button);
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chosen: ["accept"],
+        edited_values: {
+          recipe_name: "web-scrape-llm-rate-jsonl",
+          slots: prefilled,
+        },
+      }),
+    );
+  });
+
   it.each([
     ["text", "textbox"],
     ["number-int", "spinbutton"],

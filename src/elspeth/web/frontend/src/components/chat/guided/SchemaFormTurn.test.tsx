@@ -342,4 +342,40 @@ describe("SchemaFormTurn", () => {
       control_signal: null,
     });
   });
+
+  describe("tutorial validation-failure teaching copy", () => {
+    const ovfField = field({ name: "on_validation_failure", kind: "text", required: true });
+
+    it("shows the quarantine-sink teaching line on a tutorial source form with on_validation_failure", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([ovfField], { on_validation_failure: "discard" })}
+          onSubmit={vi.fn()}
+          isTutorial
+        />,
+      );
+      expect(screen.getByText(/quarantine sink/i)).toBeInTheDocument();
+    });
+
+    it("does not show the teaching line when not in tutorial mode", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([ovfField], { on_validation_failure: "discard" })}
+          onSubmit={vi.fn()}
+        />,
+      );
+      expect(screen.queryByText(/quarantine sink/i)).not.toBeInTheDocument();
+    });
+
+    it("does not show the teaching line in tutorial mode when the form has no on_validation_failure knob", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", kind: "text", required: true })])}
+          onSubmit={vi.fn()}
+          isTutorial
+        />,
+      );
+      expect(screen.queryByText(/quarantine sink/i)).not.toBeInTheDocument();
+    });
+  });
 });

@@ -1,16 +1,23 @@
 import { useId, useState } from "react";
 import type { GuidedRespondRequest, KnobField, SchemaFormPayload } from "@/types/guided";
+import { TUTORIAL_VALIDATION_FAILURE_CAVEAT } from "@/components/tutorial/copy";
 import { RecipeContextHeader } from "./RecipeContextHeader";
 
 interface SchemaFormTurnProps {
   payload: SchemaFormPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
   disabled?: boolean;
+  /**
+   * Tutorial mode: surfaces the worked-example teaching copy for prefilled
+   * required-no-default knobs the passive learner cannot type (e.g. the source's
+   * on_validation_failure="discard"). Off for the normal composer flow.
+   */
+  isTutorial?: boolean;
 }
 
 type FormValues = Record<string, unknown>;
 
-export function SchemaFormTurn({ payload, onSubmit, disabled = false }: SchemaFormTurnProps) {
+export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial = false }: SchemaFormTurnProps) {
   const reactId = useId();
   const [values, setValues] = useState<FormValues>(() =>
     initialValues(payload.knobs.fields, payload.prefilled),
@@ -97,6 +104,11 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false }: SchemaFo
     });
   }
 
+  const showValidationFailureTeaching =
+    isTutorial &&
+    payload.mode === "plugin_options" &&
+    payload.knobs.fields.some((field) => field.name === "on_validation_failure");
+
   return (
     <div className="guided-turn guided-schema-form">
       {payload.mode === "recipe_decision" && (
@@ -114,6 +126,11 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false }: SchemaFo
           />
         ))}
       </div>
+      {showValidationFailureTeaching && (
+        <p className="guided-schema-hint guided-schema-teaching" role="note">
+          {TUTORIAL_VALIDATION_FAILURE_CAVEAT}
+        </p>
+      )}
       <div className="guided-schema-actions">
         <button
           type="button"

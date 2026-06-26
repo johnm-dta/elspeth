@@ -1394,6 +1394,7 @@ export function ChatPanel({
               turn={guidedNextTurn}
               onSubmit={(body) => void respondGuided(body)}
               disabled={guidedResponsePending || hasPendingGuidedInterpretations}
+              isTutorial={isTutorial}
             />
           </div>
           {guidedResponsePending && (

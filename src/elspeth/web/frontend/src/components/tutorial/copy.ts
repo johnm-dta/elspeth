@@ -101,3 +101,17 @@ export const TUTORIAL_SHIELD_OVERRIDE_CAVEAT =
   "Running an LLM over fetched content without a shield is always a high-risk " +
   "decision, not a default. Against real or untrusted web content you would " +
   "wire the shield.";
+
+/**
+ * Teaching moment (spec §"Teaching moments"): the source's on_validation_failure
+ * routing. The worked example sets it to "discard" because the synthetic sample
+ * pages are valid by construction — no row ever fails validation, so the route
+ * is never exercised. Names the production-vs-demo difference out loud so
+ * "discard" does not read as the default: a real pipeline routes non-conformant
+ * rows to a quarantine sink for review instead of dropping them.
+ */
+export const TUTORIAL_VALIDATION_FAILURE_CAVEAT =
+  "This worked example sets validation failures to 'discard' because the " +
+  "synthetic sample pages are valid by construction — no row ever fails. A " +
+  "production pipeline routes non-conformant rows to a quarantine sink for " +
+  "review instead of dropping them.";

@@ -60,13 +60,16 @@ interface GuidedTurnProps {
   turn: TurnPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
   disabled?: boolean;
+  /** Tutorial mode — forwarded to leaf widgets that surface worked-example
+   * teaching copy (e.g. SchemaFormTurn's on_validation_failure caveat). */
+  isTutorial?: boolean;
 }
 
 function guidedTurnInstanceKey(turn: TurnPayload): string {
   return JSON.stringify([turn.step_index, turn.type, turn.payload]);
 }
 
-export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps) {
+export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = false }: GuidedTurnProps) {
   const guardedSubmit = (body: GuidedRespondRequest) => {
     if (disabled) return;
     onSubmit(body);
@@ -110,6 +113,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           payload={turn.payload as SchemaFormPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "propose_chain":
@@ -128,6 +132,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           payload={turn.payload as SchemaFormPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "interpretation_review": {

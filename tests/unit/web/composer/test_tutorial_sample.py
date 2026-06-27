@@ -51,6 +51,23 @@ def test_public_host_uses_public_only() -> None:
     assert resolve_tutorial_allowed_hosts(base_url="https://elspeth.foundryside.dev") == "public_only"
 
 
+def test_github_pages_base_resolves_public_only_and_public_urls() -> None:
+    # The first-run tutorial's synthetic pages are published to the project's
+    # public GitHub Pages (https://johnm-dta.github.io/elspeth/tutorial-site/).
+    # Pointing ``tutorial_sample_base_url`` there makes a loopback dev box scrape
+    # a PUBLIC origin -> ``public_only`` -> the server never injects the loopback
+    # CIDR allowlist the execution preflight rejects, so the tutorial executes
+    # end-to-end off localhost with NO change to the SSRF boundary. This pins the
+    # public-hosting decision: the URLs asserted here are the ones served live.
+    base = "https://johnm-dta.github.io/elspeth"
+    assert resolve_tutorial_allowed_hosts(base_url=base) == "public_only"
+    assert resolve_tutorial_sample_urls(base_url=base) == (
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-1.html",
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-2.html",
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-3.html",
+    )
+
+
 def test_loopback_host_uses_tight_cidr_not_allow_private() -> None:
     hosts = resolve_tutorial_allowed_hosts(base_url="http://127.0.0.1:5173")
     assert hosts == ["127.0.0.1/32", "::1/128"]

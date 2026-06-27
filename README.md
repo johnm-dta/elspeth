@@ -332,6 +332,16 @@ Then open `http://localhost:5173`.
 - Run audit data defaults to `data/runs/audit.db`; payloads default to
   `data/payloads/`. Override these with `ELSPETH_WEB__LANDSCAPE_URL` and
   `ELSPETH_WEB__PAYLOAD_STORE_PATH` when you need explicit deployment paths.
+- The first-run tutorial scrapes three synthetic pages it expects at
+  `{base}/tutorial-site/project-N.html`, where `{base}` is
+  `ELSPETH_WEB__TUTORIAL_SAMPLE_BASE_URL` or, when unset, the inbound request
+  origin. A public deployment serves its own pages and needs no override. On a
+  **loopback dev origin** the origin is private, so the execution preflight
+  (correctly) rejects the server-injected private-network allowlist and the
+  tutorial composes but will not run — set
+  `ELSPETH_WEB__TUTORIAL_SAMPLE_BASE_URL=https://johnm-dta.github.io/elspeth`
+  (the project's public GitHub Pages copy of those pages) so it scrapes a public
+  origin and executes end-to-end.
 
 ---
 

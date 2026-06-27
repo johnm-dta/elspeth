@@ -1,5 +1,16 @@
-/* site.css — shared styles for the ELSPETH marketing site (multi-page).
+/* site.css — shared styles for the ELSPETH project site (multi-page).
    Built on the design-system tokens (styles.css). */
+
+:root {
+  /* Website display scale. The product's console tokens cap at 32px (an
+     information-dense operator UI); a public landing layer needs larger, fluid
+     display sizes, so the display layer is tokenised here rather than left as
+     scattered px literals. Body and card sizes intentionally ride the app scale. */
+  --site-display: clamp(2.5rem, 1.6rem + 3vw, 3.5rem);    /* 40 → 56px  hero h1 */
+  --site-h1:      clamp(2rem, 1.55rem + 1.5vw, 2.75rem);  /* 32 → 44px  page-head h1 */
+  --site-h2:      clamp(1.9rem, 1.62rem + 1vw, 2.25rem);  /* ~30 → 36px ctaband h2 */
+  --site-h3:      clamp(1.75rem, 1.55rem + 0.6vw, 2rem);  /* 28 → 32px  section-head h2 */
+}
 
 html, body { height: auto; overflow-x: hidden; }
 body { background: var(--color-bg); color: var(--color-text); margin: 0; }
@@ -12,6 +23,16 @@ a { color: inherit; text-decoration: none; }
 /* A11y: lift muted text to clear WCAG AA (4.5:1) on dark surfaces (5.0:1 on the
    lightest, surface-elevated). Scoped to dark; the light theme already passes. */
 [data-theme="dark"] { --color-text-muted: #8fb0b0; }
+
+/* A11y: the success + code-accent tokens dip below WCAG AA (4.5:1) as small text
+   on the LIGHT terminal/code surface (--color-surface-nav #e8edf3). Re-tint these
+   *text* uses (not the tokens themselves) so they clear AA on light; the dark
+   theme already passes. Guarded by check-contrast.mjs. */
+[data-theme="light"] .term-body .ok,
+[data-theme="light"] .step pre .ok,
+[data-theme="light"] .proof .term-body .hl { color: #0b6b69; }   /* 5.37:1 on #e8edf3 */
+[data-theme="light"] pre.code .key { color: #1c6a87; }           /* 5.15:1 on #e8edf3 */
+[data-theme="light"] pre.code .str { color: #1f6b57; }           /* 5.41:1 on #e8edf3 */
 
 /* Skip link + visually-hidden utility (site-owned, independent of the token mirror). */
 .skip-link { position: absolute; left: 12px; top: -56px; z-index: 1000; background: var(--color-surface-elevated); color: var(--color-text); border: 1px solid var(--color-border-strong); border-radius: var(--radius-md); padding: 10px 16px; font-size: 14px; transition: top .15s ease; }
@@ -33,12 +54,12 @@ a { color: inherit; text-decoration: none; }
 
 /* Page header (non-home) */
 .page-head { padding: 64px 0 8px; }
-.page-head h1 { font-size: 44px; line-height: 1.08; letter-spacing: -0.02em; margin: 14px 0 0; max-width: 18ch; font-weight: 700; text-wrap: balance; }
+.page-head h1 { font-size: var(--site-h1); line-height: 1.08; letter-spacing: -0.02em; margin: 14px 0 0; max-width: 18ch; font-weight: 700; text-wrap: balance; }
 .page-head p { font-size: 18px; line-height: 1.55; color: var(--color-text-secondary); max-width: 60ch; margin: 18px 0 0; }
 
 /* Hero */
 .hero { padding: 76px 0 60px; position: relative; }
-.hero h1 { font-size: 56px; line-height: 1.05; letter-spacing: -0.02em; margin: 18px 0 0; max-width: 16ch; font-weight: 700; text-wrap: balance; }
+.hero h1 { font-size: var(--site-display); line-height: 1.05; letter-spacing: -0.02em; margin: 18px 0 0; max-width: 16ch; font-weight: 700; text-wrap: balance; }
 .hero .sub { font-size: 19px; line-height: 1.55; color: var(--color-text-secondary); max-width: 56ch; margin: 22px 0 0; }
 .cta-row { display: flex; gap: 12px; margin-top: 32px; flex-wrap: wrap; }
 .hero-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 48px; align-items: center; }
@@ -57,7 +78,7 @@ a { color: inherit; text-decoration: none; }
 /* Sections */
 section { padding: 60px 0; }
 .section-head { max-width: 60ch; }
-.section-head h2 { font-size: 32px; line-height: 1.15; letter-spacing: -0.01em; margin: 10px 0 0; font-weight: 700; }
+.section-head h2 { font-size: var(--site-h3); line-height: 1.15; letter-spacing: -0.01em; margin: 10px 0 0; font-weight: 700; }
 .section-head p { font-size: 17px; color: var(--color-text-secondary); line-height: 1.55; margin: 14px 0 0; }
 .divider { border: 0; border-top: 1px solid var(--color-border); margin: 0; }
 
@@ -140,7 +161,7 @@ pre.code .cm { color: var(--color-text-muted); }
 
 /* CTA band */
 .ctaband { text-align: center; padding: 76px 0; background: var(--color-surface-nav); border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
-.ctaband h2 { font-size: 36px; margin: 14px 0 0; font-weight: 700; letter-spacing: -0.01em; }
+.ctaband h2 { font-size: var(--site-h2); margin: 14px 0 0; font-weight: 700; letter-spacing: -0.01em; }
 .ctaband p { font-size: 17px; color: var(--color-text-secondary); margin: 14px auto 0; max-width: 52ch; }
 
 /* Lineage proof — real `explain` output beside its reading (assurance) */
@@ -182,6 +203,38 @@ footer { padding: 56px 0 40px; }
 
 .btn-lg { min-height: 48px; padding: 0 22px; font-size: 16px; border-radius: var(--radius-md); }
 
+/* Mobile nav disclosure — a CSS-only <details> menu shown ≤900px (no JS).
+   Native <summary> gives keyboard focus + expanded-state semantics for free. */
+.nav-menu { position: relative; display: none; }
+.nav-menu > summary { list-style: none; cursor: pointer; }
+.nav-menu > summary::-webkit-details-marker { display: none; }
+.nav-menu > summary::marker { content: ""; }
+.nav-menu > summary i, .nav-menu > summary svg { width: 20px; height: 20px; }
+.nav-menu-panel {
+  position: absolute; top: calc(100% + 12px); right: 0; z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; min-width: 208px; padding: 8px;
+  background: var(--color-surface-elevated); border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md); box-shadow: 0 12px 32px rgba(0,0,0,0.30);
+}
+.nav-menu-panel a { padding: 10px 12px; font-size: 15px; color: var(--color-text-secondary); border-radius: var(--radius-sm); }
+.nav-menu-panel a:hover { background: var(--color-surface-hover); color: var(--color-text); }
+.nav-menu-panel hr { border: 0; border-top: 1px solid var(--color-border); margin: 6px 4px; }
+
+/* Copy-to-clipboard button on command/config blocks (added by site.js; the
+   button only exists when JS runs, so blocks stay clean without it). */
+pre.copyable { position: relative; }
+.copy-btn {
+  position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated); color: var(--color-text-secondary);
+  cursor: pointer; opacity: .55; transition: opacity .15s ease, color .15s ease, border-color .15s ease;
+}
+pre.copyable:hover .copy-btn, .copy-btn:hover, .copy-btn:focus-visible { opacity: 1; }
+.copy-btn:hover { color: var(--color-text); border-color: var(--color-border-strong); }
+.copy-btn.copied { color: var(--color-success); border-color: var(--color-success); opacity: 1; }
+.copy-btn i, .copy-btn svg { width: 15px; height: 15px; }
+
 @media (max-width: 900px) {
   .hero-grid, .codewrap, .proof, .foot { grid-template-columns: 1fr; }
   .surfaces, .types, .features, .props, .tiers { grid-template-columns: 1fr; }
@@ -189,7 +242,8 @@ footer { padding: 56px 0 40px; }
   .sda-arrow, .fork-arrow { display: none; }
   .forkflow { flex-direction: column; align-items: stretch; }
   .foot-cols { grid-template-columns: repeat(2, 1fr); }
-  .hero h1 { font-size: 40px; }
-  .page-head h1 { font-size: 34px; }
+  /* Collapse the inline nav links + text action buttons into the disclosure menu. */
   .nav-links { display: none; }
+  .nav-menu { display: block; }
+  .nav-right .btn-compact { display: none; }
 }

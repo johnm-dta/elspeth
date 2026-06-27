@@ -26,9 +26,21 @@
       </nav>
     </div>
     <div class="nav-right">
+      <details class="nav-menu">
+        <summary class="iconbtn" aria-label="Open navigation menu"><i data-lucide="menu"></i></summary>
+        <div class="nav-menu-panel">
+          <a href="index.html">Home</a>
+          <a href="authoring.html">Authoring</a>
+          <a href="assurance.html">Assurance</a>
+          <a href="use-cases.html">Use cases</a>
+          <a href="get-started.html">Get started</a>
+          <hr />
+          <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
+        </div>
+      </details>
       <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
       <a class="btn-compact" href="https://github.com/johnm-dta/elspeth" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
-      <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
+      <a class="btn-compact" href="get-started.html">Get started</a>
     </div>
   </div>
 </header>
@@ -52,7 +64,7 @@
         <div>
           <h3>Install</h3>
           <p>Python 3.12+. Clone and install with <code>uv</code>.</p>
-          <pre><span class="pr">$</span> git clone https://github.com/johnm-dta/elspeth.git &amp;&amp; cd elspeth
+          <pre class="copyable"><span class="pr">$</span> git clone https://github.com/johnm-dta/elspeth.git &amp;&amp; cd elspeth
 <span class="pr">$</span> uv venv &amp;&amp; source .venv/bin/activate
 <span class="pr">$</span> uv pip install -e ".[dev]"</pre>
         </div>
@@ -97,7 +109,7 @@
         <h2>pipeline.yaml</h2>
         <p>Every edge is named; every gate is pure config. Prefer not to write YAML? The Web Composer lets you describe the workflow in conversation instead — it builds the same artifact.</p>
       </div>
-<pre class="code"><span class="cm"># pipeline.yaml — passes: elspeth validate --settings pipeline.yaml</span>
+<pre class="code copyable"><span class="cm"># pipeline.yaml — passes: elspeth validate --settings pipeline.yaml</span>
 <span class="key">sources</span>:
   submissions:
     plugin: <span class="str">csv</span>
@@ -152,7 +164,7 @@
         <div>
           <h3>Run the local server</h3>
           <p>Starts a FastAPI app bound to your machine. Open the printed address in a browser to start composing.</p>
-          <pre><span class="pr">$</span> elspeth web
+          <pre class="copyable"><span class="pr">$</span> elspeth web
 <span class="cm"># Composer served at http://127.0.0.1:8451</span></pre>
         </div>
       </div>
@@ -162,8 +174,7 @@
 
 <div class="ctaband">
   <div class="wrap">
-    <span class="eyebrow">Traceable · Reliable · Defensible</span>
-    <h2>Ready when you are.</h2>
+    <h2>Read the documentation.</h2>
     <p>Read the docs for a complete walkthrough of every plugin and contract.</p>
     <div class="cta-row" style="justify-content:center">
       <a class="btn btn-primary btn-lg" href="https://github.com/johnm-dta/elspeth/tree/main/docs">Read the docs</a>

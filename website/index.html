@@ -1,4 +1,4 @@
-<!-- @dsCard group="Website" viewport="1280x720" name="Site — Home" subtitle="Marketing landing page (multi-page set), in-brand, light/dark" -->
+<!-- @dsCard group="Website" viewport="1280x720" name="Site — Home" subtitle="Project landing page (multi-page set), in-brand, light/dark" -->
 <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
@@ -26,9 +26,21 @@
       </nav>
     </div>
     <div class="nav-right">
+      <details class="nav-menu">
+        <summary class="iconbtn" aria-label="Open navigation menu"><i data-lucide="menu"></i></summary>
+        <div class="nav-menu-panel">
+          <a href="index.html">Home</a>
+          <a href="authoring.html">Authoring</a>
+          <a href="assurance.html">Assurance</a>
+          <a href="use-cases.html">Use cases</a>
+          <a href="get-started.html">Get started</a>
+          <hr />
+          <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
+        </div>
+      </details>
       <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
       <a class="btn-compact" href="https://github.com/johnm-dta/elspeth" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
-      <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
+      <a class="btn-compact" href="get-started.html">Get started</a>
     </div>
   </div>
 </header>
@@ -40,7 +52,7 @@
   <div class="wrap hero-grid">
     <div>
       <span class="eyebrow">Open source · MIT · Python 3.12+</span>
-      <h1>Pipelines for decisions you have to defend.</h1>
+      <h1>High-assurance pipelines for decisions you have to defend.</h1>
       <p class="sub">ELSPETH is open-source software developed and publicly released by staff of the DTA — Australia's Digital Transformation Agency. It's a high-assurance pipeline substrate for consequential workflows, where a wrong output can cause operational, legal, safety, or financial harm. Author in reviewable YAML or the LLM Web Composer; both run on one audited engine.</p>
       <div class="cta-row">
         <a class="btn btn-primary btn-lg" href="get-started.html">Get started</a>
@@ -99,8 +111,7 @@
 <!-- CTA BAND -->
 <div class="ctaband">
   <div class="wrap">
-    <span class="eyebrow">Traceable · Reliable · Defensible</span>
-    <h2>Build a pipeline you can stand behind.</h2>
+    <h2>Install and run.</h2>
     <p>Install the CLI, or open the Web Composer and describe what you want. Both end in a pipeline that can be validated, executed, audited, and explained.</p>
     <div class="cta-row" style="justify-content:center">
       <a class="btn btn-primary btn-lg" href="get-started.html">Get started</a>

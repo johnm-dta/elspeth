@@ -1,0 +1,124 @@
+<!-- @dsCard group="Website" viewport="1280x720" name="Site — Home" subtitle="Marketing landing page (multi-page set), in-brand, light/dark" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ELSPETH — High-assurance pipelines for consequential work</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="site.css" />
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <div class="nav-left">
+      <a class="brand" href="index.html">ELSPETH</a>
+      <nav class="nav-links">
+        <a href="index.html" class="active">Home</a>
+        <a href="authoring.html">Authoring</a>
+        <a href="assurance.html">Assurance</a>
+        <a href="use-cases.html">Use cases</a>
+        <a href="get-started.html">Get started</a>
+      </nav>
+    </div>
+    <div class="nav-right">
+      <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
+      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
+    </div>
+  </div>
+</header>
+
+<!-- HERO -->
+<div class="hero dotgrid">
+  <div class="wrap hero-grid">
+    <div>
+      <span class="eyebrow">Open source · MIT · Python 3.12+</span>
+      <h1>Pipelines for decisions you have to defend.</h1>
+      <p class="sub">ELSPETH is a high-assurance pipeline substrate for consequential workflows — where the wrong output can cause operational, legal, safety, or financial harm. Author in reviewable YAML or the LLM Web Composer; both run on one audited engine.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary btn-lg" href="get-started.html">Get started</a>
+        <a class="btn btn-lg" href="#"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; View on GitHub</a>
+      </div>
+    </div>
+    <div class="term" aria-hidden="true">
+      <div class="term-bar">
+        <i data-lucide="terminal" style="width:14px;height:14px;color:var(--color-text-muted)"></i>
+        <span class="t">elspeth · validate &amp; run</span>
+      </div>
+      <div class="term-body"><span class="pr">$</span> <span class="cmd">elspeth validate --settings pipeline.yaml</span>
+<span class="ok">✓</span> <span class="mut">graph structure · route targets · edge/schema</span>
+<span class="ok">✓</span> <span class="mut">secret references resolved · preflight passed</span>
+
+<span class="pr">$</span> <span class="cmd">elspeth run --settings pipeline.yaml --execute</span>
+<span class="mut">240 rows · 228 approved · 12 → review · 0 failed</span>
+<span class="ok">completed</span> <span class="mut">— audit trail written to Landscape</span></div>
+    </div>
+  </div>
+</div>
+
+<hr class="divider" />
+
+<!-- THREE PROPS -->
+<section>
+  <div class="wrap">
+    <div class="section-head" style="margin-bottom:36px">
+      <span class="eyebrow">Why ELSPETH</span>
+      <h2>Substrate first. Authoring second.</h2>
+      <p>A pipeline is made of declared primitives carrying schema and semantic contracts. Validation and audit are core product properties — not after-the-fact diagnostics.</p>
+    </div>
+    <div class="props">
+      <div class="prop">
+        <span class="pi"><i data-lucide="git-fork"></i></span>
+        <h3>Two surfaces, one engine</h3>
+        <p>Hand-edit reviewable YAML, or build by conversation in the Web Composer. Both target the same runtime, contracts, and audit trail.</p>
+        <a href="authoring.html">Explore authoring <i data-lucide="arrow-right" style="width:14px;height:14px"></i></a>
+      </div>
+      <div class="prop">
+        <span class="pi"><i data-lucide="scroll-text"></i></span>
+        <h3>Audit is the product</h3>
+        <p>The Landscape database records full row lineage — hashes, route decisions, terminal outcomes, and provenance — as the canonical evidentiary record.</p>
+        <a href="assurance.html">See the assurance model <i data-lucide="arrow-right" style="width:14px;height:14px"></i></a>
+      </div>
+      <div class="prop">
+        <span class="pi"><i data-lucide="briefcase"></i></span>
+        <h3>For high-stakes work</h3>
+        <p>Tender evaluation, document QA, content moderation, financial compliance — same framework, different plugins, full audit trail.</p>
+        <a href="use-cases.html">Browse use cases <i data-lucide="arrow-right" style="width:14px;height:14px"></i></a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA BAND -->
+<div class="ctaband">
+  <div class="wrap">
+    <span class="eyebrow">Traceable · Reliable · Defensible</span>
+    <h2>Build a pipeline you can stand behind.</h2>
+    <p>Install the CLI, or open the Web Composer and describe what you want. Both end in a pipeline that can be validated, executed, audited, and explained.</p>
+    <div class="cta-row" style="justify-content:center">
+      <a class="btn btn-primary btn-lg" href="get-started.html">Get started</a>
+      <a class="btn btn-lg" href="#"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; johnm-dta/elspeth</a>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div class="wrap foot">
+    <span class="brand">ELSPETH</span>
+    <div class="links">
+      <a href="authoring.html">Authoring</a>
+      <a href="assurance.html">Assurance</a>
+      <a href="use-cases.html">Use cases</a>
+      <a href="get-started.html">Get started</a>
+      <a href="#">GitHub</a>
+    </div>
+    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

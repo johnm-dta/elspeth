@@ -1,0 +1,6 @@
+/* fonts.css — Webfonts for ELSPETH.
+   The product ships Inter (body/UI, the DTA AGDS Foundation typeface) and
+   JetBrains Mono (audit/forensic register: wordmark, code, YAML, hashes).
+   Both are loaded from Google Fonts, exactly as the real app's index.html does.
+   The @import MUST be the first statement in this file. */
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");

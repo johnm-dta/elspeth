@@ -362,6 +362,26 @@ async def get_guided(
             guided = state.guided_session
             current_step = guided.step
 
+            # Orphaned pre-change sessions: STEP_2_5_RECIPE_MATCH was retired as a
+            # live step (the recipe-offer interstitial is gone — sink commit now
+            # hops straight to STEP_3). A session persisted at this step before
+            # that change has no rebuildable turn (``_build_get_guided_turn``
+            # returns None, so GET would otherwise render a blank turn) and no POST
+            # dispatch branch (a non-exit response hits ``step_advance``'s
+            # unhandled-step InvariantError → 500). Reject with a clear, structured
+            # 409 that points at the salvage path rather than silently returning no
+            # turn. A session that has already exited (terminal set) is left alone.
+            if guided.terminal is None and current_step is GuidedStep.STEP_2_5_RECIPE_MATCH:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This guided session was started before a composer update and can no "
+                        "longer continue from its current step (step_2_5_recipe_match). POST "
+                        "control_signal=exit_to_freeform to keep your work in freeform, or "
+                        "start a new guided session."
+                    ),
+                )
+
             # Idempotency check: if this step already has an emitted TurnRecord,
             # return the existing payload without re-emitting.
             existing_record_for_step: TurnRecord | None = next(
@@ -1192,6 +1212,27 @@ async def post_guided_respond(
                 raise HTTPException(
                     status_code=409,
                     detail="Guided session is already in a terminal state. No further responses accepted.",
+                )
+
+            # Orphaned pre-change sessions parked at the retired
+            # STEP_2_5_RECIPE_MATCH interstitial: a non-exit response has no
+            # dispatch branch (``step_advance`` raises "unhandled step" → HTTP
+            # 500). Reject with the same clear 409 GET emits. ``exit_to_freeform``
+            # is intentionally exempt — ``step_advance`` handles it
+            # step-independently (state_machine.py:529), so the user can still
+            # salvage their source/sink work to freeform. Placed after the
+            # terminal-rejection above (so ``guided`` is non-terminal here) and
+            # before the turn-answering machinery, since no live turn at this
+            # retired step can legitimately be answered.
+            if guided.step is GuidedStep.STEP_2_5_RECIPE_MATCH and control_signal is not ControlSignal.EXIT_TO_FREEFORM:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This guided session was started before a composer update and can no "
+                        "longer continue from its current step (step_2_5_recipe_match). POST "
+                        "control_signal=exit_to_freeform to keep your work in freeform, or "
+                        "start a new guided session."
+                    ),
                 )
 
             # Optimistic-concurrency guard (D16): if the client carried an
@@ -2308,10 +2349,8 @@ async def post_guided_chat(
                     # fall through to advisory prose (no mutation).
                     chat_result = None
                 else:
-                    from elspeth.web.composer.guided.chain_solver import (
-                        ChainSolverResponseShapeError,
-                        solve_chain,
-                    )
+                    from elspeth.web.composer.guided.chain_solver import solve_chain
+                    from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
 
                     try:
                         # The transient set MUST be byte-identical to the

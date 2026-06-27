@@ -918,3 +918,130 @@ class TestUnwindAuditDispositionFlag:
         # ...and NEITHER was called with the success disposition (the bug).
         assert ("tool_invocations", False) not in captured, captured
         assert ("llm_calls", False) not in captured, captured
+
+
+# ---------------------------------------------------------------------------
+# Orphaned pre-change sessions parked at the removed STEP_2_5 interstitial
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedStep2_5Recovery:
+    """Sessions persisted at STEP_2_5_RECIPE_MATCH before the recipe-offer
+    interstitial was removed are orphans.
+
+    The step is no longer entered by any live flow (sink commit now hops
+    straight to STEP_3), so it has neither a rebuildable GET turn
+    (``_build_get_guided_turn`` returns ``None`` → a blank turn) nor a POST
+    dispatch branch (a non-exit response reaches ``step_advance``'s
+    ``"unhandled step: ...STEP_2_5_RECIPE_MATCH"`` ``InvariantError`` → HTTP
+    500). Both must instead surface a clear 409 that points at the
+    ``exit_to_freeform`` salvage path — and exit_to_freeform itself must keep
+    working so the user's source/sink work is never trapped.
+    """
+
+    def _seed_step_2_5_session(self, client: TestClient, session_id: str) -> None:
+        """Persist a non-terminal GuidedSession parked at STEP_2_5_RECIPE_MATCH.
+
+        Seeds a RECIPE_OFFER TurnRecord into history so the POST path reaches
+        the dispatch seam (rather than the earlier "no turn emitted" 400),
+        reproducing the orphaned-session shape exactly. Mirrors the
+        save_composition_state seeding in
+        ``test_respond.py._seed_inspect_and_confirm_history``.
+        """
+        import asyncio
+        from dataclasses import replace
+        from uuid import UUID
+
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer.guided.protocol import TurnType
+        from elspeth.web.composer.guided.state_machine import (
+            GuidedSession,
+            GuidedStep,
+            TurnRecord,
+        )
+        from elspeth.web.sessions.converters import state_from_record
+        from elspeth.web.sessions.protocol import CompositionStateData
+        from elspeth.web.sessions.routes import _initial_composition_state_with_guided_session
+
+        service = client.app.state.session_service
+        session_uuid = UUID(session_id)
+        state_record = asyncio.run(service.get_current_state(session_uuid))
+
+        if state_record is None:
+            state = _initial_composition_state_with_guided_session()
+            existing_meta: dict = {}
+        else:
+            state = state_from_record(state_record)
+            existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
+
+        guided = state.guided_session if state.guided_session is not None else GuidedSession.initial()
+        record = TurnRecord(
+            step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+            turn_type=TurnType.RECIPE_OFFER,
+            payload_hash="seed-step-2-5-payload-hash",
+            response_hash=None,
+            emitter="server",
+        )
+        guided = replace(
+            guided,
+            step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+            history=(*guided.history, record),
+        )
+        state = replace(state, guided_session=guided)
+
+        new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
+        state_d = state.to_dict()
+        state_data = CompositionStateData(
+            sources=state_d["sources"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=False,
+            validation_errors=None,
+            composer_meta=new_composer_meta,
+        )
+        asyncio.run(service.save_composition_state(session_uuid, state_data, provenance="session_seed"))
+
+    def test_get_orphaned_step_2_5_returns_409(self, composer_test_client: TestClient) -> None:
+        """GET on an orphaned STEP_2_5 session: clear 409, not a blank turn."""
+        session_id = _create_session(composer_test_client)
+        self._seed_step_2_5_session(composer_test_client, session_id)
+
+        resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
+        assert resp.status_code == 409, resp.json()
+        detail = resp.json()["detail"]
+        assert "step_2_5_recipe_match" in detail
+        assert "exit_to_freeform" in detail
+
+    def test_post_non_exit_to_orphaned_step_2_5_returns_409_not_500(self, composer_test_client: TestClient) -> None:
+        """A non-exit response to an orphaned STEP_2_5 session: 409, not a 500.
+
+        Before the guard this reached ``step_advance``'s unhandled-step
+        InvariantError and surfaced as HTTP 500.
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_step_2_5_session(composer_test_client, session_id)
+
+        resp = _respond_raw(composer_test_client, session_id, chosen=["apply"])
+        assert resp.status_code == 409, resp.json()
+        detail = resp.json()["detail"]
+        assert "step_2_5_recipe_match" in detail
+        assert "exit_to_freeform" in detail
+
+    def test_exit_to_freeform_from_orphaned_step_2_5_salvages(self, composer_test_client: TestClient) -> None:
+        """exit_to_freeform from an orphaned STEP_2_5 session still salvages.
+
+        The reject guard exempts exit_to_freeform; step_advance handles it
+        step-independently (state_machine.py:529), so the session terminates
+        cleanly to freeform and the user keeps their source/sink work.
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_step_2_5_session(composer_test_client, session_id)
+
+        resp = _respond_raw(composer_test_client, session_id, control_signal="exit_to_freeform")
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        assert body["terminal"]["kind"] == "exited_to_freeform"
+        assert body["terminal"]["reason"] == "user_pressed_exit"
+        assert body["next_turn"] is None

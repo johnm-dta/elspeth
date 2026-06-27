@@ -25,10 +25,16 @@ describe("TutorialTurn7Graduation", () => {
       tutorialCompletedAt: null,
       tutorialCompleted: false,
     });
-    // Spyable rename so the final-title rename can be asserted without
-    // exercising the real api.renameSession (which isn't mocked here).
+    // Spyable store actions so graduation's rename + land-on-pipeline path can
+    // be asserted without exercising the real implementations (which hit
+    // unmocked api routes). selectSession lands the user on the built pipeline;
+    // the stub mirrors the real action's contract by setting activeSessionId.
     useSessionStore.setState({
       renameSession: vi.fn().mockResolvedValue(undefined),
+      loadSessions: vi.fn().mockResolvedValue(undefined),
+      selectSession: vi.fn().mockImplementation(async (id: string) => {
+        useSessionStore.setState({ activeSessionId: id });
+      }),
     } as never);
     vi.mocked(api.createSession).mockResolvedValue({
       id: "session-empty",
@@ -82,7 +88,7 @@ describe("TutorialTurn7Graduation", () => {
     window.removeEventListener("tutorial_graduation_shown", eventListener);
   });
 
-  it("marks the tutorial graduated before creating the composer session", async () => {
+  it("marks the tutorial graduated and lands the user on the built pipeline", async () => {
     const user = userEvent.setup();
     render(
       <TutorialTurn7Graduation
@@ -102,9 +108,14 @@ describe("TutorialTurn7Graduation", () => {
         tutorial_completed_at: expect.any(String),
       });
     });
-    expect(api.createSession).toHaveBeenCalledTimes(1);
     expect(usePreferencesStore.getState().tutorialCompleted).toBe(true);
-    expect(useSessionStore.getState().activeSessionId).toBe("session-empty");
+    // Land on the pipeline the user built, not a fresh empty session: the list
+    // is refreshed (so the tutorial session appears in the switcher) and the
+    // tutorial session becomes active.
+    expect(useSessionStore.getState().loadSessions).toHaveBeenCalledTimes(1);
+    expect(useSessionStore.getState().selectSession).toHaveBeenCalledWith("sess-new");
+    expect(useSessionStore.getState().activeSessionId).toBe("sess-new");
+    expect(api.createSession).not.toHaveBeenCalled();
   });
 
   it("renames the tutorial session and saves Guided as the default before finishing", async () => {
@@ -207,11 +218,16 @@ describe("TutorialTurn7Graduation", () => {
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
-  it("shows a role alert when the fresh composer session cannot be created after graduation is saved", async () => {
+  it("shows a role alert when the composer cannot open the built pipeline after graduation is saved", async () => {
     const user = userEvent.setup();
-    vi.mocked(api.createSession).mockRejectedValueOnce(
-      new Error("session service down"),
-    );
+    // selectSession resolves but leaves the session inactive (e.g. a 404 on
+    // load cleared activeSessionId); graduation must surface the failure and
+    // must NOT publish completion.
+    useSessionStore.setState({
+      selectSession: vi.fn().mockImplementation(async () => {
+        useSessionStore.setState({ activeSessionId: null });
+      }),
+    } as never);
     render(
       <TutorialTurn7Graduation
         sessionId="sess-new"
@@ -226,7 +242,7 @@ describe("TutorialTurn7Graduation", () => {
     );
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Failed to create session. Please try again.",
+      "The composer could not open your pipeline.",
     );
     expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
       tutorial_completed_at: expect.any(String),

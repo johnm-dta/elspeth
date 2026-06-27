@@ -27,7 +27,6 @@ def create_tutorial_run_router() -> APIRouter:
             request=request,
             user=user,
             session_id=str(body.session_id),
-            prompt=body.prompt,
         )
 
     @router.delete("/orphans", response_model=TutorialOrphanCleanupResponse)

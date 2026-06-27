@@ -122,33 +122,6 @@ class TestCreateApp:
         assert app.state.settings is settings
         assert app.state.settings.port == 9999
 
-    def test_tutorial_cache_stored_on_app_state_with_configured_dir(self, tmp_path) -> None:
-        from datetime import UTC, datetime
-
-        from elspeth.web.preferences.tutorial_cache import (
-            CANONICAL_SEED_PROMPT,
-            TutorialCache,
-            TutorialCacheEntry,
-        )
-
-        cache_dir = tmp_path / "custom-cache"
-        app = create_app(_settings(tmp_path, tutorial_cache_dir=cache_dir))
-
-        cache = app.state.tutorial_cache
-        assert isinstance(cache, TutorialCache)
-        cache.store(
-            TutorialCacheEntry(
-                canonical_prompt=CANONICAL_SEED_PROMPT,
-                model_id="gpt-5.5:gpt-5.5",
-                cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-                rows=[],
-                source_data_hash="hash",
-                llm_call_count=0,
-                pipeline_yaml="source: {}\n",
-            )
-        )
-        assert len(list(cache_dir.glob("*.json"))) == 1
-
     def test_loopback_default_secret_key_rejected_without_pytest_module(self, tmp_path, monkeypatch) -> None:
         """Loopback bind is not proof the service is unreachable behind a proxy."""
         settings = _settings(tmp_path, host="127.0.0.1")

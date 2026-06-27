@@ -71,7 +71,6 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import CorruptPreferencesError, PreferencesService
-from elspeth.web.preferences.tutorial_cache import TutorialCache
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
@@ -879,10 +878,6 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # tutorial_completed_at).
     # Shares the session engine; preferences live on the same metadata.
     app.state.preferences_service = PreferencesService(session_engine)
-    tutorial_cache_dir = settings.tutorial_cache_dir
-    if tutorial_cache_dir is None:
-        raise RuntimeError("tutorial_cache_dir must be initialised by WebSettings")
-    app.state.tutorial_cache = TutorialCache(cache_dir=tutorial_cache_dir)
 
     # --- Blob service ---
     app.state.blob_service = BlobServiceImpl(

@@ -44,9 +44,9 @@ export function TutorialTurn7Graduation({
       // Promote the tutorial session to its final title and save Guided as
       // the default composer mode. A skipped tutorial has no session to
       // rename (and may not have created one), so only rename a real,
-      // non-skipped session. Both calls run BEFORE the graduation publish +
-      // fresh-composer-session creation; if either fails we surface the error
-      // and do not create the fresh session (fail-closed).
+      // non-skipped session. Both calls run BEFORE the landing + graduation
+      // publish; if either fails we surface the error and do not transition
+      // (fail-closed).
       if (sessionId !== null && !skipped) {
         await useSessionStore
           .getState()
@@ -57,14 +57,38 @@ export function TutorialTurn7Graduation({
       const completedAt = await usePreferencesStore
         .getState()
         .markTutorialGraduated({ publishLocally: false });
-      const previousActiveSessionId = useSessionStore.getState().activeSessionId;
-      await useSessionStore.getState().createSession();
-      const sessionState = useSessionStore.getState();
-      if (sessionState.activeSessionId === previousActiveSessionId) {
-        throw new Error(
-          sessionState.error ?? "The composer session could not be created.",
-        );
+
+      if (sessionId !== null && !skipped) {
+        // Land the user ON the pipeline they just built so they can click Run
+        // for real and revisit it later — graduation used to drop them into a
+        // fresh empty composer, abandoning the worked example. Refresh the
+        // session list FIRST so the completed tutorial session appears in the
+        // switcher: it was created outside the store (raw API on Start), so
+        // renameSession alone never adds it to the in-memory list the switcher
+        // renders. selectSession loads its composition state, which the
+        // composer auto-validates so the Run button enables.
+        await useSessionStore.getState().loadSessions();
+        await useSessionStore.getState().selectSession(sessionId);
+        const landed = useSessionStore.getState();
+        if (landed.activeSessionId !== sessionId) {
+          throw new Error(
+            landed.error ?? "The composer could not open your pipeline.",
+          );
+        }
+      } else {
+        // Skipped (no built pipeline to land on): drop into a fresh composer
+        // session so the user still lands somewhere usable.
+        const previousActiveSessionId =
+          useSessionStore.getState().activeSessionId;
+        await useSessionStore.getState().createSession();
+        const sessionState = useSessionStore.getState();
+        if (sessionState.activeSessionId === previousActiveSessionId) {
+          throw new Error(
+            sessionState.error ?? "The composer session could not be created.",
+          );
+        }
       }
+
       usePreferencesStore.getState().publishTutorialGraduation(completedAt);
     } catch (err) {
       setError(formatError(err));

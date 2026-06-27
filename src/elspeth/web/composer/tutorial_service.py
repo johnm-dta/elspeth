@@ -8,18 +8,16 @@ import hashlib
 import io
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from functools import cache
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
-import yaml
 from fastapi import HTTPException, Request
 from sqlalchemy import func, select, update
 
-from elspeth.contracts import CallType, NodeType
+from elspeth.contracts import CallType
 from elspeth.core.canonical import stable_hash
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.schema import (
@@ -31,26 +29,14 @@ from elspeth.core.landscape.schema import (
     runs_table,
     validation_errors_table,
 )
-from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
-from elspeth.plugins.infrastructure.discovery import discover_all_plugins
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
-from elspeth.web.composer.guided.prompts import guided_staged_skill_hash
-from elspeth.web.composer.recipes import recipe_catalog_content_hash
-from elspeth.web.composer.skills import load_deployment_skill, load_skill_with_hash
 from elspeth.web.composer.tutorial_models import TutorialOrphanCleanupResponse, TutorialRunOutput, TutorialRunResponse
-from elspeth.web.composer.tutorial_telemetry import _CacheSkipReason, record_tutorial_cache_skipped
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.outputs import filesystem_path_candidates
 from elspeth.web.execution.protocol import ExecutionService
 from elspeth.web.paths import allowed_sink_directories
 from elspeth.web.preferences.service import PreferencesService
-from elspeth.web.preferences.tutorial_cache import (
-    CANONICAL_SEED_PROMPT,
-    TutorialCache,
-    TutorialCacheEntry,
-    tutorial_cache_key,
-)
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
     OPERATOR_COMPLETION_RUN_STATUS_VALUES,
@@ -93,58 +79,29 @@ async def run_tutorial_pipeline(
     request: Request,
     user: UserIdentity,
     session_id: str,
-    prompt: str,
 ) -> TutorialRunResponse:
-    """Run or replay the first-run tutorial pipeline for the current user.
+    """Run the first-run tutorial pipeline LIVE for the current user.
 
-    Cache replay writes a fresh current-session ``runs`` row plus a fresh
-    current-session Landscape run. Cache miss delegates to the normal
-    ``ExecutionService`` and only projects results from real Landscape/artifact
-    rows after the run reaches a terminal operator-completion status.
+    The tutorial run is a real execution through the normal
+    ``ExecutionService``: it scrapes the hosted sample pages and summarises
+    them with the configured LLM exactly as any composed pipeline would, and
+    projects results only from real Landscape/artifact rows after the run
+    reaches a terminal operator-completion status.
+
+    There is deliberately NO cached/replayed fast path. A user watches the
+    pipeline assemble over a second or two; returning instant pre-baked rows
+    immediately afterwards is the seam that read as a fake run, and it bypassed
+    the very page-hosting the live scrape depends on. Every tutorial run is now
+    the same backend path a real composed pipeline takes (tutorial backend
+    parity), so what the learner sees is what the system actually does.
     """
     from uuid import UUID
 
     session_uuid = UUID(session_id)
     await verify_session_ownership(session_uuid, user, request)
 
-    session_service: SessionServiceProtocol = request.app.state.session_service
-    preferences_service: PreferencesService = request.app.state.preferences_service
     settings: WebSettings = request.app.state.settings
-    cache: TutorialCache = request.app.state.tutorial_cache
-
-    prefs = await preferences_service.get_composer_preferences(user.user_id)
-    effective_prompt = prompt.strip() or CANONICAL_SEED_PROMPT
-    is_canonical_prompt = effective_prompt == CANONICAL_SEED_PROMPT
-    model_id = tutorial_model_id(settings)
-
-    bypass_reason: str | None = None
-    if prefs.tutorial_completed_at is not None:
-        bypass_reason = "completed"
-    elif prefs.default_mode == "freeform":
-        bypass_reason = "freeform"
-
-    if bypass_reason is None and is_canonical_prompt:
-        cache_entry = cache.lookup(CANONICAL_SEED_PROMPT, model_id)
-        if cache_entry is not None:
-            # Verify the user's current composition state has the same plugin
-            # topology as the cached tutorial pipeline. Without this gate, a
-            # client posting the canonical prompt against an unrelated or
-            # edited session would attach cached pipeline_yaml + rows to a
-            # state_id pointing at a structurally different pipeline — a
-            # Tier-1 audit lie. Mismatch falls through to live compose so the
-            # synthesised audit faithfully describes whatever runs.
-            current_state = await session_service.get_current_state(session_uuid)
-            if current_state is not None and _state_matches_cached_topology(current_state, cache_entry.pipeline_yaml):
-                return await _replay_cache_entry(
-                    session_service=session_service,
-                    settings=settings,
-                    session_id=session_uuid,
-                    current_state=current_state,
-                    cache_entry=cache_entry,
-                    cache_key=tutorial_cache_key(CANONICAL_SEED_PROMPT, model_id),
-                    user_id=user.user_id,
-                    auth_provider_type=settings.auth_provider,
-                )
+    session_service: SessionServiceProtocol = request.app.state.session_service
 
     live_run = await _run_live_tutorial(
         request=request,
@@ -153,101 +110,7 @@ async def run_tutorial_pipeline(
         settings=settings,
         session_service=session_service,
     )
-    if bypass_reason is None and is_canonical_prompt:
-        await _store_successful_live_projection(
-            cache=cache,
-            model_id=model_id,
-            run_record=live_run.run_record,
-            output=live_run.response.output,
-            llm_call_count=live_run.projection.llm_call_count,
-        )
     return live_run.response
-
-
-async def _replay_cache_entry(
-    *,
-    session_service: SessionServiceProtocol,
-    settings: WebSettings,
-    session_id: Any,
-    current_state: Any,
-    cache_entry: TutorialCacheEntry,
-    cache_key: str,
-    user_id: str,
-    auth_provider_type: str,
-) -> TutorialRunResponse:
-    """Project a cache hit into a synthesised Landscape run.
-
-    The caller MUST have already verified
-    ``_state_matches_cached_topology(current_state, cache_entry.pipeline_yaml)``
-    is True. This function attaches the cached ``pipeline_yaml`` and rows to
-    ``current_state.id``; that attachment is only audit-honest when the
-    state and cache describe the same plugin topology.
-    """
-    run_record = await session_service.create_run(
-        session_id=session_id,
-        state_id=current_state.id,
-        pipeline_yaml=cache_entry.pipeline_yaml,
-    )
-    node_specs = _node_specs_from_pipeline_yaml(cache_entry.pipeline_yaml)
-
-    # L3→L3 import: web/composer reads the OpenRouter catalog snapshot id
-    # at synthesis time so the cache-replay run row carries the same
-    # audit-anchor as any live-executed run. Without this the replay row
-    # would have NULL columns and the audit trail would be incomplete.
-    from elspeth.plugins.transforms.llm.model_catalog import read_openrouter_catalog_snapshot_id
-
-    catalog_sha, catalog_source = read_openrouter_catalog_snapshot_id()
-
-    def _write_landscape_run() -> str:
-        with LandscapeDB.from_url(
-            settings.get_landscape_url(),
-            passphrase=settings.landscape_passphrase,
-        ) as db:
-            return LandscapeWriteRepository(db).record_synthesised_run(
-                pipeline_yaml=cache_entry.pipeline_yaml,
-                rows=cache_entry.rows,
-                source_data_hash=cache_entry.source_data_hash,
-                llm_call_count=0,
-                node_specs=node_specs,
-                started_at=run_record.started_at,
-                metadata={
-                    "seeded_from_cache": True,
-                    "cache_key": cache_key,
-                    "cache_seeding_llm_call_count": cache_entry.llm_call_count,
-                },
-                openrouter_catalog_sha256=catalog_sha,
-                openrouter_catalog_source=catalog_source,
-                initiated_by_user_id=user_id,
-                auth_provider_type=auth_provider_type,
-            )
-
-    landscape_run_id = await run_sync_in_worker(_write_landscape_run)
-    await session_service.update_run_status(
-        run_record.id,
-        status="running",
-        landscape_run_id=landscape_run_id,
-    )
-    await session_service.update_run_status(
-        run_record.id,
-        status="completed",
-        rows_processed=len(cache_entry.rows),
-        rows_succeeded=len(cache_entry.rows),
-        rows_failed=0,
-        rows_routed_success=0,
-        rows_routed_failure=0,
-        rows_quarantined=0,
-    )
-    return TutorialRunResponse(
-        run_id=str(run_record.id),
-        output=TutorialRunOutput(
-            # ``TutorialRunOutput.model_config`` is strict; list-to-tuple
-            # coercion is disabled, so build the tuple explicitly.
-            rows=tuple(dict(row) for row in cache_entry.rows),
-            source_data_hash=cache_entry.source_data_hash,
-        ),
-        seeded_from_cache=True,
-        cache_key=cache_key,
-    )
 
 
 async def _run_live_tutorial(
@@ -557,334 +420,6 @@ def _parse_rows_content(path: Path, content: bytes) -> list[dict[str, Any]] | No
     raise TutorialRunIntegrityError(
         f"Tutorial artifact {path} JSON top-level must be a list of objects or an object with a "
         f"'rows: object[]' field; got {type(value).__name__}"
-    )
-
-
-async def _store_successful_live_projection(
-    *,
-    cache: TutorialCache,
-    model_id: str,
-    run_record: RunRecord,
-    output: TutorialRunOutput,
-    llm_call_count: int,
-) -> None:
-    skip_reason = _cache_seed_skip_reason(run_record)
-    if skip_reason is not None:
-        # I6: instrument the silent-skip path. Before this counter, a
-        # persistent tutorial degradation (e.g. every live run produces
-        # one quarantined row) would leave the cache un-seeded forever
-        # and every billed live run would discard its cache-seed value
-        # — LLM-billing surge before anyone noticed. Operators can now
-        # alert on a non-trivial floor of ``composer.tutorial.cache_skipped_total``
-        # broken down by ``skip_reason``.
-        record_tutorial_cache_skipped(skip_reason)
-        return
-    if run_record.pipeline_yaml is None:
-        raise TutorialRunIntegrityError(f"Tutorial run {run_record.id} completed without stored pipeline YAML")
-    cache.store(
-        TutorialCacheEntry(
-            canonical_prompt=CANONICAL_SEED_PROMPT,
-            model_id=model_id,
-            cached_at=datetime.now(UTC),
-            # TutorialRunOutput.rows is a tuple (frozen-model immutability);
-            # TutorialCacheEntry.rows is typed list[dict] for JSON round-trip.
-            # Explicit conversion at the boundary keeps each type honest.
-            rows=list(output.rows),
-            source_data_hash=output.source_data_hash,
-            llm_call_count=llm_call_count,
-            pipeline_yaml=run_record.pipeline_yaml,
-        )
-    )
-
-
-def _cache_seed_skip_reason(run_record: RunRecord) -> _CacheSkipReason | None:
-    """Classify why the tutorial cache cannot be seeded from this run.
-
-    Returns ``None`` when all rows succeeded; otherwise the most-specific
-    closed-list reason. Conditional ordering matters: quarantined and
-    routed_failure rows are subsets of rows_failed (Tier-1 constraints in
-    ``RunRecord._validate_counters``); routed_success rows are a subset
-    of rows_succeeded. Checking the specific subsets first ensures the
-    emitted ``skip_reason`` is actionable on the operator dashboard
-    rather than collapsing every classification into the catch-all
-    ``rows_failed``.
-
-    Status is the outermost gate because a non-completed status implies
-    nothing about the counters' correctness.
-    """
-    if run_record.status != "completed":
-        return "status_not_completed"
-    if run_record.rows_processed == 0:
-        return "zero_rows_processed"
-    if run_record.rows_quarantined > 0:
-        return "rows_quarantined"
-    if run_record.rows_routed_failure > 0:
-        return "rows_routed_failure"
-    if run_record.rows_failed > 0:
-        return "rows_failed"
-    if run_record.rows_routed_success > 0:
-        return "rows_routed_success"
-    if run_record.rows_succeeded != run_record.rows_processed:
-        return "rows_partial_success"
-    return None
-
-
-def _node_specs_from_pipeline_yaml(pipeline_yaml: str) -> tuple[SynthesisedNodeSpec, ...]:
-    """Build the ordered Tier-1 audit topology for a cached tutorial pipeline.
-
-    One ``SynthesisedNodeSpec`` per YAML occurrence — plugin reuse (e.g. two
-    ``llm`` transforms, csv source plus csv sink) must produce one node row
-    per occurrence, with ``node_type`` taken from the YAML's source / transforms
-    / sinks key, not derived from list position.
-    """
-    parsed = yaml.safe_load(pipeline_yaml)
-    if type(parsed) is not dict:
-        raise TutorialRunIntegrityError("Cached tutorial pipeline YAML must parse to an object")
-    roles = _plugin_nodes_from_pipeline_dict(parsed)
-    if not roles:
-        raise TutorialRunIntegrityError("Cached tutorial pipeline YAML contains no plugin nodes")
-    versions = _discovered_plugin_versions()
-    missing = sorted({name for _, name in roles if name not in versions})
-    if missing:
-        raise TutorialRunIntegrityError(f"Cached tutorial pipeline YAML references unknown plugins: {missing!r}")
-    return tuple(SynthesisedNodeSpec(node_type=node_type, plugin_name=name, plugin_version=versions[name]) for node_type, name in roles)
-
-
-def _plugin_nodes_from_pipeline_dict(doc: Mapping[str, Any]) -> tuple[tuple[NodeType, str], ...]:
-    """Return ``(node_type, plugin_name)`` pairs in YAML order, preserving duplicates.
-
-    Tier-1 audit topology — the ``nodes`` table — must reflect one row per
-    YAML node occurrence. Deduplicating by plugin name (the prior shape) made
-    plugin reuse invisible and shifted role assignment onto list-index
-    inference. Duplicates are preserved here; the role is carried explicitly.
-
-    Schema accepted (the production composer YAML shape emitted by
-    ``yaml_generator.generate_pipeline_dict`` and consumed by
-    ``core.config`` at ``elspeth/core/config.py:1798``):
-
-    - ``sources``: dict keyed by source name, values containing ``plugin``.
-    - ``source``: legacy single dict with a ``plugin`` key.
-    - ``transforms``: **list[dict]** of plugin entries (each with ``plugin``).
-    - ``aggregations``: **list[dict]** of plugin entries (each with ``plugin``).
-    - ``sinks``: dict keyed by sink name, values containing ``plugin``.
-
-    ``gates`` and ``coalesce`` are pipeline routing primitives without plugin
-    identity (yaml_generator.py:110, 159) — they cannot be faithfully
-    encoded in a (NodeType, plugin_name) topology row and the tutorial
-    canonical pipeline never generates them. If the cached YAML contains
-    either, raise rather than emit a half-truth audit.
-    """
-    roles: list[tuple[NodeType, str]] = []
-    sources = doc["sources"] if "sources" in doc else None
-    if type(sources) is dict:
-        for source in sources.values():
-            if type(source) is dict and "plugin" in source:
-                roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
-    else:
-        source = doc["source"] if "source" in doc else None
-        if type(source) is dict and "plugin" in source:
-            roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
-    _collect_list_form_plugins(doc, "transforms", NodeType.TRANSFORM, roles)
-    _collect_list_form_plugins(doc, "aggregations", NodeType.AGGREGATION, roles)
-    for routing_section in ("gates", "coalesce"):
-        if routing_section in doc and doc[routing_section]:
-            raise TutorialRunIntegrityError(
-                f"Cached tutorial pipeline YAML contains {routing_section!r} — "
-                "routing primitives without plugin identity cannot be encoded "
-                "into the synthesised Tier-1 audit topology; the tutorial canonical "
-                "pipeline never generates them"
-            )
-    sinks = doc["sinks"] if "sinks" in doc else {}
-    if type(sinks) is dict:
-        for sink in sinks.values():
-            if type(sink) is dict and "plugin" in sink:
-                roles.append((NodeType.SINK, _require_plugin_name(sink["plugin"])))
-    return tuple(roles)
-
-
-def _plugin_nodes_from_composition_state(record: Any) -> tuple[tuple[NodeType, str], ...]:
-    """Extract the plugin-node topology from a ``CompositionStateRecord``.
-
-    Mirrors the ordering of ``yaml_generator.generate_pipeline_dict``:
-    source first, then every ``transform``-typed node in ``record.nodes``
-    list order, then every ``aggregation``-typed node in list order, then
-    ``record.outputs`` (sinks) in list order. The sequence is the same one
-    ``_plugin_nodes_from_pipeline_dict`` extracts from the rendered YAML,
-    so the two are directly comparable for cache-replay state matching.
-
-    Gate and coalesce nodes are routing primitives without plugin identity
-    (consistent with the YAML parser policy) and raise rather than emit a
-    half-truth topology row.
-
-    ``record`` is typed as ``Any`` to avoid a hard L3 backward import on
-    ``CompositionStateRecord`` from sessions/protocol; the attribute
-    contract is enforced by ``__post_init__`` on the dataclass.
-    """
-    # ``CompositionStateRecord`` is a frozen dataclass whose source/nodes/
-    # outputs fields are typed ``Mapping[str, Any] | None`` (or
-    # ``Sequence[Mapping[str, Any]] | None``) and deep-frozen by
-    # ``__post_init__``. Trust the contract — no defensive isinstance at a
-    # Tier-1 internal read boundary. If the record was constructed with a
-    # non-Mapping where a Mapping was promised, that is a contract violation
-    # the dataclass constructor should have rejected; letting a missing-key
-    # KeyError or non-subscriptable TypeError propagate here surfaces the
-    # writer bug rather than masking it.
-    roles: list[tuple[NodeType, str]] = []
-    sources = record.sources if record.sources is not None else ({"source": record.source} if record.source is not None else {})
-    for source in sources.values():
-        if "plugin" in source:
-            roles.append((NodeType.SOURCE, _require_plugin_name(source["plugin"])))
-    nodes = record.nodes if record.nodes is not None else ()
-    transform_entries: list[Mapping[str, Any]] = []
-    aggregation_entries: list[Mapping[str, Any]] = []
-    for node in nodes:
-        node_type = node["node_type"] if "node_type" in node else None
-        if node_type == "transform":
-            transform_entries.append(node)
-        elif node_type == "aggregation":
-            aggregation_entries.append(node)
-        elif node_type in ("gate", "coalesce"):
-            raise TutorialRunIntegrityError(
-                f"Composition state contains {node_type!r} node — routing primitives "
-                "without plugin identity cannot participate in synthesised Tier-1 "
-                "audit topology comparisons"
-            )
-    for entry in transform_entries:
-        if "plugin" in entry:
-            roles.append((NodeType.TRANSFORM, _require_plugin_name(entry["plugin"])))
-    for entry in aggregation_entries:
-        if "plugin" in entry:
-            roles.append((NodeType.AGGREGATION, _require_plugin_name(entry["plugin"])))
-    outputs = record.outputs if record.outputs is not None else ()
-    for output in outputs:
-        if "plugin" in output:
-            roles.append((NodeType.SINK, _require_plugin_name(output["plugin"])))
-    return tuple(roles)
-
-
-def _state_matches_cached_topology(record: Any, cached_pipeline_yaml: str) -> bool:
-    """Return True when the state's plugin topology equals the cache's.
-
-    Tier-1 audit invariant: cache replay attaches cached pipeline_yaml and
-    rows to the user's current ``state_id``. If the state and cached
-    pipeline describe different plugin topologies, that attachment is an
-    audit lie. This check gates the replay path; mismatches fall through to
-    live compose so the audit faithfully reflects what was actually run.
-
-    Comparison is by ``(NodeType, plugin_name)`` sequence — option values,
-    node names, and YAML formatting do not matter. The LLM composer is
-    non-deterministic in those surface details but the canonical pipeline
-    topology should be stable for the cache hit to be safe.
-    """
-    cached_doc = yaml.safe_load(cached_pipeline_yaml)
-    if type(cached_doc) is not dict:
-        raise TutorialRunIntegrityError("Cached tutorial pipeline YAML must parse to an object for topology comparison")
-    cached_topology = _plugin_nodes_from_pipeline_dict(cached_doc)
-    state_topology = _plugin_nodes_from_composition_state(record)
-    return state_topology == cached_topology
-
-
-def _collect_list_form_plugins(
-    doc: Mapping[str, Any],
-    section: str,
-    node_type: NodeType,
-    roles: list[tuple[NodeType, str]],
-) -> None:
-    """Append ``(node_type, plugin_name)`` for each entry in a list-form section.
-
-    Production composer YAML emits ``transforms`` and ``aggregations`` as
-    ``list[dict]`` (yaml_generator.py:86, 126). The engine config loader at
-    ``core/config.py:1798, 1811`` requires list-form. Per No Legacy Code
-    Policy, dict-form is rejected — it is not a production-reachable
-    contract.
-    """
-    if section not in doc:
-        return
-    entries = doc[section]
-    if not entries:
-        return
-    if type(entries) is not list:
-        raise TutorialRunIntegrityError(
-            f"Cached tutorial pipeline YAML {section!r} must be a list of plugin entries, got {type(entries).__name__}"
-        )
-    for entry in entries:
-        if type(entry) is dict and "plugin" in entry:
-            roles.append((node_type, _require_plugin_name(entry["plugin"])))
-
-
-def _require_plugin_name(value: object) -> str:
-    if type(value) is not str or not value:
-        raise TutorialRunIntegrityError(f"Pipeline plugin name must be a non-empty string, got {value!r}")
-    return value
-
-
-@cache  # Process-scoped: plugin discovery is idempotent within a process.
-def _discovered_plugin_versions() -> dict[str, str]:
-    versions: dict[str, str] = {}
-    discovered = discover_all_plugins()
-    for plugin_classes in discovered.values():
-        for plugin_class in plugin_classes:
-            plugin = cast(Any, plugin_class)
-            name = plugin.name
-            version = plugin.plugin_version
-            if type(name) is not str or type(version) is not str:
-                raise TutorialRunIntegrityError(f"Plugin class {plugin_class!r} has invalid name/version metadata")
-            versions[name] = version
-    return versions
-
-
-def tutorial_model_id(settings: WebSettings) -> str:
-    """Build the compound tutorial-cache identifier.
-
-    The cache key (``SHA-256(canonical_prompt + ":" + model_id)``) invalidates
-    on the operator-controlled inputs that determine the composer's choice of
-    pipeline shape and transform model. Five such inputs are folded into the
-    returned identifier; any one change forces a fresh live composition.
-
-    Covered (automatic invalidation):
-
-    1. ``settings.composer_model`` — the LLM that authors the pipeline YAML.
-    2. Core composer skill markdown (``pipeline_composer.md``) shipped with
-       the package — biases the composer's plugin selection and the
-       transform model named inside the generated pipeline YAML.
-    3. Optional deployment skill overlay at
-       ``{data_dir}/skills/pipeline_composer.md`` — operator-supplied
-       guidance that further shapes composer behaviour.
-    4. The staged guided skill pack (``base.md`` + ``step_1..step_4_wire.md``)
-       consumed by the guided per-step chat solver — biases the staged
-       compose path that authors the cached pipeline.
-    5. The recipe catalog (``composer/recipes.py`` +
-       ``composer/guided/recipe_match.py``) — under D11 the web_scrape recipe
-       deterministically authors the cached pipeline's option-level content,
-       and the predicate registry selects which recipe fires.
-
-    Out of scope (operator clears ``{data_dir}/tutorial_cache/`` manually
-    when one of these changes — same "operator deletes the artifact"
-    pattern as elsewhere in the project):
-
-    - LLM non-determinism. Same composer_model + same skill may produce a
-      different ``pipeline_yaml`` on re-compose; the cache freezes whichever
-      pipeline was authored first. The Tier-1 audit replay remains internally
-      consistent because the cached ``pipeline_yaml`` (with its embedded
-      transform model) is what the synthesised run records.
-    - Plugin pack defaults (``packs/llm/defaults.yaml``) and profile YAMLs.
-      These can bias the composer's transform-model choice without changing
-      the three keyed inputs. Cache replay remains attribution-correct (the
-      cached YAML's embedded model is what's recorded) but the canonical
-      experience may be older than the operator expects until the cache is
-      cleared.
-    """
-    _, core_skill_hash = load_skill_with_hash("pipeline_composer")
-    staged_skill_hash = guided_staged_skill_hash()
-    deployment_overlay = load_deployment_skill("pipeline_composer", settings.data_dir)
-    deployment_hash = hashlib.sha256(deployment_overlay.encode("utf-8")).hexdigest()
-    recipe_hash = recipe_catalog_content_hash()
-    return (
-        f"composer={settings.composer_model}"
-        f"|skill={core_skill_hash}"
-        f"|staged_skill={staged_skill_hash}"
-        f"|deployment_skill={deployment_hash}"
-        f"|recipe={recipe_hash}"
     )
 
 

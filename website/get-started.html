@@ -5,11 +5,13 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Get started — ELSPETH</title>
+<script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
-<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script src="vendor/lucide.min.js"></script>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="nav">
   <div class="wrap nav-inner">
@@ -25,11 +27,13 @@
     </div>
     <div class="nav-right">
       <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
-      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact" href="https://github.com/johnm-dta/elspeth" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
       <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
     </div>
   </div>
 </header>
+
+<main id="main">
 
 <div class="page-head dotgrid">
   <div class="wrap">
@@ -41,11 +45,12 @@
 
 <section>
   <div class="wrap">
+    <h2 class="vh">Install and run from the CLI</h2>
     <div class="steps" style="margin-top:8px">
       <div class="step">
         <span class="num">1</span>
         <div>
-          <h4>Install</h4>
+          <h3>Install</h3>
           <p>Python 3.12+. Clone and install with <code>uv</code>.</p>
           <pre><span class="pr">$</span> git clone https://github.com/johnm-dta/elspeth.git &amp;&amp; cd elspeth
 <span class="pr">$</span> uv venv &amp;&amp; source .venv/bin/activate
@@ -55,7 +60,7 @@
       <div class="step">
         <span class="num">2</span>
         <div>
-          <h4>Validate before you run</h4>
+          <h3>Validate before you run</h3>
           <p>Preflight checks graph structure, route targets, schema compatibility, and secret references.</p>
           <pre><span class="pr">$</span> elspeth validate --settings pipeline.yaml</pre>
         </div>
@@ -63,7 +68,7 @@
       <div class="step">
         <span class="num">3</span>
         <div>
-          <h4>Run &amp; explain</h4>
+          <h3>Run &amp; explain</h3>
           <p>Execute the pipeline, then explore why any row reached its destination.</p>
           <pre><span class="pr">$</span> elspeth run --settings pipeline.yaml --execute
 <span class="pr">$</span> elspeth explain --run &lt;run_id&gt; --row &lt;row_id&gt;</pre>
@@ -83,17 +88,28 @@
         <h2>pipeline.yaml</h2>
         <p>Every edge is named; every gate is pure config. Prefer not to write YAML? The Web Composer lets you describe the workflow in conversation instead — it builds the same artifact.</p>
       </div>
-<pre class="code"><span class="cm"># pipeline.yaml</span>
-<span class="key">source</span>:
-  plugin: <span class="str">csv</span>
-  on_success: validated
-  options: { path: <span class="str">data/submissions.csv</span> }
+<pre class="code"><span class="cm"># pipeline.yaml — passes: elspeth validate --settings pipeline.yaml</span>
+<span class="key">sources</span>:
+  submissions:
+    plugin: <span class="str">csv</span>
+    on_success: validated
+    options:
+      path: <span class="str">data/submissions.csv</span>
+      schema: { mode: <span class="str">observed</span> }   <span class="cm"># infer types from the data</span>
+      on_validation_failure: discard      <span class="cm"># no silent defaults — declare it</span>
 
 <span class="key">transforms</span>:
 - name: classify
   plugin: <span class="str">llm</span>
   input: validated
   on_success: classified
+  on_error: discard
+  options:
+    provider: <span class="str">openrouter</span>
+    model: <span class="str">anthropic/claude-sonnet-4.6</span>
+    api_key: <span class="str">${OPENROUTER_API_KEY}</span>   <span class="cm"># from the OPENROUTER_API_KEY env var</span>
+    prompt_template: <span class="str">"Score risk 0-1: {{ row }}"</span>
+    schema: { mode: <span class="str">observed</span> }
 
 <span class="key">gates</span>:
 - name: safety_gate
@@ -102,11 +118,35 @@
   routes: { <span class="str">"true"</span>: review, <span class="str">"false"</span>: approved }
 
 <span class="key">sinks</span>:
-  approved: { plugin: <span class="str">csv</span> }
-  review:   { plugin: <span class="str">review_queue</span> }
+  <span class="cm"># "review" is a destination role, not a plugin type — route it to a real sink</span>
+  approved: { plugin: <span class="str">csv</span>, on_write_failure: discard, options: { path: <span class="str">data/approved.csv</span>, schema: { mode: <span class="str">observed</span> } } }
+  review:   { plugin: <span class="str">csv</span>, on_write_failure: discard, options: { path: <span class="str">data/needs_review.csv</span>, schema: { mode: <span class="str">observed</span> } } }
 
 <span class="key">landscape</span>:
   url: <span class="str">sqlite:///./audit.db</span></pre>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<section id="composer">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Prefer not to write YAML?</span>
+      <h2>Launch the Web Composer.</h2>
+      <p>The Web Composer ships with ELSPETH. Start the local web app, then build a pipeline in conversation — it targets the same engine, contracts, and Landscape audit trail as the CLI.</p>
+    </div>
+    <div class="steps" style="margin-top:28px">
+      <div class="step">
+        <span class="num"><i data-lucide="arrow-right" style="width:16px;height:16px"></i></span>
+        <div>
+          <h3>Run the local server</h3>
+          <p>Starts a FastAPI app bound to your machine. Open the printed address in a browser to start composing.</p>
+          <pre><span class="pr">$</span> elspeth web
+<span class="cm"># Composer served at http://127.0.0.1:8451</span></pre>
+        </div>
+      </div>
     </div>
   </div>
 </section>
@@ -115,13 +155,15 @@
   <div class="wrap">
     <span class="eyebrow">Traceable · Reliable · Defensible</span>
     <h2>Ready when you are.</h2>
-    <p>Read the docs for a complete walkthrough, or jump straight into the Web Composer.</p>
+    <p>Read the docs for a complete walkthrough of every plugin and contract.</p>
     <div class="cta-row" style="justify-content:center">
-      <a class="btn btn-primary btn-lg" href="#">Read the docs</a>
-      <a class="btn btn-lg" href="#"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; johnm-dta/elspeth</a>
+      <a class="btn btn-primary btn-lg" href="https://github.com/johnm-dta/elspeth/tree/main/docs">Read the docs</a>
+      <a class="btn btn-lg" href="https://github.com/johnm-dta/elspeth"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; johnm-dta/elspeth</a>
     </div>
   </div>
 </div>
+
+</main>
 
 <footer>
   <div class="wrap foot">
@@ -131,9 +173,9 @@
       <a href="authoring.html">Authoring</a>
       <a href="assurance.html">Assurance</a>
       <a href="use-cases.html">Use cases</a>
-      <a href="#">GitHub</a>
+      <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
     </div>
-    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+    <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · Built for decisions that must be defensible.</span>
   </div>
 </footer>
 

@@ -248,7 +248,7 @@ interactively:
 - create authenticated user sessions and keep versioned conversation/state
   history
 - upload or create blobs, inspect schema hints, and wire blob-backed sources
-- store user secrets and wire `$secret{name}` references without exposing raw
+- store user secrets and wire `{secret_ref: NAME}` references without exposing raw
   values to the composer
 - ask the LLM composer to build or modify a pipeline through audited tools
 - preview validation, graph, spec, YAML, semantic contracts, and repair hints

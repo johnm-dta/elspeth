@@ -5,11 +5,13 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Assurance — ELSPETH</title>
+<script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
-<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script src="vendor/lucide.min.js"></script>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="nav">
   <div class="wrap nav-inner">
@@ -25,11 +27,13 @@
     </div>
     <div class="nav-right">
       <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
-      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact" href="https://github.com/johnm-dta/elspeth" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
       <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
     </div>
   </div>
 </header>
+
+<main id="main">
 
 <div class="page-head dotgrid">
   <div class="wrap">
@@ -41,13 +45,14 @@
 
 <section>
   <div class="wrap">
+    <h2 class="vh">Assurance properties</h2>
     <div class="features" style="margin-top:8px">
-      <div class="feature"><span class="fi"><i data-lucide="scroll-text"></i></span><h4>Landscape audit trail</h4><p>Complete row lineage with content hashes. Export signed (HMAC-SHA256) with a running hash for chain-of-custody review.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="git-compare-arrows"></i></span><h4>Two-axis terminal model</h4><p>Lifecycle outcome and path/provenance are separated — "did it succeed?" and "how did it get there?" are both explicit.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="shield-check"></i></span><h4>Declaration-trust + VAL</h4><p>Plugin declarations the graph builder trusts are backed by runtime VAL manifests, invariant tests, and CI scanners.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="fingerprint"></i></span><h4>Secret discipline</h4><p>Secrets resolve at execution boundaries, are fingerprinted for audit, and are never persisted as raw values.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="lock"></i></span><h4>Strict response schemas</h4><p>Web execution responses forbid unknown fields, so internal drift fails loudly instead of being silently coerced.</p></div>
-      <div class="feature"><span class="fi"><i data-lucide="list-checks"></i></span><h4>Terminal statuses</h4><p>completed · completed_with_failures · failed · empty · cancelled — run accounting never collapses to one number.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="scroll-text"></i></span><h3>Landscape audit trail</h3><p>Complete row lineage with content hashes. Export signed (HMAC-SHA256) with a running hash for chain-of-custody review.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="git-compare-arrows"></i></span><h3>Two-axis terminal model</h3><p>Lifecycle outcome and path/provenance are separated — "did it succeed?" and "how did it get there?" are both explicit.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="shield-check"></i></span><h3>Declaration-trust + VAL</h3><p>Plugin declarations the graph builder trusts are backed by runtime VAL manifests, invariant tests, and CI scanners.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="fingerprint"></i></span><h3>Secret discipline</h3><p>Secrets resolve at execution boundaries, are fingerprinted for audit, and are never persisted as raw values.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="lock"></i></span><h3>Strict response schemas</h3><p>Web execution responses forbid unknown fields, so internal drift fails loudly instead of being silently coerced.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="list-checks"></i></span><h3>Terminal statuses</h3><p>completed · completed_with_failures · failed · empty · cancelled — run accounting never collapses to one number.</p></div>
     </div>
   </div>
 </section>
@@ -64,21 +69,21 @@
     <div class="tiers">
       <div class="tier">
         <span class="tlabel">Tier 1</span>
-        <h4>Engine-owned records</h4>
+        <h3>Engine-owned records</h3>
         <p>Audit database, checkpoints, runtime records. A corrupted audit record means tampering — crash immediately.</p>
-        <span class="trust" style="background:var(--color-error-bg);color:var(--color-error)">Full trust · crash on anomaly</span>
+        <span class="trust" style="background:var(--color-error-bg);color:var(--color-text);border:1px solid var(--color-error-border)">Full trust · crash on anomaly</span>
       </div>
       <div class="tier">
         <span class="tlabel">Tier 2</span>
-        <h4>Validated pipeline data</h4>
+        <h3>Validated pipeline data</h3>
         <p>Rows after source validation. Types are valid; wrap operations where row content can still fail.</p>
-        <span class="trust" style="background:var(--color-warning-bg);color:var(--color-warning)">Elevated trust</span>
+        <span class="trust" style="background:var(--color-warning-bg);color:var(--color-text);border:1px solid var(--color-warning-border)">Elevated trust</span>
       </div>
       <div class="tier">
         <span class="tlabel">Tier 3</span>
-        <h4>External input</h4>
+        <h3>External input</h3>
         <p>Files, API/LLM responses, source data. Validate at the boundary, coerce where allowed, quarantine malformed rows.</p>
-        <span class="trust" style="background:var(--color-success-bg);color:var(--color-success)">Zero trust · quarantine</span>
+        <span class="trust" style="background:var(--color-success-bg);color:var(--color-text);border:1px solid var(--color-success-border)">Zero trust · quarantine</span>
       </div>
     </div>
     <div class="cta-row" style="margin-top:40px">
@@ -88,6 +93,8 @@
   </div>
 </section>
 
+</main>
+
 <footer>
   <div class="wrap foot">
     <span class="brand">ELSPETH</span>
@@ -96,9 +103,9 @@
       <a href="authoring.html">Authoring</a>
       <a href="use-cases.html">Use cases</a>
       <a href="get-started.html">Get started</a>
-      <a href="#">GitHub</a>
+      <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
     </div>
-    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+    <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · Built for decisions that must be defensible.</span>
   </div>
 </footer>
 

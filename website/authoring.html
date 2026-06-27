@@ -5,11 +5,13 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Authoring — ELSPETH</title>
+<script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
-<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script src="vendor/lucide.min.js"></script>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="nav">
   <div class="wrap nav-inner">
@@ -25,11 +27,13 @@
     </div>
     <div class="nav-right">
       <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
-      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact" href="https://github.com/johnm-dta/elspeth" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
       <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
     </div>
   </div>
 </header>
+
+<main id="main">
 
 <div class="page-head dotgrid">
   <div class="wrap">
@@ -41,6 +45,7 @@
 
 <section>
   <div class="wrap">
+    <h2 class="vh">Authoring surfaces</h2>
     <div class="surfaces" style="margin-top:8px">
       <div class="surface-card">
         <span class="ic"><i data-lucide="file-code-2"></i></span>
@@ -55,10 +60,12 @@
       <div class="surface-card">
         <span class="ic"><i data-lucide="messages-square"></i></span>
         <h3>Web Composer</h3>
-        <p>For knowledge workers building document QA, classification, routing, or review workflows. An LLM tool loop mutates pipeline state through audited tools and contracts — never free-form config text.</p>
+        <p>For knowledge workers building document QA, classification, routing, or review workflows. An LLM tool loop mutates pipeline state through audited tools and contracts — never free-form config text. Two modes share the same tools, contracts, and audit trail:</p>
         <ul>
+          <li><i data-lucide="check"></i> Guided — default-on for a first pipeline: a stepped walk through source → transforms → sink → wire, prompting one stage at a time</li>
+          <li><i data-lucide="check"></i> Freeform — one open conversation for a fluent operator who drives the whole pipeline at once, no rails</li>
           <li><i data-lucide="check"></i> Preview validation, graph, spec, YAML, and repair hints</li>
-          <li><i data-lucide="check"></i> Blob-backed sources and <code>$secret{}</code> references</li>
+          <li><i data-lucide="check"></i> Blob-backed sources and wired <code>{secret_ref: NAME}</code> references</li>
           <li><i data-lucide="check"></i> Background runs streamed over WebSocket, safely cancellable</li>
         </ul>
       </div>
@@ -78,19 +85,19 @@
     <div class="sda">
       <div class="sda-step">
         <span class="k" style="color:var(--color-badge-source)">Sense</span>
-        <h4>Sources</h4>
-        <p>Load data — CSV, JSON, text/blob, Azure Blob, Dataverse, database, Chroma.</p>
+        <h3>Sources</h3>
+        <p>Load data — CSV, JSON, text/blob, Azure Blob, Dataverse.</p>
       </div>
       <div class="sda-arrow">→</div>
       <div class="sda-step">
         <span class="k" style="color:var(--color-badge-transform)">Decide</span>
-        <h4>Transforms &amp; gates</h4>
+        <h3>Transforms &amp; gates</h3>
         <p>Map, coerce, classify, run LLM queries, evaluate pure-config threshold gates.</p>
       </div>
       <div class="sda-arrow">→</div>
       <div class="sda-step">
-        <span class="k" style="color:var(--color-badge-sink)">Act</span>
-        <h4>Sinks</h4>
+        <span class="k k-act">Act</span>
+        <h3>Sinks</h3>
         <p>Route rows to outputs — files, database rows, review queues, alerts.</p>
       </div>
     </div>
@@ -109,6 +116,32 @@
   </div>
 </section>
 
+<hr class="divider" />
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Execution model</span>
+      <h2>Concurrent, but still deterministic.</h2>
+      <p>LLM calls are the slow part of most pipelines, so an LLM transform fans its per-row requests out across a bounded thread pool — then puts the results back in order. Throughput comes from overlapping I/O-bound model calls inside a transform, not from parallelising the graph, and never at the cost of a reproducible run.</p>
+    </div>
+    <div class="features">
+      <div class="feature"><span class="fi"><i data-lucide="layers"></i></span><h3>Bounded fan-out</h3><p>Per-row LLM and API calls run through a semaphore-bounded ThreadPoolExecutor, so a single LLM transform overlaps in-flight requests up to a fixed ceiling instead of waiting one row at a time.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="gauge"></i></span><h3>AIMD back-pressure</h3><p>Concurrency adapts to the provider: additive-increase while calls succeed, multiplicative-decrease on capacity errors — the pool backs off under load instead of hammering a rate-limited endpoint.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="list-ordered"></i></span><h3>Reorder buffer</h3><p>Concurrent results arrive out of order, then a reorder buffer re-sequences them back to submission order before they flow downstream. Parallel execution never reshuffles your rows.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="snowflake"></i></span><h3>Frozen row contexts</h3><p>Rows crossing a thread boundary are exposed as read-only views (MappingProxyType), so concurrent workers share no mutable state and cannot race each other.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="shield-alert"></i></span><h3>Contained regex, force-killable</h3><p>The only OS-level subprocess is a single-worker, force-killable process that runs regex in isolation, so a catastrophic-backtracking (ReDoS) pattern can be killed rather than hang the run. Containment for safety — not parallelism for speed.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="scroll-text"></i></span><h3>Preserves the deterministic audit</h3><p>Fan-out lives inside the transform layer; the orchestrator and Landscape audit stay single-writer and ordered. The reorder buffer is what lets concurrency keep the audit reproducible, not undermine it.</p></div>
+    </div>
+    <div class="cta-row" style="margin-top:40px">
+      <a class="btn btn-primary" href="assurance.html">How the audit stays deterministic</a>
+      <a class="btn" href="use-cases.html">Where it's used</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
 <footer>
   <div class="wrap foot">
     <span class="brand">ELSPETH</span>
@@ -117,9 +150,9 @@
       <a href="assurance.html">Assurance</a>
       <a href="use-cases.html">Use cases</a>
       <a href="get-started.html">Get started</a>
-      <a href="#">GitHub</a>
+      <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
     </div>
-    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+    <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · Built for decisions that must be defensible.</span>
   </div>
 </footer>
 

@@ -5,11 +5,13 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>ELSPETH — High-assurance pipelines for consequential work</title>
+<script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
-<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script src="vendor/lucide.min.js"></script>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="nav">
   <div class="wrap nav-inner">
@@ -25,11 +27,13 @@
     </div>
     <div class="nav-right">
       <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
-      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact" href="https://github.com/johnm-dta/elspeth" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
       <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
     </div>
   </div>
 </header>
+
+<main id="main">
 
 <!-- HERO -->
 <div class="hero dotgrid">
@@ -40,7 +44,7 @@
       <p class="sub">ELSPETH is a high-assurance pipeline substrate for consequential workflows — where the wrong output can cause operational, legal, safety, or financial harm. Author in reviewable YAML or the LLM Web Composer; both run on one audited engine.</p>
       <div class="cta-row">
         <a class="btn btn-primary btn-lg" href="get-started.html">Get started</a>
-        <a class="btn btn-lg" href="#"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; View on GitHub</a>
+        <a class="btn btn-lg" href="https://github.com/johnm-dta/elspeth"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; View on GitHub</a>
       </div>
     </div>
     <div class="term" aria-hidden="true">
@@ -100,10 +104,12 @@
     <p>Install the CLI, or open the Web Composer and describe what you want. Both end in a pipeline that can be validated, executed, audited, and explained.</p>
     <div class="cta-row" style="justify-content:center">
       <a class="btn btn-primary btn-lg" href="get-started.html">Get started</a>
-      <a class="btn btn-lg" href="#"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; johnm-dta/elspeth</a>
+      <a class="btn btn-lg" href="https://github.com/johnm-dta/elspeth"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; johnm-dta/elspeth</a>
     </div>
   </div>
 </div>
+
+</main>
 
 <footer>
   <div class="wrap foot">
@@ -113,9 +119,9 @@
       <a href="assurance.html">Assurance</a>
       <a href="use-cases.html">Use cases</a>
       <a href="get-started.html">Get started</a>
-      <a href="#">GitHub</a>
+      <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
     </div>
-    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+    <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · Built for decisions that must be defensible.</span>
   </div>
 </footer>
 

@@ -5,11 +5,13 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Use cases — ELSPETH</title>
+<script>(function(){try{var s=localStorage.getItem("elspeth-theme");var t=s||((window.matchMedia&&window.matchMedia("(prefers-color-scheme: light)").matches)?"light":"dark");document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <link rel="stylesheet" href="styles.css" />
 <link rel="stylesheet" href="site.css" />
-<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script src="vendor/lucide.min.js"></script>
 </head>
 <body>
+<a class="skip-link" href="#main">Skip to content</a>
 
 <header class="nav">
   <div class="wrap nav-inner">
@@ -25,11 +27,13 @@
     </div>
     <div class="nav-right">
       <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
-      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact" href="https://github.com/johnm-dta/elspeth" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
       <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
     </div>
   </div>
 </header>
+
+<main id="main">
 
 <div class="page-head dotgrid">
   <div class="wrap">
@@ -41,46 +45,21 @@
 
 <section>
   <div class="wrap">
-    <div class="cases" style="margin-top:8px">
-      <div class="case-row head">
-        <span>Domain</span><span>Sense</span><span>Decide</span><span>Act</span>
-      </div>
-      <div class="case-row">
-        <span class="dom">Tender evaluation</span>
-        <span class="c">CSV of submissions</span>
-        <span class="c">LLM classification + safety gates</span>
-        <span class="c">Results CSV, abuse review queue</span>
-      </div>
-      <div class="case-row">
-        <span class="dom">Document QA</span>
-        <span class="c">PDF / text blobs</span>
-        <span class="c">Extraction, rubric checks, summaries</span>
-        <span class="c">Annotated outputs, exception queue</span>
-      </div>
-      <div class="case-row">
-        <span class="dom">Content moderation</span>
-        <span class="c">User submissions</span>
-        <span class="c">Safety classifier</span>
-        <span class="c">Published, human review, rejected</span>
-      </div>
-      <div class="case-row">
-        <span class="dom">Financial compliance</span>
-        <span class="c">Transaction feed</span>
-        <span class="c">Rules engine + ML fraud detection</span>
-        <span class="c">Approved, flagged, blocked</span>
-      </div>
-      <div class="case-row">
-        <span class="dom">Weather monitoring</span>
-        <span class="c">Sensor API feed</span>
-        <span class="c">Threshold + ML anomaly detection</span>
-        <span class="c">Routine log, warning, emergency alert</span>
-      </div>
-      <div class="case-row">
-        <span class="dom">Satellite operations</span>
-        <span class="c">Telemetry stream</span>
-        <span class="c">Anomaly classifier</span>
-        <span class="c">Routine log, investigation ticket</span>
-      </div>
+    <div class="table-scroll" style="margin-top:8px">
+    <table class="cases">
+      <caption class="vh">ELSPETH use cases mapped to Sense, Decide, and Act</caption>
+      <thead>
+        <tr><th scope="col">Domain</th><th scope="col">Sense</th><th scope="col">Decide</th><th scope="col">Act</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row" class="dom">Tender evaluation</th><td>CSV of submissions</td><td>LLM classification + safety gates</td><td>Results CSV, abuse review queue</td></tr>
+        <tr><th scope="row" class="dom">Document QA</th><td>PDF / text blobs</td><td>Extraction, rubric checks, summaries</td><td>Annotated outputs, exception queue</td></tr>
+        <tr><th scope="row" class="dom">Content moderation</th><td>User submissions</td><td>Safety classifier</td><td>Published, human review, rejected</td></tr>
+        <tr><th scope="row" class="dom">Financial compliance</th><td>Transaction feed</td><td>Rules engine + ML fraud detection</td><td>Approved, flagged, blocked</td></tr>
+        <tr><th scope="row" class="dom">Weather monitoring</th><td>Sensor API feed</td><td>Threshold + ML anomaly detection</td><td>Routine log, warning, emergency alert</td></tr>
+        <tr><th scope="row" class="dom">Satellite operations</th><td>Telemetry stream</td><td>Anomaly classifier</td><td>Routine log, investigation ticket</td></tr>
+      </tbody>
+    </table>
     </div>
   </div>
 </section>
@@ -122,25 +101,18 @@
       <h2>When to reach for something else.</h2>
       <p>The audit machinery that makes ELSPETH defensible is overhead you don't want for throughput-first work. If you don't need the trail, a leaner tool will serve you better.</p>
     </div>
-    <div class="cases" style="margin-top:36px">
-      <div class="case-row head" style="grid-template-columns:1fr 1fr 2fr">
-        <span>If you need…</span><span>Consider instead</span><span>Why</span>
-      </div>
-      <div class="case-row" style="grid-template-columns:1fr 1fr 2fr">
-        <span class="dom">High-throughput ETL</span>
-        <span class="c"><code>Spark</code> · <code>dbt</code></span>
-        <span class="c">Bulk transformation at scale, where per-row lineage and audit evidence aren't the point.</span>
-      </div>
-      <div class="case-row" style="grid-template-columns:1fr 1fr 2fr">
-        <span class="dom">Sub-second streaming</span>
-        <span class="c"><code>Flink</code> · <code>Kafka Streams</code></span>
-        <span class="c">Low-latency event processing. ELSPETH's orchestrator is deterministic and single-writer by design.</span>
-      </div>
-      <div class="case-row" style="grid-template-columns:1fr 1fr 2fr">
-        <span class="dom">Simple scripts, no audit</span>
-        <span class="c">Plain Python</span>
-        <span class="c">One-off or low-stakes work where a reviewable trail would be ceremony, not value.</span>
-      </div>
+    <div class="table-scroll" style="margin-top:36px">
+    <table class="cases">
+      <caption class="vh">When to choose a different tool</caption>
+      <thead>
+        <tr><th scope="col">If you need…</th><th scope="col">Consider instead</th><th scope="col">Why</th></tr>
+      </thead>
+      <tbody>
+        <tr><th scope="row" class="dom">High-throughput ETL</th><td><code>Spark</code> · <code>dbt</code></td><td>Bulk transformation at scale, where per-row lineage and audit evidence aren't the point.</td></tr>
+        <tr><th scope="row" class="dom">Sub-second streaming</th><td><code>Flink</code> · <code>Kafka Streams</code></td><td>Low-latency event processing. ELSPETH's orchestrator is deterministic and single-writer by design.</td></tr>
+        <tr><th scope="row" class="dom">Simple scripts, no audit</th><td>Plain Python</td><td>One-off or low-stakes work where a reviewable trail would be ceremony, not value.</td></tr>
+      </tbody>
+    </table>
     </div>
     <p class="muted" style="margin-top:20px;font-size:14px;max-width:60ch">ELSPETH trades raw throughput for evidence. That's the right trade only when "why did it do that?" has to have an answer.</p>
     <div class="cta-row" style="margin-top:32px">
@@ -148,6 +120,8 @@
     </div>
   </div>
 </section>
+
+</main>
 
 <footer>
   <div class="wrap foot">
@@ -157,9 +131,9 @@
       <a href="authoring.html">Authoring</a>
       <a href="assurance.html">Assurance</a>
       <a href="get-started.html">Get started</a>
-      <a href="#">GitHub</a>
+      <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
     </div>
-    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+    <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · Built for decisions that must be defensible.</span>
   </div>
 </footer>
 

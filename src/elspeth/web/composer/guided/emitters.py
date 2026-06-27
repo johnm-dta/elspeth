@@ -504,10 +504,20 @@ def _build_inspect_and_confirm_turn(
     )
 
 
+# Degenerate sources hidden from the guided discovery picker. ``null`` yields no
+# rows — it is never a sensible pipeline INPUT to pick first-hand, and surfacing
+# it in the (especially first-run) source list is pure noise. It remains fully
+# usable via explicit YAML / freeform composition.
+_GUIDED_HIDDEN_SOURCES = frozenset({"null"})
+
+
 def _build_step_1_single_select_turn(
     catalog: CatalogServiceProtocol,
 ) -> Turn:
-    """Build a ``single_select`` Turn listing available source plugins."""
+    """Build a ``single_select`` Turn listing selectable source plugins.
+
+    Excludes the degenerate sources in ``_GUIDED_HIDDEN_SOURCES`` (see note).
+    """
     sources = catalog.list_sources()
     options: list[_Option] = [
         _Option(
@@ -516,6 +526,7 @@ def _build_step_1_single_select_turn(
             hint=plugin.description if plugin.description else None,
         )
         for plugin in sources
+        if plugin.name not in _GUIDED_HIDDEN_SOURCES
     ]
     payload: SingleSelectPayload = {
         "question": "Which data source would you like to use?",

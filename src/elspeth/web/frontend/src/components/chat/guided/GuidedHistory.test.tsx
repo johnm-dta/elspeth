@@ -52,7 +52,7 @@ describe("GuidedHistory", () => {
     expect(screen.queryByText("Single select")).toBeNull();
   });
 
-  it("collapses multiple turns of the same step to one row (last wins)", () => {
+  it("collapses multiple turns of the same step to one row (most-recent summary wins)", () => {
     render(
       <GuidedHistory
         history={[
@@ -63,6 +63,22 @@ describe("GuidedHistory", () => {
     );
     expect(screen.getAllByRole("listitem")).toHaveLength(1);
     expect(screen.getByText("Source configured: csv")).toBeInTheDocument();
+  });
+
+  it("does not let a trailing unsummarised next-turn mask the step's summary", () => {
+    // Real shape after a chat-resolve: the entry record carries the decision
+    // summary, then an unanswered next-turn record (summary: null) is emitted.
+    render(
+      <GuidedHistory
+        history={[
+          { ...TURN_1, turn_type: "single_select", summary: "Configured: web_scrape" },
+          { ...TURN_1, turn_type: "schema_form", summary: null },
+        ]}
+      />,
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByText("Configured: web_scrape")).toBeInTheDocument();
+    expect(screen.queryByText("Decided")).toBeNull();
   });
 
   it("renders nothing when history is empty", () => {

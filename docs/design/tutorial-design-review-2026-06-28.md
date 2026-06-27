@@ -64,12 +64,14 @@ visible effect).
 - **`.visually-hidden` leak** (found in the back-half filmstrip): the class was undefined, so SR-only status text ("… needs review") rendered visibly above every approval card. Aliased onto `.sr-only` in `base.css` — fixes 4 components.
 - **Tests updated** for the intentional behaviour changes (`GuidedHistory` fallback→"Decided" + de-dup; stepper 6→5 columns + mobile breakpoint); full touched-area suite green (565/565).
 
-**Also fixed:** **m8** `.tutorial-run-discarded` now styled (subdued warning note).
+**Also fixed (second backend pass, operator-approved):**
+- **m8** `.tutorial-run-discarded` styled (subdued warning note).
+- **m7** `null` source removed from the guided source picker. Operator chose *filter for all guided pickers* (not tutorial-only — `WorkflowProfile` has no `kind` discriminator to gate on). `emitters.py` `_GUIDED_HIDDEN_SOURCES = {"null"}` drops it from `_build_step_1_single_select_turn`; still usable via explicit YAML/freeform. Unit-tested; **verified on staging** (picker now azure_blob/csv/dataverse/json/text — no `null`).
+- **M6 backend** richer "Decisions so far". The chat-resolve path (`guided.py`) now stamps a **display-only** summary ("Configured: <plugin>") onto the SINGLE_SELECT/INSPECT_AND_CONFIRM entry record for source + sink (response_hash stays None — the chat is the answer, recorded as a ChatTurn; no fabricated widget response). Frontend `GuidedHistory` dedup now prefers the most-recent *summarised* record per step, so a freshly-emitted unanswered next-turn no longer masks the decision. Transforms already summarises via the propose-chain accept. Integration- + unit-tested.
 
-**Remaining — investigated; both are guided-ENGINE backend changes, not the quick fixes the "minor" label implied. The user-visible jank is already resolved (see below); these are enrichments deferred to a properly-designed, test-covered follow-up:**
+> **Deploy note:** m7/M6 are *backend* changes — a frontend `dist` rebuild does NOT pick them up; the running `elspeth-web.service` must be **restarted** (no `--reload`). Done for staging.
 
-- **M6 backend** (richer "Decisions so far"). The frontend already removed the jank (no "Single select"; de-dup; "Decided"). Richer text ("Source: web_scrape over 3 URLs") requires the **chat-resolve path** (`guided.py` ~2096 source / ~2273 sink / ~2448 transforms) to stamp a summary derived from the *applied* result onto the completed-step `TurnRecord`. The manual `/guided/respond` path already summarizes (`_summarize_guided_response`, `_helpers.py:2399`); the chat (`/guided/chat`) path emits the *next* turn's record without summarizing the resolution. This is **audit/history bookkeeping** — do it deliberately with audit-event + history tests, not hastily.
-- **m7** (`null` source in the first-run picker). Emitted by `build_initial_step_1_turn` → `_build_step_1_single_select_turn` (`emitters.py:507`), which has no tutorial context. **`WorkflowProfile` carries no `kind` discriminator** (only toggles; the operator is actively minimizing it — `9900ac6d7` removed `entry_seed`), so a clean tutorial-only filter needs a first-class profile signal, not a fragile `bookends`-proxy hack. Low impact now (the picker is de-emphasised by m4 and the learner uses Send). Recommend a profile-level decision before implementing.
+**Remaining:** none from this review. (Future polish, not defects: per-step summaries could be richer still — e.g. "web_scrape over 3 URLs" instead of "Configured: web_scrape".)
 
 **Coverage boundary:** visual evidence covers welcome → source → output (the LLM walk
 driver stalls at the output `single_select` — a harness limitation, not a product

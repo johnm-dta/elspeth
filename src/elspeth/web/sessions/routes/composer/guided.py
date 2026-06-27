@@ -2069,11 +2069,22 @@ async def post_guided_chat(
                             actor=user.user_id,
                         )
                     else:
-                        # SINGLE_SELECT / INSPECT_AND_CONFIRM entry: no prior
-                        # schema-form answer to stamp. Just adopt the committed session
-                        # and clear the staging fields.
+                        # SINGLE_SELECT / INSPECT_AND_CONFIRM entry resolved via chat:
+                        # there is no widget answer to stamp (response_hash stays None —
+                        # the chat IS the answer, recorded as a ChatTurn + emit events).
+                        # But denormalize a DISPLAY summary onto the entry record so
+                        # "Decisions so far" reads "Configured: <plugin>" instead of a
+                        # bare "Decided". Display-only; NOT an answered-via-widget claim.
+                        # existing_record_for_chat is non-None here (guarded at the top
+                        # of this STEP_1 chat block).
+                        summarized_entry = _replace(
+                            existing_record_for_chat,
+                            summary=f"Configured: {source_resolution.plugin}",
+                        )
+                        entry_history = tuple(summarized_entry if r is existing_record_for_chat else r for r in guided.history)
                         guided = _replace(
                             handler_result.session,
+                            history=entry_history,
                             step_1_chosen_plugin=None,
                             step_1_source_intent=None,
                         )
@@ -2257,6 +2268,19 @@ async def post_guided_chat(
                             control_signal=None,
                             composition_version=state.version,
                             actor=user.user_id,
+                        )
+                    elif existing_record_for_chat is not None:
+                        # SINGLE_SELECT entry resolved via chat — display-only summary
+                        # (response_hash stays None; the chat is the answer). Mirrors
+                        # STEP_1's else leg so "Decisions so far" reads
+                        # "Configured: <plugin>" instead of a bare "Decided".
+                        summarized_entry = _replace(
+                            existing_record_for_chat,
+                            summary=f"Configured: {sink_resolution.outputs[0].plugin}",
+                        )
+                        guided = _replace(
+                            guided,
+                            history=tuple(summarized_entry if r is existing_record_for_chat else r for r in guided.history),
                         )
                     ts_iso = finished_at.isoformat()
                     # POPULATED re-render from the committed sink (Task 2.5

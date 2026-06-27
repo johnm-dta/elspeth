@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from elspeth.web.composer.guided.emitters import (
     _step_index,
+    build_initial_step_1_turn,
     build_step_1_schema_form_turn,
     build_step_2_schema_form_turn,
     build_step_3_schema_form_turn,
@@ -120,3 +121,24 @@ class TestStep4WireEmitter:
         assert payload["edge_contracts"] == []
         assert payload["semantic_contracts"] == []
         assert payload["warnings"] == []
+
+
+class _SourceCatalog:
+    """Catalog stub exposing list_sources for the step-1 single_select path."""
+
+    def list_sources(self) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(name="csv", description="Load rows from a CSV file."),
+            SimpleNamespace(name="null", description="A source that yields no rows."),
+            SimpleNamespace(name="json", description="Load rows from a JSON file."),
+        ]
+
+
+class TestStep1SourcePicker:
+    def test_single_select_excludes_the_degenerate_null_source(self) -> None:
+        turn = build_initial_step_1_turn(_empty_state(), blob_inspection=None, catalog=_SourceCatalog())
+
+        assert turn["type"] == TurnType.SINGLE_SELECT.value
+        option_ids = [opt["id"] for opt in turn["payload"]["options"]]
+        assert "null" not in option_ids
+        assert option_ids == ["csv", "json"]

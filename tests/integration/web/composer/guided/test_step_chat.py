@@ -548,6 +548,16 @@ class TestStep1SourceResolution:
         assert body["next_turn"]["step_index"] == 0
         assert body["next_turn"]["payload"]["plugin"] == "csv"
         assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
+        # M6: the SINGLE_SELECT entry record, resolved via chat, carries a DISPLAY
+        # summary so "Decisions so far" reads "Configured: csv" instead of a bare
+        # "Decided". response_hash stays None — the chat IS the answer (recorded as
+        # a ChatTurn), not a widget response, so we do not fabricate one.
+        step1_single_selects = [
+            r for r in body["guided_session"]["history"] if r["step"] == "step_1_source" and r["turn_type"] == "single_select"
+        ]
+        assert step1_single_selects, body["guided_session"]["history"]
+        assert step1_single_selects[-1]["summary"] == "Configured: csv"
+        assert step1_single_selects[-1]["response_hash"] is None
 
     def test_step_1_chat_advisory_prose_at_phase_entry_does_not_mutate_source(self, composer_test_client) -> None:
         """Prose-only chat at STEP_1 phase entry (SINGLE_SELECT) stays advisory.

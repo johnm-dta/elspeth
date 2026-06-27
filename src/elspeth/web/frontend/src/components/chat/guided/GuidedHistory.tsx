@@ -39,13 +39,26 @@ export function GuidedHistory({ history }: Props): React.ReactElement | null {
     return null;
   }
 
-  // One row per step (last turn wins): a step can emit several turns (e.g. a
-  // single_select then a schema_form), which previously rendered as duplicate
-  // "Source" rows. A Map keyed by step preserves first-seen step order while
-  // collapsing to the latest decision for that step.
+  // One row per step: a step can emit several turns (e.g. a single_select then a
+  // schema_form), which previously rendered as duplicate "Source" rows. Collapse
+  // to the most-recent turn that carries a SUMMARY, falling back to the most
+  // recent turn only when the step has produced no summary yet. Preferring the
+  // summarised record stops a freshly-emitted, not-yet-answered next-turn record
+  // (summary === null) from masking the step's actual decision. The Map preserves
+  // first-seen step order.
   const latestByStep = new Map<GuidedStep, TurnRecord>();
   for (const turn of history) {
-    latestByStep.set(turn.step, turn);
+    const existing = latestByStep.get(turn.step);
+    if (existing === undefined) {
+      latestByStep.set(turn.step, turn);
+    } else if (turn.summary !== null) {
+      // A summarised record always supersedes (most-recent summary wins).
+      latestByStep.set(turn.step, turn);
+    } else if (existing.summary === null) {
+      // Neither is summarised: keep the most recent as the fallback.
+      latestByStep.set(turn.step, turn);
+    }
+    // else: existing is summarised and this one is not — keep the summary.
   }
   const rows = [...latestByStep.values()];
 

@@ -26,7 +26,7 @@ _PROFILE_KEYS = frozenset(
     }
 )
 
-_TUTORIAL_ENTRY_SEED = "Scrape the three synthetic project-brief pages from the list below and, for each, have an LLM write a short summary of the page. Remove the raw HTML and write the rows to a json file. These are our own demo pages, so use noreply@foundryside.dev as the scraping abuse contact."
+_TUTORIAL_ENTRY_SEED = "Scrape the three synthetic project-brief pages from the list below and, for each, have an LLM write a short summary of the page. Remove the raw HTML and write the rows to a json file. These are our own demo pages, so use noreply@dta.gov.au as the scraping abuse contact."
 
 
 @dataclass(frozen=True, slots=True)

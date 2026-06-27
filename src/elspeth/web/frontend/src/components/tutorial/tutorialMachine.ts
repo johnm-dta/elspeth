@@ -29,7 +29,7 @@ export const TUTORIAL_TRANSFORMS_PROMPT =
   "For each row, fetch the page at its URL, then have an LLM write a short " +
   "summary of the page. Finally drop the raw HTML and fingerprint columns so " +
   "the saved rows keep only the summary. These are our own demo pages, so use " +
-  "noreply@foundryside.dev as the scraping abuse contact.";
+  "noreply@dta.gov.au as the scraping abuse contact.";
 
 export type TutorialStep =
   | "welcome"

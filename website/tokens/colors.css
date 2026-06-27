@@ -1,0 +1,220 @@
+/* colors.css — ELSPETH colour tokens.
+   Primary: :root (dark theme defaults) and [data-theme="light"] overrides.
+   Both blocks are TOP-LEVEL selectors.
+
+   The palette is built on the DTA / AGDS three-family role model:
+     • Workspace family  — Pacific teal   (active editing surfaces)
+     • Navigation family — Foundation navy (header / chrome)
+     • Inspection family — warm neutral    (right rail, paper modals)
+   so a screen reads as paper-on-desk against teal/navy columns rather than
+   one flat slab of colour. */
+
+:root {
+  /* ── Backgrounds — Workspace family (Pacific teal) ───────────────────────── */
+  --color-bg:                #0f2d35;
+  --color-surface:           #122f37;
+  --color-surface-elevated:  #1a3d47;
+  --color-surface-hover:     rgba(255, 255, 255, 0.04);
+  --color-surface-raised:    #1a3d47;
+  --color-surface-input:     #0f2d35;
+
+  /* ── Backgrounds — Navigation family (Foundation navy) ───────────────────── */
+  --color-surface-nav:        #0a1d2e;
+  --color-surface-nav-raised: #13283a;
+
+  /* ── Backgrounds — Inspection family (warm neutral paper) ────────────────── */
+  --color-surface-inspector: #2a2826;
+  --color-surface-paper:     #332f2c;
+
+  /* ── Text ────────────────────────────────────────────────────────────────── */
+  --color-text:              #dff0ee;
+  --color-text-secondary:    #a8d0d0;
+  --color-text-muted:        #7a9a9a;
+  --color-text-inverse:      #ffffff;
+
+  /* ── Borders — teal-tinted ───────────────────────────────────────────────── */
+  --color-border:            rgba(143, 200, 200, 0.12);
+  --color-border-strong:     rgba(143, 200, 200, 0.25);
+
+  /* ── Interactive / accent ────────────────────────────────────────────────── */
+  --color-accent:            #1a7a52;
+  --color-accent-muted:      rgba(20, 176, 174, 0.18);
+  --color-focus-ring:        #ffffff;
+  --color-btn-primary-bg:        #16664a;
+  --color-btn-primary-bg-hover:  #1a5840;
+  --color-btn-danger-bg:         #b23835;
+  --color-btn-danger-bg-hover:   #912f2d;
+  --color-link:              #61daff;
+  --color-highlight:         rgba(26, 122, 82, 0.14);
+  --color-selected-ring:     rgba(26, 122, 82, 0.55);
+
+  /* ── Semantic colours ────────────────────────────────────────────────────── */
+  --color-success:           #14b0ae;
+  --color-error:             #e85653;
+  --color-warning:           #e38444;
+  --color-info:              #61daff;
+  --color-state-positive:    #14b0ae;
+
+  --color-success-bg:        rgba(20, 176, 174, 0.12);
+  --color-success-border:    rgba(20, 176, 174, 0.30);
+  --color-error-bg:          rgba(232, 86, 83, 0.12);
+  --color-error-border:      rgba(232, 86, 83, 0.30);
+  --color-warning-bg:        rgba(227, 132, 68, 0.14);
+  --color-warning-border:    rgba(227, 132, 68, 0.30);
+  --color-info-bg:           rgba(97, 218, 255, 0.10);
+  --color-info-border:       rgba(97, 218, 255, 0.25);
+
+  /* ── Chat bubbles ────────────────────────────────────────────────────────── */
+  --color-bubble-user:             rgba(40, 130, 100, 0.14);
+  --color-bubble-user-border:      rgba(40, 130, 100, 0.35);
+  --color-bubble-assistant:        rgba(255, 255, 255, 0.05);
+  --color-bubble-assistant-border: rgba(255, 255, 255, 0.18);
+  --color-bubble-system:           rgba(255, 255, 255, 0.03);
+
+  /* ── Component-type badges — functional colour coding for the 6 primitives ── */
+  --color-badge-source:      #4db89a;   /* SENSE  — aqua-green */
+  --color-badge-transform:   #e8a030;   /* DECIDE — amber */
+  --color-badge-gate:        #c390f9;   /* DECIDE — purple */
+  --color-badge-sink:        #e07040;   /* ACT    — orange-red */
+  --color-badge-aggregation: #61daff;   /* DECIDE — cyan */
+  --color-badge-coalesce:    #18c2c0;   /* join   — cyan-teal */
+
+  --color-badge-source-bg:      #184244;
+  --color-badge-transform-bg:   #303e34;
+  --color-badge-gate-bg:        #2a3c52;
+  --color-badge-sink-bg:        #2e3737;
+  --color-badge-aggregation-bg: #1b4753;
+  --color-badge-coalesce-bg:    #10434a;
+
+  --color-badge-source-border:      rgba(77, 184, 154, 0.3);
+  --color-badge-transform-border:   rgba(232, 160, 48, 0.3);
+  --color-badge-gate-border:        rgba(195, 144, 249, 0.3);
+  --color-badge-sink-border:        rgba(224, 112, 64, 0.3);
+  --color-badge-aggregation-border: rgba(97, 218, 255, 0.3);
+  --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
+
+  /* ── Per-node validation indicator borders ───────────────────────────────── */
+  --color-node-valid:     #14b0ae;
+  --color-node-warning:   #e38444;
+  --color-node-invalid:   #e85653;
+  --color-node-unchecked: var(--color-border-strong);
+
+  /* ── Run status badges ───────────────────────────────────────────────────── */
+  --color-status-pending:    #7a9a9a;
+  --color-status-running:    #61daff;
+  --color-status-completed:  #14b0ae;
+  --color-status-failed:     #e85653;
+  --color-status-cancelled:  #e38444;
+  --color-status-empty:      #888888;
+
+  /* ── Scrollbar — teal-tinted ─────────────────────────────────────────────── */
+  --color-scrollbar-track:       var(--color-bg);
+  --color-scrollbar-thumb:       rgba(143, 200, 200, 0.15);
+  --color-scrollbar-thumb-hover: rgba(143, 200, 200, 0.28);
+
+  /* ── React Flow canvas dot grid ──────────────────────────────────────────── */
+  --color-canvas-grid: rgba(170, 220, 220, 0.28);
+
+  /* ── Dimming ─────────────────────────────────────────────────────────────── */
+  --opacity-dimmed: 0.35; /* @kind other */
+}
+
+/* ---------------------------------------------------------------------------
+   Light Theme — applied via data-theme="light" (set by the useTheme hook).
+   --------------------------------------------------------------------------- */
+[data-theme="light"] {
+  /* Workspace family — light teal */
+  --color-bg:                #f4f8f9;
+  --color-surface:           #ffffff;
+  --color-surface-elevated:  #ffffff;
+  --color-surface-hover:     rgba(15, 45, 53, 0.06);
+  --color-surface-raised:    #eaf2f3;
+  --color-surface-input:     #ffffff;
+
+  /* Navigation family — pale navy */
+  --color-surface-nav:        #e8edf3;
+  --color-surface-nav-raised: #dbe3ec;
+
+  /* Inspection family — warm cream */
+  --color-surface-inspector: #faf7f3;
+  --color-surface-paper:     #f0eae3;
+
+  --color-text:              #0f2d35;
+  --color-text-secondary:    #3a5a64;
+  --color-text-muted:        #426069;
+  --color-text-inverse:      #ffffff;
+
+  --color-border:            rgba(15, 45, 53, 0.12);
+  --color-border-strong:     rgba(15, 45, 53, 0.25);
+
+  --color-accent:            #156048;
+  --color-accent-muted:      rgba(21, 96, 72, 0.12);
+  --color-focus-ring:        #0f2d35;
+  --color-btn-primary-bg:        #1a7a5a;
+  --color-btn-primary-bg-hover:  #156048;
+  --color-btn-danger-bg:         #b23835;
+  --color-btn-danger-bg-hover:   #912f2d;
+  --color-link:              #176d8a;
+  --color-highlight:         rgba(21, 96, 72, 0.12);
+  --color-selected-ring:     rgba(21, 96, 72, 0.45);
+
+  --color-success:           #0d8a88;
+  --color-error:             #c93b38;
+  --color-warning:           #b86830;
+  --color-info:              #176d8a;
+  --color-state-positive:    #056e6c;
+
+  --color-success-bg:        rgba(20, 160, 158, 0.10);
+  --color-success-border:    rgba(20, 160, 158, 0.35);
+  --color-error-bg:          rgba(210, 70, 67, 0.10);
+  --color-error-border:      rgba(210, 70, 67, 0.35);
+  --color-warning-bg:        rgba(200, 115, 55, 0.12);
+  --color-warning-border:    rgba(200, 115, 55, 0.35);
+  --color-info-bg:           rgba(40, 150, 190, 0.10);
+  --color-info-border:       rgba(40, 150, 190, 0.30);
+
+  --color-bubble-user:             rgba(40, 130, 100, 0.10);
+  --color-bubble-user-border:      rgba(40, 130, 100, 0.30);
+  --color-bubble-assistant:        rgba(15, 45, 53, 0.05);
+  --color-bubble-assistant-border: rgba(15, 45, 53, 0.15);
+  --color-bubble-system:           rgba(15, 45, 53, 0.03);
+
+  --color-badge-source:      #257963;
+  --color-badge-transform:   #926414;
+  --color-badge-gate:        #8356b6;
+  --color-badge-sink:        #ad502d;
+  --color-badge-aggregation: #207595;
+  --color-badge-coalesce:    #0e8090;
+
+  --color-badge-source-bg:      #dcebe9;
+  --color-badge-transform-bg:   #ece9de;
+  --color-badge-gate-bg:        #e7e5f2;
+  --color-badge-sink-bg:        #ede4e1;
+  --color-badge-aggregation-bg: #dcecf1;
+  --color-badge-coalesce-bg:    #d8eaec;
+
+  --color-badge-source-border:      rgba(42, 138, 112, 0.35);
+  --color-badge-transform-border:   rgba(176, 120, 24, 0.35);
+  --color-badge-gate-border:        rgba(138, 90, 192, 0.35);
+  --color-badge-sink-border:        rgba(184, 85, 48, 0.35);
+  --color-badge-aggregation-border: rgba(40, 144, 184, 0.35);
+  --color-badge-coalesce-border:    rgba(14, 128, 144, 0.35);
+
+  --color-node-valid:     #0d8a88;
+  --color-node-warning:   #b86830;
+  --color-node-invalid:   #c93b38;
+  --color-node-unchecked: var(--color-border-strong);
+
+  --color-status-pending:    #5a7a84;
+  --color-status-running:    #2890b8;
+  --color-status-completed:  #0d8a88;
+  --color-status-failed:     #c93b38;
+  --color-status-cancelled:  #b86830;
+  --color-status-empty:      #4d6a73;
+
+  --color-scrollbar-track:       var(--color-bg);
+  --color-scrollbar-thumb:       rgba(15, 45, 53, 0.18);
+  --color-scrollbar-thumb-hover: rgba(15, 45, 53, 0.30);
+
+  --color-canvas-grid: rgba(15, 45, 53, 0.20);
+}

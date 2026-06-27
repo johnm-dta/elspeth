@@ -1,0 +1,36 @@
+/* typography.css — Type tokens.
+   Inter for body/UI; JetBrains Mono for the audit/forensic register
+   (wordmark, code, YAML, hashes, type badges). */
+
+:root {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Oxygen, Ubuntu, Cantarell, "Helvetica Neue", sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code",
+    "Source Code Pro", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  /* ── Font sizes ─ a deliberately fine scale tuned for a dense operator UI ── */
+  --font-size-3xs:  10px;   /* tab counts, ribbon micro-text, required badge */
+  --font-size-2xs:  11px;   /* chrome hints, breadcrumbs */
+  --font-size-xs:   12px;
+  --font-size-sm:   13px;
+  --font-size-md:   15px;
+  --font-size-base: 16px;
+  --font-size-lg:   18px;
+  --font-size-xl:   22px;   /* empty-state heroes, loud headings */
+  --font-size-2xl:  32px;   /* display headings */
+
+  /* ── Line heights ────────────────────────────────────────────────────────── */
+  --line-height-tight:   1.3;
+  --line-height-snug:    1.35;   /* chat bubble body */
+  --line-height-normal:  1.5;
+  --line-height-relaxed: 1.7;
+
+  /* ── Weights ─────────────────────────────────────────────────────────────── */
+  --font-weight-regular:  400;
+  --font-weight-medium:   500;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+
+  /* ── Brand wordmark tracking — JetBrains Mono, uppercase ─────────────────── */
+  --tracking-wordmark: 0.18em;
+}

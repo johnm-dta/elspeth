@@ -1,0 +1,142 @@
+<!-- @dsCard group="Website" viewport="1280x760" name="Site — Get started" subtitle="Install the CLI, write a pipeline, validate & run" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Get started — ELSPETH</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="site.css" />
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <div class="nav-left">
+      <a class="brand" href="index.html">ELSPETH</a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="authoring.html">Authoring</a>
+        <a href="assurance.html">Assurance</a>
+        <a href="use-cases.html">Use cases</a>
+        <a href="get-started.html" class="active">Get started</a>
+      </nav>
+    </div>
+    <div class="nav-right">
+      <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
+      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
+    </div>
+  </div>
+</header>
+
+<div class="page-head dotgrid">
+  <div class="wrap">
+    <span class="eyebrow">Reviewable by design</span>
+    <h1>From install to a validated run.</h1>
+    <p>Install the CLI, declare a pipeline, and validate it before it runs. What you read is what runs — and what the audit trail records.</p>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="steps" style="margin-top:8px">
+      <div class="step">
+        <span class="num">1</span>
+        <div>
+          <h4>Install</h4>
+          <p>Python 3.12+. Clone and install with <code>uv</code>.</p>
+          <pre><span class="pr">$</span> git clone https://github.com/johnm-dta/elspeth.git &amp;&amp; cd elspeth
+<span class="pr">$</span> uv venv &amp;&amp; source .venv/bin/activate
+<span class="pr">$</span> uv pip install -e ".[dev]"</pre>
+        </div>
+      </div>
+      <div class="step">
+        <span class="num">2</span>
+        <div>
+          <h4>Validate before you run</h4>
+          <p>Preflight checks graph structure, route targets, schema compatibility, and secret references.</p>
+          <pre><span class="pr">$</span> elspeth validate --settings pipeline.yaml</pre>
+        </div>
+      </div>
+      <div class="step">
+        <span class="num">3</span>
+        <div>
+          <h4>Run &amp; explain</h4>
+          <p>Execute the pipeline, then explore why any row reached its destination.</p>
+          <pre><span class="pr">$</span> elspeth run --settings pipeline.yaml --execute
+<span class="pr">$</span> elspeth explain --run &lt;run_id&gt; --row &lt;row_id&gt;</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<section class="dotgrid">
+  <div class="wrap">
+    <div class="codewrap">
+      <div class="section-head" style="max-width:38ch">
+        <span class="eyebrow">A pipeline is just declared primitives</span>
+        <h2>pipeline.yaml</h2>
+        <p>Every edge is named; every gate is pure config. Prefer not to write YAML? The Web Composer lets you describe the workflow in conversation instead — it builds the same artifact.</p>
+      </div>
+<pre class="code"><span class="cm"># pipeline.yaml</span>
+<span class="key">source</span>:
+  plugin: <span class="str">csv</span>
+  on_success: validated
+  options: { path: <span class="str">data/submissions.csv</span> }
+
+<span class="key">transforms</span>:
+- name: classify
+  plugin: <span class="str">llm</span>
+  input: validated
+  on_success: classified
+
+<span class="key">gates</span>:
+- name: safety_gate
+  input: classified
+  condition: <span class="str">"row['risk_score'] > 0.8"</span>
+  routes: { <span class="str">"true"</span>: review, <span class="str">"false"</span>: approved }
+
+<span class="key">sinks</span>:
+  approved: { plugin: <span class="str">csv</span> }
+  review:   { plugin: <span class="str">review_queue</span> }
+
+<span class="key">landscape</span>:
+  url: <span class="str">sqlite:///./audit.db</span></pre>
+    </div>
+  </div>
+</section>
+
+<div class="ctaband">
+  <div class="wrap">
+    <span class="eyebrow">Traceable · Reliable · Defensible</span>
+    <h2>Ready when you are.</h2>
+    <p>Read the docs for a complete walkthrough, or jump straight into the Web Composer.</p>
+    <div class="cta-row" style="justify-content:center">
+      <a class="btn btn-primary btn-lg" href="#">Read the docs</a>
+      <a class="btn btn-lg" href="#"><i data-lucide="github" style="width:18px;height:18px"></i>&nbsp; johnm-dta/elspeth</a>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <div class="wrap foot">
+    <span class="brand">ELSPETH</span>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="authoring.html">Authoring</a>
+      <a href="assurance.html">Assurance</a>
+      <a href="use-cases.html">Use cases</a>
+      <a href="#">GitHub</a>
+    </div>
+    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

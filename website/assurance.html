@@ -1,0 +1,107 @@
+<!-- @dsCard group="Website" viewport="1280x720" name="Site — Assurance" subtitle="Landscape audit trail · trust model · terminal statuses" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Assurance — ELSPETH</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="site.css" />
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <div class="nav-left">
+      <a class="brand" href="index.html">ELSPETH</a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="authoring.html">Authoring</a>
+        <a href="assurance.html" class="active">Assurance</a>
+        <a href="use-cases.html">Use cases</a>
+        <a href="get-started.html">Get started</a>
+      </nav>
+    </div>
+    <div class="nav-right">
+      <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
+      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
+    </div>
+  </div>
+</header>
+
+<div class="page-head dotgrid">
+  <div class="wrap">
+    <span class="eyebrow">Assurance is the product</span>
+    <h1>Validation and audit are core properties.</h1>
+    <p>The Landscape database is the canonical evidentiary record — source rows, node states, external calls, payload hashes, route decisions, terminal outcomes, and artifact provenance. Telemetry and logs are secondary.</p>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="features" style="margin-top:8px">
+      <div class="feature"><span class="fi"><i data-lucide="scroll-text"></i></span><h4>Landscape audit trail</h4><p>Complete row lineage with content hashes. Export signed (HMAC-SHA256) with a running hash for chain-of-custody review.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="git-compare-arrows"></i></span><h4>Two-axis terminal model</h4><p>Lifecycle outcome and path/provenance are separated — "did it succeed?" and "how did it get there?" are both explicit.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="shield-check"></i></span><h4>Declaration-trust + VAL</h4><p>Plugin declarations the graph builder trusts are backed by runtime VAL manifests, invariant tests, and CI scanners.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="fingerprint"></i></span><h4>Secret discipline</h4><p>Secrets resolve at execution boundaries, are fingerprinted for audit, and are never persisted as raw values.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="lock"></i></span><h4>Strict response schemas</h4><p>Web execution responses forbid unknown fields, so internal drift fails loudly instead of being silently coerced.</p></div>
+      <div class="feature"><span class="fi"><i data-lucide="list-checks"></i></span><h4>Terminal statuses</h4><p>completed · completed_with_failures · failed · empty · cancelled — run accounting never collapses to one number.</p></div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<section class="dotgrid">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Data trust model</span>
+      <h2>Three tiers, one rule: coerce only at the boundary.</h2>
+      <p>Once data enters the pipeline with valid types, downstream transforms trust those types. Wrong types downstream are upstream bugs to fix — not data-quality issues to handle gracefully.</p>
+    </div>
+    <div class="tiers">
+      <div class="tier">
+        <span class="tlabel">Tier 1</span>
+        <h4>Engine-owned records</h4>
+        <p>Audit database, checkpoints, runtime records. A corrupted audit record means tampering — crash immediately.</p>
+        <span class="trust" style="background:var(--color-error-bg);color:var(--color-error)">Full trust · crash on anomaly</span>
+      </div>
+      <div class="tier">
+        <span class="tlabel">Tier 2</span>
+        <h4>Validated pipeline data</h4>
+        <p>Rows after source validation. Types are valid; wrap operations where row content can still fail.</p>
+        <span class="trust" style="background:var(--color-warning-bg);color:var(--color-warning)">Elevated trust</span>
+      </div>
+      <div class="tier">
+        <span class="tlabel">Tier 3</span>
+        <h4>External input</h4>
+        <p>Files, API/LLM responses, source data. Validate at the boundary, coerce where allowed, quarantine malformed rows.</p>
+        <span class="trust" style="background:var(--color-success-bg);color:var(--color-success)">Zero trust · quarantine</span>
+      </div>
+    </div>
+    <div class="cta-row" style="margin-top:40px">
+      <a class="btn btn-primary" href="get-started.html">Get started</a>
+      <a class="btn" href="use-cases.html">Where it's used</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <span class="brand">ELSPETH</span>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="authoring.html">Authoring</a>
+      <a href="use-cases.html">Use cases</a>
+      <a href="get-started.html">Get started</a>
+      <a href="#">GitHub</a>
+    </div>
+    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

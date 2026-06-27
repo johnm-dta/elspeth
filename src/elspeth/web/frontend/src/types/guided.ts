@@ -83,9 +83,7 @@ export interface ChatTurn {
 
 /**
  * Wire: WorkflowProfileResponse (schemas.py — WorkflowProfileResponse).
- * Server-owned workflow profile, wire-visible subset. `entry_seed` is
- * consumed server-side at POST /api/sessions/{session_id}/guided/start
- * (`/guided/start` shorthand only) and is NOT on the wire.
+ * Server-owned workflow profile (the four behavior flags).
  * A `null` `GuidedSession.profile` is the empty/live-guided profile.
  */
 export interface WorkflowProfile {
@@ -167,8 +165,7 @@ export interface GuidedRespondResponse {
  * prompt so the source driver can parse the runtime-served addresses). The
  * client NEVER sends `allowed_hosts` back: the SSRF allowlist is injected
  * server-side at the STEP_2.5 recipe-accept seam (Task 8a) — surfacing it here
- * is informational only. The server-side `entry_seed` framing prompt is NOT on
- * this wire (mirrors WorkflowProfileResponse's exclusion).
+ * is informational only.
  */
 export interface TutorialSampleResponse {
   sample_urls: string[];

@@ -469,7 +469,7 @@ def test_workflow_profile_response_wire_subset_and_strict() -> None:
             bookends=True,
             recipe_match=True,
             advisor_checkpoints=True,
-            entry_seed="leak",
+            injected="leak",
         )
 
     with pytest.raises(pydantic.ValidationError):

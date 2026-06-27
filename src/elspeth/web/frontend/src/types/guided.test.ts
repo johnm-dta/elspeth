@@ -161,9 +161,9 @@ describe("guided protocol types", () => {
 });
 
 describe("WorkflowProfile wire type", () => {
-  it("carries exactly the four wire-visible boolean flags (entry_seed is server-side)", () => {
-    // Compile-time exhaustive check: entry_seed is consumed server-side at
-    // POST /guided/start and is NOT on the wire — adding it here would fail tsc.
+  it("carries exactly the four wire-visible boolean flags", () => {
+    // Compile-time exhaustive check: the wire profile is exactly these four
+    // behavior flags — adding any other key here would fail tsc.
     const _exact: Equals<
       keyof WorkflowProfile,
       "coaching" | "bookends" | "recipe_match" | "advisor_checkpoints"

@@ -496,39 +496,6 @@ def _litellm_error_detail(
     return detail
 
 
-def _redact_guided_meta_entry_seed(composer_meta: Any) -> Any:
-    """Strip ``entry_seed`` from the guided-session profile in a WIRE composer_meta.
-
-    ``composer_meta`` is persisted as ``{"guided_session": GuidedSession.to_dict()}``
-    and ``GuidedSession.to_dict()`` embeds ``"profile": WorkflowProfile.to_dict()``
-    which INCLUDES ``entry_seed`` (a server-side ``str`` framing prompt, P0). When the
-    raw persisted blob is echoed onto the wire via ``_state_response`` →
-    ``composition_state.composer_meta`` it would leak ``entry_seed`` — a second wire
-    channel that bypasses the ``WorkflowProfileResponse`` subset (P6.1). This strips
-    it from the WIRE copy ONLY (see :func:`deep_thaw`, which returns a fresh deep copy,
-    so the persisted blob is untouched and P7.5's welcome bookend still reads the
-    persisted seed). The other profile flags (coaching/bookends/...) are preserved —
-    the frontend may read them.
-
-    Defensive against shape drift: any non-dict / missing level is a no-op
-    passthrough (this is a wire-redaction belt, not a validation gate). Mutates and
-    returns *composer_meta* in place — callers pass the already-thawed wire copy.
-    """
-    if not isinstance(composer_meta, dict):
-        return composer_meta
-    guided = composer_meta.get("guided_session")
-    if not isinstance(guided, dict):
-        return composer_meta
-    profile = guided.get("profile")
-    if not isinstance(profile, dict):
-        return composer_meta
-    # Delete the key entirely (not set-to-None): the strict wire invariant is
-    # that neither the seed string NOR the ``entry_seed`` key name appears on the
-    # wire. The frontend reads the bool flags, never ``entry_seed``.
-    profile.pop("entry_seed", None)
-    return composer_meta
-
-
 def _state_response(
     state: CompositionStateRecord,
     live_validation: ValidationSummary | None = None,
@@ -576,10 +543,7 @@ def _state_response(
         else None,
         derived_from_state_id=str(state.derived_from_state_id) if state.derived_from_state_id is not None else None,
         created_at=state.created_at,
-        # deep_thaw yields a fresh mutable deep copy; redact entry_seed from the
-        # guided-session profile on the WIRE only — persisted storage keeps it
-        # for P7.5's welcome bookend.
-        composer_meta=_redact_guided_meta_entry_seed(deep_thaw(state.composer_meta)) if state.composer_meta is not None else None,
+        composer_meta=deep_thaw(state.composer_meta) if state.composer_meta is not None else None,
     )
 
 
@@ -2316,39 +2280,10 @@ def _initial_composition_state_with_guided_session(*, profile: WorkflowProfile =
     )
 
 
-def _materialize_profile_entry_seed_state(profile: WorkflowProfile) -> CompositionState:
-    """Build the initial guided state for a profile (D16 decision: profile-only).
-
-    Attaches the SERVER-owned ``profile`` to a fresh ``GuidedSession`` via
-    :func:`_initial_composition_state_with_guided_session` and returns that
-    state UNCHANGED. It deliberately does **not** inject a chat turn and does
-    **not** fabricate any source/topology into the ``CompositionState``.
-
-    ``profile.entry_seed`` is a SERVER-owned ``str | None`` framing *prompt*
-    (P0 — ``composer/guided/profile.py``): for ``TUTORIAL_PROFILE`` it is the
-    canonical "rate how cool each Australian government web page is" opener;
-    for ``EMPTY_PROFILE`` it is ``None``. It is NOT consumed here — it stays on
-    the persisted ``GuidedSession.profile`` for a downstream consumer (the P7.5
-    welcome bookend) to render. ``start`` does not materialize it into the
-    ``CompositionState``: the brief's "materialize topology" model is moot for a
-    ``str`` seed, and the concrete pipeline is built downstream by the guided
-    wizard + web-scrape recipe match (P4) via the composer tool flow
-    (``set_pipeline`` in ``composer/tools/sessions.py``), never from ``entry_seed``.
-
-    ``entry_seed`` is never accepted from the request body and never appears on
-    the wire (``WorkflowProfileResponse`` excludes it). The name is kept because
-    callers/tests reference it; the behaviour is the honest profile-attach
-    passthrough.
-    """
-    return _initial_composition_state_with_guided_session(profile=profile)
-
-
 def _workflow_profile_response(guided: GuidedSession) -> WorkflowProfileResponse | None:
     """Project a GuidedSession's server-owned profile onto the wire subset.
 
     Returns ``None`` for the empty/live-guided profile (== ``EMPTY_PROFILE``).
-    ``entry_seed`` is deliberately excluded: it is the server-side cache-key
-    discriminator, not a render input.
     """
     if guided.profile == EMPTY_PROFILE:
         return None

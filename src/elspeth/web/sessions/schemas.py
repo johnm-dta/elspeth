@@ -281,7 +281,7 @@ class StartGuidedRequest(_RequestModel):
     ``object`` (not the enum) keeps a stale/hostile client's unknown or
     object-shaped value out of a Pydantic 422 and away from the response —
     the handler never echoes the raw value, so an attempted profile object
-    carrying ``entry_seed`` cannot leak back through the error.
+    carrying injected fields cannot leak back through the error.
     """
 
     profile: object = "live"
@@ -340,10 +340,8 @@ class WorkflowProfileResponse(_StrictResponse):
     """Wire-visible subset of a server-owned WorkflowProfile.
 
     Mirrors :class:`elspeth.web.composer.guided.profile.WorkflowProfile`
-    MINUS ``entry_seed``. The seed is consumed server-side at
-    ``POST /api/sessions/{session_id}/guided/start`` and must never ride
-    the GET wire. ``None`` at the parent ``GuidedSessionResponse.profile``
-    level means the empty/live-guided profile.
+    (the four behavior flags). ``None`` at the parent
+    ``GuidedSessionResponse.profile`` level means the empty/live-guided profile.
     """
 
     coaching: bool
@@ -409,9 +407,6 @@ class TutorialSampleResponse(_StrictResponse):
     base at request time (they cannot ride the frozen profile constants), and
     ``allowed_hosts`` is the deterministic resolver output — ``"public_only"``
     for a public base, or a tight CIDR list for a loopback/private dev base.
-
-    ``entry_seed`` (the server-side framing prompt) is NEVER on this wire —
-    mirrors :class:`WorkflowProfileResponse`'s exclusion of the seed.
     """
 
     sample_urls: list[str]

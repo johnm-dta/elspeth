@@ -22,7 +22,6 @@ class TestWorkflowProfileShape:
             EMPTY_PROFILE.coaching = True  # type: ignore[misc]
 
     def test_empty_profile_is_live_guided_default(self) -> None:
-        assert EMPTY_PROFILE.entry_seed is None
         assert EMPTY_PROFILE.coaching is False
         assert EMPTY_PROFILE.advisor_checkpoints is False
         assert EMPTY_PROFILE.recipe_match is True
@@ -35,8 +34,6 @@ class TestWorkflowProfileShape:
         assert TUTORIAL_PROFILE.advisor_checkpoints is False
         assert TUTORIAL_PROFILE.recipe_match is True
         assert TUTORIAL_PROFILE.bookends is True
-        assert isinstance(TUTORIAL_PROFILE.entry_seed, str)
-        assert TUTORIAL_PROFILE.entry_seed.strip() != ""
 
 
 class TestWorkflowProfileKind:
@@ -63,19 +60,13 @@ class TestWorkflowProfileSerialisation:
     def test_tutorial_profile_round_trips(self) -> None:
         assert WorkflowProfile.from_dict(TUTORIAL_PROFILE.to_dict()) == TUTORIAL_PROFILE
 
-    def test_to_dict_emits_all_five_keys(self) -> None:
+    def test_to_dict_emits_all_four_keys(self) -> None:
         assert set(EMPTY_PROFILE.to_dict()) == {
-            "entry_seed",
             "coaching",
             "advisor_checkpoints",
             "recipe_match",
             "bookends",
         }
-
-    def test_entry_seed_none_round_trips_as_none(self) -> None:
-        d = EMPTY_PROFILE.to_dict()
-        assert d["entry_seed"] is None
-        assert WorkflowProfile.from_dict(d).entry_seed is None
 
     def test_from_dict_rejects_missing_key(self) -> None:
         d = TUTORIAL_PROFILE.to_dict()

@@ -64,7 +64,6 @@ from .._helpers import (
     _dispatch_guided_respond,
     _get_session_compose_lock_registry,
     _initial_composition_state_with_guided_session,
-    _materialize_profile_entry_seed_state,
     _persist_chat_turns,
     _persist_llm_calls,
     _persist_tool_invocations,
@@ -640,8 +639,7 @@ async def get_guided_tutorial_sample(
     (``allowed_hosts``) for the active tutorial session's resolved origin. The
     base is resolved via ``tutorial_sample_base_url`` (a configured
     ``WebSettings.tutorial_sample_base_url`` wins, else the request origin).
-    ``entry_seed`` is server-side only and is NEVER exposed here (Global
-    Constraint); the URLs are a separate runtime-derived payload.
+    The URLs are a runtime-derived payload computed by the server seam.
 
     Read-only: this route never mutates state. Returns 404 if the session does
     not exist or does not belong to the requesting user. Returns 400 if the
@@ -821,12 +819,10 @@ async def post_guided_start(
     persisted ``GuidedSession.profile``; the lazy no-arg GET default path
     stays for live guided (empty profile).
 
-    Decision D: ``start`` persists the profile only — it does NOT materialize
-    ``profile.entry_seed`` into the CompositionState. ``entry_seed`` is a
-    server-side ``str`` framing prompt that stays on the persisted profile for
-    the P7.5 welcome bookend to render; the concrete pipeline is built downstream
-    by the guided wizard + web-scrape recipe match. ``entry_seed`` never rides
-    the request or response wire.
+    Decision D: ``start`` persists the SERVER-owned profile only (the behavior
+    flags) and does not fabricate any source/topology into the CompositionState;
+    the concrete pipeline is built downstream by the guided wizard + web-scrape
+    recipe match.
 
     Raises 404 if the session does not exist or belong to the requester.
     Raises 409 if the session already has a freeform composition state with
@@ -843,7 +839,7 @@ async def post_guided_start(
     # rather than a Pydantic 422; the typed kind then selects a SERVER-owned
     # constant — the client never supplies the profile object. Do not echo
     # the raw value: it may be a long string or an attempted profile object
-    # carrying attacker-controlled fields such as entry_seed.
+    # carrying attacker-controlled profile fields.
     if not isinstance(body.profile, str) or len(body.profile) > 32:
         raise HTTPException(
             status_code=400,
@@ -925,15 +921,13 @@ async def post_guided_start(
                 ),
             )
 
-        # No persisted guided session yet: construct the profile-seeded
-        # initial state and PERSIST it (so GET /api/sessions/{session_id}/guided
-        # reads the profile back). Decision D: this attaches the server-owned
-        # profile only — it does NOT materialize profile.entry_seed into the
-        # CompositionState (entry_seed is a server-side str framing prompt that
-        # stays on the persisted profile for the P7.5 welcome bookend to render;
-        # the concrete pipeline is wizard/recipe-built downstream). For the live
-        # profile this is the existing empty guided state.
-        new_state = _materialize_profile_entry_seed_state(profile)
+        # No persisted guided session yet: attach the server-owned profile to a
+        # fresh guided state and PERSIST it (so GET /api/sessions/{session_id}/guided
+        # reads the profile back). Decision D: this attaches the profile only — it
+        # does not fabricate any source/topology into the CompositionState; the
+        # concrete pipeline is wizard/recipe-built downstream. For the live profile
+        # this is the existing empty guided state.
+        new_state = _initial_composition_state_with_guided_session(profile=profile)
         seeded_guided = new_state.guided_session
         if seeded_guided is None:  # pragma: no cover — helper always attaches a guided session
             raise InvariantError("post_guided_start: initial state has no guided_session")

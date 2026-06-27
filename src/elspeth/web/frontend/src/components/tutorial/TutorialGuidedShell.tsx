@@ -42,8 +42,7 @@ interface TutorialGuidedShellProps {
  * branch, which already projects interpretationEventsStore.pendingBySession and
  * blocks advancement while pending (P4.T2). Coaching/bookend copy reads off the
  * wire GuidedSession.profile; the welcome framing text comes from the frontend
- * copy.ts, never from a server entry_seed (which is server-side only and NOT a
- * field on the TS WorkflowProfile — P6.4 security carry-note).
+ * copy.ts.
  */
 export function TutorialGuidedShell({
   sessionId,

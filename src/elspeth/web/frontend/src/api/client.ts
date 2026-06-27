@@ -617,7 +617,7 @@ export async function getGuided(
  * constants), so the shell fetches them and appends them to the locked STEP_1
  * prompt. `allowed_hosts` is surfaced informationally only — the client never
  * sends it back; the SSRF allowlist is set server-side at the STEP_2.5 recipe
- * accept seam. `entry_seed` is NEVER on this wire.
+ * accept seam.
  */
 export async function getTutorialSample(
   sessionId: string,

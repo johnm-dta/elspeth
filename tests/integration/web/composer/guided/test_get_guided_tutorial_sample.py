@@ -3,13 +3,12 @@
 Exposes the runtime-derived synthetic-scrape inputs for the active TUTORIAL
 session: the 3 sample URLs + the SSRF host-class (``allowed_hosts``). The URLs
 are runtime-derived (they cannot ride the frozen profile constants) and the
-host-class is the deterministic resolver output. ``entry_seed`` (the server-side
-framing prompt) MUST NEVER appear on this wire.
+host-class is the deterministic resolver output. The wire carries only those two
+runtime-derived fields.
 """
 
 from __future__ import annotations
 
-from elspeth.web.composer.guided.profile import _TUTORIAL_ENTRY_SEED
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -66,8 +65,8 @@ def test_tutorial_sample_configured_loopback_base_yields_cidr(composer_test_clie
     ]
 
 
-def test_tutorial_sample_never_exposes_entry_seed(composer_test_client: TestClient) -> None:
-    """entry_seed is server-side only and must never appear on the GET wire."""
+def test_tutorial_sample_exposes_only_urls_and_allowed_hosts(composer_test_client: TestClient) -> None:
+    """The tutorial-sample wire carries ONLY the runtime-derived inputs."""
     session_id = _create_session(composer_test_client)
     _start(composer_test_client, session_id, "tutorial")
 
@@ -75,9 +74,6 @@ def test_tutorial_sample_never_exposes_entry_seed(composer_test_client: TestClie
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    assert "entry_seed" not in body
-    # The seed string itself must not leak through any field.
-    assert _TUTORIAL_ENTRY_SEED not in resp.text
     assert set(body.keys()) == {"sample_urls", "allowed_hosts"}
 
 

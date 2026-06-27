@@ -375,10 +375,10 @@ async function runOnce(page: Page, runIndex: number): Promise<void> {
     graduated = true;
 
     // Id-capture assertions (Task 5 Step 2). The cache-bypass assertion is kept
-    // advisory: the staged tutorial uses the tutorial-profile entry_seed (the
-    // canonical scenario), so a cache hit is no longer a fault the way a stale
-    // FIXED_PROMPT compose would have been — the run still executes through the
-    // normal path. We record seededFromCache in the RunRecord for the judge.
+    // advisory: the staged tutorial runs the canonical scenario, so a cache hit
+    // is no longer a fault the way a stale FIXED_PROMPT compose would have been —
+    // the run still executes through the normal path. We record seededFromCache
+    // in the RunRecord for the judge.
     expect(sessionId, "session id captured").not.toBeNull();
     expect(tutorialRunId, "tutorial run id captured").not.toBeNull();
 

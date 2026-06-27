@@ -18,7 +18,6 @@ class WorkflowProfileKind(StrEnum):
 
 _PROFILE_KEYS = frozenset(
     {
-        "entry_seed",
         "coaching",
         "advisor_checkpoints",
         "recipe_match",
@@ -26,24 +25,17 @@ _PROFILE_KEYS = frozenset(
     }
 )
 
-_TUTORIAL_ENTRY_SEED = "Scrape the three synthetic project-brief pages from the list below and, for each, have an LLM write a short summary of the page. Remove the raw HTML and write the rows to a json file. These are our own demo pages, so use noreply@dta.gov.au as the scraping abuse contact."
-
 
 @dataclass(frozen=True, slots=True)
 class WorkflowProfile:
     """Server-owned behavior toggles for guided workflow variants."""
 
-    entry_seed: str | None
     coaching: bool
     advisor_checkpoints: bool
     recipe_match: bool
     bookends: bool
 
     def __post_init__(self) -> None:
-        if self.entry_seed is not None and type(self.entry_seed) is not str:
-            raise TypeError(f"entry_seed must be str | None, got {type(self.entry_seed).__name__}")
-        if self.entry_seed is not None and self.entry_seed.strip() == "":
-            raise ValueError("entry_seed must be non-empty when provided")
         for field_name in ("coaching", "advisor_checkpoints", "recipe_match", "bookends"):
             value = getattr(self, field_name)
             if type(value) is not bool:
@@ -53,7 +45,6 @@ class WorkflowProfile:
         """Serialize all direct profile fields for Tier-1 persistence."""
 
         return {
-            "entry_seed": self.entry_seed,
             "coaching": self.coaching,
             "advisor_checkpoints": self.advisor_checkpoints,
             "recipe_match": self.recipe_match,
@@ -78,7 +69,6 @@ class WorkflowProfile:
 
         try:
             return cls(
-                entry_seed=d["entry_seed"],
                 coaching=d["coaching"],
                 advisor_checkpoints=d["advisor_checkpoints"],
                 recipe_match=d["recipe_match"],
@@ -89,7 +79,6 @@ class WorkflowProfile:
 
 
 EMPTY_PROFILE = WorkflowProfile(
-    entry_seed=None,
     coaching=False,
     advisor_checkpoints=False,
     recipe_match=True,
@@ -97,7 +86,6 @@ EMPTY_PROFILE = WorkflowProfile(
 )
 
 TUTORIAL_PROFILE = WorkflowProfile(
-    entry_seed=_TUTORIAL_ENTRY_SEED,
     coaching=True,
     # Match live guided (EMPTY_PROFILE.advisor_checkpoints=False): the tutorial is
     # the normal guided flow, not a divergent variant. The terminal advisor

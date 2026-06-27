@@ -217,6 +217,14 @@ export function ChatInput({
 
   const canSend = !disabled && text.trim().length > 0;
 
+  // Read-only (tutorial locked prompt) content is static and multi-line (the
+  // worked-example prompt + the sample URLs). A fixed 2-row box clipped it; size
+  // the box to the content (capped) so the whole locked prompt is visible
+  // without an obscure inner scroll. Editable mode keeps the compact 2 rows.
+  const rows = readOnly
+    ? Math.min(10, Math.max(3, text.split("\n").length + 1))
+    : 2;
+
   // Phase 5b Task 8 (extends Phase 5a Task 1) — derive the effective
   // placeholder.  Precedence (highest wins):
   //   1. explicit `placeholder` prop (Phase A slice 4 guided-mode nudge)
@@ -262,7 +270,7 @@ export function ChatInput({
           readOnly={readOnly}
           aria-label="Message input"
           aria-describedby={hintId}
-          rows={2}
+          rows={rows}
           className="chat-input-textarea"
         />
 

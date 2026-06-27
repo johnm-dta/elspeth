@@ -170,7 +170,10 @@ export function LoginPage() {
           </Button>
         ) : (
           /* Local auth: username/password form */
-          <form onSubmit={handleSubmit}>
+          <form
+            onSubmit={handleSubmit}
+            style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}
+          >
             <Input
               label="Username"
               id="login-username"

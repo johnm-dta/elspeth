@@ -3,7 +3,7 @@
 // Guided-mode decision summary. This is deliberately not a protocol log: the
 // operator needs a visible recap of choices made so far, while low-level
 // emitter/type/hash details stay out of the default workflow surface.
-import type { GuidedStep, TurnRecord, TurnType } from "@/types/guided";
+import type { GuidedStep, TurnRecord } from "@/types/guided";
 
 // ── Display mappings ─────────────────────────────────────────────────────────
 
@@ -18,25 +18,6 @@ const STEP_LABELS: Record<GuidedStep, string> = {
   step_2_5_recipe_match: "Recipe",
   step_3_transforms: "Transforms",
   step_4_wire: "Wire",
-};
-
-/**
- * Human-readable labels for turn types.
- * CLOSED LIST — mirrors TurnType in types/guided.ts:15-21.
- */
-const TURN_TYPE_LABELS: Record<TurnType, string> = {
-  inspect_and_confirm: "Inspect and confirm",
-  single_select: "Single select",
-  multi_select_with_custom: "Multi-select with custom fields",
-  schema_form: "Schema form",
-  propose_chain: "Proposed chain",
-  recipe_offer: "Recipe offer",
-  // Phase 5b — interpretation-review history label.  The widget itself lands
-  // in Task 4 of 18b-phase-5b-frontend.md; this label entry exists so the
-  // Record<TurnType, string> exhaustive-keys contract holds the moment the
-  // TurnType union widens.
-  interpretation_review: "Interpretation review",
-  confirm_wiring: "Confirm wiring",
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -58,6 +39,16 @@ export function GuidedHistory({ history }: Props): React.ReactElement | null {
     return null;
   }
 
+  // One row per step (last turn wins): a step can emit several turns (e.g. a
+  // single_select then a schema_form), which previously rendered as duplicate
+  // "Source" rows. A Map keyed by step preserves first-seen step order while
+  // collapsing to the latest decision for that step.
+  const latestByStep = new Map<GuidedStep, TurnRecord>();
+  for (const turn of history) {
+    latestByStep.set(turn.step, turn);
+  }
+  const rows = [...latestByStep.values()];
+
   return (
     <section
       className="guided-history"
@@ -67,13 +58,17 @@ export function GuidedHistory({ history }: Props): React.ReactElement | null {
         Decisions so far
       </h2>
       <ol className="guided-history-list">
-        {history.map((turn, idx) => (
-          <li key={`${turn.step}-${idx}`} className="guided-history-item">
+        {rows.map((turn) => (
+          <li key={turn.step} className="guided-history-item">
             <span className="guided-history-step-name">
               {STEP_LABELS[turn.step]}
             </span>
+            {/* Show the decision summary only. The prior code fell back to the
+                widget-type label ("Single select") when summary was null, which
+                read as a meaningless "decision"; a step with no summary now
+                shows a muted "Decided" instead of leaking the widget type. */}
             <span className="guided-history-summary">
-              {turn.summary ?? TURN_TYPE_LABELS[turn.turn_type]}
+              {turn.summary ?? "Decided"}
             </span>
           </li>
         ))}

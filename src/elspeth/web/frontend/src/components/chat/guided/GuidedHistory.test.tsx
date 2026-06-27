@@ -45,9 +45,24 @@ describe("GuidedHistory", () => {
     expect(screen.queryByText("server")).toBeNull();
   });
 
-  it("falls back to plain turn labels for legacy records without summaries", () => {
+  it("shows a neutral marker (not the widget type) for records without a summary", () => {
     render(<GuidedHistory history={[{ ...TURN_1, summary: null }]} />);
-    expect(screen.getByText("Single select")).toBeInTheDocument();
+    expect(screen.getByText("Decided")).toBeInTheDocument();
+    // The widget-type label must NOT leak as a "decision".
+    expect(screen.queryByText("Single select")).toBeNull();
+  });
+
+  it("collapses multiple turns of the same step to one row (last wins)", () => {
+    render(
+      <GuidedHistory
+        history={[
+          { ...TURN_1, summary: null },
+          { ...TURN_1, turn_type: "schema_form", summary: "Source configured: csv" },
+        ]}
+      />,
+    );
+    expect(screen.getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.getByText("Source configured: csv")).toBeInTheDocument();
   });
 
   it("renders nothing when history is empty", () => {

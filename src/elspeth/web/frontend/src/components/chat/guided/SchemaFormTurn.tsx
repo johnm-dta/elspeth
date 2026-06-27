@@ -123,6 +123,7 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
             onChange={(value) => onChange(field.name, value)}
             idPrefix={reactId}
             disabled={disabled}
+            isTutorial={isTutorial}
           />
         ))}
       </div>
@@ -209,12 +210,14 @@ function KnobFieldRenderer({
   onChange,
   idPrefix,
   disabled,
+  isTutorial = false,
 }: {
   field: KnobField;
   value: unknown;
   onChange: (value: unknown) => void;
   idPrefix: string;
   disabled: boolean;
+  isTutorial?: boolean;
 }) {
   const id = `${idPrefix}-${field.name}`;
   const descriptionId = field.description ? `${id}-description` : undefined;
@@ -386,6 +389,10 @@ function KnobFieldRenderer({
               }
             }}
             disabled={disabled}
+            // Tutorial: the passive learner authors nothing. Show the prefilled
+            // raw-JSON value read-only (transparency) instead of an editable,
+            // intimidating JSON editor.
+            readOnly={isTutorial}
           />
           {field.description && (
             <p id={descriptionId} className="guided-schema-hint">

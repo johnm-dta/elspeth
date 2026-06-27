@@ -531,12 +531,19 @@ describe("ChatPanel mode discriminator", () => {
     );
   });
 
-  it("keeps the guided workflow stepper on a six-column grid", () => {
+  it("lays the guided workflow stepper out one column per step, with a mobile breakpoint", () => {
     const css = readFileSync(
       join(process.cwd(), "src/components/chat/guided/guided.css"),
       "utf8",
     );
-    expect(css).toContain("grid-template-columns: repeat(6, minmax(0, 1fr));");
+    // 5 GUIDED_WORKFLOW_STEPS -> 5 columns. The prior repeat(6,...) left an
+    // empty trailing column.
+    expect(css).toContain("grid-template-columns: repeat(5, minmax(0, 1fr));");
+    // Narrow viewports drop to 2 columns so single-word labels (e.g.
+    // "Transforms") stay whole instead of shattering one character per line.
+    expect(css).toMatch(
+      /@media \(max-width: 640px\)[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
+    );
   });
 
   it("renders the active turn in a current-decision panel with step purpose copy", () => {

@@ -256,6 +256,19 @@
   border-color: var(--color-btn-danger-bg-hover);
 }
 
+/* Ghost variant — emitted by the components/ui Button (variant="ghost"). Without
+   it the ghost variant silently degraded to the bordered base .btn. Mirrors
+   website/tokens/primitives.css. */
+.btn-ghost {
+  background-color: transparent;
+  border-color: transparent;
+}
+
+.btn-ghost:hover:not(:disabled):not([aria-disabled="true"]) {
+  background-color: var(--color-surface-hover);
+  border-color: var(--color-border);
+}
+
 /* .btn-small predates .btn-compact and is retained at its existing call sites.
    New buttons that need a chrome-row size should compose .btn-compact instead. */
 .btn-small {
@@ -328,6 +341,28 @@
   margin-top: var(--space-xs);
   font-size: var(--font-size-2xs);
   color: var(--color-text-muted);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Card surface (ui/Card, ui/CardHeader primitives)
+
+   Completes the design-system port begun by the Form inputs block above: the
+   components/ui Card primitive emits .card / .card-paper, which lived only in
+   the standalone website/ tree and were undefined in the app bundle. Mirrors
+   website/tokens/primitives.css so a <Card> renders as a real surface, not a
+   bare <div>.
+   --------------------------------------------------------------------------- */
+.card {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+}
+
+.card-paper {
+  background-color: var(--color-surface-paper);
+  border-color: var(--color-border);
 }
 
 

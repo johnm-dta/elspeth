@@ -1350,6 +1350,13 @@ export function ChatPanel({
         */}
         <GuidedChatHistory chatHistory={guidedSession.chat_history} />
         {/*
+          Pending LLM approvals (interpretation reviews) render ABOVE the intent
+          box and the form: the learner must approve them before advancing, so
+          they belong at the top of the reply surface, not buried below it. The
+          widget owns its own role/aria; empty-state returns nothing.
+        */}
+        <GuidedInterpretationReviews sessionId={activeSessionId ?? ""} />
+        {/*
           Intent box (LLM-primary, spec §"Core model" point 1). This is the
           PRIMARY input for the phase and renders ABOVE the editable form.
           It routes the learner's plain English through `chatGuided`
@@ -1397,8 +1404,21 @@ export function ChatPanel({
             readOnly={isTutorial === true}
           />
         </section>
+        {/* Tutorial de-emphasis applies ONLY to Send-driven steps — those with
+            a locked chat prompt (source / sink / transforms). Confirm-only steps
+            (wire) have an empty locked prompt: Send is disabled there and the
+            manual widget IS the path, so they keep full emphasis and no
+            "press Send" note (which would point at a disabled button). */}
+        {(() => {
+          const stepIsSendDriven =
+            isTutorial && (lockedChatPrompt?.[guidedSession.step] ?? "") !== "";
+          return (
         <section
-          className="guided-current-decision"
+          className={
+            stepIsSendDriven
+              ? "guided-current-decision guided-current-decision--tutorial"
+              : "guided-current-decision"
+          }
           aria-labelledby="guided-current-decision-heading"
         >
           <div className="guided-current-decision-copy">
@@ -1406,6 +1426,12 @@ export function ChatPanel({
               Current decision
             </h2>
             <p>{GUIDED_STEP_PURPOSES[guidedSession.step]}</p>
+            {stepIsSendDriven && (
+              <p className="guided-current-decision-tutorial-note">
+                You don't need to fill this in — pressing <strong>Send</strong>{" "}
+                above builds this step for you.
+              </p>
+            )}
           </div>
           <div
             ref={guidedLogRef}
@@ -1415,7 +1441,8 @@ export function ChatPanel({
             aria-live="polite"
             aria-relevant="additions"
           >
-            <GuidedInterpretationReviews sessionId={activeSessionId ?? ""} />
+            {/* Interpretation reviews moved above the intent box (approve-before-
+                advance); the turn widget remains here as the current decision. */}
             {guidedNextTurn && (
               <GuidedTurn
                 turn={guidedNextTurn}
@@ -1431,11 +1458,16 @@ export function ChatPanel({
             </p>
           )}
         </section>
+          );
+        })()}
         {!isTutorial && <ExitToFreeformButton />}
         {/* Phase 1B inline opt-out: footer-weight affordance to flip the
             account-level default-mode preference from guided→freeform (or
-            back). Same backend row as the Settings → Composer pane. */}
-        <InlineOptOutCheckbox />
+            back). Same backend row as the Settings → Composer pane. Hidden in
+            the tutorial: graduation owns the default-mode save, and a mid-walk
+            "always start in freeform mode" toggle contradicts the guided lesson
+            (mirrors the !isTutorial guard on ExitToFreeformButton above). */}
+        {!isTutorial && <InlineOptOutCheckbox />}
         <InlineRunResults />
       </div>
     );

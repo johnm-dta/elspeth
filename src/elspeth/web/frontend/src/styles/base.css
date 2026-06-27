@@ -115,8 +115,13 @@ summary:focus-visible {
   top: 0;
 }
 
-/* Screen-reader-only utility */
-.sr-only {
+/* Screen-reader-only utility. Both names are honoured: components use either
+   `.sr-only` (tutorial) or `.visually-hidden` (guided widgets, e.g.
+   InterpretationReviewTurn / GuidedChatHistory). `.visually-hidden` was
+   undefined, so those widgets' SR-only status text ("… needs review") rendered
+   visibly as a redundant line above each card. */
+.sr-only,
+.visually-hidden {
   position: absolute;
   width: 1px;
   height: 1px;

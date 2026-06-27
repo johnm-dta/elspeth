@@ -56,6 +56,18 @@
   text-transform: uppercase;
 }
 
+/* Guided-shell bridge wrapper (TutorialGuidedShell): the embedded ChatPanel
+   guided surface lives here. Full width within the centered .tutorial-shell
+   column; the kicker sits above it. */
+.tutorial-guided-shell {
+  width: 100%;
+}
+
+.tutorial-sample-loading {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
 .tutorial-actions {
   display: flex;
   flex-wrap: wrap;
@@ -312,6 +324,15 @@
 .tutorial-run-summary {
   color: var(--color-state-positive);
   font-weight: 600;
+}
+
+/* Discarded-rows note on the run turn — a subdued warning (rows were dropped at
+   the source but recorded in the audit trail). */
+.tutorial-run-discarded {
+  margin-top: var(--space-xs);
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+  max-width: 760px;
 }
 
 .tutorial-result-table-wrap {

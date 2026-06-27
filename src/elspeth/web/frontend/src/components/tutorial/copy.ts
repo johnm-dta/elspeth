@@ -43,7 +43,7 @@ export const WELCOME_LAYERS = [
  * "auditable" promise leaks ahead of any audit trail being recorded.
  */
 export const TUTORIAL_RUN_PREAMBLE =
-  "This is calling the configured LLM and fetching the URLs the composer chose.";
+  "This step calls the configured LLM and fetches pages over the network.";
 
 /**
  * Note rendered on the graduation turn when the user reached it via a cancelled

@@ -935,3 +935,52 @@ class TestObservedColumnsFromContent:
         content = b"just some prose with no columns or headers"
         cols = observed_columns_from_content(content=content, filename="note.txt", mime_type="text/plain")
         assert cols == ()
+
+
+class TestObservedColumnsFromPath:
+    """``observed_columns_from_path`` — the bounded-read, path-taking variant.
+
+    ``inspect_blob_content`` already truncates to ``_MAX_BYTES``, so reading the
+    whole file at the call site (a guided commit's column backfill) is wasted
+    I/O — a multi-hundred-MB blob would be slurped just to recover a header.
+    This entry point reads at most ``_MAX_BYTES`` and degrades an unreadable
+    file to ``()`` per its contract (the bound stays private to the inspector).
+    """
+
+    def test_reads_at_most_max_bytes(self, tmp_path, monkeypatch) -> None:
+        import elspeth.web.composer.source_inspection as si
+
+        # A file FAR larger than the inspector's read bound.
+        big = tmp_path / "big.csv"
+        big.write_bytes(b"id,name,score\n" + b"x,y,z\n" * si._MAX_BYTES)
+        assert big.stat().st_size > si._MAX_BYTES
+
+        seen: dict[str, int] = {}
+        real = si.observed_columns_from_content
+
+        def _spy(*, content: bytes, filename: str, mime_type: str) -> tuple[str, ...]:
+            seen["len"] = len(content)
+            return real(content=content, filename=filename, mime_type=mime_type)
+
+        monkeypatch.setattr(si, "observed_columns_from_content", _spy)
+        cols = si.observed_columns_from_path(path=big, filename="big.csv", mime_type="text/csv")
+
+        # The fix: the call site hands the inspector a bounded prefix, not the
+        # whole file. Without it, ``seen["len"]`` is the full file size.
+        assert seen["len"] <= si._MAX_BYTES
+        # Behaviour preserved: columns are still detected from the prefix.
+        assert cols == ("id", "name", "score")
+
+    def test_unreadable_path_degrades_to_empty(self, tmp_path) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_path
+
+        # A directory exists() but cannot be opened/read as a file -> OSError -> ().
+        d = tmp_path / "adir"
+        d.mkdir()
+        assert observed_columns_from_path(path=d, filename="x.csv", mime_type="text/csv") == ()
+
+    def test_missing_path_degrades_to_empty(self, tmp_path) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_path
+
+        missing = tmp_path / "nope.csv"
+        assert observed_columns_from_path(path=missing, filename="x.csv", mime_type="text/csv") == ()

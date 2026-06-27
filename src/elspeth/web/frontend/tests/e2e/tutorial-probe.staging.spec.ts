@@ -12,7 +12,6 @@ import { mkdirSync } from "node:fs";
 
 import { test, expect, type Page } from "@playwright/test";
 
-import { FIXED_PROMPT } from "./harness/prompt-and-rubric";
 import { harnessCtx, resetToFirstRun, cleanSessions } from "./helpers/tutorial-harness";
 
 const SHOT_DIR =
@@ -93,14 +92,18 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
   await shot(page, "guided-shell");
   console.log("[affordances @ guided-shell]\n" + (await affordances(page)));
 
-  // Seed the source via the step-1 chat (dynamic-source-from-chat).
-  const stepChat = page.getByRole("region", { name: "Ask about this step" });
-  const input = stepChat.getByLabel("Message input");
-  const send = stepChat.getByRole("button", { name: "Send message" });
-  await expect(input).toBeVisible({ timeout: 30_000 });
-  await input.fill(FIXED_PROMPT);
-  await send.click();
-  await shot(page, "after-source-chat-send");
+  // The tutorial is the NORMAL guided flow with the intent PRELOCKED at every
+  // phase: the learner types nothing and never fills the box — on each LLM-driven
+  // phase they press Send on the prepopulated worked-example prompt. We mirror
+  // tutorial-reliability's driver exactly: locate the step chat under its current
+  // region label, do NOT fill the read-only prompt, and wait for it to populate
+  // (synthetic URLs are fetched + appended async) before the pump drives by Send.
+  const stepChat = page.getByRole("region", { name: "Describe what you want" });
+  const stepChatInput = stepChat.getByLabel("Message input");
+  const stepChatSend = stepChat.getByRole("button", { name: "Send message" });
+  await expect(stepChatInput).toBeVisible({ timeout: 30_000 });
+  await expect(stepChatInput).not.toHaveValue("", { timeout: 30_000 });
+  await shot(page, "step-1-locked-prompt");
 
   // Turn-pump: resolve per-stage interpretation reviews, then advance via the
   // enabled stage primary, screenshotting + dumping affordances as state evolves.
@@ -111,7 +114,22 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
     page.getByRole("button", { name: "Apply recipe", exact: true }),
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     page.getByRole("button", { name: "Continue", exact: true }),
+    // Output required-fields turn: the LLM-built sink is observed-mode, so the
+    // designed answer is the escape, not ticking the source's column.
+    page.getByRole("button", { name: "Let source decide (pass all fields through)", exact: true }),
   ];
+
+  // The tutorial prompt is prelocked at every phase; the learner drives each
+  // LLM-built phase (Source/Output/Transforms) by pressing Send ONCE per phase
+  // (re-sending mid-build re-triggers the driver). Recipe + Wire are confirm-only.
+  // Mirrors tutorial-reliability's driveGuidedWalk.
+  const drivenPhases = new Set(["Source", "Output", "Transforms"]);
+  const currentPhase = async (): Promise<string | null> => {
+    const label = page.locator(".guided-workflow-step--current .guided-workflow-label").first();
+    const text = await label.textContent().catch(() => null);
+    return text ? text.trim() : null;
+  };
+  let lastDrivenPhase: string | null = null;
   const deadline = Date.now() + 420_000;
   let pass = 0;
   let lastSig = "";
@@ -153,6 +171,20 @@ test("probe: walk the staged guided tutorial", async ({ page }) => {
           advanced = true;
           break;
         }
+      }
+    }
+    if (!advanced) {
+      // No Accept/primary fired — drive the CURRENT LLM phase by Send (once per
+      // phase), mirroring tutorial-reliability. A confirm primary appears once
+      // the phase result renders.
+      const phase = await currentPhase();
+      const canSend = await stepChatSend.isEnabled().catch(() => false);
+      if (canSend && phase !== null && drivenPhases.has(phase) && phase !== lastDrivenPhase) {
+        await stepChatSend.click().catch(() => {});
+        lastDrivenPhase = phase;
+        console.log(`[advance] sent locked prompt for phase: "${phase}"`);
+        advanced = true;
+        await page.waitForTimeout(2_000);
       }
     }
     const sig = await affordances(page);

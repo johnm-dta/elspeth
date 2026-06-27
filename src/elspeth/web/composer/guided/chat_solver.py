@@ -30,7 +30,7 @@ from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
-from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError, InvariantError
 from elspeth.web.composer.guided.prompts import load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
@@ -718,7 +718,14 @@ async def maybe_resolve_step_2_sink_chat(
             error_class = type(exc).__name__
             error_message = type(exc).__name__
             raise
-        except (IndexError, AttributeError, json.JSONDecodeError, ValueError) as exc:
+        except (IndexError, AttributeError, json.JSONDecodeError, ValueError, ChainSolverResponseShapeError) as exc:
+            # ``ChainSolverResponseShapeError`` from a malformed discovery-tool
+            # dispatch (``_execute_discovery_call``) is a response-shape failure,
+            # not an unknown server error — classify it MALFORMED_RESPONSE like
+            # ``solve_chain`` (chain_solver.py), instead of falling through to the
+            # API_ERROR catch-all. It still re-raises; the auto-drop wrapper
+            # (``resolve_step_2_sink_chat_with_auto_drop``) turns it into the
+            # advisory fallback.
             status = ComposerLLMCallStatus.MALFORMED_RESPONSE
             error_class = type(exc).__name__
             error_message = "malformed_response"

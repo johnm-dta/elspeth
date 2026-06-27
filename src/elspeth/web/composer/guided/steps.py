@@ -31,7 +31,7 @@ from elspeth.web.composer.guided.state_machine import (
     TerminalKind,
     TerminalState,
 )
-from elspeth.web.composer.source_inspection import observed_columns_from_content
+from elspeth.web.composer.source_inspection import observed_columns_from_path
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools import (
     ToolContext,
@@ -166,11 +166,12 @@ def _observed_columns_from_blob(blob: Mapping[str, Any]) -> tuple[str, ...]:
     storage_path = blob.get("storage_path")
     if not storage_path:
         return ()
-    path = Path(str(storage_path))
-    if not path.exists():
-        return ()
-    return observed_columns_from_content(
-        content=path.read_bytes(),
+    # observed_columns_from_path reads only the bounded prefix the inspector
+    # actually scans (the whole-file read here could allocate hundreds of MB for
+    # a large blob just to recover a header) and degrades a missing/unreadable
+    # file to () itself — so no separate existence pre-check is needed.
+    return observed_columns_from_path(
+        path=Path(str(storage_path)),
         filename=str(blob.get("filename") or ""),
         mime_type=str(blob.get("mime_type") or ""),
     )

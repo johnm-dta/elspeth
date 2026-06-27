@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
+from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.catalog.schemas import PluginSummary
 from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_2_sink_chat
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
+from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.sessions._guided_step_chat import (
     Step2SinkChatResult,
     resolve_step_2_sink_chat_with_auto_drop,
@@ -142,4 +145,61 @@ async def test_sink_wrapper_absorbs_transient_into_synthetic_unavailable() -> No
     assert result.sink_resolution is None
     assert result.fallback_chat is not None
     assert result.fallback_chat.error_class == "TimeoutError"
+    assert result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_sink_wrapper_absorbs_malformed_discovery_args_into_synthetic_unavailable() -> None:
+    """A malformed discovery call (non-object arguments) raises
+    ``ChainSolverResponseShapeError`` deep in the sink discovery loop; the
+    wrapper must absorb it into the synthetic-unavailable fallback — exactly
+    like ``solve_chain``'s auto-drop path — not let it escape as a 500.
+
+    Regression for the sink/chain asymmetry: ``solve_chain`` lists the class in
+    its transient set but the sink twin did not, so a model that emitted an
+    *allowed* discovery tool with garbage arguments crashed the request.
+    """
+    catalog = MagicMock(spec=CatalogService)
+    catalog.list_sinks.return_value = [
+        PluginSummary(name="json", description="JSON Lines sink", plugin_type="sink", config_fields=[]),
+    ]
+    state = CompositionState(source=None, nodes=(), edges=(), outputs=(), metadata=PipelineMetadata(), version=1)
+    # ``list_sinks`` is an allowed discovery tool, but its arguments decode to a
+    # non-object, so the production ``_execute_discovery_call`` raises
+    # ``ChainSolverResponseShapeError`` when the loop dispatches it.
+    malformed = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="c1",
+                            function=SimpleNamespace(name="list_sinks", arguments="[1, 2, 3]"),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=AsyncMock(return_value=malformed),
+    ):
+        result = await resolve_step_2_sink_chat_with_auto_drop(
+            site="test",
+            session_id="s1",
+            user_id="u1",
+            model="anthropic/claude-sonnet-4.6",
+            user_message="write a jsonl file",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            state=state,
+            catalog=catalog,
+        )
+    assert isinstance(result, Step2SinkChatResult)
+    assert result.sink_resolution is None
+    assert result.fallback_chat is not None
+    assert result.fallback_chat.error_class == "ChainSolverResponseShapeError"
     assert result.fallback_chat.status == ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE

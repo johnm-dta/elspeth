@@ -37,6 +37,7 @@ from elspeth.web.composer.guided.chat_solver import (
     maybe_resolve_step_2_sink_chat,
     solve_step_chat,
 )
+from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
 from elspeth.web.composer.state import CompositionState
@@ -274,6 +275,11 @@ async def resolve_step_2_sink_chat_with_auto_drop(
         AttributeError,
         json.JSONDecodeError,
         ValueError,
+        # A malformed discovery-tool dispatch deep in the sink loop raises this
+        # (via ``_execute_discovery_call``); absorb it into the advisory fallback
+        # exactly like ``solve_chain``'s auto-drop path, instead of letting it
+        # escape as a 500.
+        ChainSolverResponseShapeError,
     ) as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         slog.error(

@@ -232,6 +232,47 @@ async def test_sink_loop_returns_none_at_iteration_cap() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sink_loop_malformed_discovery_args_classify_malformed_response() -> None:
+    """A malformed discovery call classifies MALFORMED_RESPONSE, not API_ERROR.
+
+    An *allowed* discovery tool whose ``arguments`` decode to a non-object makes
+    the production ``_execute_discovery_call`` raise ``ChainSolverResponseShapeError``.
+    The loop must list that class in its typed shape-failure except (mirroring
+    ``solve_chain``'s ``chain_solver.py`` clause) so the audit row records
+    MALFORMED_RESPONSE — not fall through to the API_ERROR catch-all. The class
+    still re-raises; the wrapper turns it into the advisory fallback.
+    """
+    from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
+    from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
+
+    recorder = BufferingRecorder()
+    # ``list_sinks`` is allowed (passes the dispatch gate), but its arguments
+    # decode to a non-object, so dispatch raises ChainSolverResponseShapeError.
+    malformed = _response(tool_calls=[SimpleNamespace(id="c1", function=SimpleNamespace(name="list_sinks", arguments="[1, 2, 3]"))])
+
+    async def _fake(**kwargs: Any) -> SimpleNamespace:
+        return malformed
+
+    with (
+        patch("elspeth.web.composer.guided.chat_solver._litellm_acompletion", side_effect=_fake),
+        pytest.raises(ChainSolverResponseShapeError),
+    ):
+        await maybe_resolve_step_2_sink_chat(
+            model="m",
+            user_message="save as jsonl",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+            recorder=recorder,
+            state=_empty_state(),
+            catalog=_mock_catalog(),
+            user_id="u1",
+        )
+
+    assert recorder.llm_calls[-1].status == ComposerLLMCallStatus.MALFORMED_RESPONSE
+
+
+@pytest.mark.asyncio
 async def test_sink_loop_single_shot_when_no_catalog() -> None:
     """Without state+catalog the loop degrades to the pre-loop single-shot path."""
     responses = [_response(tool_calls=[_tool_call("c1", "resolve_sink", _RESOLVE_SINK_ARGS)])]

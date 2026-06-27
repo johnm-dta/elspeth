@@ -1,0 +1,15 @@
+/* =============================================================================
+   ELSPETH Design System — Global styles entry point.
+   Consumers link THIS file only. It is a manifest of @import lines; every
+   token, font, and shared primitive in the system is reachable from here.
+   ============================================================================= */
+
+/* Foundation: fonts → color tokens → type tokens → layout tokens. */
+@import "./tokens/fonts.css";
+@import "./tokens/colors.css";
+@import "./tokens/typography.css";
+@import "./tokens/layout.css";
+
+/* Base reset + shared primitive classes (buttons, badges, inputs, cards…). */
+@import "./tokens/base.css";
+@import "./tokens/primitives.css";

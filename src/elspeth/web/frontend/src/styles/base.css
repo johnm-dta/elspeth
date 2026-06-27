@@ -106,7 +106,7 @@ summary:focus-visible {
   background-color: var(--color-accent);
   color: var(--color-text-inverse);
   font-size: var(--font-size-base);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   text-decoration: none;
   border-radius: 0 0 var(--radius-md) 0;
 }

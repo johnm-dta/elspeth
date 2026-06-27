@@ -1,0 +1,128 @@
+<!-- @dsCard group="Website" viewport="1280x720" name="Site — Authoring" subtitle="Two authoring surfaces · Sense → Decide → Act" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Authoring — ELSPETH</title>
+<link rel="stylesheet" href="styles.css" />
+<link rel="stylesheet" href="site.css" />
+<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <div class="nav-left">
+      <a class="brand" href="index.html">ELSPETH</a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="authoring.html" class="active">Authoring</a>
+        <a href="assurance.html">Assurance</a>
+        <a href="use-cases.html">Use cases</a>
+        <a href="get-started.html">Get started</a>
+      </nav>
+    </div>
+    <div class="nav-right">
+      <button class="iconbtn" id="theme-toggle" aria-label="Toggle theme"><i data-lucide="moon"></i></button>
+      <a class="btn-compact" href="#" style="gap:8px"><i data-lucide="github" style="width:15px;height:15px"></i> GitHub</a>
+      <a class="btn-compact btn-primary" href="get-started.html" style="background:var(--color-btn-primary-bg);border-color:var(--color-btn-primary-bg);color:#fff">Get started</a>
+    </div>
+  </div>
+</header>
+
+<div class="page-head dotgrid">
+  <div class="wrap">
+    <span class="eyebrow">Two authoring surfaces, one engine</span>
+    <h1>Hand-edit YAML, or build by conversation.</h1>
+    <p>Both surfaces target the same primitives, plugin contracts, graph validation, and Landscape audit trail. The Web Composer is an authoring surface over the substrate — not an alternative engine.</p>
+  </div>
+</div>
+
+<section>
+  <div class="wrap">
+    <div class="surfaces" style="margin-top:8px">
+      <div class="surface-card">
+        <span class="ic"><i data-lucide="file-code-2"></i></span>
+        <h3>YAML operator path</h3>
+        <p>For operators in sensitive, regulated, or defence-adjacent workflows. The pipeline can be read, reviewed, versioned, and explained before it ever runs.</p>
+        <ul>
+          <li><i data-lucide="check"></i> Declarative DAG — every edge explicitly named and validated</li>
+          <li><i data-lucide="check"></i> Hierarchical settings with profile overrides</li>
+          <li><i data-lucide="check"></i> <code>validate</code>, <code>run</code>, <code>explain</code>, <code>resume</code> from the CLI</li>
+        </ul>
+      </div>
+      <div class="surface-card">
+        <span class="ic"><i data-lucide="messages-square"></i></span>
+        <h3>Web Composer</h3>
+        <p>For knowledge workers building document QA, classification, routing, or review workflows. An LLM tool loop mutates pipeline state through audited tools and contracts — never free-form config text.</p>
+        <ul>
+          <li><i data-lucide="check"></i> Preview validation, graph, spec, YAML, and repair hints</li>
+          <li><i data-lucide="check"></i> Blob-backed sources and <code>$secret{}</code> references</li>
+          <li><i data-lucide="check"></i> Background runs streamed over WebSocket, safely cancellable</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<section class="dotgrid">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">The model</span>
+      <h2>Sense → Decide → Act.</h2>
+      <p>Runtime assembly turns declared primitives into an execution graph; validation checks the wiring, route targets, and schema compatibility before the executor runs it.</p>
+    </div>
+    <div class="sda">
+      <div class="sda-step">
+        <span class="k" style="color:var(--color-badge-source)">Sense</span>
+        <h4>Sources</h4>
+        <p>Load data — CSV, JSON, text/blob, Azure Blob, Dataverse, database, Chroma.</p>
+      </div>
+      <div class="sda-arrow">→</div>
+      <div class="sda-step">
+        <span class="k" style="color:var(--color-badge-transform)">Decide</span>
+        <h4>Transforms &amp; gates</h4>
+        <p>Map, coerce, classify, run LLM queries, evaluate pure-config threshold gates.</p>
+      </div>
+      <div class="sda-arrow">→</div>
+      <div class="sda-step">
+        <span class="k" style="color:var(--color-badge-sink)">Act</span>
+        <h4>Sinks</h4>
+        <p>Route rows to outputs — files, database rows, review queues, alerts.</p>
+      </div>
+    </div>
+    <div class="types">
+      <div class="type-item"><span class="type-badge type-badge-source">Source</span><p>Ingest external data at a zero-trust boundary.</p></div>
+      <div class="type-item"><span class="type-badge type-badge-transform">Transform</span><p>Row-level mapping, coercion, LLM and safety steps.</p></div>
+      <div class="type-item"><span class="type-badge type-badge-gate">Gate</span><p>Pure-config routing by named expression.</p></div>
+      <div class="type-item"><span class="type-badge type-badge-sink">Sink</span><p>Write outputs and route to review.</p></div>
+      <div class="type-item"><span class="type-badge type-badge-aggregation">Aggregation</span><p>Batch-aware, audit-attributable analytics.</p></div>
+      <div class="type-item"><span class="type-badge type-badge-coalesce">Coalesce</span><p>Join branches back into a single stream.</p></div>
+    </div>
+    <div class="cta-row" style="margin-top:40px">
+      <a class="btn btn-primary" href="get-started.html">See a pipeline.yaml</a>
+      <a class="btn" href="assurance.html">How it's audited</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <span class="brand">ELSPETH</span>
+    <div class="links">
+      <a href="index.html">Home</a>
+      <a href="assurance.html">Assurance</a>
+      <a href="use-cases.html">Use cases</a>
+      <a href="get-started.html">Get started</a>
+      <a href="#">GitHub</a>
+    </div>
+    <span class="copy">MIT licensed · Built for decisions that must be defensible.</span>
+  </div>
+</footer>
+
+<script src="site.js"></script>
+</body>
+</html>

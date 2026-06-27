@@ -1,0 +1,48 @@
+/* layout.css — Spacing, radius, control sizing, transitions, z-index. */
+
+:root {
+  /* ── Spacing scale (2 → 32) ──────────────────────────────────────────────── */
+  --space-2xs: 2px;
+  --space-xs:  4px;
+  --space-sm:  8px;
+  --space-md:  12px;
+  --space-lg:  16px;
+  --space-xl:  24px;
+  --space-2xl: 32px;
+
+  /* ── Radius ──────────────────────────────────────────────────────────────── */
+  --radius-sm:   4px;
+  --radius-md:   6px;
+  --radius-lg:   8px;
+  --radius-xl:   12px;
+  --radius-pill: 9999px;
+
+  /* ── Control heights ─────────────────────────────────────────────────────── */
+  /* --size-control is the WCAG 2.5.5 (AAA) 44×44 touch floor for canvas-area
+     primary actions. --size-control-compact is the chrome-row size used by
+     header buttons and dense toolbars (WCAG 2.5.8 AA, ≥24×24). */
+  --size-control:         44px;
+  --size-control-compact: 36px;
+
+  /* ── Side-rail / inspector sizing ────────────────────────────────────────── */
+  --inspector-default-width: 320px;
+  --inspector-min-width:     240px;
+
+  /* ── Transitions ─────────────────────────────────────────────────────────── */
+  --transition-fast:   100ms ease; /* @kind other */
+  --transition-normal: 150ms ease; /* @kind other */
+  --transition-slow:   250ms ease; /* @kind other */
+
+  /* ── Z-index layers ──────────────────────────────────────────────────────── */
+  --z-panel-controls:   10; /* @kind other */
+  --z-catalog-backdrop: 38; /* @kind other */
+  --z-catalog:          40; /* @kind other */
+  --z-popover:          50; /* @kind other */
+  --z-overlay-backdrop: 99; /* @kind other */
+  --z-overlay:         100; /* @kind other */
+  --z-dialog-backdrop: 200; /* @kind other */
+  --z-dialog:          201; /* @kind other */
+  --z-palette-backdrop: 300; /* @kind other */
+  --z-palette:         301; /* @kind other */
+  --z-skip-link:      1000; /* @kind other */
+}

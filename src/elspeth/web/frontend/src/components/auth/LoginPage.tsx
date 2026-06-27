@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from "react";
 import { useAuth } from "../../hooks/useAuth";
 import * as api from "../../api/client";
 import type { AuthConfig } from "../../types/index";
+import { Button, Input, AlertBanner } from "../ui";
 
 /**
  * Login page that adapts to the configured auth provider.
@@ -155,132 +156,49 @@ export function LoginPage() {
           Sign in to ELSPETH
         </h1>
 
-        {loginError && (
-          <div
-            role="alert"
-            style={{
-              padding: "8px 12px",
-              marginBottom: 16,
-              backgroundColor: "var(--color-error-bg)",
-              color: "var(--color-error)",
-              borderRadius: 4,
-              fontSize: 14,
-              border: "1px solid var(--color-error-border)",
-            }}
-          >
-            {loginError}
-          </div>
-        )}
+        {loginError && <AlertBanner tone="error">{loginError}</AlertBanner>}
 
         {isOidc ? (
           /* OIDC / Entra SSO: single "Sign in with SSO" button */
-          <button
+          <Button
+            variant="primary"
             type="button"
             onClick={handleSsoRedirect}
             aria-label="Sign in with single sign-on"
-            style={{
-              display: "block",
-              width: "100%",
-              padding: "10px 16px",
-              backgroundColor: "var(--color-accent)",
-              color: "var(--color-text-inverse)",
-              border: "none",
-              borderRadius: 4,
-              fontSize: 14,
-              cursor: "pointer",
-            }}
           >
             Sign in with SSO
-          </button>
+          </Button>
         ) : (
           /* Local auth: username/password form */
           <form onSubmit={handleSubmit}>
-            <label
-              htmlFor="login-username"
-              style={{
-                display: "block",
-                marginBottom: 4,
-                fontSize: 14,
-                color: "var(--color-text)",
-              }}
-            >
-              Username
-            </label>
-            <input
+            <Input
+              label="Username"
               id="login-username"
               type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
               required
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "8px 12px",
-                marginBottom: 16,
-                border: "1px solid var(--color-border-strong)",
-                borderRadius: 4,
-                fontSize: 14,
-                boxSizing: "border-box",
-                backgroundColor: "var(--color-surface-elevated)",
-                color: "var(--color-text)",
-              }}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
             />
 
-            <label
-              htmlFor="login-password"
-              style={{
-                display: "block",
-                marginBottom: 4,
-                fontSize: 14,
-                color: "var(--color-text)",
-              }}
-            >
-              Password
-            </label>
-            <input
+            <Input
+              label="Password"
               id="login-password"
               type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               required
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "8px 12px",
-                marginBottom: 24,
-                border: "1px solid var(--color-border-strong)",
-                borderRadius: 4,
-                fontSize: 14,
-                boxSizing: "border-box",
-                backgroundColor: "var(--color-surface-elevated)",
-                color: "var(--color-text)",
-              }}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
             />
 
-            <button
+            <Button
+              variant="primary"
               type="submit"
               disabled={isSubmitting}
               aria-label={isSubmitting ? "Signing in" : "Sign in"}
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "10px 16px",
-                backgroundColor: isSubmitting
-                  ? "var(--color-surface-elevated)"
-                  : "var(--color-accent)",
-                color: isSubmitting
-                  ? "var(--color-text-muted)"
-                  : "var(--color-text-inverse)",
-                border: "none",
-                borderRadius: 4,
-                fontSize: 14,
-                cursor: isSubmitting ? "not-allowed" : "pointer",
-              }}
             >
-              {isSubmitting ? "Signing in..." : "Sign in"}
-            </button>
+              {isSubmitting ? "Signing in…" : "Sign in"}
+            </Button>
           </form>
         )}
       </div>

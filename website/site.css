@@ -135,27 +135,60 @@ pre.code .cm { color: var(--color-text-muted); }
 .step p { margin: 6px 0 0; font-size: 14px; color: var(--color-text-secondary); line-height: 1.5; }
 .step pre { margin: 12px 0 0; padding: 12px 14px; background: var(--color-surface-nav); border: 1px solid var(--color-border); border-radius: var(--radius-md); font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-secondary); overflow: auto; }
 .step pre .pr { color: var(--color-badge-source); }
+.step pre .ok { color: var(--color-success); }
+.step pre .mut, .step pre .cm { color: var(--color-text-muted); }
 
 /* CTA band */
 .ctaband { text-align: center; padding: 76px 0; background: var(--color-surface-nav); border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
 .ctaband h2 { font-size: 36px; margin: 14px 0 0; font-weight: 700; letter-spacing: -0.01em; }
 .ctaband p { font-size: 17px; color: var(--color-text-secondary); margin: 14px auto 0; max-width: 52ch; }
 
+/* Lineage proof — real `explain` output beside its reading (assurance) */
+.proof { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 32px; align-items: start; margin-top: 36px; }
+.proof .term-body { font-size: 12.5px; line-height: 1.65; }
+.proof .term-body .hl { color: var(--color-success); font-weight: 600; }
+.proof .term-body .sec { color: var(--color-text-secondary); }
+.proof-notes { display: flex; flex-direction: column; gap: 18px; }
+.proof-note { border-left: 2px solid var(--color-accent); padding-left: 14px; }
+.proof-note h4 { font-size: 14px; margin: 0; font-weight: 650; }
+.proof-note p { font-size: 13px; color: var(--color-text-secondary); line-height: 1.55; margin: 6px 0 0; }
+.proof-note code { font-family: var(--font-mono); font-size: 12px; color: var(--color-text); }
+.proof-src { margin-top: 18px; font-size: 13px; color: var(--color-text-muted); }
+.proof-src code { font-family: var(--font-mono); font-size: 12px; color: var(--color-text-secondary); }
+
+/* Fork → coalesce diagram (authoring) */
+.forkflow { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 36px; flex-wrap: wrap; }
+.fork-node { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 14px 16px; text-align: center; min-width: 104px; }
+.fork-node .fn-k { font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--color-text-muted); display: block; }
+.fork-node .fn-v { font-size: 14px; font-weight: 650; margin-top: 5px; display: block; }
+.fork-branches { display: flex; flex-direction: column; gap: 10px; }
+.fork-branch { background: var(--color-surface-elevated); border: 1px dashed var(--color-border-strong); border-radius: var(--radius-md); padding: 10px 14px; font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-secondary); text-align: center; }
+.fork-arrow { color: var(--color-border-strong); font-size: 20px; }
+.fork-caption { margin-top: 24px; font-size: 15px; color: var(--color-text-secondary); line-height: 1.6; max-width: 72ch; }
+.fork-caption code { font-family: var(--font-mono); font-size: 13px; color: var(--color-text); }
+
 /* Footer */
-footer { padding: 44px 0; }
-.foot { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
-.foot .links { display: flex; gap: 20px; }
-.foot .links a { font-size: 13px; color: var(--color-text-muted); }
-.foot .links a:hover { color: var(--color-text); }
-.foot .copy { font-size: 13px; color: var(--color-text-muted); }
+footer { padding: 56px 0 40px; }
+.foot { display: grid; grid-template-columns: 1.3fr 1.7fr; gap: 40px; align-items: start; }
+.foot-brand .brand { font-size: 15px; }
+.foot-prov { font-size: 13px; color: var(--color-text-muted); line-height: 1.6; margin: 12px 0 0; max-width: 44ch; }
+.foot-cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.foot-col { display: flex; flex-direction: column; gap: 9px; }
+.foot-h { font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--color-text-secondary); margin-bottom: 3px; }
+.foot-col a { font-size: 13px; color: var(--color-text-muted); }
+.foot-col a:hover { color: var(--color-text); }
+.foot-bottom { margin-top: 36px; padding-top: 20px; border-top: 1px solid var(--color-border); }
+.foot-bottom .copy { font-size: 13px; color: var(--color-text-muted); }
 
 .btn-lg { min-height: 48px; padding: 0 22px; font-size: 16px; border-radius: var(--radius-md); }
 
 @media (max-width: 900px) {
-  .hero-grid, .codewrap { grid-template-columns: 1fr; }
+  .hero-grid, .codewrap, .proof, .foot { grid-template-columns: 1fr; }
   .surfaces, .types, .features, .props, .tiers { grid-template-columns: 1fr; }
   .sda { grid-template-columns: 1fr; }
-  .sda-arrow { display: none; }
+  .sda-arrow, .fork-arrow { display: none; }
+  .forkflow { flex-direction: column; align-items: stretch; }
+  .foot-cols { grid-template-columns: repeat(2, 1fr); }
   .hero h1 { font-size: 40px; }
   .page-head h1 { font-size: 34px; }
   .nav-links { display: none; }

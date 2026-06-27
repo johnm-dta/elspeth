@@ -121,6 +121,33 @@
 <section>
   <div class="wrap">
     <div class="section-head">
+      <span class="eyebrow">Parallel lineage</span>
+      <h2>Fork into branches — without losing the thread.</h2>
+      <p>A gate can <strong>fork</strong> one row into parallel branches that traverse the DAG independently, then a <strong>coalesce</strong> node joins them back. The audit trail follows every step, so a branched decision is still fully reconstructable.</p>
+    </div>
+    <div class="forkflow">
+      <div class="fork-node"><span class="fn-k">Row</span><span class="fn-v">one source row</span></div>
+      <div class="fork-arrow">→</div>
+      <div class="fork-node"><span class="fn-k">Gate</span><span class="fn-v">fork_gate</span></div>
+      <div class="fork-arrow">⇒</div>
+      <div class="fork-branches">
+        <div class="fork-branch">path_a</div>
+        <div class="fork-branch">path_b</div>
+      </div>
+      <div class="fork-arrow">⇒</div>
+      <div class="fork-node"><span class="fn-k">Coalesce</span><span class="fn-v">require_all</span></div>
+      <div class="fork-arrow">→</div>
+      <div class="fork-node"><span class="fn-k">Sink</span><span class="fn-v">output</span></div>
+    </div>
+    <p class="fork-caption">Each branch token carries the same <code>fork_group_id</code>, so the trail knows the two are siblings of one row. When the coalesce node merges them, the merged token's lineage names <em>both</em> parent branch tokens by id — so the joined row can still answer “which branch produced which part of this result?” In the bundled <code>examples/fork_coalesce</code> run, the coalesced token lists <code>Parent Tokens</code> <code>38ac0f55…</code> (path_a) and <code>098ec06d…</code> (path_b). Branching execution; reconstructable provenance.</p>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<section>
+  <div class="wrap">
+    <div class="section-head">
       <span class="eyebrow">Execution model</span>
       <h2>Concurrent, but still deterministic.</h2>
       <p>LLM calls are the slow part of most pipelines, so an LLM transform fans its per-row requests out across a bounded thread pool — then puts the results back in order. Throughput comes from overlapping I/O-bound model calls inside a transform, not from parallelising the graph, and never at the cost of a reproducible run.</p>
@@ -143,16 +170,38 @@
 </main>
 
 <footer>
-  <div class="wrap foot">
-    <span class="brand">ELSPETH</span>
-    <div class="links">
-      <a href="index.html">Home</a>
-      <a href="assurance.html">Assurance</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="get-started.html">Get started</a>
-      <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
+  <div class="wrap">
+    <div class="foot">
+      <div class="foot-brand">
+        <span class="brand">ELSPETH</span>
+        <p class="foot-prov">Open-source software developed and publicly released by staff of the DTA — the Australian Government's Digital Transformation Agency.</p>
+      </div>
+      <div class="foot-cols">
+        <div class="foot-col">
+          <span class="foot-h">Product</span>
+          <a href="index.html">Home</a>
+          <a href="authoring.html">Authoring</a>
+          <a href="assurance.html">Assurance</a>
+          <a href="use-cases.html">Use cases</a>
+          <a href="get-started.html">Get started</a>
+        </div>
+        <div class="foot-col">
+          <span class="foot-h">Project</span>
+          <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CHANGELOG.md">Changelog · v0.7.0</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CONTRIBUTING.md">Contributing</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CODE_OF_CONDUCT.md">Code of conduct</a>
+        </div>
+        <div class="foot-col">
+          <span class="foot-h">Assurance</span>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/SECURITY.md">Report a vulnerability</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT license</a>
+        </div>
+      </div>
     </div>
-    <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · Built for decisions that must be defensible.</span>
+    <div class="foot-bottom">
+      <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · ELSPETH 0.7.0 · Built for decisions that must be defensible.</span>
+    </div>
   </div>
 </footer>
 

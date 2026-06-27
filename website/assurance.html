@@ -59,6 +59,69 @@
 
 <hr class="divider" />
 
+<section>
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">Show, don't tell</span>
+      <h2>One row's defensible trail.</h2>
+      <p>This is real <code>explain</code> output from a bundled example run — not a mock-up. It reconstructs why a single row reached the <code>approved</code> sink: the source fingerprint it carried, the gate it passed, and the routing decision that sent it there.</p>
+    </div>
+    <div class="proof">
+      <div class="term" aria-label="elspeth explain output for one row">
+        <div class="term-bar">
+          <i data-lucide="scroll-text" style="width:14px;height:14px;color:var(--color-text-muted)"></i>
+          <span class="t">elspeth · explain one row</span>
+        </div>
+        <div class="term-body"><span class="pr">$</span> <span class="cmd">elspeth explain --run &lt;run&gt; --row &lt;row&gt; \
+    --database examples/boolean_routing/runs/audit.db --no-tui</span>
+
+<span class="sec">============================================================</span>
+LINEAGE REPORT
+<span class="sec">============================================================</span>
+
+Token: 5f2754f391ed4195b6d3101f2a3dc2a8
+Row: 4500ad0bc8674d4bae3922300e64dca3
+
+<span class="sec">--- Source ---</span>
+Row Index: 0
+Source Data Hash: <span class="mut">9b3de0ff04d4983f8accfe3e…</span>
+Payload Available: False
+
+<span class="sec">--- Outcome ---</span>
+Outcome: <span class="hl">SUCCESS</span>
+Path: <span class="hl">GATE_ROUTED</span>
+Sink: approved
+Completed: True
+
+<span class="sec">--- Node States ---</span>
+  [0] source_primary…: completed
+  [1] config_gate_approval_check…: completed
+  [2] sink_approved…: completed
+
+<span class="sec">--- Routing Events ---</span>
+  [0] move edge=6b96441565… group=a5441a9c66… reason_hash=<span class="mut">f8fa1fdeab3a…</span></div>
+      </div>
+      <div class="proof-notes">
+        <div class="proof-note">
+          <h4>Outcome and path are separate axes</h4>
+          <p>The two-axis terminal model in practice: <code>SUCCESS</code> answers <em>did it succeed?</em>; <code>GATE_ROUTED</code> answers <em>how did it get there?</em> "It passed" and "a gate sent it to <code>approved</code>" are recorded as distinct facts.</p>
+        </div>
+        <div class="proof-note">
+          <h4>Every decision is bound to its evidence</h4>
+          <p>The source row carries a content hash; the routing event carries a <code>reason_hash</code> that ties the destination to the exact condition that produced it. Nothing in the path is asserted without a fingerprint.</p>
+        </div>
+        <div class="proof-note">
+          <h4>Reproducible, and exportable as evidence</h4>
+          <p>The same records export signed (HMAC-SHA256) with a running hash for chain-of-custody review — the trail a regulated or audited assessment needs to reconstruct a single decision after the fact.</p>
+        </div>
+      </div>
+    </div>
+    <p class="proof-src">Node ids, source-data and reason hashes are abbreviated here (marked <code>…</code>) for display; the run records them in full. Reproduce it against any bundled run under <code>examples/*/runs/audit.db</code>.</p>
+  </div>
+</section>
+
+<hr class="divider" />
+
 <section class="dotgrid">
   <div class="wrap">
     <div class="section-head">
@@ -96,16 +159,38 @@
 </main>
 
 <footer>
-  <div class="wrap foot">
-    <span class="brand">ELSPETH</span>
-    <div class="links">
-      <a href="index.html">Home</a>
-      <a href="authoring.html">Authoring</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="get-started.html">Get started</a>
-      <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
+  <div class="wrap">
+    <div class="foot">
+      <div class="foot-brand">
+        <span class="brand">ELSPETH</span>
+        <p class="foot-prov">Open-source software developed and publicly released by staff of the DTA — the Australian Government's Digital Transformation Agency.</p>
+      </div>
+      <div class="foot-cols">
+        <div class="foot-col">
+          <span class="foot-h">Product</span>
+          <a href="index.html">Home</a>
+          <a href="authoring.html">Authoring</a>
+          <a href="assurance.html">Assurance</a>
+          <a href="use-cases.html">Use cases</a>
+          <a href="get-started.html">Get started</a>
+        </div>
+        <div class="foot-col">
+          <span class="foot-h">Project</span>
+          <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CHANGELOG.md">Changelog · v0.7.0</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CONTRIBUTING.md">Contributing</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CODE_OF_CONDUCT.md">Code of conduct</a>
+        </div>
+        <div class="foot-col">
+          <span class="foot-h">Assurance</span>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/SECURITY.md">Report a vulnerability</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT license</a>
+        </div>
+      </div>
     </div>
-    <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · Built for decisions that must be defensible.</span>
+    <div class="foot-bottom">
+      <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · ELSPETH 0.7.0 · Built for decisions that must be defensible.</span>
+    </div>
   </div>
 </footer>
 

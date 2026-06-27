@@ -62,7 +62,13 @@
         <div>
           <h3>Validate before you run</h3>
           <p>Preflight checks graph structure, route targets, schema compatibility, and secret references.</p>
-          <pre><span class="pr">$</span> elspeth validate --settings pipeline.yaml</pre>
+          <pre><span class="pr">$</span> elspeth validate --settings pipeline.yaml
+<span class="ok">✅ Pipeline configuration valid!</span>
+<span class="mut">  Sources: submissions=csv
+  Transforms: 1
+  Aggregations: 0
+  Sinks: approved, review
+  Graph: 5 nodes, 4 edges</span></pre>
         </div>
       </div>
       <div class="step">
@@ -70,8 +76,11 @@
         <div>
           <h3>Run &amp; explain</h3>
           <p>Execute the pipeline, then explore why any row reached its destination.</p>
-          <pre><span class="pr">$</span> elspeth run --settings pipeline.yaml --execute
-<span class="pr">$</span> elspeth explain --run &lt;run_id&gt; --row &lt;row_id&gt;</pre>
+          <pre><span class="pr">$</span> elspeth run --settings pipeline.yaml --execute   <span class="cm"># → status: completed</span>
+<span class="pr">$</span> elspeth explain --run &lt;run_id&gt; --row &lt;row_id&gt;
+<span class="mut">Outcome:</span>   <span class="ok">SUCCESS</span>
+<span class="mut">Path:</span>      <span class="ok">GATE_ROUTED</span>
+<span class="mut">Sink:</span>      approved</pre>
         </div>
       </div>
     </div>
@@ -166,16 +175,38 @@
 </main>
 
 <footer>
-  <div class="wrap foot">
-    <span class="brand">ELSPETH</span>
-    <div class="links">
-      <a href="index.html">Home</a>
-      <a href="authoring.html">Authoring</a>
-      <a href="assurance.html">Assurance</a>
-      <a href="use-cases.html">Use cases</a>
-      <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
+  <div class="wrap">
+    <div class="foot">
+      <div class="foot-brand">
+        <span class="brand">ELSPETH</span>
+        <p class="foot-prov">Open-source software developed and publicly released by staff of the DTA — the Australian Government's Digital Transformation Agency.</p>
+      </div>
+      <div class="foot-cols">
+        <div class="foot-col">
+          <span class="foot-h">Product</span>
+          <a href="index.html">Home</a>
+          <a href="authoring.html">Authoring</a>
+          <a href="assurance.html">Assurance</a>
+          <a href="use-cases.html">Use cases</a>
+          <a href="get-started.html">Get started</a>
+        </div>
+        <div class="foot-col">
+          <span class="foot-h">Project</span>
+          <a href="https://github.com/johnm-dta/elspeth">GitHub</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CHANGELOG.md">Changelog · v0.7.0</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CONTRIBUTING.md">Contributing</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/CODE_OF_CONDUCT.md">Code of conduct</a>
+        </div>
+        <div class="foot-col">
+          <span class="foot-h">Assurance</span>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/SECURITY.md">Report a vulnerability</a>
+          <a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT license</a>
+        </div>
+      </div>
     </div>
-    <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · Built for decisions that must be defensible.</span>
+    <div class="foot-bottom">
+      <span class="copy"><a href="https://github.com/johnm-dta/elspeth/blob/main/LICENSE">MIT licensed</a> · ELSPETH 0.7.0 · Built for decisions that must be defensible.</span>
+    </div>
   </div>
 </footer>
 

@@ -246,7 +246,7 @@ class AzureLLMProvider:
         try:
             client.chat_completion(
                 model=model,
-                messages=[{"role": "user", "content": "Respond with OK only."}],
+                messages=[{"role": "user", "content": "This is a pre-flight smoke test. Please reply with ok."}],
                 temperature=0.0,
                 # Azure OpenAI requires max_output_tokens >= 16. Values below
                 # the floor return HTTP 400 with "integer_below_min_value"

@@ -509,7 +509,7 @@ class OpenRouterLLMProvider:
         try:
             request_body: dict[str, Any] = {
                 "model": model,
-                "messages": [{"role": "user", "content": "Respond with OK only."}],
+                "messages": [{"role": "user", "content": "This is a pre-flight smoke test. Please reply with ok."}],
                 "temperature": 0.0,
                 # Underlying providers behind OpenRouter enforce different minimums
                 # on max_output_tokens. Azure-backed routes require >= 16; values

@@ -1738,6 +1738,15 @@ class TestIDORCoverageDrift:
             "post_guided_reenter",
             "post_guided_respond",
             "post_guided_chat",
+            # 0.7.0 synthetic-scrape tutorial redesign added the
+            # ``GET /api/sessions/{session_id}/guided/tutorial-sample``
+            # endpoint (runtime-derived sample-page URLs + SSRF host-class
+            # for an active tutorial session). Like every other
+            # session-scoped guided route it gates on
+            # ``_verify_session_ownership`` as its first line, so it joins
+            # this inventory and the cross-session walk in
+            # ``test_idor_session_crud``.
+            "get_guided_tutorial_sample",
             # Phase 5b Task 6 / Task 7: interpretation event HTTP surface
             # (resolve / list) and opt-out endpoints, added in
             # ``sessions/routes.py`` and gated through
@@ -1955,6 +1964,7 @@ class TestIDORProtection:
     - ``POST /{session_id}/state/yaml``      (import_state_yaml)
     - ``POST /{session_id}/fork``            (fork_from_message)
     - ``GET  /{session_id}/guided``          (get_guided)
+    - ``GET  /{session_id}/guided/tutorial-sample`` (get_guided_tutorial_sample)
     - ``POST /{session_id}/guided/reenter``  (post_guided_reenter)
     - ``POST /{session_id}/guided/respond``  (post_guided_respond)
     - ``POST /{session_id}/guided/chat``     (post_guided_chat)
@@ -2174,6 +2184,17 @@ class TestIDORProtection:
             f"/api/sessions/{session_id}/guided/chat",
             json={"message": "hi", "step_index": "step_1_source"},
         )
+        assert resp.status_code == 404
+
+        # Bob tries to GET guided/tutorial-sample — should be 404. The
+        # 0.7.0 synthetic-scrape redesign added this read-only endpoint,
+        # which exposes the runtime-derived sample-page URLs and the SSRF
+        # host-class for an active tutorial session. The ownership check
+        # in ``get_guided_tutorial_sample`` runs FIRST (before the guided/
+        # tutorial-state 400 branches), so a non-owner gets 404 regardless
+        # of whether a tutorial session exists. An ownership bypass would
+        # let an attacker learn Alice's resolved sample origin.
+        resp = bob_client.get(f"/api/sessions/{session_id}/guided/tutorial-sample")
         assert resp.status_code == 404
 
         # Alice can still access her own session
@@ -3059,6 +3080,7 @@ class TestMessageRoutes:
                             options={"path": "inline://source.csv"},
                             observed_columns=("name", "value"),
                             sample_rows=({"name": raw_row_secret, "value": "1"},),
+                            on_validation_failure="discard",
                         ),
                         fallback_chat=None,
                     )

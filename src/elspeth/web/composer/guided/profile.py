@@ -26,7 +26,7 @@ _PROFILE_KEYS = frozenset(
     }
 )
 
-_TUTORIAL_ENTRY_SEED = "Scrape the three synthetic project-brief pages from the list below and, for each, extract the project name, top risk, go-live date, and total cost into one JSON row."
+_TUTORIAL_ENTRY_SEED = "Scrape the three synthetic project-brief pages from the list below and, for each, have an LLM write a short summary of the page. Remove the raw HTML and write the rows to a json file. These are our own demo pages, so use noreply@foundryside.dev as the scraping abuse contact."
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +99,12 @@ EMPTY_PROFILE = WorkflowProfile(
 TUTORIAL_PROFILE = WorkflowProfile(
     entry_seed=_TUTORIAL_ENTRY_SEED,
     coaching=True,
-    advisor_checkpoints=True,
+    # Match live guided (EMPTY_PROFILE.advisor_checkpoints=False): the tutorial is
+    # the normal guided flow, not a divergent variant. The terminal advisor
+    # sign-off is a nondeterministic frontier-model gate that re-flags a passive
+    # demo of a known-good pipeline (e.g. the web->LLM prompt-injection-shield
+    # recommendation), blocking wire completion with no harness-reachable escape.
+    advisor_checkpoints=False,
     recipe_match=True,
     bookends=True,
 )

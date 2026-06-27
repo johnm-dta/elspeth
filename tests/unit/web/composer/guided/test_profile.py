@@ -28,9 +28,11 @@ class TestWorkflowProfileShape:
         assert EMPTY_PROFILE.recipe_match is True
         assert EMPTY_PROFILE.bookends is False
 
-    def test_tutorial_profile_enables_coaching_advisor_bookends(self) -> None:
+    def test_tutorial_profile_enables_coaching_bookends(self) -> None:
         assert TUTORIAL_PROFILE.coaching is True
-        assert TUTORIAL_PROFILE.advisor_checkpoints is True
+        # Matches live guided (EMPTY_PROFILE): the tutorial is the normal guided
+        # flow, so it skips the nondeterministic terminal advisor sign-off.
+        assert TUTORIAL_PROFILE.advisor_checkpoints is False
         assert TUTORIAL_PROFILE.recipe_match is True
         assert TUTORIAL_PROFILE.bookends is True
         assert isinstance(TUTORIAL_PROFILE.entry_seed, str)

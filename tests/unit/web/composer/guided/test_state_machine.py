@@ -17,7 +17,6 @@ from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
     SinkIntent,
-    SinkOutputResolved,
     SinkResolved,
     SourceIntent,
     SourceResolved,
@@ -246,49 +245,6 @@ class TestGuidedSession:
         restored = GuidedSession.from_dict(d)
         assert restored == sess
         assert restored.step_1_source_intent is None
-
-    def test_guided_session_roundtrip_with_recipe_offer(self) -> None:
-        """GuidedSession with step_2_5_recipe_offer survives to_dict/from_dict round-trip.
-
-        Exercises the Tier-1 serialisation boundary: the staged offer is persisted
-        to composer_meta["guided_session"] when the recipe_offer turn is emitted and
-        must survive the round-trip so the POST /respond accept branch can verify
-        the recipe_name.
-        """
-        from dataclasses import replace
-
-        from elspeth.web.composer.guided.recipe_match import RecipeMatch
-        from elspeth.web.composer.recipes import SlotSpec
-
-        offer = RecipeMatch(
-            recipe_name="classify-rows-llm-jsonl",
-            slots={"source_blob_id": "blob-abc", "output_path": "out.jsonl", "label_field": "category"},
-            unsatisfied_slots={
-                "classifier_template": SlotSpec(slot_type="str", description="Jinja2 template", required=True),
-                "model": SlotSpec(slot_type="str", description="LLM model name", required=True),
-                "api_key_secret": SlotSpec(slot_type="str", description="Secret name", required=True),
-            },
-        )
-        sess = replace(GuidedSession.initial(), step_2_5_recipe_offer=offer)
-        d = sess.to_dict()
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_2_5_recipe_offer is not None
-        assert restored.step_2_5_recipe_offer.recipe_name == "classify-rows-llm-jsonl"
-        assert restored.step_2_5_recipe_offer.slots["source_blob_id"] == "blob-abc"
-        assert "classifier_template" in restored.step_2_5_recipe_offer.unsatisfied_slots
-
-    def test_guided_session_roundtrip_with_recipe_offer_none(self) -> None:
-        """GuidedSession with step_2_5_recipe_offer=None round-trips cleanly.
-
-        Ensures the None case is serialised as None (not absent), which would
-        crash from_dict's strict key read.
-        """
-        sess = GuidedSession.initial()
-        d = sess.to_dict()
-        restored = GuidedSession.from_dict(d)
-        assert restored == sess
-        assert restored.step_2_5_recipe_offer is None
 
     def test_guided_session_roundtrip_with_step_2_chosen_plugin(self) -> None:
         """GuidedSession with step_2_chosen_plugin survives to_dict/from_dict round-trip.
@@ -694,7 +650,7 @@ class TestStepAdvance:
 
         new_sess, _next, terminal, _events = step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
 
-        assert new_sess.step is GuidedStep.STEP_2_5_RECIPE_MATCH
+        assert new_sess.step is GuidedStep.STEP_3_TRANSFORMS
         assert new_sess.step_2_result is not None
         assert len(new_sess.step_2_result.outputs) == 1
         output = new_sess.step_2_result.outputs[0]
@@ -761,116 +717,6 @@ class TestStepAdvance:
         }
         with pytest.raises(InvariantError, match="step_2_sink_intent is None"):
             step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
-
-    # ---------------------------------------------------------------------------
-    # Task 2.4 tests: Step 2.5 → Step 3 (or passthrough on recipe accept)
-    # ---------------------------------------------------------------------------
-
-    def test_step_2_5_recipe_accepted_session_unchanged(self) -> None:
-        """chosen=["accept"] at STEP_2_5: session stays at STEP_2_5, no directive.
-
-        The endpoint handler (Errata C2) reads response["chosen"] == ["accept"]
-        and invokes _execute_apply_pipeline_recipe to commit the recipe and
-        produce the COMPLETED terminal. step_advance is pure and does not run
-        apply_recipe; it leaves the session unchanged for the handler to act on.
-        """
-        sess = GuidedSession(
-            step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={"blob_id": "blob-1"},
-                observed_columns=("a",),
-                sample_rows=({},),
-            ),
-            step_2_result=SinkResolved(
-                outputs=(
-                    SinkOutputResolved(
-                        plugin="json",
-                        options={"path": "out.jsonl"},
-                        required_fields=("category",),
-                        schema_mode="fixed",
-                    ),
-                )
-            ),
-            step_3_proposal=None,
-            terminal=None,
-        )
-        response: TurnResponse = {
-            "chosen": ["accept"],
-            "edited_values": None,
-            "custom_inputs": None,
-            "accepted_step_index": None,
-            "edit_step_index": None,
-            "control_signal": None,
-        }
-        new_sess, next_turn, terminal, directives = step_advance(
-            sess,
-            response,
-            current_turn_type=TurnType.RECIPE_OFFER,
-        )
-        # Session stays at STEP_2_5 — endpoint handler advances to COMPLETED
-        assert new_sess.step is GuidedStep.STEP_2_5_RECIPE_MATCH
-        assert new_sess is sess  # pure: no state change
-        assert next_turn is None
-        assert terminal is None
-        assert directives == []
-
-    def test_step_2_5_build_manually_advances_to_step_3(self) -> None:
-        """chosen=["build_manually"] at STEP_2_5: advance to STEP_3_TRANSFORMS."""
-        sess = GuidedSession(
-            step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={},
-                observed_columns=("a",),
-                sample_rows=({},),
-            ),
-            step_2_result=SinkResolved(outputs=()),
-            step_3_proposal=None,
-            terminal=None,
-        )
-        response: TurnResponse = {
-            "chosen": ["build_manually"],
-            "edited_values": None,
-            "custom_inputs": None,
-            "accepted_step_index": None,
-            "edit_step_index": None,
-            "control_signal": None,
-        }
-        new_sess, next_turn, terminal, directives = step_advance(
-            sess,
-            response,
-            current_turn_type=TurnType.RECIPE_OFFER,
-        )
-        assert new_sess.step is GuidedStep.STEP_3_TRANSFORMS
-        assert next_turn is None
-        assert terminal is None
-        assert len(directives) == 1
-        assert directives[0].tool_name == "guided_step_advanced"
-        assert directives[0].arguments["prev_step"] == GuidedStep.STEP_2_5_RECIPE_MATCH.value
-        assert directives[0].arguments["next_step"] == GuidedStep.STEP_3_TRANSFORMS.value
-        assert directives[0].arguments["reason"] == "user_advanced"
-
-    def test_step_2_5_unexpected_chosen_raises(self) -> None:
-        """Any chosen value other than 'accept' or 'build_manually' is a protocol violation."""
-        sess = GuidedSession(
-            step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={},
-                observed_columns=("a",),
-                sample_rows=({},),
-            ),
-            step_2_result=SinkResolved(outputs=()),
-            step_3_proposal=None,
-            terminal=None,
-        )
-        response = _make_response(chosen=["nonsense"])
-        with pytest.raises(ValueError, match="unexpected chosen for recipe_offer"):
-            step_advance(sess, response, current_turn_type=TurnType.RECIPE_OFFER)
 
     # ---------------------------------------------------------------------------
     # Task 2.5 tests: Step 3 accept/edit/reject + terminal-failure paths

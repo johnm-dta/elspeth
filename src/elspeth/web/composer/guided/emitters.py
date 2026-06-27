@@ -12,7 +12,6 @@ Exported:
     build_step_2_single_select_turn — single_select for sink plugin selection.
     build_step_2_schema_form_turn — schema_form for a chosen sink plugin.
     build_step_2_multi_select_turn — multi_select_with_custom for required fields.
-    build_step_2_5_recipe_offer_turn — recipe_offer from a RecipeMatch.
     build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
     build_step_3_schema_form_turn — schema_form for editing one proposed transform.
     build_step_4_wire_turn — confirm_wiring turn with topology + validation two-read merge.
@@ -28,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from elspeth.web.catalog.knob_schema import KnobSchema, lower_slot_specs_to_knob_schema
+from elspeth.web.catalog.knob_schema import KnobSchema
 from elspeth.web.composer._producer_resolver import source_producer_id
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import (
@@ -45,12 +44,10 @@ from elspeth.web.composer.guided.protocol import (
     _Observed,
     _Option,
 )
-from elspeth.web.composer.guided.tutorial_schema_form_prefill import prefill_tutorial_schema_form_knobs
 from elspeth.web.composer.tools._common import _semantic_contracts_payload, _serialize_full_pipeline_state
 
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
-    from elspeth.web.composer.guided.recipe_match import RecipeMatch
     from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
     from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
@@ -244,8 +241,6 @@ def build_step_2_schema_form_turn(
 def build_step_1_schema_form_turn_from_resolved(
     source: SourceResolved,
     catalog: CatalogServiceProtocol,
-    *,
-    tutorial: bool = False,
 ) -> Turn:
     """Build the STEP_1 ``schema_form`` populated from an APPLIED source.
 
@@ -254,25 +249,22 @@ def build_step_1_schema_form_turn_from_resolved(
     editable form shows what the LLM (or the manual path) built. Used by the
     chat-apply in-place re-render and by GET /guided when ``step_1_result`` is
     set on a STEP_1 session.
-
-    ``tutorial`` (set from ``guided.profile == TUTORIAL_PROFILE`` at the call
-    site) injects honest worked-example defaults for required-no-default knobs
-    the passive learner cannot type — at minimum ``on_validation_failure`` for a
-    chat-committed source that never persisted it. Injected BEFORE the caller
-    hashes the turn, so the audit hash matches what the learner submits. Default
-    ``False`` leaves a non-tutorial form byte-unchanged.
     """
     from elspeth.contracts.freeze import deep_thaw
 
     schema_info = catalog.get_schema("source", source.plugin)
     prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(deep_thaw(source.options))}
+    # on_validation_failure is a required-no-default source-node knob, so the
+    # schema_form's Continue stays disabled until it has a value. Seed it from the
+    # resolved node field (assigned AFTER the options spread so the authoritative
+    # node value wins over any stray same-named key in options).
+    prefilled["on_validation_failure"] = source.on_validation_failure
     payload: SchemaFormPayload = {
         "mode": "plugin_options",
         "plugin": source.plugin,
         "knobs": cast(KnobSchema, schema_info.knob_schema),
         "prefilled": prefilled,
     }
-    prefill_tutorial_schema_form_knobs(payload, tutorial=tutorial)
     return Turn(
         type=TurnType.SCHEMA_FORM.value,
         step_index=_step_index(GuidedStep.STEP_1_SOURCE),
@@ -341,45 +333,6 @@ def build_step_2_multi_select_turn(
     return Turn(
         type=TurnType.MULTI_SELECT_WITH_CUSTOM.value,
         step_index=_step_index(GuidedStep.STEP_2_SINK),
-        payload=payload,
-    )
-
-
-def build_step_2_5_recipe_offer_turn(
-    match: RecipeMatch,
-) -> Turn:
-    """Build a ``recipe_offer`` Turn with a schema-form recipe decision payload.
-
-    ``TurnType.RECIPE_OFFER`` is retained for guided state-machine routing,
-    while ``payload.mode == "recipe_decision"`` routes the shared one-knob
-    renderer on the frontend.
-
-    Args:
-        match: The matched recipe with its partial slot map.
-
-    Returns:
-        A ``Turn`` TypedDict ready for serialisation and hash.
-    """
-    from elspeth.contracts.freeze import deep_thaw
-    from elspeth.web.composer.recipes import get_recipe
-
-    recipe = get_recipe(match.recipe_name)
-    if recipe is None:
-        raise InvariantError(f"Recipe {match.recipe_name!r} disappeared from registry")
-
-    payload: SchemaFormPayload = {
-        "mode": "recipe_decision",
-        "knobs": lower_slot_specs_to_knob_schema(match.unsatisfied_slots),
-        "prefilled": dict(deep_thaw(match.slots)),
-        "recipe_context": {
-            "recipe_name": match.recipe_name,
-            "description": recipe.description,
-            "alternatives": ["build_manually"],
-        },
-    }
-    return Turn(
-        type=TurnType.RECIPE_OFFER.value,
-        step_index=_step_index(GuidedStep.STEP_2_5_RECIPE_MATCH),
         payload=payload,
     )
 

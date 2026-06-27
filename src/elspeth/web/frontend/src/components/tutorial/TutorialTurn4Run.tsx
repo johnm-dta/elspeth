@@ -306,7 +306,7 @@ function TutorialResultTable({ rows }: { rows: RunResultRow[] }): JSX.Element {
 function preferredColumns(rows: RunResultRow[]): string[] {
   const keys = new Set<string>();
   rows.forEach((row) => Object.keys(row).forEach((key) => keys.add(key)));
-  const preferred = ["url", "project_name", "top_risk", "key_date", "total_cost", "error"];
+  const preferred = ["url", "summary", "error"];
   const ordered = preferred.filter((key) => keys.has(key));
   for (const key of keys) {
     if (!ordered.includes(key)) {

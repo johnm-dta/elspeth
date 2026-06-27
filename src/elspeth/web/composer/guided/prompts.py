@@ -32,7 +32,6 @@ from typing import TYPE_CHECKING
 from elspeth.web.composer.guided.protocol import GuidedStep
 
 if TYPE_CHECKING:
-    from elspeth.web.composer.guided.recipe_match import RecipeMatch
     from elspeth.web.composer.guided.state_machine import (
         SinkResolved,
         SourceResolved,
@@ -182,7 +181,6 @@ def build_step_3_context_block(
     *,
     source: SourceResolved,
     sink: SinkResolved,
-    recipe_match: RecipeMatch | None,
 ) -> str:
     """Render the GUIDED CONTEXT block for the Step 3 LLM prompt."""
     src_payload = {
@@ -200,13 +198,7 @@ def build_step_3_context_block(
             for o in sink.outputs
         ],
     }
-    match_repr = "null" if recipe_match is None else json.dumps({"recipe_name": recipe_match.recipe_name})
-    return (
-        "GUIDED CONTEXT (server-resolved):\n"
-        f"source: {json.dumps(src_payload)}\n"
-        f"sink: {json.dumps(sink_payload)}\n"
-        f"recipe_match: {match_repr}\n"
-    )
+    return f"GUIDED CONTEXT (server-resolved):\nsource: {json.dumps(src_payload)}\nsink: {json.dumps(sink_payload)}\n"
 
 
 @lru_cache(maxsize=1)

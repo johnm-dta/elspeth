@@ -99,14 +99,15 @@ async def test_guided_start_seeds_tutorial_profile_and_persists(tmp_path) -> Non
     )
     assert resp.status_code == 200
     body = resp.json()
-    # Wire carries the tutorial profile (advisor_checkpoints on, bookends on).
+    # Wire carries the tutorial profile (advisor_checkpoints OFF — matches live
+    # guided; bookends on).
     assert body["guided_session"]["profile"] is not None
-    assert body["guided_session"]["profile"]["advisor_checkpoints"] is True
+    assert body["guided_session"]["profile"]["advisor_checkpoints"] is False
     assert body["guided_session"]["profile"]["bookends"] is True
 
     get_resp = client.get(f"/api/sessions/{session.id}/guided")
     assert get_resp.status_code == 200
-    assert get_resp.json()["guided_session"]["profile"]["advisor_checkpoints"] is True
+    assert get_resp.json()["guided_session"]["profile"]["advisor_checkpoints"] is False
 
 
 @pytest.mark.asyncio
@@ -142,7 +143,7 @@ async def test_guided_start_persists_profile_without_materializing_topology(tmp_
     assert "entry_seed" not in json.dumps(body)
     # The tutorial profile is on the wire (populated subset).
     assert body["guided_session"]["profile"] is not None
-    assert body["guided_session"]["profile"]["advisor_checkpoints"] is True
+    assert body["guided_session"]["profile"]["advisor_checkpoints"] is False
 
     # D contract: start does NOT materialize a chat turn or any topology.
     # Empty CompositionState on the wire: sources={} (mapping), nodes/edges/
@@ -161,7 +162,7 @@ async def test_guided_start_persists_profile_without_materializing_topology(tmp_
     assert get_resp.status_code == 200
     get_body = get_resp.json()
     assert "entry_seed" not in json.dumps(get_body)
-    assert get_body["guided_session"]["profile"]["advisor_checkpoints"] is True
+    assert get_body["guided_session"]["profile"]["advisor_checkpoints"] is False
     assert get_body["guided_session"]["chat_history"] == []
 
     # Re-read the persisted record: empty source/topology (tuples on the record).
@@ -201,7 +202,7 @@ async def test_guided_start_entry_seed_redacted_on_wire_but_retained_in_storage(
     meta_profile = body["composition_state"]["composer_meta"]["guided_session"]["profile"]
     # The redaction DELETES the key (other flags preserved for the frontend).
     assert "entry_seed" not in meta_profile
-    assert meta_profile["advisor_checkpoints"] is True
+    assert meta_profile["advisor_checkpoints"] is False
 
     # GET response: same wire guarantee.
     get_body = client.get(f"/api/sessions/{session.id}/guided").json()
@@ -255,7 +256,7 @@ async def test_guided_start_is_idempotent(tmp_path) -> None:
     )
     assert second.status_code == 200
     assert second.json()["guided_session"]["profile"] is not None
-    assert second.json()["guided_session"]["profile"]["advisor_checkpoints"] is True
+    assert second.json()["guided_session"]["profile"]["advisor_checkpoints"] is False
 
     from sqlalchemy import text
 
@@ -413,9 +414,9 @@ async def test_guided_respond_success_preserves_tutorial_profile(tmp_path) -> No
     assert resp.status_code == 200
     profile = resp.json()["guided_session"]["profile"]
     assert profile is not None
-    assert profile["advisor_checkpoints"] is True
+    assert profile["advisor_checkpoints"] is False
     assert profile["bookends"] is True
 
     get_resp = client.get(f"/api/sessions/{session.id}/guided")
     assert get_resp.status_code == 200
-    assert get_resp.json()["guided_session"]["profile"]["advisor_checkpoints"] is True
+    assert get_resp.json()["guided_session"]["profile"]["advisor_checkpoints"] is False

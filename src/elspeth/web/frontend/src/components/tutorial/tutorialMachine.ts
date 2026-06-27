@@ -1,15 +1,35 @@
-// Kept BYTE-IDENTICAL to the backend cache-key constant ``CANONICAL_SEED_PROMPT``
-// in ``src/elspeth/web/preferences/tutorial_cache.py``. Turn 4 posts this string
-// to ``/api/tutorial/run``; the backend only engages the tutorial cache when
+// RUN-CACHE KEY ONLY — no longer the per-stage build prompt. Kept
+// BYTE-IDENTICAL to the backend cache-key constant ``CANONICAL_SEED_PROMPT`` in
+// ``src/elspeth/web/preferences/tutorial_cache.py``. Turn 4 posts this string to
+// ``/api/tutorial/run``; the backend only engages the tutorial cache when
 // ``effective_prompt == CANONICAL_SEED_PROMPT``. If the two drift apart the cache
 // silently never hits and every tutorial run goes live. The Python test
 // ``test_canonical_seed_matches_frontend_constant`` fails CI if they diverge.
+// The guided BUILD is now driven PER STAGE by the prompts below — the composer
+// is a STAGED orchestrator (source -> sink -> transforms -> wire), one focused
+// prompt per phase, NOT one whole-problem prompt at every phase.
 export const CANONICAL_TUTORIAL_PROMPT =
   "Scrape these three synthetic project-brief pages and, for each page, " +
-  "have an LLM read the tables and return one JSON row with the project " +
-  "name, the top risk (the highest-impact risk and its mitigation), the " +
-  "go-live date, and the total cost (the sum of the cost line items). " +
-  "Remove the raw HTML and write the rows to a json file.";
+  "have an LLM write a short summary of the page. Remove the raw HTML and " +
+  "write the rows to a json file.";
+
+// Per-stage prelocked prompts — each phase gets ONLY its stage's intent so the
+// light composer model can focus on one task. Verified live against the
+// per-stage solvers (resolve_source / resolve_sink / solve_chain). The SOURCE
+// prompt names the `url` column so the source declares it as a guaranteed field
+// (surface-or-record); the runtime-resolved sample URLs are appended to it.
+export const TUTORIAL_SOURCE_PROMPT =
+  "Create the source for this pipeline. The rows are these three project-brief " +
+  "pages; each row carries the page's address in a `url` column:";
+
+export const TUTORIAL_SINK_PROMPT =
+  "Save the pipeline's results to a JSON file.";
+
+export const TUTORIAL_TRANSFORMS_PROMPT =
+  "For each row, fetch the page at its URL, then have an LLM write a short " +
+  "summary of the page. Finally drop the raw HTML and fingerprint columns so " +
+  "the saved rows keep only the summary. These are our own demo pages, so use " +
+  "noreply@foundryside.dev as the scraping abuse contact.";
 
 export type TutorialStep =
   | "welcome"

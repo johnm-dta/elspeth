@@ -121,8 +121,22 @@ def _drive_guided_flow_to_step_3_transform_schema(client: TestClient, session_id
                 "sample_rows": [],
             },
         )
+        # Committing the sink no longer auto-builds the transform chain: it
+        # advances to step_3_transforms with no proposal (next_turn=None). The
+        # chain is built by the per-stage transforms chat prompt, on which the
+        # SAME chain_solver mock fires.
         body = _respond(client, session_id, chosen=["text"], custom_inputs=[])
-        assert body["next_turn"]["type"] == "propose_chain"
+        assert body["next_turn"] is None
+        assert body["guided_session"]["step"] == "step_3_transforms"
+
+        chat_resp = client.post(
+            f"/api/sessions/{session_id}/guided/chat",
+            json={"message": "fetch each page and summarise it", "step_index": "step_3_transforms"},
+        )
+        assert chat_resp.status_code == 200, chat_resp.json()
+        chat_body = chat_resp.json()
+        assert chat_body["guided_session"]["step"] == "step_3_transforms"
+        assert chat_body["next_turn"]["type"] == "propose_chain"
 
         edit_resp = client.post(
             f"/api/sessions/{session_id}/guided/respond",

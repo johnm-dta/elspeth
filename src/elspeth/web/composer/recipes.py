@@ -916,19 +916,16 @@ def apply_recipe(name: str, raw_slots: Mapping[str, Any]) -> dict[str, Any]:
 
 @cache  # Process-scoped: module source on disk is immutable for the process lifetime.
 def recipe_catalog_content_hash() -> str:
-    """Hex SHA-256 over recipes.py + guided/recipe_match.py byte content.
+    """Hex SHA-256 over recipes.py byte content.
 
-    Cache input #5 of the tutorial run-cache key (C2). Under D11 the
-    web_scrape recipe deterministically authors the cached pipeline
-    including option-level content (provider, model, prompt_template,
-    response_field, schema mode, output format), and recipe_match selects
-    the recipe + pre-fills slots. _state_matches_cached_topology is
-    option-blind by design and cannot catch this drift, so option fidelity
-    is guaranteed by keying both module sources here.
+    Cache input #5 of the tutorial run-cache key (C2). The recipe registry +
+    builders here author the cached pipeline's option-level content (provider,
+    model, prompt_template, response_field, schema mode, output format).
+    ``_state_matches_cached_topology`` is option-blind by design and cannot
+    catch that drift, so option fidelity is guaranteed by keying this module's
+    source here.
     """
     recipes_path = Path(__file__)
-    recipe_match_path = recipes_path.parent / "guided" / "recipe_match.py"
     digest = hashlib.sha256()
     digest.update(recipes_path.read_bytes())
-    digest.update(recipe_match_path.read_bytes())
     return digest.hexdigest()

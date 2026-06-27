@@ -908,3 +908,30 @@ class TestInspectBlobContentHypothesis:
             assert isinstance(facts, SourceInspectionFacts)
 
         _prop()
+
+
+class TestObservedColumnsFromContent:
+    """``observed_columns_from_content`` — derive column names from inline source
+    content, used to backfill observed_columns when a chat-resolved source left
+    them empty (the data is the authority, not the LLM's claim)."""
+
+    def test_json_url_array_yields_url_column(self) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_content
+
+        content = b'[{"url": "https://example/a"}, {"url": "https://example/b"}]'
+        cols = observed_columns_from_content(content=content, filename="urls.json", mime_type="application/json")
+        assert cols == ("url",)
+
+    def test_csv_header_yields_columns(self) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_content
+
+        content = b"name,score\nada,42\n"
+        cols = observed_columns_from_content(content=content, filename="data.csv", mime_type="text/csv")
+        assert cols == ("name", "score")
+
+    def test_no_detectable_columns_yields_empty_tuple(self) -> None:
+        from elspeth.web.composer.source_inspection import observed_columns_from_content
+
+        content = b"just some prose with no columns or headers"
+        cols = observed_columns_from_content(content=content, filename="note.txt", mime_type="text/plain")
+        assert cols == ()

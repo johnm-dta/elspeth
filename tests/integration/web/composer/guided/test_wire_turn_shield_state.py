@@ -235,10 +235,17 @@ def _fake_llm_chain_response() -> SimpleNamespace:
 
 
 def _drive_to_wire_turn(client: TestClient, session_id: str) -> dict:
-    """Drive source → sink → propose_chain → accept → confirm_wiring.
+    """Drive source → sink → transforms-chat → propose_chain → accept → confirm_wiring.
 
     Returns the ``confirm_wiring`` next_turn dict.
     Must be called inside a ``patch(_litellm_acompletion)`` context.
+
+    The sink commit no longer auto-builds the transform chain (the
+    sink→step_3 auto-build was removed): it advances to STEP_3_TRANSFORMS with
+    ``next_turn`` null. The per-stage transforms prompt — sent via
+    ``POST /guided/chat`` with ``step_index="step_3_transforms"`` — drives the
+    chain build, and the SAME ``chain_solver._litellm_acompletion`` mock fires
+    on that chat call, surfacing the ``propose_chain`` turn in its response.
     """
     _blob_id, storage_path = _seed_blob(client, session_id)
     output_path = _outputs_path(client, "out.jsonl")
@@ -271,9 +278,22 @@ def _drive_to_wire_turn(client: TestClient, session_id: str) -> dict:
             "sample_rows": [],
         },
     )
-    # No classifier keyword, single output → no recipe match → chain solver fires.
+    # Commit the sink → advances to STEP_3_TRANSFORMS with NO auto-proposal
+    # (the sink→step_3 auto-build was removed); next_turn is null here.
     body = _respond(client, session_id, chosen=["text"], custom_inputs=[])
-    assert body["next_turn"]["type"] == "propose_chain", body["next_turn"]
+    assert body["next_turn"] is None, body["next_turn"]
+    assert body["guided_session"]["step"] == "step_3_transforms", body["guided_session"]["step"]
+
+    # The per-stage transforms prompt drives the chain build via /guided/chat.
+    # The same chain_solver._litellm_acompletion mock fires on this call, so its
+    # response carries the propose_chain turn.
+    chat_resp = client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={"message": "fetch each page and summarise it", "step_index": "step_3_transforms"},
+    )
+    assert chat_resp.status_code == 200, chat_resp.json()
+    chat_body = chat_resp.json()
+    assert chat_body["next_turn"]["type"] == "propose_chain", chat_body["next_turn"]
 
     # Accept the proposed LLM chain → produces confirm_wiring turn.
     result = _respond(client, session_id, chosen=["accept"])

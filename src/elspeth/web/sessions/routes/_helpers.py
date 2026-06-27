@@ -73,7 +73,6 @@ from elspeth.web.composer.guided.emitters import (
     build_step_1_inspect_and_confirm_turn_from_intent,
     build_step_1_schema_form_turn,
     build_step_1_schema_form_turn_from_resolved,
-    build_step_2_5_recipe_offer_turn,
     build_step_2_multi_select_turn,
     build_step_2_schema_form_turn,
     build_step_2_schema_form_turn_from_resolved,
@@ -84,9 +83,8 @@ from elspeth.web.composer.guided.emitters import (
     rebuild_wire_turn_after_reconciliation,
 )
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.profile import EMPTY_PROFILE, TUTORIAL_PROFILE, WorkflowProfile
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
-from elspeth.web.composer.guided.recipe_match import match_recipe
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
@@ -101,12 +99,10 @@ from elspeth.web.composer.guided.state_machine import (
 )
 from elspeth.web.composer.guided.steps import (
     handle_step_1_source,
-    handle_step_2_5_recipe_apply,
     handle_step_2_sink,
     handle_step_3_chain_accept,
     handle_step_4_wire_confirm,
 )
-from elspeth.web.composer.guided.tutorial_recipe_prefill import prefill_tutorial_recipe_slots
 from elspeth.web.composer.implicit_decisions import merge_implicit_decisions_meta
 from elspeth.web.composer.progress import (
     ComposerProgressRegistry,
@@ -1087,6 +1083,57 @@ def _composer_conversation_tool_or_llm_audit_messages(messages: Sequence[ChatMes
         for message in messages
         if message.role == "tool" or not _is_composer_audit_tool_message(message) or _is_composer_llm_audit_tool_message(message)
     ]
+
+
+def _transforms_intent_from_chat_history(guided: GuidedSession) -> str | None:
+    """The transforms-phase request — the LAST USER chat turn.
+
+    In the staged orchestrator each phase is driven by its OWN ``/guided/chat``
+    send (source → sink → transforms). The transform chain is built from the
+    STEP_3 transforms send — the most recent user turn — NOT the source-phase
+    opening turn. A reject / advisor / repair re-solve of the transform chain
+    must rebuild from THAT transforms request: feeding the *originating* (source)
+    intent would re-solve blind to the transform the operator actually asked for
+    (the passthrough-instead-of-web_scrape failure mode). The reject/advisor/
+    repair gestures arrive on ``/guided/respond`` control signals, not chat, so
+    they add no later user chat turn — the transforms send stays the last one.
+    Returns ``None`` when no user turn exists yet — the build then falls back to
+    the source/sink contract alone (the prior behaviour).
+    """
+    for turn in reversed(guided.chat_history):
+        if turn.role is ChatRole.USER:
+            return turn.content
+    return None
+
+
+def _tutorial_web_scrape_allowed_hosts(
+    guided: GuidedSession,
+    settings: WebSettings | None,
+    request_origin: str | None,
+) -> str | list[str] | None:
+    """SSRF allowlist the seam injects into a TUTORIAL session's web_scrape node.
+
+    The LLM never sets ``allowed_hosts`` (an SSRF control). For a tutorial session
+    the server resolves it from the synthetic-page origin's host class — a
+    loopback/private dev origin gets a tight CIDR; a public origin gets
+    ``"public_only"`` (the default, hence a no-op for the deployed/staging case).
+    Returns ``None`` for a live session (``EMPTY_PROFILE`` — the operator owns its
+    own allowlist there) or when no settings are wired. Re-homes the injection the
+    removed STEP_2.5 recipe-accept seam used to perform now that the staged flow
+    builds web_scrape via the per-stage transforms chat.
+    """
+    if guided.profile == EMPTY_PROFILE or settings is None:
+        return None
+    try:
+        base_url = tutorial_sample_base_url(settings=settings, request_origin=request_origin)
+    except ValueError:
+        # Base unresolvable (no configured base AND no request origin). The GET
+        # tutorial-sample already gates this — it calls the same resolver, so a
+        # real tutorial cannot reach accept without a base — but degrade SAFELY to
+        # no injection (web_scrape's default ``public_only``, never a widening)
+        # rather than 500 the accept on a misconfigured local-dev edge.
+        return None
+    return resolve_tutorial_allowed_hosts(base_url=base_url)
 
 
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
@@ -3228,20 +3275,19 @@ async def _dispatch_guided_respond(
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
 
-    # --- STEP_2_SINK → STEP_2_5 (step_advance fired for MULTI_SELECT_WITH_CUSTOM)
-    # step_advance sets guided.step=STEP_2_5_RECIPE_MATCH and populates
+    # --- STEP_2_SINK → STEP_3 (step_advance fired for MULTI_SELECT_WITH_CUSTOM)
+    # step_advance sets guided.step=STEP_3_TRANSFORMS and populates
     # guided.step_2_result for every MULTI_SELECT_WITH_CUSTOM response, so the
     # intra-step branch (current_step==guided.step==STEP_2_SINK) for this turn
     # type is structurally unreachable — _advance_step_2 always fires.
     # This is the ONLY reachable MULTI_SELECT_WITH_CUSTOM dispatch point.
-    if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-        # step_advance already set guided.step_2_result and advanced to STEP_2_5.
+    if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_3_TRANSFORMS:
+        # step_advance already set guided.step_2_result and advanced to STEP_3.
         if guided.step_1_result is None or guided.step_2_result is None:
             raise HTTPException(
                 status_code=500,
                 detail="Dispatcher invariant: step_1_result and step_2_result must be set.",
             )
-        source = guided.step_1_result
         sink = guided.step_2_result
 
         # Commit the sink to CompositionState.outputs via handle_step_2_sink.
@@ -3262,317 +3308,21 @@ async def _dispatch_guided_respond(
         state = sink_handler_result.state
         guided = sink_handler_result.session
 
-        recipe_match = match_recipe(source, sink)
-        if recipe_match is not None:
-            # Tutorial worked-example prefill (p4 Task 8b). A passive tutorial
-            # learner cannot TYPE the operator-fillable recipe slots, so for a
-            # TUTORIAL session we move them out of ``unsatisfied_slots`` into
-            # ``slots`` with honest config-sourced worked-example values. The
-            # offer then surfaces them PREFILLED (read-only) with no
-            # required-empty knob, so the learner's single "Apply recipe" click
-            # is enabled. A NON-tutorial offer is UNCHANGED (the operator fills
-            # them). This is separate from 8a's accept-seam allowed_hosts SSRF
-            # injection (an SSRF control, never a learner-visible slot).
-            if guided.profile == TUTORIAL_PROFILE:
-                if settings is None:
-                    # Fail closed: without settings we cannot source the
-                    # composer model / LLM secret-ref for the worked example.
-                    raise InvariantError(
-                        "tutorial recipe offer reached the dispatcher without settings; "
-                        "the worked-example slots cannot be sourced from config (fail-closed)."
-                    )
-                recipe_match = prefill_tutorial_recipe_slots(recipe_match=recipe_match, settings=settings)
-            next_turn = build_step_2_5_recipe_offer_turn(recipe_match)
-            new_record = TurnRecord(
-                step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-                turn_type=TurnType(next_turn["type"]),
-                payload_hash=stable_hash(next_turn["payload"]),
-                response_hash=None,
-                emitter="server",
-            )
-            emit_turn_emitted(
-                recorder,
-                step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-                turn_type=TurnType(next_turn["type"]),
-                payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
-                emitter="server",
-                composition_version=state.version,
-                actor=user_id,
-            )
-            # Stage the offered RecipeMatch so the accept branch can verify
-            # the client-supplied recipe_name matches what was actually offered.
-            # Cleared (set to None) atomically when the acceptance is consumed.
-            guided = _replace(guided, history=(*guided.history, new_record), step_2_5_recipe_offer=recipe_match)
-            return state, guided, next_turn
-
-        # No recipe match — solve the chain via the LLM and emit propose_chain.
-        # I2: wrap transient LLM failures (LiteLLM API/auth/bad-request,
-        # timeouts, malformed-response shape) so they auto-drop to freeform
-        # via mark_solver_exhausted rather than escape as 500s.  See
-        # ``solve_chain_with_auto_drop`` for the contract.
-        proposal, guided = await solve_chain_with_auto_drop(
-            site="step_2_sink_initial_solve",
-            session=guided,
-            session_id=session_id,
-            user_id=user_id,
-            composition_version=state.version,
-            recorder=recorder,
-            model=model,
-            temperature=temperature,
-            seed=seed,
-            source=source,
-            sink=sink,
-            recipe_match=None,
-        )
-        if proposal is None:
-            return state, guided, None
-        guided = _replace(guided, step=GuidedStep.STEP_3_TRANSFORMS, step_3_proposal=proposal)
-        next_turn = build_step_3_propose_chain_turn(proposal)
-        new_record = TurnRecord(
-            step=GuidedStep.STEP_3_TRANSFORMS,
-            turn_type=TurnType.PROPOSE_CHAIN,
-            payload_hash=stable_hash(next_turn["payload"]),
-            response_hash=None,
-            emitter="server",
-        )
-        emit_step_advanced(
-            recorder,
-            prev=GuidedStep.STEP_2_5_RECIPE_MATCH,
-            next_=GuidedStep.STEP_3_TRANSFORMS,
-            # System-driven advance: no recipe matched the (source, sink) topology,
-            # so the dispatcher hops STEP_2_5 → STEP_3 without operator input.
-            reason="auto_advanced",
-            composition_version=state.version,
-            actor=user_id,
-        )
-        emit_turn_emitted(
-            recorder,
-            step=GuidedStep.STEP_3_TRANSFORMS,
-            turn_type=TurnType.PROPOSE_CHAIN,
-            payload_hash=stable_hash(next_turn["payload"]),
-            payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
-            emitter="server",
-            composition_version=state.version,
-            actor=user_id,
-        )
-        guided = _replace(guided, history=(*guided.history, new_record))
-        return state, guided, next_turn
-
-    # --- STEP_2_5_RECIPE_MATCH turns ------------------------------------
-    if current_step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-        chosen = list(turn_response["chosen"] or [])
-        if chosen == ["accept"]:
-            # User accepted the recipe. Extract the slots from edited_values
-            # (user may have filled in required slots).
-            # ``edited_values`` is the wire contract for recipe_offer ['accept']:
-            # the RecipeOfferTurn widget always sends ``{"recipe_name": str,
-            # "slots": {...}}``. A missing key, a null payload, or a non-string
-            # ``recipe_name`` is a protocol violation, not a Tier-3 "user typo"
-            # we paper over with empty-string defaults — silent defaults here
-            # would surface far downstream as a misleading "unknown recipe ''"
-            # error, masking the actual contract drift. The HTTP boundary is a
-            # trust boundary, so we raise 400 with a contract-citing message.
-            edited = turn_response["edited_values"]
-            if edited is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="recipe_offer ['accept'] requires edited_values; received null.",
-                )
-            missing = {"recipe_name", "slots"} - edited.keys()
-            if missing:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"recipe_offer ['accept'] edited_values missing required keys: {sorted(missing)}; got keys: {sorted(edited.keys())}"
-                    ),
-                )
-            recipe_name = edited["recipe_name"]
-            if type(recipe_name) is not str or not recipe_name:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(f"recipe_offer ['accept'] edited_values['recipe_name'] must be a non-empty string; got {recipe_name!r}"),
-                )
-            slots_raw = edited["slots"]
-            if type(slots_raw) is not dict:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(f"recipe_offer ['accept'] edited_values['slots'] must be an object; got {type(slots_raw).__name__}"),
-                )
-
-            # Binding check: the client-supplied recipe_name must match the
-            # recipe that was actually offered for this step.  ``step_2_5_recipe_offer``
-            # is written by the server immediately before emitting the RECIPE_OFFER
-            # turn (Option A staging pattern, mirrors step_2_sink_intent).  A missing
-            # offer means the session was never in the recipe-offer state — the client
-            # is sending an accept without a prior offer (protocol violation or crafted
-            # request).  A mismatched recipe_name means the client is trying to accept
-            # a different recipe than the one offered — also rejected with 400.
-            #
-            # The offered prefilled slots are server-authored and read-only in the UI.
-            # Compare their stable hashes against the client-submitted subset so a
-            # crafted API client cannot silently rewrite inspected facts.  Unsatisfied
-            # slots remain operator-editable and are intentionally not bound here.
-            offered = guided.step_2_5_recipe_offer
-            if offered is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "recipe_offer ['accept'] received but no recipe was staged for this session "
-                        "(step_2_5_recipe_offer is None — the session has not reached the recipe-offer state "
-                        "or the offer was already consumed)."
-                    ),
-                )
-            if recipe_name != offered.recipe_name:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"recipe_offer ['accept'] recipe_name mismatch: "
-                        f"client sent {recipe_name!r} but the server offered {offered.recipe_name!r}. "
-                        "Accept must reference the recipe that was offered."
-                    ),
-                )
-            prefilled_mismatches = _prefilled_recipe_slot_mismatches(
-                offered_slots=offered.slots,
-                submitted_slots=slots_raw,
-            )
-            if prefilled_mismatches:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "recipe_offer ['accept'] prefilled slot mismatch: "
-                        f"client changed or omitted server-prefilled slot(s) {list(prefilled_mismatches)}. "
-                        "Prefilled recipe slots are read-only; accept must echo the offered values."
-                    ),
-                )
-
-            # The slots must be passed as edited_values from the client.
-            # The recipe_offer turn pre-populates partial slots; the user fills
-            # the rest via the recipe_offer form and sends them back in edited_values.
-            from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
-
-            slots = dict(slots_raw)
-            # The "accept" reconstruction is post-acceptance: the operator has
-            # supplied the slot values (merged into ``edited.slots`` by the
-            # widget).  ``unsatisfied_slots`` was a property of the *offer*;
-            # at apply time ``handle_step_2_5_recipe_apply`` consumes only
-            # ``recipe_name`` and ``slots``, so an empty mapping is correct.
-            match = _RecipeMatch(recipe_name=recipe_name, slots=slots, unsatisfied_slots={})
-
-            # SSRF crux (p4 Task 8a). For a TUTORIAL session ONLY, the
-            # ``web_scrape.allowed_hosts`` egress allowlist is a server-controlled
-            # SSRF set. It must be the deterministic resolver output keyed on the
-            # session's resolved origin — NEVER a client/LLM-authored value. The
-            # Task 6 slot is not self-defending (it accepts any CIDR incl.
-            # ``0.0.0.0/0``), so we OVERRIDE (or STRIP) any client-supplied
-            # ``allowed_hosts`` here, after ``slots`` is built from the request
-            # body. This is the only place the value is set; the client cannot
-            # carry it. A non-tutorial accept is left untouched (the enforcement
-            # boundary's CidrStr validation + ``public_only`` field default remain
-            # the SSRF control for the general Tier-3 apply path). ``match`` is
-            # frozen, so we ``_replace`` rather than mutate.
-            if guided.profile == TUTORIAL_PROFILE:
-                if settings is None:
-                    # Fail closed: without settings we cannot resolve the SSRF
-                    # allowlist, and silently skipping would leave the client's
-                    # value (or a scrape-blocking ``public_only``) in place.
-                    raise InvariantError(
-                        "tutorial recipe accept reached the dispatcher without settings; "
-                        "the web_scrape allowed_hosts SSRF set cannot be resolved (fail-closed)."
-                    )
-                tutorial_base_url = tutorial_sample_base_url(settings=settings, request_origin=request_origin)
-                resolved_hosts = resolve_tutorial_allowed_hosts(base_url=tutorial_base_url)
-                if resolved_hosts == "public_only":
-                    # Public base: OMIT the slot so the web_scrape field default
-                    # ``public_only`` applies (the tightest correct value).
-                    tutorial_slots = {k: v for k, v in match.slots.items() if k != "allowed_hosts"}
-                else:
-                    # Loopback / private dev base: inject the tight CIDR list verbatim.
-                    tutorial_slots = {**match.slots, "allowed_hosts": resolved_hosts}
-                match = _replace(match, slots=tutorial_slots)
-
-            # Clear the staged offer atomically before passing to the handler
-            # so it cannot be re-read by a later step.
-            guided = _replace(guided, step_2_5_recipe_offer=None)
-
-            handler_result = handle_step_2_5_recipe_apply(
-                state=state,
-                session=guided,
-                match=match,
-                catalog=catalog,
-                data_dir=data_dir,
-                session_engine=session_engine,
-                session_id=session_id,
-            )
-            if not handler_result.tool_result.success:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Recipe application failed: {handler_result.tool_result}",
-                )
-            state = handler_result.state
-            guided, next_turn = _emit_wire_turn(
-                state=state,
-                guided=handler_result.session,
-                recorder=recorder,
-                user_id=user_id,
-                payload_store=payload_store,
-                prev_step=GuidedStep.STEP_2_5_RECIPE_MATCH,
-                advance_reason="recipe_applied",
-            )
-            return state, guided, next_turn
-
-        if chosen == ["build_manually"]:
-            # step_advance already advanced to STEP_3.  Solve the chain via the LLM.
-            if guided.step_1_result is None or guided.step_2_result is None:
-                raise HTTPException(
-                    status_code=500,
-                    detail="Dispatcher invariant: step_1_result and step_2_result must be set at build_manually.",
-                )
-            source = guided.step_1_result
-            sink = guided.step_2_result
-            # I2: same auto-drop wrap as the no-recipe-match branch above.
-            proposal, guided = await solve_chain_with_auto_drop(
-                site="step_2_5_build_manually_solve",
-                session=guided,
-                session_id=session_id,
-                user_id=user_id,
-                composition_version=state.version,
-                recorder=recorder,
-                model=model,
-                temperature=temperature,
-                seed=seed,
-                source=source,
-                sink=sink,
-                recipe_match=None,
-            )
-            if proposal is None:
-                return state, guided, None
-            guided = _replace(guided, step_3_proposal=proposal)
-            next_turn = build_step_3_propose_chain_turn(proposal)
-            new_record = TurnRecord(
-                step=GuidedStep.STEP_3_TRANSFORMS,
-                turn_type=TurnType.PROPOSE_CHAIN,
-                payload_hash=stable_hash(next_turn["payload"]),
-                response_hash=None,
-                emitter="server",
-            )
-            emit_turn_emitted(
-                recorder,
-                step=GuidedStep.STEP_3_TRANSFORMS,
-                turn_type=TurnType.PROPOSE_CHAIN,
-                payload_hash=stable_hash(next_turn["payload"]),
-                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
-                emitter="server",
-                composition_version=state.version,
-                actor=user_id,
-            )
-            guided = _replace(guided, history=(*guided.history, new_record))
-            return state, guided, next_turn
-
-        raise HTTPException(
-            status_code=400,
-            detail=f"recipe_offer response must have chosen=['accept'] or chosen=['build_manually'], got {chosen!r}.",
-        )
+        # Step-2 sink committed. PER-STAGE design: do NOT auto-build the
+        # transform chain here. STEP_3 is driven by its OWN prompt — the operator
+        # describes the transforms at STEP_3 and the /guided/chat cold-start path
+        # (``intent = body.message``, guided.py post_guided_chat) builds the chain.
+        # The previous auto-build fed solve_chain the FIRST user chat turn, which
+        # in the staged flow is the SOURCE-phase send ("create a source of
+        # url-rows"), never the transforms intent — so it built a blind chain that
+        # exhausted (solver_exhausted -> exited_to_freeform). (The reject/repair
+        # re-solves now use ``_transforms_intent_from_chat_history`` — the LAST user
+        # turn — for the same reason.)
+        # STEP_3 now starts with NO proposal; the frontend renders the chat box at
+        # step_3-no-proposal so the per-stage transforms prompt drives the build.
+        # ``guided.step`` is already STEP_3_TRANSFORMS (step_advance set it; the sink
+        # commit preserves it). Returning a None turn is an existing, handled shape.
+        return state, guided, None
 
     # --- STEP_3_TRANSFORMS turns ----------------------------------------
     # The only response shape handled here is ACCEPT on a propose_chain
@@ -3603,8 +3353,17 @@ async def _dispatch_guided_respond(
                     seed=seed,
                     source=guided.step_1_result,
                     sink=guided.step_2_result,
-                    recipe_match=None,
+                    # Regenerate from the TRANSFORMS-phase request (the operator
+                    # rejected the transform chain, not the source) — the last user
+                    # chat turn, NOT the source-phase opening turn.
+                    intent=_transforms_intent_from_chat_history(guided),
                     repair_context=repair_context,
+                    # Discovery loop (read-only): the regenerate solve can look up
+                    # the schema it tripped on instead of re-guessing blind.
+                    state=state,
+                    catalog=catalog,
+                    secret_service=None,
+                    max_discovery_iters=(settings.composer_max_discovery_turns if settings is not None else None),
                 )
                 if proposal is None:
                     return state, guided, None
@@ -3697,6 +3456,7 @@ async def _dispatch_guided_respond(
                     data_dir=data_dir,
                     session_engine=session_engine,
                     session_id=session_id,
+                    tutorial_web_scrape_allowed_hosts=_tutorial_web_scrape_allowed_hosts(guided, settings, request_origin),
                 )
                 if not handler_result.tool_result.success:
                     # Initial commit failed. Attempt one LLM repair: feed the
@@ -3740,8 +3500,22 @@ async def _dispatch_guided_respond(
                         seed=seed,
                         source=guided.step_1_result,
                         sink=guided.step_2_result,
-                        recipe_match=None,
+                        # Repair after a failed accept still builds FROM the user's
+                        # TRANSFORMS request (the last user chat turn) while fixing the
+                        # named validation errors (repair_context) — independent
+                        # channels, both apply. Without the transforms intent the
+                        # repaired chain regenerates blind to the goal (the
+                        # passthrough-instead-of-web_scrape bug) and auto-commits.
+                        intent=_transforms_intent_from_chat_history(guided),
                         repair_context=repair_context,
+                        # Discovery loop (read-only): the repair solve can look up
+                        # the exact schema the first accept rejected. This is the
+                        # break in the blind repair loop (web_scrape required-fields
+                        # + http.* nesting were the live failure).
+                        state=state,
+                        catalog=catalog,
+                        secret_service=None,
+                        max_discovery_iters=(settings.composer_max_discovery_turns if settings is not None else None),
                     )
                     if repair_proposal is None:
                         return state, guided, None
@@ -3756,6 +3530,7 @@ async def _dispatch_guided_respond(
                         data_dir=data_dir,
                         session_engine=session_engine,
                         session_id=session_id,
+                        tutorial_web_scrape_allowed_hosts=_tutorial_web_scrape_allowed_hosts(guided, settings, request_origin),
                     )
                     if repair_result.tool_result.success:
                         guided, next_turn = _emit_wire_turn(
@@ -4431,7 +4206,6 @@ __all__ = [
     "build_step_1_inspect_and_confirm_turn_from_intent",
     "build_step_1_schema_form_turn",
     "build_step_1_schema_form_turn_from_resolved",
-    "build_step_2_5_recipe_offer_turn",
     "build_step_2_multi_select_turn",
     "build_step_2_schema_form_turn",
     "build_step_2_schema_form_turn_from_resolved",
@@ -4458,7 +4232,6 @@ __all__ = [
     "get_current_user",
     "get_rate_limiter",
     "handle_step_1_source",
-    "handle_step_2_5_recipe_apply",
     "handle_step_2_sink",
     "handle_step_3_chain_accept",
     "handle_step_4_wire_confirm",
@@ -4468,7 +4241,6 @@ __all__ = [
     "llm_call_audit_envelope",
     "load_run_accounting_for_settings",
     "mark_solver_exhausted",
-    "match_recipe",
     "maybe_auto_title_session",
     "maybe_resolve_step_1_source_chat",
     "merge_implicit_decisions_meta",

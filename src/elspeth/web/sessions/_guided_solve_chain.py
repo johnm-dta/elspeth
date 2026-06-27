@@ -19,6 +19,8 @@ from typing import Any
 
 import structlog
 
+from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.audit import emit_dropped_to_freeform
 from elspeth.web.composer.guided.chain_solver import ChainSolverResponseShapeError, solve_chain
@@ -31,6 +33,7 @@ from elspeth.web.composer.guided.state_machine import (
     TerminalReason,
     mark_solver_exhausted,
 )
+from elspeth.web.composer.state import CompositionState
 
 slog = structlog.get_logger()
 
@@ -76,10 +79,14 @@ async def solve_chain_with_auto_drop(
     model: str,
     source: SourceResolved,
     sink: SinkResolved,
-    recipe_match: Any | None = None,
+    intent: str | None = None,
     repair_context: str | None = None,
     temperature: float | None,
     seed: int | None,
+    state: CompositionState | None = None,
+    catalog: CatalogService | None = None,
+    secret_service: WebSecretResolver | None = None,
+    max_discovery_iters: int | None = None,
 ) -> tuple[ChainProposal | None, GuidedSession]:
     """Wrap ``solve_chain`` with the auto-drop-on-transient contract (I2).
 
@@ -160,11 +167,16 @@ async def solve_chain_with_auto_drop(
             model=model,
             source=source,
             sink=sink,
-            recipe_match=recipe_match,
+            intent=intent,
             repair_context=repair_context,
             recorder=recorder,
             temperature=temperature,
             seed=seed,
+            state=state,
+            catalog=catalog,
+            secret_service=secret_service,
+            user_id=user_id,
+            max_discovery_iters=max_discovery_iters,
         )
         return proposal, session
     except (

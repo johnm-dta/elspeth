@@ -121,7 +121,9 @@ def _fake_llm_response_for_passthrough() -> SimpleNamespace:
 def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple[dict, str, str]:
     """Drive the wizard to the Step 3 ``propose_chain`` turn.
 
-    Returns (response_body_at_step_3, blob_id, output_path).
+    Returns (chat_response_body_at_step_3, blob_id, output_path). The body is
+    the /guided/chat response carrying the server-emitted propose_chain turn in
+    ``next_turn`` (the sink-commit itself no longer auto-builds the chain).
 
     Picks ``required_fields=["text"]`` so the deterministic recipe matcher
     finds no match (no classifier keyword present, single JSON output —
@@ -161,12 +163,25 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
     )
     # No classifier keyword (no category/label/tag/classification),
     # not exactly two outputs → no recipe matches → chain solver entry seam fires.
-    body = _respond(
+    #
+    # Committing the sink no longer AUTO-BUILDS the chain: it advances to
+    # step_3_transforms with ``next_turn: null``. The transform chain is built by
+    # the per-stage transforms prompt sent via /guided/chat. Callers wrap this
+    # helper in the ``chain_solver._litellm_acompletion`` mock, so the chat below
+    # fires that mock and the propose_chain turn rides back on the chat-response
+    # body. Any transforms-intent string works — the mock ignores it.
+    _respond(
         client,
         session_id,
         chosen=["text"],
         custom_inputs=[],
     )
+    chat_resp = client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={"message": "fetch each page and summarise it", "step_index": "step_3_transforms"},
+    )
+    assert chat_resp.status_code == 200, chat_resp.json()
+    body = chat_resp.json()
     return body, blob_id, output_path
 
 
@@ -180,7 +195,8 @@ class TestStep3ChainAccept:
         """End-to-end: Step 3 ACCEPT → confirm_wiring → terminal=COMPLETED."""
         session_id = _create_session(composer_test_client)
 
-        # Drive Steps 1 + 2 + the auto-advance to Step 3 (with chain-solver stubbed).
+        # Drive Steps 1 + 2 + the step_3 transforms-prompt chat that builds the
+        # proposal (with chain-solver stubbed across the whole helper).
         with patch(
             "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
             new_callable=AsyncMock,

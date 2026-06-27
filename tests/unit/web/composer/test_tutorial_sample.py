@@ -72,6 +72,15 @@ def test_private_rfc1918_host_uses_tight_cidr() -> None:
     assert hosts != "allow_private"
 
 
+def test_localhost_hostname_uses_tight_cidr() -> None:
+    # RFC 6761 reserves ``localhost`` (and ``*.localhost``) for loopback. The
+    # common local-dev base http://localhost:PORT must NOT fall through to
+    # public_only (``ip_address("localhost")`` raises) — it gets the same tight
+    # CIDR as 127.0.0.1, otherwise the scraper blocks the synthetic tutorial pages.
+    assert resolve_tutorial_allowed_hosts(base_url="http://localhost:5173") == ["127.0.0.1/32", "::1/128"]
+    assert resolve_tutorial_allowed_hosts(base_url="http://app.localhost:8000") == ["127.0.0.1/32", "::1/128"]
+
+
 def test_base_url_prefers_configured_setting() -> None:
     settings = _settings(tutorial_sample_base_url="https://configured.example")
     assert tutorial_sample_base_url(settings=settings, request_origin="https://ignored.example") == "https://configured.example"

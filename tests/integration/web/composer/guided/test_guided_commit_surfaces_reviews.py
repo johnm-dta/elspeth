@@ -229,9 +229,27 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> str:
             "sample_rows": [],
         },
     )
-    # No classifier keyword, single output -> no recipe match -> chain solver fires.
+    # No classifier keyword, single output -> no recipe match. With the
+    # sink->step_3 auto-build removed, committing the recipe-match step now
+    # advances to step_3_transforms with NO proposal (next_turn is null);
+    # the transform chain is built by the per-stage transforms prompt sent
+    # via /guided/chat below.
     body = _respond(client, session_id, chosen=["text"], custom_inputs=[])
-    assert body["next_turn"]["type"] == "propose_chain"
+    assert body["next_turn"] is None
+    assert body["guided_session"]["step"] == "step_3_transforms"
+
+    # Drive the transform-chain build through the per-stage transforms chat.
+    # The SAME chain_solver._litellm_acompletion mock (patched by the caller)
+    # fires on this call and emits the propose_chain turn. Any transforms
+    # intent works; the mock ignores the message.
+    chat_resp = client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={"message": "fetch each page and summarise it", "step_index": "step_3_transforms"},
+    )
+    assert chat_resp.status_code == 200, chat_resp.json()
+    chat_body = chat_resp.json()
+    assert chat_body["guided_session"]["step"] == "step_3_transforms"
+    assert chat_body["next_turn"]["type"] == "propose_chain"
     return session_id
 
 

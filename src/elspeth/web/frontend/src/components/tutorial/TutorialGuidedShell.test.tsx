@@ -2,7 +2,11 @@ import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TutorialGuidedShell } from "./TutorialGuidedShell";
-import { CANONICAL_TUTORIAL_PROMPT } from "./tutorialMachine";
+import {
+  TUTORIAL_SINK_PROMPT,
+  TUTORIAL_SOURCE_PROMPT,
+  TUTORIAL_TRANSFORMS_PROMPT,
+} from "./tutorialMachine";
 import { useSessionStore } from "@/stores/sessionStore";
 
 const startGuidedSessionMock = vi.fn();
@@ -37,11 +41,16 @@ vi.mock("@/api/client", () => ({
 }));
 
 vi.mock("@/components/chat/ChatPanel", () => ({
-  ChatPanel: (props: { isTutorial?: boolean; lockedChatPrompt?: string }) => (
+  ChatPanel: (props: {
+    isTutorial?: boolean;
+    lockedChatPrompt?: Partial<Record<string, string>>;
+  }) => (
     <div
       data-testid="chat-panel-stub"
       data-is-tutorial={String(props.isTutorial)}
-      data-locked-prompt={props.lockedChatPrompt}
+      data-locked-prompt={props.lockedChatPrompt?.step_1_source}
+      data-locked-sink={props.lockedChatPrompt?.step_2_sink}
+      data-locked-transforms={props.lockedChatPrompt?.step_3_transforms}
     />
   ),
 }));
@@ -105,24 +114,29 @@ describe("TutorialGuidedShell", () => {
     expect(stub.dataset.isTutorial).toBe("true");
   });
 
-  it("appends the resolved sample URLs to the locked STEP_1 prompt", async () => {
-    // The frozen CANONICAL_TUTORIAL_PROMPT names no URLs; the source driver
-    // parses them out of the Sent message, so the shell must append the
-    // runtime-resolved synthetic URLs fetched from the 8a GET surface.
+  it("gives each stage its own prompt; appends sample URLs to the SOURCE stage only", async () => {
+    // Per-stage staged orchestrator: the source prompt names no URLs in its
+    // constant; the shell appends the runtime-resolved synthetic URLs (8a GET
+    // surface) to the SOURCE stage only. Sink/transforms get their own focused
+    // prompts with no URLs.
     render(<TutorialGuidedShell sessionId="sess-1" onCompleted={vi.fn()} />);
     await waitFor(() =>
       expect(getTutorialSampleMock).toHaveBeenCalledWith("sess-1"),
     );
     const stub = await screen.findByTestId("chat-panel-stub");
-    const locked = stub.dataset.lockedPrompt ?? "";
-    expect(locked).toContain(CANONICAL_TUTORIAL_PROMPT);
+    const lockedSource = stub.dataset.lockedPrompt ?? "";
+    expect(lockedSource).toContain(TUTORIAL_SOURCE_PROMPT);
     for (const url of SAMPLE_URLS) {
-      expect(locked).toContain(url);
+      expect(lockedSource).toContain(url);
     }
-    // URLs come AFTER the canonical prose (appended, not interleaved).
-    expect(locked.indexOf(SAMPLE_URLS[0])).toBeGreaterThan(
-      locked.indexOf(CANONICAL_TUTORIAL_PROMPT),
+    // URLs come AFTER the source prose (appended, not interleaved).
+    expect(lockedSource.indexOf(SAMPLE_URLS[0])).toBeGreaterThan(
+      lockedSource.indexOf(TUTORIAL_SOURCE_PROMPT),
     );
+    // Sink and transforms stages carry their own focused prompts, no URLs.
+    expect(stub.dataset.lockedSink).toBe(TUTORIAL_SINK_PROMPT);
+    expect(stub.dataset.lockedTransforms).toBe(TUTORIAL_TRANSFORMS_PROMPT);
+    expect(stub.dataset.lockedTransforms).not.toContain(SAMPLE_URLS[0]);
   });
 
   it("gates the chat panel until the sample URLs resolve (never an editable box)", async () => {

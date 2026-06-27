@@ -47,10 +47,8 @@ def test_canonical_seed_prompt_constant_is_exact() -> None:
     """The seed prompt must match the synthetic-scrape canonical prompt verbatim."""
     assert CANONICAL_SEED_PROMPT == (
         "Scrape these three synthetic project-brief pages and, for each page, "
-        "have an LLM read the tables and return one JSON row with the project "
-        "name, the top risk (the highest-impact risk and its mitigation), the "
-        "go-live date, and the total cost (the sum of the cost line items). "
-        "Remove the raw HTML and write the rows to a json file."
+        "have an LLM write a short summary of the page. Remove the raw HTML and "
+        "write the rows to a json file."
     )
 
 

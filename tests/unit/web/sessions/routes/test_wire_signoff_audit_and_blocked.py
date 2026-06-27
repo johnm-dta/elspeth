@@ -20,6 +20,12 @@ from elspeth.web.composer.service import AdvisorCheckpointVerdict, _advisor_sign
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond
 from tests.unit.web.sessions.routes._wire_fixtures import make_wire_ready_session_and_state
 
+# The terminal advisor sign-off is no shipped profile's behaviour anymore
+# (TUTORIAL_PROFILE.advisor_checkpoints is now False, matching live guided). These
+# sign-off-audit tests pin the still-live advisor-gate code path with a synthetic
+# advisor-ON profile so coverage survives the tutorial flip.
+ADVISOR_ON_PROFILE = dataclasses.replace(TUTORIAL_PROFILE, advisor_checkpoints=True)
+
 
 def _d(outcome: SignoffOutcome, reason: str | None) -> SignoffDecision:
     return SignoffDecision(outcome=outcome, reason=reason, findings_text="f", passes_delta=1)
@@ -139,7 +145,7 @@ async def test_dispatch_records_distinct_completed_without_signoff_name() -> Non
     # invocation is the sign-off audit event — and it carries the DISTINCT
     # advisor-unreachable name, never composer.signoff.clean (the D13 assertion,
     # proven through the real dispatcher).
-    session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     session = dataclasses.replace(
         session,
         advisor_checkpoint_passes_used=3,
@@ -174,7 +180,7 @@ async def test_dispatch_records_distinct_completed_without_signoff_name() -> Non
 async def test_dispatch_records_clean_name_on_clean_signoff() -> None:
     # CLEAN sign-off completes; the last recorded invocation is the sign-off
     # audit event and it is composer.signoff.clean (NOT the unreachable name).
-    session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
     recorder = BufferingRecorder()
     _state, guided, next_turn = await _dispatch(session, state, svc, recorder=recorder)
@@ -189,7 +195,7 @@ async def test_dispatch_blocked_flagged_records_event_and_carries_fail_closed_fi
     # FLAGGED on the last budgeted pass => BLOCKED_FLAGGED. The sign-off audit
     # event is recorded (NOT last — guided_turn_emitted follows the re-emit) and
     # the re-emitted turn carries the NON-RUNNABLE blocked-validation findings.
-    session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     session = dataclasses.replace(session, advisor_checkpoint_passes_used=2)
     svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: prompt sees no row field"))
     recorder = BufferingRecorder()

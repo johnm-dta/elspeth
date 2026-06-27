@@ -2,17 +2,30 @@ import { useEffect, useRef, useState } from "react";
 import { getTutorialSample, startGuidedSession } from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
-import { CANONICAL_TUTORIAL_PROMPT } from "./tutorialMachine";
+import type { GuidedStep } from "@/types/guided";
+import {
+  TUTORIAL_SINK_PROMPT,
+  TUTORIAL_SOURCE_PROMPT,
+  TUTORIAL_TRANSFORMS_PROMPT,
+} from "./tutorialMachine";
 
 /**
- * The locked STEP_1 prompt the passive learner Sends verbatim. The frozen
- * `CANONICAL_TUTORIAL_PROMPT` says "scrape these three synthetic project-brief
- * pages" but carries NO URLs — the source driver parses URLs out of the message
- * and the LLM cannot guess the runtime-served addresses, so the resolved
- * synthetic URLs (fetched per-session from the 8a GET surface) are appended.
+ * The per-stage prelocked prompts the passive learner Sends verbatim, one per
+ * LLM-driven phase. The composer is a STAGED orchestrator: each phase gets ONLY
+ * its stage's intent so the light model can focus. The SOURCE prompt carries NO
+ * URLs in its constant — the LLM cannot guess the runtime-served addresses, so
+ * the resolved synthetic URLs (fetched per-session from the 8a GET surface) are
+ * appended to the source prompt only (the sink/transforms phases don't need
+ * them). Recipe and Wire are confirm-only (no chat prompt).
  */
-function buildLockedPrompt(sampleUrls: string[]): string {
-  return `${CANONICAL_TUTORIAL_PROMPT}\n${sampleUrls.join("\n")}`;
+function buildLockedPrompts(
+  sampleUrls: string[],
+): Partial<Record<GuidedStep, string>> {
+  return {
+    step_1_source: `${TUTORIAL_SOURCE_PROMPT}\n${sampleUrls.join("\n")}`,
+    step_2_sink: TUTORIAL_SINK_PROMPT,
+    step_3_transforms: TUTORIAL_TRANSFORMS_PROMPT,
+  };
 }
 
 interface TutorialGuidedShellProps {
@@ -103,6 +116,13 @@ export function TutorialGuidedShell({
         // start above). Appended to the locked STEP_1 prompt; the box stays
         // gated (never editable) until they arrive.
         const sample = await getTutorialSample(sessionId);
+        // Only sample_urls are consumed client-side. sample.allowed_hosts is
+        // surfaced informationally but DELIBERATELY NOT used here: allowed_hosts
+        // is an SSRF control the client must never carry (a client-set allowlist
+        // is a widening vector). The server injects it into the web_scrape node
+        // at the per-stage transforms commit (handle_step_3_chain_accept) from
+        // the host class of the resolved origin. Do not "fix" this by threading
+        // allowed_hosts into the prompt or the pipeline from here.
         setSampleUrls(sample.sample_urls);
         await startGuided(sessionId);
       } catch (err) {
@@ -177,7 +197,7 @@ export function TutorialGuidedShell({
         // exposed with a URL-less prompt.
         <ChatPanel
           isTutorial
-          lockedChatPrompt={buildLockedPrompt(sampleUrls)}
+          lockedChatPrompt={buildLockedPrompts(sampleUrls)}
         />
       ) : (
         error === null && (

@@ -21,18 +21,23 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Final, cast
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
 from elspeth.contracts.freeze import freeze_fields
+from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.blobs.protocol import ALLOWED_MIME_TYPES, AllowedMimeType
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.prompts import load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
 from elspeth.web.composer.llm_response_parsing import attach_llm_calls, build_llm_call_record
 from elspeth.web.composer.service import _litellm_acompletion
+from elspeth.web.composer.state import CompositionState
+from elspeth.web.composer.tools._dispatch import get_discovery_tool_definitions
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +57,7 @@ class Step1SourceChatResolution:
     options: Mapping[str, Any]
     observed_columns: tuple[str, ...]
     sample_rows: tuple[Mapping[str, Any], ...]
+    on_validation_failure: str
 
     def __post_init__(self) -> None:
         freeze_fields(self, "options", "sample_rows")
@@ -85,10 +91,34 @@ _STEP_1_SOURCE_TOOL: dict[str, Any] = {
                 "filename": {"type": "string", "minLength": 1},
                 "mime_type": {"type": "string", "enum": sorted(ALLOWED_MIME_TYPES)},
                 "content": {"type": "string", "minLength": 1},
-                "options": {"type": "object"},
+                "options": {
+                    "type": "object",
+                    "description": (
+                        "Source plugin options. IMPORTANT: when the rows are guaranteed to carry "
+                        "specific columns — a column the operator named (e.g. `url`), or columns you "
+                        "authored into every row of inline `content` — declare them as a contract: set "
+                        '`schema` to `{"mode": "observed", "guaranteed_fields": [<those exact column '
+                        "names>]}`. This records the columns the rows are guaranteed to contain so a "
+                        "downstream transform that reads one of them (e.g. web_scrape reading `url`) "
+                        "wires cleanly at the wiring step; an observed source with no `guaranteed_fields` "
+                        "promises nothing and fails that contract. Keep `mode` `observed` so any other "
+                        "columns still pass through."
+                    ),
+                },
                 "observed_columns": {"type": "array", "items": {"type": "string"}},
                 "sample_rows": {"type": "array", "items": {"type": "object"}},
                 "assistant_message": {"type": "string", "minLength": 1},
+                # Optional (absent from ``required``): the parser defaults it to
+                # "discard" so a passive walk never stalls. Listed here so the
+                # model is allowed to send it under ``additionalProperties: false``.
+                "on_validation_failure": {
+                    "type": "string",
+                    "description": (
+                        "Where rows that fail the source's schema validation are routed: a "
+                        "configured sink name, or 'discard' to drop them. For a synthetic/valid-by-"
+                        "construction demo source, 'discard' is correct."
+                    ),
+                },
             },
         },
     },
@@ -160,16 +190,29 @@ def _build_step_1_source_tool_prompt(
         "If the user's message provides enough information to create inline source data, "
         "call `resolve_source` with the complete file content, the source plugin, "
         "schema options, observed columns, representative sample rows, and a brief "
-        "assistant_message. For CSV data, include a header row in `content` and set "
+        "assistant_message. Whenever the message states the rows carry a specific "
+        "named column (a `url`, an id, a key), set the source `schema` to "
+        '`{"mode": "observed", "guaranteed_fields": [<those exact column names>]}` — '
+        "you are RECORDING the columns the operator told you the rows contain, so a "
+        "later transform that reads one of them wires cleanly at the wiring step. "
+        "Keep `mode` `observed` so any other columns still pass through. "
+        "For CSV data, include a header row in `content` and set "
         "`mime_type` to `text/csv`. When the user wants to FETCH or SCRAPE one or more "
         "URLs, the source is an INLINE `json` (or `csv`) dataset whose rows carry each "
         "URL in a `url` column — e.g. json `content` of "
-        '`[{"url": "https://example/a"}, {"url": "https://example/b"}]` — and you '
+        '`[{"url": "https://example/a"}, {"url": "https://example/b"}]`. Declare that '
+        "`url` column as guaranteed on the source `schema` "
+        '(`{"mode": "observed", "guaranteed_fields": ["url"]}`) so the downstream '
+        "web_scrape transform's required `url` input is satisfied at the wiring step "
+        "(an observed-mode source that guarantees nothing fails that contract). You "
         "must NOT choose a `web_scraper`/`web_scrape` source: fetching pages is a "
         "downstream TRANSFORM applied later, never a source plugin. The only valid "
         "source plugins are `azure_blob`, `csv`, `dataverse`, `json`, `null`, `text`. "
         "Preserve user-supplied values exactly in the file "
-        "content; do not invent hidden pipeline transforms. If the message is only a "
+        "content; do not invent hidden pipeline transforms. Also set `on_validation_failure` "
+        "when you resolve a source: use `discard` for a demo source that is valid by "
+        "construction, or the name of a quarantine sink for production data whose invalid "
+        "rows must be kept for inspection. If the message is only a "
         "question or lacks enough source detail, reply in prose and do not call a tool.\n"
     )
 
@@ -240,6 +283,20 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
     if not isinstance(assistant_message, str) or not assistant_message.strip():
         raise ValueError("resolve_source assistant_message must be a non-empty string")
 
+    # on_validation_failure is OPTIONAL (not in the required set / tool schema).
+    # The composer sets it most of the time, but a passive walk must never stall,
+    # so absent / None / empty defaults to "discard". When the model DOES send it,
+    # require a non-empty string at this Tier-3 boundary.
+    on_validation_failure_raw = data.get("on_validation_failure")
+    if on_validation_failure_raw is None or (isinstance(on_validation_failure_raw, str) and not on_validation_failure_raw):
+        on_validation_failure = "discard"
+    elif not isinstance(on_validation_failure_raw, str):
+        raise ValueError(
+            f"resolve_source on_validation_failure must be a string when provided; got {type(on_validation_failure_raw).__name__}"
+        )
+    else:
+        on_validation_failure = on_validation_failure_raw
+
     return Step1SourceChatResolution(
         assistant_message=assistant_message,
         plugin=plugin,
@@ -249,6 +306,7 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
         options=dict(options),
         observed_columns=tuple(observed_columns),
         sample_rows=tuple(sample_rows),
+        on_validation_failure=on_validation_failure,
     )
 
 
@@ -499,6 +557,26 @@ def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str
     return SinkResolved(outputs=tuple(outputs)), assistant_message
 
 
+_STEP_2_SINK_DISCOVERY_TOOL_NAMES: Final[frozenset[str]] = frozenset({"list_sinks", "get_plugin_schema"})
+"""Read-only discovery tools the sink stage offers the composer model.
+
+``list_sinks`` answers "which sink plugins exist" and ``get_plugin_schema``
+answers "what options does this sink take" — the two facts a model needs to
+build a sink without a hand-maintained inventory baked into the prompt. The
+set is deliberately tight: source/transform/model discovery is irrelevant to
+choosing an output, and every name here is asserted ``<= _DISCOVERY_TOOL_NAMES``
+inside :func:`get_discovery_tool_definitions`.
+"""
+
+_DEFAULT_MAX_DISCOVERY_ITERS: Final[int] = 6
+"""Fallback discovery-iteration cap when the route does not pass one.
+
+Production threads ``settings.composer_max_discovery_turns``; this default
+keeps direct callers (and tests) bounded. Reaching the cap returns ``None``
+(advisory fallback), never raises.
+"""
+
+
 async def maybe_resolve_step_2_sink_chat(
     *,
     model: str,
@@ -507,12 +585,37 @@ async def maybe_resolve_step_2_sink_chat(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
+    state: CompositionState | None = None,
+    catalog: CatalogService | None = None,
+    secret_service: WebSecretResolver | None = None,
+    user_id: str | None = None,
+    max_discovery_iters: int | None = None,
 ) -> tuple[SinkResolved, str] | None:
-    """Try to resolve a Step-2 chat message into a sink config.
+    """Resolve a Step-2 chat message into a sink config via a discovery loop.
 
-    Returns ``(sink, assistant_message)`` on a ``resolve_sink`` tool call, or
-    ``None`` when the model replies in prose, allowing the route to fall back
-    to advisory chat. Mirrors :func:`maybe_resolve_step_1_source_chat`.
+    The composer model is given ``resolve_sink`` plus the read-only sink
+    discovery tools (``list_sinks`` / ``get_plugin_schema``). Each round:
+
+    * a ``resolve_sink`` call is terminal — parsed and returned;
+    * one or more *allowed discovery* calls are dispatched via ``execute_tool``,
+      their results threaded back, and the loop continues;
+    * a prose reply, OR any tool call that is neither ``resolve_sink`` nor an
+      allowed discovery tool, ends the loop returning ``None`` (advisory
+      fallback) WITHOUT dispatching — the execution-side safety gate that stops
+      a hallucinated mutation/secret call from running, since ``execute_tool``
+      itself would otherwise happily dispatch one.
+
+    Returns ``(sink, assistant_message)`` on resolution, or ``None`` (prose /
+    gate trip / iteration cap) so the route falls back to advisory chat.
+
+    Discovery is active only when both ``state`` and ``catalog`` are supplied
+    (the guided route always threads them). Without them the loop degrades to
+    single-shot: the model sees only ``resolve_sink`` and either resolves or
+    replies prose on the first round — the pre-loop behaviour.
+
+    Audit: one ``ComposerLLMCall`` is recorded per provider round and one
+    ``ComposerToolInvocation`` per executed discovery call; the route drains
+    both from *recorder* after it persists guided-session state.
     """
     if not user_message:
         raise InvariantError("maybe_resolve_step_2_sink_chat: user_message is empty (route validation gap)")
@@ -521,90 +624,128 @@ async def maybe_resolve_step_2_sink_chat(
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
+    discovery_enabled = catalog is not None and state is not None
+    discovery_defs = get_discovery_tool_definitions(_STEP_2_SINK_DISCOVERY_TOOL_NAMES) if discovery_enabled else []
+    allowed_discovery = _STEP_2_SINK_DISCOVERY_TOOL_NAMES if discovery_enabled else frozenset()
+    tools = [_STEP_2_SINK_TOOL, *discovery_defs]
+    actor = user_id or "guided-composer"
+    iteration_cap = max_discovery_iters if max_discovery_iters is not None else _DEFAULT_MAX_DISCOVERY_ITERS
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _build_step_2_sink_tool_prompt(current_sink=current_sink)},
         {"role": "user", "content": user_message},
     ]
-    tools = [_STEP_2_SINK_TOOL]
-    kwargs: dict[str, Any] = {"model": model, "messages": messages, "tools": tools}
-    if temperature is not None:
-        kwargs["temperature"] = temperature
-    if seed is not None:
-        kwargs["seed"] = seed
-    started_at = datetime.now(UTC)
-    started_ns = time.monotonic_ns()
-    status: ComposerLLMCallStatus | None = None
-    response: Any = None
-    error_class: str | None = None
-    error_message: str | None = None
-    try:
-        response = await _litellm_acompletion(**kwargs)
-        message = response.choices[0].message
-        tool_calls = message.tool_calls or ()
-        for tool_call in tool_calls:
-            function = tool_call.function
-            if function is None:
-                continue
-            if function.name != "resolve_sink":
-                continue
-            arguments = function.arguments
-            if not isinstance(arguments, str):
-                raise ValueError(f"resolve_sink function.arguments must be a JSON string; got {type(arguments).__name__}")
-            sink, assistant = _parse_step_2_sink_tool_arguments(arguments)
+
+    for _iteration in range(max(1, iteration_cap)):
+        request_messages = list(messages)
+        kwargs: dict[str, Any] = {"model": model, "messages": request_messages, "tools": tools}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if seed is not None:
+            kwargs["seed"] = seed
+        started_at = datetime.now(UTC)
+        started_ns = time.monotonic_ns()
+        status: ComposerLLMCallStatus | None = None
+        response: Any = None
+        error_class: str | None = None
+        error_message: str | None = None
+        try:
+            response = await _litellm_acompletion(**kwargs)
+            message = response.choices[0].message
+            tool_calls = message.tool_calls or ()
+
+            # resolve_sink is terminal — take it regardless of sibling calls.
+            for tool_call in tool_calls:
+                function = tool_call.function
+                if function is None or function.name != "resolve_sink":
+                    continue
+                arguments = function.arguments
+                if not isinstance(arguments, str):
+                    raise ValueError(f"resolve_sink function.arguments must be a JSON string; got {type(arguments).__name__}")
+                sink, assistant = _parse_step_2_sink_tool_arguments(arguments)
+                status = ComposerLLMCallStatus.SUCCESS
+                return sink, assistant
+
+            # Execution-side safety gate: the only non-terminal calls we
+            # dispatch are allowed read-only discovery tools. A prose reply
+            # (no tool calls) or ANY other tool (a hallucinated mutation /
+            # secret call) ends the loop without dispatching anything.
+            discovery_calls = [tc for tc in tool_calls if tc.function is not None and tc.function.name in allowed_discovery]
+            if not discovery_calls or len(discovery_calls) != len(tool_calls):
+                status = ComposerLLMCallStatus.SUCCESS
+                return None
+
+            # Thread the assistant tool-call request once, then answer every
+            # call id with its result, or the next round 400s.
+            assert state is not None and catalog is not None  # implied by discovery_enabled
+            messages.append(_assistant_tool_calls_message(message, tool_calls))
+            for tool_call in tool_calls:
+                messages.append(
+                    _execute_discovery_call(
+                        tool_call=tool_call,
+                        state=state,
+                        catalog=catalog,
+                        secret_service=secret_service,
+                        user_id=user_id,
+                        actor=actor,
+                        recorder=recorder,
+                    )
+                )
             status = ComposerLLMCallStatus.SUCCESS
-            return sink, assistant
-        status = ComposerLLMCallStatus.SUCCESS
-        return None
-    except TimeoutError:
-        status = ComposerLLMCallStatus.TIMEOUT
-        error_class = "TimeoutError"
-        error_message = "TimeoutError"
-        raise
-    except asyncio.CancelledError as exc:
-        status = ComposerLLMCallStatus.CANCELLED
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMAuthError as exc:
-        status = ComposerLLMCallStatus.AUTH_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMBadRequestError as exc:
-        status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMAPIError as exc:
-        status = ComposerLLMCallStatus.API_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except (IndexError, AttributeError, json.JSONDecodeError, ValueError) as exc:
-        status = ComposerLLMCallStatus.MALFORMED_RESPONSE
-        error_class = type(exc).__name__
-        error_message = "malformed_response"
-        raise
-    except Exception as exc:
-        status = ComposerLLMCallStatus.API_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    finally:
-        _record_llm_call(
-            recorder=recorder,
-            model=model,
-            messages=messages,
-            tools=tools,
-            status=status,
-            started_at=started_at,
-            started_ns=started_ns,
-            temperature=temperature,
-            seed=seed,
-            response=response,
-            error_class=error_class,
-            error_message=error_message,
-        )
+            # fall through to finally (records this round), then loop again
+        except TimeoutError:
+            status = ComposerLLMCallStatus.TIMEOUT
+            error_class = "TimeoutError"
+            error_message = "TimeoutError"
+            raise
+        except asyncio.CancelledError as exc:
+            status = ComposerLLMCallStatus.CANCELLED
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMAuthError as exc:
+            status = ComposerLLMCallStatus.AUTH_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMBadRequestError as exc:
+            status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMAPIError as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except (IndexError, AttributeError, json.JSONDecodeError, ValueError) as exc:
+            status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+            error_class = type(exc).__name__
+            error_message = "malformed_response"
+            raise
+        except Exception as exc:
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        finally:
+            _record_llm_call(
+                recorder=recorder,
+                model=model,
+                messages=request_messages,
+                tools=tools,
+                status=status,
+                started_at=started_at,
+                started_ns=started_ns,
+                temperature=temperature,
+                seed=seed,
+                response=response,
+                error_class=error_class,
+                error_message=error_message,
+            )
+
+    # Discovery iteration cap reached without a resolve_sink — advisory fallback.
+    return None
 
 
 async def solve_step_chat(

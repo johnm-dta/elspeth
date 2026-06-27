@@ -64,7 +64,7 @@ describe("tutorial teaching moments — render at the right turn", () => {
       expect(screen.getByText(TUTORIAL_ASSUMPTION_CALLOUT)).toBeInTheDocument(),
     );
     expect(screen.queryByText(/received its score/i)).not.toBeInTheDocument();
-    expect(screen.getByText(/top risk it picked or the total it summed/i)).toBeInTheDocument();
+    expect(screen.getByText(/what it chose to include or leave out/i)).toBeInTheDocument();
   });
 
   it("Turn 4 (run) renders the shield-override caveat", () => {

@@ -1,5 +1,4 @@
-### Step 2.5 — Recipe match
+### Step 2.5 — (skipped)
 
-The server emits `recipe_offer` automatically when a recipe matches; you do
-**not** emit this turn yourself. If the user picks "build manually," you
-proceed to Step 3.
+There is no recipe-match step. Once the output is set, the wizard advances
+straight to the transforms, where you build the chain from the user's request.

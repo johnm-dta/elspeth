@@ -1651,18 +1651,15 @@ class TestFixedSchemaSingleKeyFormNoFalseOmitDiagnostic:
 # --------------------------------------------------------------------------
 
 
-def test_recipe_catalog_content_hash_covers_both_recipe_modules() -> None:
-    """The hash folds recipes.py AND guided/recipe_match.py byte content.
+def test_recipe_catalog_content_hash_covers_recipes_module() -> None:
+    """The hash folds recipes.py byte content.
 
-    recipe_match selects which recipe fires and pre-fills slots; recipes.py
-    authors the deterministic pipeline including option-level content. Both
-    are operator-controlled cache inputs, so both must be keyed.
+    recipes.py authors the deterministic pipeline including option-level
+    content; it is the operator-controlled cache input that must be keyed.
     """
     recipes_path = Path(recipes_module.__file__)
-    recipe_match_path = recipes_path.parent / "guided" / "recipe_match.py"
     h = hashlib.sha256()
     h.update(recipes_path.read_bytes())
-    h.update(recipe_match_path.read_bytes())
     assert recipe_catalog_content_hash() == h.hexdigest()
 
 

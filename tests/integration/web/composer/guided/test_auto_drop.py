@@ -162,12 +162,37 @@ def _fake_llm_response_for_passthrough() -> SimpleNamespace:
     )
 
 
+def _post_step_3_transforms_chat(client: TestClient, session_id: str, message: str = "fetch each page and summarise it") -> object:
+    """Send the per-stage transforms prompt via /guided/chat at STEP_3.
+
+    Post sink->step_3 auto-build removal, the transform chain is built here
+    (the STEP_3_TRANSFORMS cold-start path in ``post_guided_chat``), NOT at
+    the sink commit. The ``chain_solver._litellm_acompletion`` mock the caller
+    installed fires on THIS call; ``message`` is arbitrary (the mock ignores
+    it). On a returning (non-raising) mock the response carries the
+    ``propose_chain`` turn in ``next_turn``.
+    """
+    return client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={"message": message, "step_index": "step_3_transforms"},
+    )
+
+
 def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple[dict, str, str]:
     """Drive the wizard to the Step 3 ``propose_chain`` turn.
 
-    Returns (response_body_at_step_3, blob_id, output_path).
+    Returns (chat_response_body_at_step_3, blob_id, output_path).
     Uses ``required_fields=["text"]`` (no classifier keyword) so no recipe
     matches and the chain-solver entry seam fires.
+
+    Post sink->step_3 auto-build removal: committing the sink (the final
+    MULTI_SELECT_WITH_CUSTOM ``chosen=["text"]`` respond) now advances to
+    STEP_3_TRANSFORMS with ``next_turn=None`` and DOES NOT solve a chain. The
+    transform chain is built by the per-stage transforms prompt sent via
+    ``/guided/chat`` (step_index="step_3_transforms"). The SAME
+    ``chain_solver._litellm_acompletion`` mock installed by the caller's
+    ``with patch(...)`` block fires on THIS chat call and produces the
+    ``propose_chain`` turn.
     """
     blob_id, storage_path = _seed_blob(client, session_id)
     output_path = _outputs_path(client, "out.jsonl")
@@ -200,12 +225,19 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
             "sample_rows": [],
         },
     )
-    body = _respond(
+    # Sink commit: advances to STEP_3_TRANSFORMS with next_turn=None (no
+    # auto-build). The mock does NOT fire here.
+    _respond(
         client,
         session_id,
         chosen=["text"],
         custom_inputs=[],
     )
+    # Per-stage transforms prompt builds the chain via /guided/chat. The
+    # caller's mock fires here and stages the propose_chain turn.
+    resp = _post_step_3_transforms_chat(client, session_id)
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
     return body, blob_id, output_path
 
 
@@ -385,28 +417,72 @@ class TestRepairSucceeds:
 
 
 # ---------------------------------------------------------------------------
-# I2: transient LLM failure at solve_chain sites → auto-drop (200), not 500.
+# I2: transient LLM failure at the live solve_chain auto-drop site → 200, not 500.
 # ---------------------------------------------------------------------------
 #
-# Three sites in ``_dispatch_guided_respond`` await ``solve_chain``:
-#   1. step_2_sink_initial_solve      (no recipe match path)
-#   2. step_2_5_build_manually_solve  (recipe offer → build_manually)
-#   3. step_3_repair_solve            (Step 3 repair re-solve)
+# HISTORY — site removal (sink->step_3 auto-build removed):
+# The sink commit (``step_2_sink_initial_solve``) used to auto-build the
+# transform chain via ``solve_chain``; a transient there auto-dropped to
+# freeform. That auto-build is GONE. The sink commit now advances to
+# STEP_3_TRANSFORMS with ``next_turn=None`` and runs NO solver, and the
+# transform chain is built by the per-stage transforms prompt on the
+# ``/guided/chat`` STEP_3 cold-start path. That chat path is **non-load-bearing**:
+# it calls a PLAIN ``solve_chain`` (NOT ``solve_chain_with_auto_drop``), and on a
+# transient it catches the error, abandons the proposal, and falls through to
+# advisory prose — it DOES NOT auto-drop the session to freeform. The new
+# behaviour is pinned by ``test_step_3_chat_coldstart_transient_does_not_auto_drop``.
 #
-# Pre-I2, all three were unwrapped: a LiteLLM API/auth error, timeout, or
+# The remaining LIVE ``solve_chain_with_auto_drop`` site reachable from
+# ``/guided/respond`` is the Step-3 **repair** re-solve (``site="step_3_repair_solve"``,
+# ``_helpers.py``): after an accept whose initial commit fails validation, the
+# repair re-solve runs through the auto-drop wrapper, and a transient there
+# exhausts the solver and drops to freeform. These tests therefore drive to a
+# staged (bad-plugin) ``propose_chain`` and then accept so the failing mock fires
+# on the repair re-solve — the live expression of the auto-drop contract these
+# tests have always pinned. (A regenerate re-solve at ``site="step_3_reject_solve"``
+# shares the same wrapper.)
+#
+# Pre-I2 the solve sites were unwrapped: a LiteLLM API/auth error, timeout, or
 # malformed-response shape (IndexError on empty ``choices``) escaped as an
-# unstructured 500 — bypassing ``mark_solver_exhausted`` and leaving the
-# session wedged mid-step with no ``guided_dropped_to_freeform`` audit
-# record.  These tests pin the new contract from
-# ``_solve_chain_or_auto_drop``.
+# unstructured 500 — bypassing ``mark_solver_exhausted`` and leaving the session
+# wedged mid-step with no ``guided_dropped_to_freeform`` audit record. These
+# tests pin the auto-drop contract from ``solve_chain_with_auto_drop``.
+
+
+def _accept_propose_chain(client: TestClient, session_id: str) -> object:
+    """Accept the staged propose_chain turn (triggers commit + repair re-solve)."""
+    return client.post(
+        f"/api/sessions/{session_id}/guided/respond",
+        json={"chosen": ["accept"]},
+    )
+
+
+def _drive_to_step_3_propose_chain_bad(client: TestClient, session_id: str) -> None:
+    """Drive to a staged (bad-plugin) ``propose_chain`` turn ready for accept.
+
+    The bad-plugin response is a structurally valid ``propose_chain`` (it parses
+    cleanly into a ``ChainProposal``); the plugin invalidity only surfaces at
+    preview/commit time. So the drive's ``/guided/chat`` solve SUCCEEDS (no drop,
+    one success llm_call audit row) and stages the proposal. The subsequent
+    accept fails its commit and triggers the live ``step_3_repair_solve`` re-solve
+    — the seam these I2 tests provoke.
+    """
+    with patch(
+        "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+        new_callable=AsyncMock,
+        return_value=_fake_llm_response_for_bad_plugin(),
+    ):
+        _drive_to_step_3_propose_chain(client, session_id)
 
 
 def _drive_to_step_2_sink_initial_solve_pre_call(client: TestClient, session_id: str) -> str:
-    """Drive to the request that triggers site 1 (step_2_sink_initial_solve).
+    """Drive to the sink-commit request, then on to STEP_3_TRANSFORMS.
 
-    Returns ``session_id`` after Steps 1 and 2 SINGLE_SELECT + SCHEMA_FORM
-    have been answered. The NEXT respond (MULTI_SELECT chosen=['text'])
-    triggers ``solve_chain`` at site 1.
+    Returns ``session_id`` after Steps 1 and 2 SINGLE_SELECT + SCHEMA_FORM have
+    been answered. The NEXT respond (MULTI_SELECT ``chosen=['text']``, via
+    :func:`_post_step_2_sink_intent`) commits the sink and advances to
+    STEP_3_TRANSFORMS with ``next_turn=None`` — it no longer runs a solver
+    (the sink->step_3 auto-build was removed).
     """
     _blob_id, storage_path = _seed_blob(client, session_id)
     output_path = _outputs_path(client, "out.jsonl")
@@ -443,7 +519,11 @@ def _drive_to_step_2_sink_initial_solve_pre_call(client: TestClient, session_id:
 
 
 def _post_step_2_sink_intent(client: TestClient, session_id: str) -> object:
-    """Post the MULTI_SELECT response that triggers site 1's solve_chain call."""
+    """Commit the sink (MULTI_SELECT) → advance to STEP_3_TRANSFORMS.
+
+    Post auto-build removal this runs NO solver; it returns 200 with the step
+    at STEP_3_TRANSFORMS and ``next_turn=None``.
+    """
     return client.post(
         f"/api/sessions/{session_id}/guided/respond",
         json={"chosen": ["text"], "custom_inputs": []},
@@ -474,23 +554,112 @@ class TestI2ChainSolverTransientFailure:
     PROTOCOL_VIOLATION flow (filed as observation
     ``elspeth-obs-8e5b614ca3``) but does not change current behaviour.
 
+    SITE: the original ``step_2_sink_initial_solve`` site no longer exists (the
+    sink->step_3 auto-build was removed). The live ``solve_chain_with_auto_drop``
+    site reachable from ``/guided/respond`` is the Step-3 **repair** re-solve
+    (``site="step_3_repair_solve"``), so these tests now drive to a staged
+    (bad-plugin) ``propose_chain`` (:func:`_drive_to_step_3_propose_chain_bad`)
+    and ACCEPT it (:func:`_accept_propose_chain`): the initial commit fails
+    validation and the repair re-solve fires the failing mock. ``solve_chain``
+    is the same function regardless of site, so every failure mode below raises
+    identically on the repair re-solve. The (non-auto-dropping) chat cold-start
+    path is pinned separately by
+    ``test_step_3_chat_coldstart_transient_does_not_auto_drop``.
+
     Patches ``chain_solver._litellm_acompletion`` (the seam the existing
     auto-drop tests use) to provoke each failure mode. Asserts:
       - HTTP 200 (not 500) with terminal=exited_to_freeform / solver_exhausted.
       - ``guided_dropped_to_freeform`` audit emitted exactly once with the
-        ``validation_result`` payload mandated by spec §9.1.
+        ``validation_result`` payload mandated by spec §9.1. (The drive's
+        bad-plugin chat solve succeeds and emits no drop; the single drop comes
+        from the repair re-solve.)
       - No exception ``str(exc)`` leaks into the response body.
       - ``InvariantError`` from inside ``solve_chain``'s callee chain (a
         genuine server-side invariant violation, NOT an LLM shape failure)
         still propagates as 500 — real server bugs must crash.
     """
 
-    def test_step_2_sink_initial_solve_api_error_auto_drops(self, composer_test_client: TestClient) -> None:
-        """Site 1: a LiteLLM APIError at the no-recipe initial solve auto-drops."""
+    def test_step_3_chat_coldstart_transient_does_not_auto_drop(self, composer_test_client: TestClient) -> None:
+        """Contrast case (the removed site's new behavior): a transient at the
+        STEP_3 ``/guided/chat`` cold-start solve does NOT auto-drop.
+
+        The sink->step_3 auto-build (old ``step_2_sink_initial_solve`` auto-drop
+        site) is gone. The transform chain is now built on the
+        ``/guided/chat`` STEP_3 cold-start path, which calls a PLAIN
+        ``solve_chain`` (NOT ``solve_chain_with_auto_drop``). On a transient it
+        abandons the proposal and falls through to advisory prose via the
+        non-load-bearing ``solve_step_chat_with_auto_drop`` — the session is
+        NOT terminated to freeform and NO ``guided_dropped_to_freeform`` is
+        emitted.
+
+        Double-mock: ``chain_solver._litellm_acompletion`` raises (cold-start
+        solve abandons the proposal) AND ``chat_solver._litellm_acompletion``
+        raises a LiteLLM-typed error (so the advisory ``solve_step_chat`` returns
+        the synthetic-unavailable message → clean 200). A single mock would 500
+        on the unmocked advisory ``solve_step_chat`` real network call.
+        """
         from litellm.exceptions import APIError as LiteLLMAPIError
 
         session_id = _create_session(composer_test_client)
         _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+        # Commit the sink → advance to STEP_3_TRANSFORMS (no solver runs here).
+        sink_resp = _post_step_2_sink_intent(composer_test_client, session_id)
+        assert sink_resp.status_code == 200, sink_resp.json()
+        assert sink_resp.json()["guided_session"]["step"] == "step_3_transforms"
+        assert sink_resp.json()["next_turn"] is None
+
+        api_err = LiteLLMAPIError(
+            status_code=500,
+            message="cold-start solve failed: SECRET_API_KEY=sk-leaks-here",
+            llm_provider="openai",
+            model="gpt-4o",
+        )
+        chat_err = LiteLLMAPIError(
+            status_code=500,
+            message="advisory chat failed: SECRET_API_KEY=sk-leaks-here",
+            llm_provider="openai",
+            model="gpt-4o",
+        )
+        with (
+            patch(
+                "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=api_err,
+            ),
+            patch(
+                "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+                new_callable=AsyncMock,
+                side_effect=chat_err,
+            ),
+        ):
+            resp = _post_step_3_transforms_chat(composer_test_client, session_id)
+
+        # Non-load-bearing: a transient here is a 200 advisory fall-through, NOT
+        # an auto-drop. The session stays at STEP_3_TRANSFORMS; no terminal.
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+        assert body["terminal"] is None, f"chat cold-start transient must NOT auto-drop; got terminal={body['terminal']}"
+        assert body["guided_session"]["terminal"] is None
+        assert body["guided_session"]["step"] == "step_3_transforms"
+        assert body["next_turn"] is None
+        # The advisory fall-through surfaces the synthetic-unavailable message.
+        assert "unavailable" in body["assistant_message"].lower(), body["assistant_message"]
+
+        # No drop event — the chat path never marks the solver exhausted.
+        drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
+        assert drop_invocations == [], f"chat cold-start transient must not emit a drop; got {drop_invocations}"
+
+        # No-leak: neither the cold-start nor the advisory error str escapes.
+        body_text = json.dumps(body)
+        assert "SECRET_API_KEY" not in body_text, "exc str leaked into response body"
+        assert "sk-leaks-here" not in body_text, "exc str leaked into response body"
+
+    def test_step_3_repair_solve_api_error_auto_drops(self, composer_test_client: TestClient) -> None:
+        """Repair re-solve: a LiteLLM APIError on the repair attempt auto-drops."""
+        from litellm.exceptions import APIError as LiteLLMAPIError
+
+        session_id = _create_session(composer_test_client)
+        _drive_to_step_3_propose_chain_bad(composer_test_client, session_id)
 
         api_err = LiteLLMAPIError(
             status_code=500,
@@ -503,7 +672,7 @@ class TestI2ChainSolverTransientFailure:
             new_callable=AsyncMock,
             side_effect=api_err,
         ):
-            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+            resp = _accept_propose_chain(composer_test_client, session_id)
 
         # Must be 200 (auto-drop is a clean wizard outcome) not 500.
         assert resp.status_code == 200, resp.json()
@@ -564,7 +733,7 @@ class TestI2ChainSolverTransientFailure:
             ),
         ],
     )
-    def test_step_2_sink_initial_solve_non_api_litellm_errors_auto_drop(
+    def test_step_3_repair_solve_non_api_litellm_errors_auto_drop(
         self,
         composer_test_client: TestClient,
         exc_factory: Callable[[], Exception],
@@ -572,14 +741,14 @@ class TestI2ChainSolverTransientFailure:
     ) -> None:
         """Non-APIError LiteLLM operational failures follow the auto-drop path."""
         session_id = _create_session(composer_test_client)
-        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+        _drive_to_step_3_propose_chain_bad(composer_test_client, session_id)
 
         with patch(
             "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
             new_callable=AsyncMock,
             side_effect=exc_factory(),
         ):
-            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+            resp = _accept_propose_chain(composer_test_client, session_id)
 
         assert resp.status_code == 200, resp.json()
         body = resp.json()
@@ -744,11 +913,12 @@ class TestI2ChainSolverTransientFailure:
         direct ``solve_chain`` stub (decoupled from chain_solver internals).
         """
         session_id = _create_session(composer_test_client)
-        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+        _drive_to_step_3_propose_chain_bad(composer_test_client, session_id)
 
         # Construct a LiteLLM response with a tool_call name OTHER than
-        # ``emit_turn`` — this triggers ``raise ChainSolverResponseShapeError``
-        # in ``solve_chain``, which the wrapper now catches.
+        # ``emit_turn`` — on the repair re-solve this triggers
+        # ``raise ChainSolverResponseShapeError`` in ``solve_chain``, which the
+        # auto-drop wrapper catches.
         wrong_name_response = SimpleNamespace(
             choices=[
                 SimpleNamespace(
@@ -770,7 +940,7 @@ class TestI2ChainSolverTransientFailure:
             new_callable=AsyncMock,
             return_value=wrong_name_response,
         ):
-            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+            resp = _accept_propose_chain(composer_test_client, session_id)
 
         assert resp.status_code == 200, resp.json()
         terminal = resp.json()["terminal"]
@@ -795,7 +965,7 @@ class TestI2ChainSolverTransientFailure:
         through auto-drop.
         """
         session_id = _create_session(composer_test_client)
-        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+        _drive_to_step_3_propose_chain_bad(composer_test_client, session_id)
 
         wrong_turn_type_response = SimpleNamespace(
             choices=[
@@ -818,7 +988,7 @@ class TestI2ChainSolverTransientFailure:
             new_callable=AsyncMock,
             return_value=wrong_turn_type_response,
         ):
-            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+            resp = _accept_propose_chain(composer_test_client, session_id)
 
         assert resp.status_code == 200, resp.json()
         terminal = resp.json()["terminal"]
@@ -835,7 +1005,7 @@ class TestI2ChainSolverTransientFailure:
         auto-drop.
         """
         session_id = _create_session(composer_test_client)
-        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+        _drive_to_step_3_propose_chain_bad(composer_test_client, session_id)
 
         missing_steps_response = SimpleNamespace(
             choices=[
@@ -858,7 +1028,7 @@ class TestI2ChainSolverTransientFailure:
             new_callable=AsyncMock,
             return_value=missing_steps_response,
         ):
-            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+            resp = _accept_propose_chain(composer_test_client, session_id)
 
         assert resp.status_code == 200, resp.json()
         terminal = resp.json()["terminal"]
@@ -872,7 +1042,7 @@ class TestI2ChainSolverTransientFailure:
         :class:`ChainSolverResponseShapeError`.
         """
         session_id = _create_session(composer_test_client)
-        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+        _drive_to_step_3_propose_chain_bad(composer_test_client, session_id)
 
         malformed_step_response = SimpleNamespace(
             choices=[
@@ -900,7 +1070,7 @@ class TestI2ChainSolverTransientFailure:
             new_callable=AsyncMock,
             return_value=malformed_step_response,
         ):
-            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+            resp = _accept_propose_chain(composer_test_client, session_id)
 
         assert resp.status_code == 200, resp.json()
         terminal = resp.json()["terminal"]
@@ -920,7 +1090,12 @@ class TestI2ChainSolverTransientFailure:
         from elspeth.web.composer.guided.errors import InvariantError
 
         session_id = _create_session(composer_test_client)
-        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+        # Drive to a staged proposal FIRST (the drive's chat solve binds
+        # ``chain_solver.solve_chain``, NOT the ``_guided_solve_chain`` binding
+        # patched below — so the drive is unaffected). The accept's repair
+        # re-solve calls ``_guided_solve_chain.solve_chain``, which we stub to
+        # raise InvariantError.
+        _drive_to_step_3_propose_chain_bad(composer_test_client, session_id)
 
         async def _raise_invariant(**_kwargs):
             raise InvariantError("genuine server-side invariant violation")
@@ -929,7 +1104,7 @@ class TestI2ChainSolverTransientFailure:
             "elspeth.web.sessions._guided_solve_chain.solve_chain",
             new=_raise_invariant,
         ):
-            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+            resp = _accept_propose_chain(composer_test_client, session_id)
 
         assert resp.status_code == 500, resp.json()
         detail = resp.json().get("detail", "")
@@ -999,9 +1174,9 @@ class TestE2ELLMCallAuditPersisted:
             _drive_to_step_3_propose_chain(composer_test_client, session_id)
 
         audits = _extract_llm_call_audits(composer_test_client, session_id)
-        # The wizard fires solve_chain exactly once on the STEP_2_5 → STEP_3
-        # transition (no recipe matched because required_fields=["text"] has
-        # no classifier keyword).
+        # The wizard fires solve_chain exactly once — on the STEP_3 cold-start
+        # ``/guided/chat`` call that builds the chain (the drive does not accept,
+        # so there is no repair re-solve). One SUCCESS row, no others.
         assert len(audits) == 1, f"expected exactly one llm_call_audit row; got {audits}"
         row = audits[0]
         assert row["status"] == "success", row
@@ -1015,15 +1190,20 @@ class TestE2ELLMCallAuditPersisted:
         self,
         composer_test_client: TestClient,
     ) -> None:
-        """A LiteLLMAPIError at the initial solve_chain site fires the auto-drop
+        """A LiteLLMAPIError at the repair re-solve site fires the auto-drop
         AND lands an api_error audit row.  Both audit channels (tool_invocations
         for the drop directive, llm_calls for the LLM-call record) must drain
         in the same ``finally`` block.
+
+        Auto-drop is only reachable after a prior SUCCESSFUL proposal (the
+        drive's bad-plugin chat solve), so the persisted llm_calls carry BOTH a
+        ``success`` row (the drive) and an ``api_error`` row (the failed repair).
+        We assert the api_error row EXISTS rather than pinning a total count.
         """
         from litellm.exceptions import APIError as LiteLLMAPIError
 
         session_id = _create_session(composer_test_client)
-        _drive_to_step_2_sink_initial_solve_pre_call(composer_test_client, session_id)
+        _drive_to_step_3_propose_chain_bad(composer_test_client, session_id)
 
         api_err = LiteLLMAPIError(
             status_code=500,
@@ -1036,16 +1216,19 @@ class TestE2ELLMCallAuditPersisted:
             new_callable=AsyncMock,
             side_effect=api_err,
         ):
-            resp = _post_step_2_sink_intent(composer_test_client, session_id)
+            resp = _accept_propose_chain(composer_test_client, session_id)
 
         # Sanity: the existing auto-drop behavior is preserved (200, dropped).
         assert resp.status_code == 200, resp.json()
 
-        # The whole point of this fix: the LLM-call audit row exists alongside
-        # the existing drop invocation row.
+        # The whole point of this fix: the failed repair lands an api_error
+        # LLM-call audit row alongside the drop invocation row.
         audits = _extract_llm_call_audits(composer_test_client, session_id)
-        assert len(audits) == 1, f"expected exactly one llm_call_audit row; got {audits}"
-        assert audits[0]["status"] == "api_error", audits[0]
+        api_error_rows = [a for a in audits if a["status"] == "api_error"]
+        assert len(api_error_rows) == 1, f"expected exactly one api_error llm_call_audit row; got {audits}"
+        # The drive's successful chat solve also persisted its own row — proves
+        # the channel drains every invocation, success and failure alike.
+        assert any(a["status"] == "success" for a in audits), f"expected a success row from the drive solve; got {audits}"
 
         # And the sibling channel (drop invocation) still fired — proves the
         # two drain calls inside the same finally block are independent.

@@ -18,7 +18,7 @@ only what this module defines (``execute_tool``, ``get_tool_definitions``,
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from typing import Any, Final
 
@@ -45,6 +45,7 @@ from elspeth.web.composer.tools._registry import (
     _BLOB_DISCOVERY_TOOLS,
     _BLOB_MUTATION_TOOL_NAMES,
     _BLOB_MUTATION_TOOLS,
+    _DISCOVERY_TOOL_NAMES,
     _DISCOVERY_TOOLS,
     _MUTATION_TOOL_NAMES,
     _MUTATION_TOOLS,
@@ -64,6 +65,7 @@ from elspeth.web.composer.tools.sessions import (
 __all__ = [
     "_inject_prior_validation",
     "execute_tool",
+    "get_discovery_tool_definitions",
     "get_tool_definitions",
 ]
 
@@ -304,6 +306,52 @@ if _trailing_seen != _TRAILING_TOOL_NAME:
         "and test_trailing_tool_name_is_locked, and consider the cache-miss cost on next deploy."
     )
 del _trailing_seen
+
+
+def get_discovery_tool_definitions(names: Iterable[str]) -> list[dict[str, Any]]:
+    """Return LiteLLM-wrapped tool defs for a READ-ONLY discovery subset.
+
+    The guided per-phase solver (``composer/guided/chat_solver.py``) wires a
+    bounded subset of the discovery tools into its tool palette so the
+    composer model can ``list_sinks`` / ``get_plugin_schema`` at runtime
+    before it resolves a stage. This emitter is the **advertised-surface**
+    half of that path's safety posture: every requested name must be a
+    declared ``ToolKind.DISCOVERY`` tool (``<= _DISCOVERY_TOOL_NAMES``), so a
+    mutation or secret tool can never be offered to the model by mistake.
+
+    The **execution** half (refusing to *dispatch* a non-discovery name even
+    if the model emits one) is enforced separately at the solver's
+    ``execute_tool`` call site — ``execute_tool``'s handler union includes
+    every mutation registry, so advertising the read-only subset is necessary
+    but not sufficient. Both halves are required.
+
+    Returns the same ``{"type": "function", "function": {...}}`` shape
+    ``ComposerServiceImpl._get_litellm_tools`` produces, so the solver can
+    concatenate these with its ``resolve_X`` tool and pass them straight to
+    ``_litellm_acompletion``. Each def is freshly ``deep_thaw``ed from the
+    immutable registry — callers get a mutually-isolated mutable copy.
+
+    Raises:
+        ValueError: if any requested name is not a declared discovery tool.
+    """
+    requested = frozenset(names)
+    unknown = requested - _DISCOVERY_TOOL_NAMES
+    if unknown:
+        raise ValueError(f"get_discovery_tool_definitions: not declared DISCOVERY tools: {sorted(unknown)}")
+    result: list[dict[str, Any]] = []
+    for name in sorted(requested):
+        defn = deep_thaw(_TOOL_DEFS_BY_NAME[name])
+        result.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": defn["name"],
+                    "description": defn["description"],
+                    "parameters": defn["parameters"],
+                },
+            }
+        )
+    return result
 
 
 def _inject_prior_validation(

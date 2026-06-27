@@ -491,14 +491,16 @@ interface ChatPanelProps {
   // freeform fall-through to a guided placeholder (Task 3).
   isTutorial?: boolean;
   /**
-   * Tutorial locked prompt. When set, the guided STEP_1 "Describe what you
-   * want" chat input is prepopulated with this text and locked read-only, so
-   * the tutorial learner steps through the normal guided flow without typing.
-   * Supplied by TutorialGuidedShell (the canonical worked-example prompt +
-   * resolved synthetic URLs). Absent for a normal session (the input behaves
-   * as the editable freeform-intent box).
+   * Tutorial locked prompts, PER GUIDED STAGE. When set, the guided "Describe
+   * what you want" chat input is prepopulated with the CURRENT phase's prompt
+   * (keyed by `guidedSession.step`) and locked read-only, so the tutorial
+   * learner steps through the normal staged flow without typing — each phase
+   * gets only its stage's intent. Supplied by TutorialGuidedShell (per-stage
+   * worked-example prompts; source carries the resolved synthetic URLs). Steps
+   * with no entry (recipe / wire) are confirm-only. Absent for a normal session
+   * (the input behaves as the editable freeform-intent box).
    */
-  lockedChatPrompt?: string;
+  lockedChatPrompt?: Partial<Record<GuidedStep, string>>;
 }
 
 /**
@@ -1289,7 +1291,21 @@ export function ChatPanel({
     );
   }
 
-  if (guidedSession && !guidedSession.terminal && guidedNextTurn) {
+  // STEP_3 begins with NO proposal: the per-stage transforms prompt drives the
+  // build via /guided/chat (cold-start intent=body.message), so there is no
+  // server turn yet. Render the guided surface — crucially the chat box — even
+  // without a next turn so the operator can describe the transforms; otherwise
+  // the panel falls through to the "Preparing…" flash and the build never starts.
+  const atStep3AwaitingTransforms =
+    guidedSession != null &&
+    !guidedSession.terminal &&
+    guidedNextTurn == null &&
+    guidedSession.step === "step_3_transforms";
+  if (
+    guidedSession &&
+    !guidedSession.terminal &&
+    (guidedNextTurn || atStep3AwaitingTransforms)
+  ) {
     return (
       <div
         id="chat-main"
@@ -1360,15 +1376,25 @@ export function ChatPanel({
           <h2 className="guided-step-chat-heading">Describe what you want</h2>
           <ChatInput
             onSend={(content) => void chatGuided(content)}
-            disabled={guidedChatPending}
+            // Gate on BOTH pending flags: `guidedChatPending` blocks
+            // double-submits of a chat in flight; `guidedResponsePending` blocks
+            // a chat WHILE a turn-respond is advancing the step — otherwise the
+            // chat captures the stale `guidedSession.step` and the backend
+            // rejects the step mismatch with 409 (guided.py step-match guard).
+            disabled={guidedChatPending || guidedResponsePending}
             inputRef={inputRef}
             placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
             maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
-            value={lockedChatPrompt}
-            onChange={
-              lockedChatPrompt !== undefined ? () => undefined : undefined
+            // Tutorial: the box is locked read-only and prefilled with the
+            // CURRENT phase's per-stage prompt (recipe/wire have none → empty,
+            // confirm-only). Kept controlled (value defined) across all phases
+            // to avoid controlled↔uncontrolled flips. Normal session: undefined
+            // value → editable freeform-intent box.
+            value={
+              isTutorial ? (lockedChatPrompt?.[guidedSession.step] ?? "") : undefined
             }
-            readOnly={lockedChatPrompt !== undefined}
+            onChange={isTutorial ? () => undefined : undefined}
+            readOnly={isTutorial === true}
           />
         </section>
         <section
@@ -1390,12 +1416,14 @@ export function ChatPanel({
             aria-relevant="additions"
           >
             <GuidedInterpretationReviews sessionId={activeSessionId ?? ""} />
-            <GuidedTurn
-              turn={guidedNextTurn}
-              onSubmit={(body) => void respondGuided(body)}
-              disabled={guidedResponsePending || hasPendingGuidedInterpretations}
-              isTutorial={isTutorial}
-            />
+            {guidedNextTurn && (
+              <GuidedTurn
+                turn={guidedNextTurn}
+                onSubmit={(body) => void respondGuided(body)}
+                disabled={guidedResponsePending || hasPendingGuidedInterpretations}
+                isTutorial={isTutorial}
+              />
+            )}
           </div>
           {guidedResponsePending && (
             <p className="guided-current-decision-pending" role="status">
@@ -1803,7 +1831,9 @@ const GUIDED_WORKFLOW_STEPS: ReadonlyArray<{
 }> = [
   { id: "step_1_source", label: "Source" },
   { id: "step_2_sink", label: "Output" },
-  { id: "step_2_5_recipe_match", label: "Recipe" },
+  // step_2_5_recipe_match is a vestigial, collapsed step (the recipe-offer
+  // deviation was removed; the sink commit hops straight to transforms). It is
+  // intentionally NOT shown in the stepper.
   { id: "step_3_transforms", label: "Transforms" },
   { id: "step_4_wire", label: "Wire" },
   { id: "ready", label: "Ready" },

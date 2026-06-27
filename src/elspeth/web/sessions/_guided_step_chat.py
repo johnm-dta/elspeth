@@ -28,6 +28,8 @@ from dataclasses import dataclass
 import structlog
 
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
+from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import (
     Step1SourceChatResolution,
@@ -37,6 +39,7 @@ from elspeth.web.composer.guided.chat_solver import (
 )
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
+from elspeth.web.composer.state import CompositionState
 
 slog = structlog.get_logger()
 
@@ -215,8 +218,20 @@ async def resolve_step_2_sink_chat_with_auto_drop(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
+    state: CompositionState | None = None,
+    catalog: CatalogService | None = None,
+    secret_service: WebSecretResolver | None = None,
+    max_discovery_iters: int | None = None,
 ) -> Step2SinkChatResult:
-    """Wrap Step-2 ``resolve_sink`` chat with the guided-chat fallback contract."""
+    """Wrap Step-2 ``resolve_sink`` chat with the guided-chat fallback contract.
+
+    ``state`` + ``catalog`` (and optional ``secret_service``) activate the
+    sink discovery-tool loop in :func:`maybe_resolve_step_2_sink_chat`; the
+    route always threads them so the composer model can ``list_sinks`` /
+    ``get_plugin_schema`` before resolving. ``max_discovery_iters`` bounds the
+    loop (the route passes ``settings.composer_max_discovery_turns``); ``None``
+    defers to the solver's own default.
+    """
     from litellm.exceptions import APIError as LiteLLMAPIError
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
@@ -236,6 +251,11 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             temperature=temperature,
             seed=seed,
             recorder=recorder,
+            state=state,
+            catalog=catalog,
+            secret_service=secret_service,
+            user_id=user_id,
+            max_discovery_iters=max_discovery_iters,
         )
         if resolved is None:
             return Step2SinkChatResult(sink_resolution=None, assistant_message=None, fallback_chat=None)

@@ -49,7 +49,14 @@ def resolve_tutorial_allowed_hosts(*, base_url: str) -> Literal["public_only"] |
     try:
         address = ipaddress.ip_address(host)
     except ValueError:
-        # A hostname (e.g. elspeth.foundryside.dev) -> public_only covers it.
+        # A bare hostname. RFC 6761 reserves ``localhost`` (and ``*.localhost``)
+        # for loopback, so the common local-dev base ``http://localhost:PORT``
+        # gets the same tight loopback CIDR as ``127.0.0.1`` — otherwise it would
+        # be misclassified as ``public_only`` and the scraper would block the
+        # synthetic tutorial pages. Any other hostname (e.g.
+        # elspeth.foundryside.dev) -> ``public_only`` covers it.
+        if host == "localhost" or host.endswith(".localhost"):
+            return list(_LOOPBACK_CIDRS)
         return "public_only"
     if address.is_global:
         return "public_only"

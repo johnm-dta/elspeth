@@ -82,7 +82,6 @@ from .._helpers import (
     build_step_1_inspect_and_confirm_turn_from_intent,
     build_step_1_schema_form_turn,
     build_step_1_schema_form_turn_from_resolved,
-    build_step_2_5_recipe_offer_turn,
     build_step_2_multi_select_turn,
     build_step_2_schema_form_turn,
     build_step_2_schema_form_turn_from_resolved,
@@ -100,7 +99,6 @@ from .._helpers import (
     get_current_user,
     handle_step_1_source,
     handle_step_2_sink,
-    match_recipe,
     resolve_step_1_source_chat_with_auto_drop,
     resolve_step_2_sink_chat_with_auto_drop,
     slog,
@@ -198,9 +196,8 @@ def _build_get_guided_turn(
       3. Neither is set → initial state.  Emit ``single_select`` listing
          all registered sink plugins.
 
-    - STEP_2_5_RECIPE_MATCH: deterministically re-run ``match_recipe``; if a
-      match is found, emit ``recipe_offer``.  Returns ``None`` when no
-      recipe matched (session stays at this step but no turn exists).
+    - STEP_2_5_RECIPE_MATCH: vestigial step (the recipe-offer deviation was
+      removed); always returns ``None`` — no live session reaches it.
 
     - STEP_3_TRANSFORMS: if ``step_3_proposal`` is set, emit
       ``propose_chain`` from the staged proposal, unless
@@ -235,7 +232,7 @@ def _build_get_guided_turn(
             # Reaches here only when the chat-apply branch (Task 3) cleared the
             # staging fields after committing — so a manual in-progress plugin
             # switch (chosen_plugin set) still wins above.
-            return build_step_1_schema_form_turn_from_resolved(guided.step_1_result, catalog, tutorial=guided.profile == TUTORIAL_PROFILE)
+            return build_step_1_schema_form_turn_from_resolved(guided.step_1_result, catalog)
         return build_initial_step_1_turn(state, blob_inspection=None, catalog=catalog)
     if step is GuidedStep.STEP_2_SINK:
         # Finding 2 (Codex #10): determine intra-step position and rebuild
@@ -255,13 +252,9 @@ def _build_get_guided_turn(
         # Initial state: no plugin chosen yet.  Emit the sink plugin list.
         return build_step_2_single_select_turn(catalog)
     if step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-        # A recipe_offer TurnRecord exists iff a recipe was matched.
-        # Reconstruct by re-running match_recipe (deterministic).
-        if guided.step_1_result is not None and guided.step_2_result is not None:
-            recipe_match = match_recipe(guided.step_1_result, guided.step_2_result)
-            if recipe_match is not None:
-                return build_step_2_5_recipe_offer_turn(recipe_match)
-        # No recipe matched — no initial turn for this step.
+        # Vestigial step — the recipe-offer deviation was removed; the sink
+        # commit now hops straight to STEP_3. No live session reaches this step,
+        # so there is no rebuildable turn here.
         return None
     if step is GuidedStep.STEP_3_TRANSFORMS:
         if guided.step_3_proposal is not None:
@@ -307,14 +300,7 @@ def _append_server_turn_record(
         emitter="server",
     )
 
-    if current_step is GuidedStep.STEP_2_5_RECIPE_MATCH and guided.step_1_result is not None and guided.step_2_result is not None:
-        staged_offer = match_recipe(guided.step_1_result, guided.step_2_result)
-    else:
-        staged_offer = None
-
     new_guided = _replace(guided, history=(*guided.history, new_record))
-    if staged_offer is not None:
-        new_guided = _replace(new_guided, step_2_5_recipe_offer=staged_offer)
     return new_guided, new_record, turn_type, payload_hash
 
 
@@ -461,54 +447,6 @@ async def get_guided(
                 )
 
                 guided = new_guided
-
-            # Idempotency-path repair: if the session is at STEP_2_5_RECIPE_MATCH
-            # and the staged offer is absent (persisted before the step_2_5_recipe_offer
-            # field was introduced), re-populate it and persist the repaired state so
-            # the POST /respond accept branch can verify the recipe_name.  Without this
-            # repair, sessions that reached STEP_2_5 before this field was added would
-            # always fail the accept binding check with 400.  The offer is
-            # deterministically reconstructable from (step_1_result, step_2_result).
-            if (
-                existing_record_for_step is not None
-                and current_step is GuidedStep.STEP_2_5_RECIPE_MATCH
-                and guided.step_2_5_recipe_offer is None
-                and guided.step_1_result is not None
-                and guided.step_2_result is not None
-            ):
-                recovered_offer = match_recipe(guided.step_1_result, guided.step_2_result)
-                if recovered_offer is not None:
-                    from dataclasses import replace as _replace_repair
-
-                    repaired_guided = _replace_repair(guided, step_2_5_recipe_offer=recovered_offer)
-                    repaired_state = _replace_repair(state, guided_session=repaired_guided)
-                    existing_meta_repair: dict[str, Any] = {}
-                    if state_record is not None and state_record.composer_meta is not None:
-                        existing_meta_repair = dict(deep_thaw(state_record.composer_meta))
-                    repair_meta = {**existing_meta_repair, "guided_session": repaired_guided.to_dict()}
-                    repaired_state_d = repaired_state.to_dict()
-                    repair_data = CompositionStateData(
-                        sources=repaired_state_d["sources"],
-                        nodes=repaired_state_d["nodes"],
-                        edges=repaired_state_d["edges"],
-                        outputs=repaired_state_d["outputs"],
-                        metadata_=repaired_state_d["metadata"],
-                        is_valid=False,
-                        validation_errors=None,
-                        composer_meta=repair_meta,
-                    )
-                    state_record_out = await service.save_composition_state(
-                        session_id,
-                        repair_data,
-                        # Idempotency repair: re-populating ``step_2_5_recipe_offer``
-                        # that was missing on a session created before that field
-                        # was introduced. The repair restores a derived seed value,
-                        # not a new convergence — ``session_seed`` is the closest
-                        # existing provenance category. See merge commit message
-                        # for the guided-vs-enum scope decision.
-                        provenance="session_seed",
-                    )
-                    guided = repaired_guided
 
             # Build response.  On re-fetch the same turn is returned (deterministic
             # rebuild) and the payload_hash matches what was recorded on first visit.
@@ -1469,7 +1407,7 @@ async def post_guided_respond(
 
             # Run side-effect dispatcher if the session is not yet terminal.
             # The dispatcher calls step handlers (handle_step_1_source,
-            # handle_step_2_sink, handle_step_2_5_recipe_apply) and emits
+            # handle_step_2_sink, handle_step_3_chain_accept) and emits
             # the next turn based on the updated step + turn type.
             next_turn: Any | None = None
             settings = request.app.state.settings
@@ -2020,8 +1958,17 @@ async def post_guided_chat(
                             **dict(source_resolution.options),
                             "path": source_blob.storage_path,
                         },
+                        # observed_columns is backfilled from the data at the
+                        # commit convergence point (handle_step_1_source) when the
+                        # LLM left it empty — see that handler. Doing it here would
+                        # miss the schema_form re-submit path, which also commits
+                        # through handle_step_1_source.
                         observed_columns=source_resolution.observed_columns,
                         sample_rows=source_resolution.sample_rows,
+                        # The composer chose the source NODE's invalid-row routing
+                        # while resolving the source from chat; carry it through so
+                        # the commit and the re-rendered schema_form agree.
+                        on_validation_failure=source_resolution.on_validation_failure,
                     )
                     data_dir: str | None = str(settings.data_dir) if settings.data_dir else None
                     handler_result = handle_step_1_source(
@@ -2108,9 +2055,7 @@ async def post_guided_chat(
                             "step_1_result is None after successful handle_step_1_source — "
                             "handler set tool_result.success=True but did not set step_1_result"
                         )
-                    next_turn = build_step_1_schema_form_turn_from_resolved(
-                        applied_step_1_result, catalog, tutorial=guided.profile == TUTORIAL_PROFILE
-                    )
+                    next_turn = build_step_1_schema_form_turn_from_resolved(applied_step_1_result, catalog)
                     next_turn_type = TurnType(next_turn["type"])
                     next_payload_hash = stable_hash(next_turn["payload"])
                     new_record = TurnRecord(
@@ -2194,6 +2139,12 @@ async def post_guided_chat(
                     temperature=settings.composer_temperature,
                     seed=settings.composer_seed,
                     recorder=recorder,
+                    # Activate the sink discovery loop: the composer model can
+                    # list_sinks / get_plugin_schema before it resolves.
+                    state=state,
+                    catalog=catalog,
+                    secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
+                    max_discovery_iters=settings.composer_max_discovery_turns,
                 )
                 chat_result = sink_chat_result.fallback_chat
                 sink_resolution = sink_chat_result.sink_resolution
@@ -2399,17 +2350,31 @@ async def post_guided_chat(
                         # (repair_context stays reserved for the genuine
                         # validation-repair loop on /guided/respond). On the FIRST
                         # STEP_3 chat (no prior proposal) there is nothing to
-                        # revise yet, so gate to None — a cold start is a plain
-                        # initial propose, not a revision.
-                        revise_context = body.message if guided.step_3_proposal is not None else None
+                        # revise yet, so the user's message rides as ``intent`` —
+                        # a cold start is a plain initial propose built FROM the
+                        # request (the freeform mirror), not a revision.
+                        if guided.step_3_proposal is not None:
+                            revise_context = body.message
+                            intent = None
+                        else:
+                            revise_context = None
+                            intent = body.message
                         proposal = await solve_chain(
                             model=settings.composer_model,
                             source=guided.step_1_result,
                             sink=guided.step_2_result,
+                            intent=intent,
                             revise_context=revise_context,
                             recorder=recorder,
                             temperature=settings.composer_temperature,
                             seed=settings.composer_seed,
+                            # Discovery loop: the STEP_3 chat revise can look up real
+                            # transform plugins + schemas before re-proposing.
+                            state=state,
+                            catalog=catalog,
+                            secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
+                            user_id=user.user_id,
+                            max_discovery_iters=settings.composer_max_discovery_turns,
                         )
                     except (
                         _LLMAPIError,

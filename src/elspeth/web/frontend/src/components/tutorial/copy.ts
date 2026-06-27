@@ -77,14 +77,14 @@ export const TURN_7_LEARNING_BULLETS = [
 
 /**
  * Teaching moment 1 (spec §"Teaching moments"): names that the LLM transform
- * made a REVIEWABLE assumption (e.g. summing the cost lines, choosing the
- * top-impact risk). Worded so the learner does not over-generalise into
- * "assumptions are fine, ignore them": the assumption is surfaced, not hidden,
- * and is correctable via the intent box.
+ * made a REVIEWABLE assumption (e.g. what to include in the summary and what to
+ * leave out). Worded so the learner does not over-generalise into "assumptions
+ * are fine, ignore them": the assumption is surfaced, not hidden, and is
+ * correctable via the intent box.
  */
 export const TUTORIAL_ASSUMPTION_CALLOUT =
-  "The LLM made an assumption here — it summed the per-line costs into a total " +
-  "and picked the highest-impact entry as the top risk. This is exactly the " +
+  "The LLM made an assumption here — it decided what each page was about and " +
+  "what was important enough to keep in a short summary. This is exactly the " +
   "kind of inference you review: every assumption is surfaced in the audit " +
   "trail, and you can correct it by telling the composer what you meant.";
 

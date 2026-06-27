@@ -109,13 +109,17 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   const stepChatInput = stepChat.getByLabel("Message input");
   const stepChatSend = stepChat.getByRole("button", { name: "Send message" });
 
-  // The tutorial prompt is prepopulated AND locked (read-only) — the learner
-  // types nothing. Wait for the locked worked-example prompt to populate (the
-  // synthetic URLs are fetched + appended async; the box is gated until they
-  // resolve), then just press Send to submit it verbatim.
+  // The tutorial is the NORMAL guided flow with the intent PRELOCKED at every
+  // phase — that lock is the ONLY difference from guided mode. The learner types
+  // nothing and never picks from a widget: on each LLM-driven phase they press
+  // Send on the prelocked worked-example prompt, and the orchestrator LLM builds
+  // THAT phase via the apply-capable /guided/chat drivers (resolve_source →
+  // resolve_sink → propose_chain), each extracting its part of the one prompt.
+  // We therefore drive each phase by Send (once per phase) and advance through
+  // the structured result via the stage primaries. Wait for the locked prompt to
+  // populate (synthetic URLs are fetched + appended async).
   await expect(stepChatInput).toBeVisible({ timeout: 30_000 });
   await expect(stepChatInput).not.toHaveValue("", { timeout: 30_000 });
-  await stepChatSend.click();
 
   // Stage primary affordances, in priority order. "Confirm wiring" is the wire
   // gate (D12): it stays disabled until the stage's interpretation cards are
@@ -124,7 +128,28 @@ async function driveGuidedWalk(page: Page): Promise<void> {
     page.getByRole("button", { name: "Apply recipe", exact: true }),
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     page.getByRole("button", { name: "Continue", exact: true }),
+    // Output required-fields turn (multi_select_with_custom): the sink the LLM
+    // built is observed-mode (pass-all-through), and the real output fields come
+    // from the downstream transforms — so the correct, designed answer here is
+    // the escape, not ticking the source's `url` column. Only renders on this
+    // one turn, so it never preempts another stage's primary.
+    page.getByRole("button", { name: "Let source decide (pass all fields through)", exact: true }),
   ];
+
+  // The phases the LLM builds from intent (source/sink/transforms). Recipe + Wire
+  // are confirm-only (no chat). Labels come from the workflow stepper.
+  const drivenPhases = new Set(["Source", "Output", "Transforms"]);
+
+  // Active guided phase, read from the stepper's aria-current step — used to send
+  // the locked prompt exactly ONCE per phase (re-sending mid-build would
+  // re-trigger the driver).
+  async function currentPhase(): Promise<string | null> {
+    const label = page.locator(".guided-workflow-step--current .guided-workflow-label").first();
+    const text = await label.textContent().catch(() => null);
+    return text ? text.trim() : null;
+  }
+
+  let lastDrivenPhase: string | null = null;
   const deadline = Date.now() + 420_000;
   while (Date.now() < deadline) {
     // Done once the guided surface is replaced by the run turn.
@@ -133,6 +158,7 @@ async function driveGuidedWalk(page: Page): Promise<void> {
 
     await resolveVisibleReviews(page);
 
+    // 1. Advance through the structured result via an enabled stage primary.
     let advanced = false;
     for (const primary of primaries) {
       if (
@@ -144,7 +170,23 @@ async function driveGuidedWalk(page: Page): Promise<void> {
         break;
       }
     }
-    if (!advanced) await page.waitForTimeout(1_000);
+    if (advanced) {
+      await page.waitForTimeout(750);
+      continue;
+    }
+
+    // 2. No primary yet — drive the CURRENT LLM phase with the locked prompt. A
+    //    confirm primary (Continue/Apply recipe) appears once the result renders.
+    const phase = await currentPhase();
+    const canSend = await stepChatSend.isEnabled().catch(() => false);
+    if (canSend && phase !== null && drivenPhases.has(phase) && phase !== lastDrivenPhase) {
+      await stepChatSend.click().catch(() => {});
+      lastDrivenPhase = phase;
+      await page.waitForTimeout(2_000); // let the /guided/chat round-trip settle
+      continue;
+    }
+
+    await page.waitForTimeout(1_000);
   }
   throw new Error("guided walk never reached the run turn before the deadline");
 }

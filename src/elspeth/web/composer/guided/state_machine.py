@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
@@ -40,14 +40,6 @@ from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_
 # Pre-v6 persisted sessions are intentionally incompatible with v6: the
 # operator must delete the guided sessions DB before deploying this change.
 GUIDED_SESSION_SCHEMA_VERSION = 6
-
-if TYPE_CHECKING:
-    # Imported for type annotations only — avoids a circular dependency.
-    # recipe_match.py imports state_machine.py (SourceResolved, SinkResolved);
-    # a runtime import of RecipeMatch here would create a cycle.
-    # RecipeMatch is a frozen dataclass; no freeze_fields needed on GuidedSession
-    # for this field — frozen dataclass instances are already immutable.
-    from elspeth.web.composer.guided.recipe_match import RecipeMatch
 
 
 class TerminalKind(StrEnum):
@@ -285,16 +277,6 @@ class GuidedSession:
     reconstruct the full SinkOutputResolved and clears it in the same atomic
     replace(); it is always None after Step 2 completes.
 
-    ``step_2_5_recipe_offer`` is a mid-Step-2.5 staging field.  The Step 2.5
-    dispatcher writes the emitted ``RecipeMatch`` into it immediately before
-    emitting the RECIPE_OFFER turn.  The recipe-accept branch in the dispatcher
-    reads it to verify that the client-supplied ``recipe_name`` matches the
-    recipe that was actually offered — binding the acceptance to the server-emitted
-    offer and preventing a crafted client from accepting a different recipe.  The
-    field is cleared (set to None) in the same atomic replace() that consumes it
-    (the accept-to-wire path).  It is always None when the session is not at
-    STEP_2_5_RECIPE_MATCH.
-
     ``step_2_chosen_plugin`` is a mid-Step-2 staging field.  The Step-2
     SINGLE_SELECT dispatcher writes the chosen sink plugin name into it
     immediately before emitting the SCHEMA_FORM turn.  The SCHEMA_FORM
@@ -322,7 +304,6 @@ class GuidedSession:
     transition_consumed: bool = False
     step_1_source_intent: SourceIntent | None = None
     step_2_sink_intent: SinkIntent | None = None
-    step_2_5_recipe_offer: RecipeMatch | None = None
     step_2_chosen_plugin: str | None = None
     step_3_edit_index: int | None = None
     # Phase A slice 5 — per-step chat history persistence.
@@ -388,7 +369,6 @@ class GuidedSession:
             "transition_consumed": self.transition_consumed,
             "step_1_source_intent": self.step_1_source_intent.to_dict() if self.step_1_source_intent is not None else None,
             "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
-            "step_2_5_recipe_offer": self.step_2_5_recipe_offer.to_dict() if self.step_2_5_recipe_offer is not None else None,
             "step_2_chosen_plugin": self.step_2_chosen_plugin,
             "step_3_edit_index": self.step_3_edit_index,
             "chat_history": [
@@ -435,14 +415,8 @@ class GuidedSession:
             terminal_raw = d["terminal"]
             source_intent_raw = d["step_1_source_intent"]
             sink_intent_raw = d["step_2_sink_intent"]
-            recipe_offer_raw = d["step_2_5_recipe_offer"]
             step_2_chosen_plugin_raw = d["step_2_chosen_plugin"]
             step_3_edit_index_raw = d["step_3_edit_index"]
-            # Deferred import to avoid a circular dependency at module level.
-            # recipe_match.py imports from state_machine.py; importing RecipeMatch
-            # at module level here would create a cycle.
-            from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
-
             # Phase A slice 5 chat-history fields.  Tier-1 strict: every entry
             # must declare role / content / seq / step / ts_iso.  Per CLAUDE.md
             # "Our data crash on any anomaly" — no coercion of missing keys
@@ -476,7 +450,6 @@ class GuidedSession:
                 transition_consumed=d["transition_consumed"],
                 step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
-                step_2_5_recipe_offer=_RecipeMatch.from_dict(recipe_offer_raw) if recipe_offer_raw is not None else None,
                 step_2_chosen_plugin=str(step_2_chosen_plugin_raw) if step_2_chosen_plugin_raw is not None else None,
                 step_3_edit_index=int(step_3_edit_index_raw) if step_3_edit_index_raw is not None else None,
                 chat_history=chat_history,
@@ -575,8 +548,6 @@ def step_advance(
         return _advance_step_1(session, response, current_turn_type)
     if session.step is GuidedStep.STEP_2_SINK:
         return _advance_step_2(session, response, current_turn_type)
-    if session.step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-        return _advance_step_2_5(session, response, current_turn_type)
     if session.step is GuidedStep.STEP_3_TRANSFORMS:
         return _advance_step_3(session, response, current_turn_type)
     if session.step is GuidedStep.STEP_4_WIRE:
@@ -706,65 +677,21 @@ def _advance_step_2(
             tool_name="guided_step_advanced",
             arguments={
                 "prev_step": GuidedStep.STEP_2_SINK.value,
-                "next_step": GuidedStep.STEP_2_5_RECIPE_MATCH.value,
+                "next_step": GuidedStep.STEP_3_TRANSFORMS.value,
                 "reason": "user_advanced",
             },
         ),
     ]
+    # The sink commit advances straight to the transform build. The composer
+    # builds the chain from the user's originating request (mirror freeform);
+    # there is no STEP_2_5 recipe-match interstitial.
     new_sess = replace(
         session,
-        step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+        step=GuidedStep.STEP_3_TRANSFORMS,
         step_2_result=sink,
         step_2_sink_intent=None,  # consumed; clear to prevent misread by later steps
     )
     return (new_sess, None, None, directives)
-
-
-def _advance_step_2_5(
-    session: GuidedSession,
-    response: TurnResponse,
-    turn_type: TurnType,
-) -> _StepAdvanceResult:
-    """Handle a Step 2.5 (recipe match) response.
-
-    Two valid paths:
-    - chosen == ["accept"]: the session stays at STEP_2_5 with no directive.
-      The endpoint handler (Task 3.3 / Errata C2) detects response["chosen"] ==
-      ["accept"] and invokes ``_execute_apply_pipeline_recipe`` to commit the
-      recipe, then moves the session to STEP_4_WIRE and emits confirm_wiring.
-      step_advance is pure and does not run apply_recipe; emitting
-      emit_turn_answered is the handler's responsibility.
-    - chosen == ["build_manually"]: advance to STEP_3_TRANSFORMS with a
-      ``guided_step_advanced`` directive.
-
-    Any other chosen value is a protocol violation — raises ValueError.
-    Non-RECIPE_OFFER turn types are intra-step turns; no advance.
-    """
-    if turn_type is not TurnType.RECIPE_OFFER:
-        return (session, None, None, [])
-
-    chosen = response["chosen"] or []
-    if list(chosen) == ["accept"]:
-        # Endpoint handler reads response["chosen"] == ["accept"] and runs
-        # apply_recipe (Errata C2). step_advance leaves the session at
-        # STEP_2_5 unchanged; the handler commits, advances to STEP_4_WIRE, and
-        # emits confirm_wiring. No directive here — the handler emits
-        # emit_turn_answered.
-        return (session, None, None, [])
-    if list(chosen) == ["build_manually"]:
-        directives = [
-            GuidedAuditDirective(
-                tool_name="guided_step_advanced",
-                arguments={
-                    "prev_step": GuidedStep.STEP_2_5_RECIPE_MATCH.value,
-                    "next_step": GuidedStep.STEP_3_TRANSFORMS.value,
-                    "reason": "user_advanced",
-                },
-            ),
-        ]
-        new_sess = replace(session, step=GuidedStep.STEP_3_TRANSFORMS)
-        return (new_sess, None, None, directives)
-    raise ValueError(f"unexpected chosen for recipe_offer: {chosen!r}")
 
 
 def _advance_step_3(

@@ -151,6 +151,25 @@ def inspect_blob_content(
     )
 
 
+def observed_columns_from_content(*, content: bytes, filename: str, mime_type: str) -> tuple[str, ...]:
+    """Derive observed column names from inline source content.
+
+    A thin wrapper over :func:`inspect_blob_content` that returns just the
+    observed headers (the empty tuple when none are detectable). Used to
+    backfill ``observed_columns`` for an inline chat-resolved source when the
+    LLM's ``resolve_source`` left them empty — ``observed_columns`` is a *fact*
+    about the data, not a Tier-3 claim to trust, so deriving it authoritatively
+    from the bytes is the right move when the model omits it.
+
+    Caveat (deliberate): the underlying scan is bounded to ``_MAX_BYTES`` /
+    ``_MAX_ROWS``, so callers should prefer a non-empty LLM-supplied column list
+    when one exists (it may have seen the full, possibly ragged, content) and
+    fall back to this only when that list is empty.
+    """
+    facts = inspect_blob_content(content=content, filename=filename, mime_type=mime_type)
+    return facts.observed_headers or ()
+
+
 def inspect_csv_source_content(
     *,
     content: bytes,

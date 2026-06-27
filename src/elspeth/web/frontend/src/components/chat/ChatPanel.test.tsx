@@ -481,11 +481,35 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     const workflow = screen.getByRole("list", { name: /guided workflow/i });
-    for (const label of ["Source", "Output", "Recipe", "Transforms", "Wire", "Ready"]) {
+    for (const label of ["Source", "Output", "Transforms", "Wire", "Ready"]) {
       expect(workflow).toHaveTextContent(label);
     }
     expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
       "Source",
+    );
+  });
+
+  it("renders the chat box at step_3 with NO proposal (per-stage transforms entry, not a panel-less fall-through)", () => {
+    // STEP_3 begins with no server turn: the per-stage transforms prompt drives
+    // the build via /guided/chat (cold-start). The guided surface — crucially the
+    // chat box — MUST render so the operator can describe the transforms; a
+    // missing turn must NOT fall through to the freeform body / loading flash.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: null,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    const chatMain = container.querySelector("#chat-main");
+    expect(chatMain?.classList.contains("chat-panel--guided")).toBe(true);
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    // Transforms is the current stepper step (not the vestigial Recipe).
+    expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
+      "Transforms",
     );
   });
 

@@ -17,6 +17,12 @@ from tests.unit.web.sessions.routes._wire_fixtures import (  # P3 helper; see no
     make_wire_ready_session_and_state,
 )
 
+# TUTORIAL_PROFILE now carries advisor_checkpoints=False (matches live guided);
+# the gate short-circuits to COMPLETE before the provider is reached. The gate-
+# behavior cases below need an advisor-ON profile to exercise the sign-off path,
+# so use a synthetic clone that flips only the advisor toggle.
+ADVISOR_ON_PROFILE = dataclasses.replace(TUTORIAL_PROFILE, advisor_checkpoints=True)
+
 
 def _service(verdict: AdvisorCheckpointVerdict | None) -> MagicMock:
     svc = MagicMock()
@@ -82,7 +88,7 @@ async def test_empty_profile_completes_with_zero_provider_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_custom_inputs_never_acknowledge_unavailable_escape() -> None:
-    session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     session = dataclasses.replace(session, advisor_checkpoint_passes_used=2)
     svc = _service(
         AdvisorCheckpointVerdict(
@@ -113,7 +119,26 @@ async def test_custom_inputs_never_acknowledge_unavailable_escape() -> None:
 
 @pytest.mark.asyncio
 async def test_tutorial_profile_clean_completes() -> None:
+    # CHANGE 2: TUTORIAL_PROFILE now carries advisor_checkpoints=False (matches
+    # live guided), so the tutorial wire-confirm completes clean on a valid
+    # pipeline WITHOUT the terminal advisor sign-off — the gate short-circuits
+    # before the provider is reached and never touches the pass counter.
     session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    svc = _service(None)  # advisor must NOT be called for the advisor-off profile
+    _state, guided, _turn = await _dispatch(session, state, svc)
+    assert guided.terminal is not None
+    assert guided.terminal.kind is TerminalKind.COMPLETED
+    assert guided.advisor_checkpoint_passes_used == 0
+    svc.run_signoff_checkpoint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_advisor_on_clean_verdict_completes() -> None:
+    # Positive gate path: an advisor-ON profile + a clean (non-blocking) verdict
+    # COMPLETES, having awaited the provider exactly once and incremented the
+    # pass counter. Distinct from the escape-completion path, which completes
+    # WITHOUT calling the provider.
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
     _state, guided, _turn = await _dispatch(session, state, svc)
     assert guided.terminal is not None
@@ -124,7 +149,7 @@ async def test_tutorial_profile_clean_completes() -> None:
 
 @pytest.mark.asyncio
 async def test_tutorial_profile_flagged_does_not_complete() -> None:
-    session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: x"))
     _state, guided, next_turn = await _dispatch(session, state, svc)
     assert guided.terminal is None  # re-emit a revise turn, never COMPLETED
@@ -134,7 +159,7 @@ async def test_tutorial_profile_flagged_does_not_complete() -> None:
 
 @pytest.mark.asyncio
 async def test_tutorial_profile_missing_service_fails_closed_invariant() -> None:
-    session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     _state, guided, next_turn = await _dispatch(session, state, None)
     assert guided.terminal is None
     assert next_turn is not None
@@ -143,7 +168,7 @@ async def test_tutorial_profile_missing_service_fails_closed_invariant() -> None
 
 @pytest.mark.asyncio
 async def test_tutorial_profile_missing_budget_fails_closed_invariant() -> None:
-    session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
     _state, guided, next_turn = await _dispatch(session, state, svc, max_passes=None)
     assert guided.terminal is None
@@ -160,7 +185,7 @@ async def test_acknowledged_unavailable_escape_completes_cross_request() -> None
     # custom_inputs is None), and run_wire_signoff must COMPLETE without re-calling
     # the provider. Guards against a future guard-tightening silently breaking the
     # escape path with no failing test.
-    session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
+    session, state = make_wire_ready_session_and_state(profile=ADVISOR_ON_PROFILE)
     session = dataclasses.replace(
         session,
         advisor_checkpoint_passes_used=3,

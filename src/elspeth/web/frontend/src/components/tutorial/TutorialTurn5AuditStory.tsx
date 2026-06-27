@@ -92,10 +92,9 @@ export function TutorialTurn5AuditStory({
             </div>
           </dl>
           <p>
-            If someone asks how the LLM derived a project's facts — the top
-            risk it picked or the total it summed — the run has the prompt,
-            response, model details, source hash, and plugin versions tied
-            together.
+            If someone asks how the LLM wrote a page's summary — what it chose
+            to include or leave out — the run has the prompt, response, model
+            details, source hash, and plugin versions tied together.
           </p>
           <div className="tutorial-actions">
             <button type="button" className="btn btn-primary" onClick={onContinue}>

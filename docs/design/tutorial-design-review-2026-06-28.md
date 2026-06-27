@@ -64,10 +64,12 @@ visible effect).
 - **`.visually-hidden` leak** (found in the back-half filmstrip): the class was undefined, so SR-only status text ("… needs review") rendered visibly above every approval card. Aliased onto `.sr-only` in `base.css` — fixes 4 components.
 - **Tests updated** for the intentional behaviour changes (`GuidedHistory` fallback→"Decided" + de-dup; stepper 6→5 columns + mobile breakpoint); full touched-area suite green (565/565).
 
-**Remaining (small / needs a separate call):**
-- **M6 backend** — emit a human `summary` per completed turn so the recap reads richer than "Decided".
-- **m7** `null` source still appears in the first-run picker. Now lower-impact (the picker is de-emphasised by m4 and the learner uses Send); a clean fix is a backend/catalog tutorial-filter rather than a frontend hack — not done.
-- **m8** `.tutorial-run-discarded` (one undefined class on the run turn's discarded-rows note) — minor, not yet styled.
+**Also fixed:** **m8** `.tutorial-run-discarded` now styled (subdued warning note).
+
+**Remaining — investigated; both are guided-ENGINE backend changes, not the quick fixes the "minor" label implied. The user-visible jank is already resolved (see below); these are enrichments deferred to a properly-designed, test-covered follow-up:**
+
+- **M6 backend** (richer "Decisions so far"). The frontend already removed the jank (no "Single select"; de-dup; "Decided"). Richer text ("Source: web_scrape over 3 URLs") requires the **chat-resolve path** (`guided.py` ~2096 source / ~2273 sink / ~2448 transforms) to stamp a summary derived from the *applied* result onto the completed-step `TurnRecord`. The manual `/guided/respond` path already summarizes (`_summarize_guided_response`, `_helpers.py:2399`); the chat (`/guided/chat`) path emits the *next* turn's record without summarizing the resolution. This is **audit/history bookkeeping** — do it deliberately with audit-event + history tests, not hastily.
+- **m7** (`null` source in the first-run picker). Emitted by `build_initial_step_1_turn` → `_build_step_1_single_select_turn` (`emitters.py:507`), which has no tutorial context. **`WorkflowProfile` carries no `kind` discriminator** (only toggles; the operator is actively minimizing it — `9900ac6d7` removed `entry_seed`), so a clean tutorial-only filter needs a first-class profile signal, not a fragile `bookends`-proxy hack. Low impact now (the picker is de-emphasised by m4 and the learner uses Send). Recommend a profile-level decision before implementing.
 
 **Coverage boundary:** visual evidence covers welcome → source → output (the LLM walk
 driver stalls at the output `single_select` — a harness limitation, not a product

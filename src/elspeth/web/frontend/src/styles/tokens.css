@@ -164,6 +164,15 @@
   --line-height-normal:  1.5;
   --line-height-relaxed: 1.7;
 
+  /* ── Font weights ────────────────────────────────────────────────────────── */
+  --font-weight-regular:  400;
+  --font-weight-medium:   500;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+
+  /* ── Brand wordmark tracking — JetBrains Mono, uppercase ─────────────────── */
+  --tracking-wordmark: 0.18em;
+
   /* ── Spacing ─────────────────────────────────────────────────────────────── */
   --space-2xs: 2px;          /* chip insets, badge padding (covers the 2px axis) */
   --space-xs:  4px;

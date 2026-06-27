@@ -83,7 +83,7 @@
   font-family: var(--font-mono);
   font-weight: 700;
   font-size: var(--font-size-sm);
-  letter-spacing: 0.18em;
+  letter-spacing: var(--tracking-wordmark);
   text-transform: uppercase;
 }
 

@@ -38,6 +38,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
+from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -228,6 +229,16 @@ class TestStep1Advance:
         assert cs is not None
         assert cs["sources"].get("source") is not None
         assert cs["sources"]["source"]["plugin"] == "csv"
+        # Egress (the OTHER path the original leak was demonstrated on — the
+        # schema_form submit via /guided/respond, not just /guided/chat): this
+        # blob-backed source's absolute storage_path must NOT reach the wire. The
+        # committed source carries no blob_ref (manual set_source strips it), so
+        # redact_guided_snapshot_storage_paths cross-references the GuidedSession
+        # snapshot's retained blob_ref to mask both the committed source path AND
+        # the composer_meta snapshot path.
+        assert cs["sources"]["source"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+        assert cs["composer_meta"]["guided_session"]["step_1_result"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+        assert storage_path not in json.dumps(body)
 
     def test_step_2_single_select_lists_sink_plugins(self, composer_test_client: TestClient) -> None:
         """The step-2 initial turn is single_select listing registered sink plugins."""

@@ -3294,3 +3294,97 @@ def redact_source_storage_path(state_dict: dict[str, Any]) -> dict[str, Any]:
     if sources_changed and redacted_sources is not None:
         redacted["sources"] = redacted_sources
     return redacted
+
+
+def redact_guided_snapshot_storage_paths(
+    sources: Mapping[str, Any] | None,
+    composer_meta: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Redact blob storage paths missed by :func:`redact_source_storage_path` for
+    guided-mode sources, using the persisted GuidedSession snapshot's ``blob_ref``
+    as a no-DB-lookup signal.
+
+    Why this exists: :func:`redact_source_storage_path` keys off ``blob_ref`` in a
+    source's options. The guided flow commits blob-backed sources through the
+    manual ``set_source`` path (``guided/steps.py``), which REJECTS/strips
+    ``blob_ref`` because it cannot prove ``path == storage_path``. So the committed
+    source carries the absolute ``storage_path`` with NO ``blob_ref`` and slips
+    past the source-keyed redaction. The co-located GuidedSession snapshot
+    persisted in ``composer_meta`` (``guided_session.step_1_result``) DID retain
+    ``blob_ref`` (the by-storage_path enrichment in ``guided/steps.py``), so a
+    ``blob_ref`` there is an authoritative, DB-lookup-free signal that the source
+    is blob-backed.
+
+    Closes the two HTTP-response (``_state_response``) egress channels of the same
+    storage_path that the source-keyed redaction misses for guided sources:
+      1. ``composition_state.composer_meta.guided_session.step_1_result.options.path``
+         — the snapshot itself (serialized unredacted), and
+      2. ``composition_state.sources.<name>.options.path`` — the committed source,
+         matched to the snapshot's blob-backed path so operator-typed (non-blob)
+         sources are left untouched.
+
+    Both ``"path"`` and ``"file"`` are treated as storage-path carriers (mirrors
+    :func:`redact_source_storage_path`). Returns shallow-redacted copies of
+    ``(sources, composer_meta)``; inputs are never mutated. When there is no
+    blob-backed guided snapshot (freeform state, operator-typed path, or no source
+    yet), the inputs are returned unchanged.
+    """
+    sources_out = dict(sources) if isinstance(sources, Mapping) else None
+    meta_out = dict(composer_meta) if isinstance(composer_meta, Mapping) else None
+
+    # Staged membership guards: each narrows the level below to a Mapping, so the
+    # shallow-copy chain never indexes into a None and stays type-safe.
+    if not isinstance(composer_meta, Mapping):
+        return sources_out, meta_out
+    guided = composer_meta.get("guided_session")
+    if not isinstance(guided, Mapping):
+        return sources_out, meta_out
+    snapshot = guided.get("step_1_result")
+    if not isinstance(snapshot, Mapping):
+        return sources_out, meta_out
+    snap_options = snapshot.get("options")
+    # Only a blob_ref on the snapshot marks the source as blob-backed; without it
+    # the source path is operator-typed and must NOT be redacted.
+    if not isinstance(snap_options, Mapping) or "blob_ref" not in snap_options:
+        return sources_out, meta_out
+
+    blob_backed_paths = {snap_options[key] for key in ("path", "file") if isinstance(snap_options.get(key), str)}
+
+    # Channel 1 (the snapshot itself): shallow-copy the composer_meta chain down to
+    # the snapshot options and mask its storage-path carriers.
+    snap_options_redacted = dict(snap_options)
+    for key in ("path", "file"):
+        if key in snap_options_redacted:
+            snap_options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+    snapshot_redacted = dict(snapshot)
+    snapshot_redacted["options"] = snap_options_redacted
+    guided_redacted = dict(guided)
+    guided_redacted["step_1_result"] = snapshot_redacted
+    meta_out = dict(composer_meta)
+    meta_out["guided_session"] = guided_redacted
+
+    # Channel 2: mask the committed source(s) whose storage-path carrier matches a
+    # blob-backed path. A source already redacted by redact_source_storage_path
+    # carries REDACTED_BLOB_SOURCE_PATH (not the real path), so it simply won't
+    # match — no double processing.
+    if isinstance(sources, Mapping) and blob_backed_paths:
+        rebuilt: dict[str, Any] = {}
+        for name, source in sources.items():
+            options = source.get("options") if isinstance(source, Mapping) else None
+            if (
+                isinstance(source, Mapping)
+                and isinstance(options, Mapping)
+                and any(options.get(key) in blob_backed_paths for key in ("path", "file"))
+            ):
+                options_redacted = dict(options)
+                for key in ("path", "file"):
+                    if options_redacted.get(key) in blob_backed_paths:
+                        options_redacted[key] = REDACTED_BLOB_SOURCE_PATH
+                source_redacted = dict(source)
+                source_redacted["options"] = options_redacted
+                rebuilt[name] = source_redacted
+            else:
+                rebuilt[name] = source
+        sources_out = rebuilt
+
+    return sources_out, meta_out

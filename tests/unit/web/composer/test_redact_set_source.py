@@ -21,6 +21,7 @@ from elspeth.web.composer.redaction import (
     SetSourceArgumentsModel,
     _redact_via_schema,
     _summarize_set_source_options,
+    redact_guided_snapshot_storage_paths,
     redact_source_storage_path,
     redact_tool_call_arguments,
 )
@@ -197,6 +198,66 @@ def test_redact_source_storage_path_leaves_manual_file_without_blob_ref() -> Non
     redacted = redact_source_storage_path(state)
     assert redacted["source"]["options"]["file"] == "/tmp/user-data.csv"
     assert REDACTED_BLOB_SOURCE_PATH not in str(redacted)
+
+
+def test_redact_guided_snapshot_masks_both_channels() -> None:
+    """A guided blob source is committed via manual set_source (blob_ref stripped),
+    so the committed source carries the real storage_path with NO blob_ref and the
+    source-keyed redaction misses it. The co-located GuidedSession snapshot retained
+    blob_ref; the helper uses it (no DB lookup) to mask BOTH the committed source
+    path (channel 2) and the snapshot path (channel 3)."""
+    real_path = "/home/u/elspeth/data/blobs/sess/abc_data.csv"
+    sources = {"source": {"plugin": "csv", "options": {"path": real_path, "schema": {"mode": "observed"}}}}
+    composer_meta = {
+        "guided_session": {
+            "step_1_result": {"plugin": "csv", "options": {"path": real_path, "blob_ref": "abc", "schema": {"mode": "observed"}}},
+        }
+    }
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+    assert sources_out["source"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    assert meta_out["guided_session"]["step_1_result"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+    # blob_ref is retained — it is the redaction SIGNAL, not a sensitive value.
+    assert meta_out["guided_session"]["step_1_result"]["options"]["blob_ref"] == "abc"
+    assert real_path not in str(sources_out)
+    assert real_path not in str(meta_out)
+    # inputs are not mutated.
+    assert sources["source"]["options"]["path"] == real_path
+    assert composer_meta["guided_session"]["step_1_result"]["options"]["path"] == real_path
+
+
+def test_redact_guided_snapshot_leaves_operator_typed_source() -> None:
+    """No blob_ref on the snapshot => the path is operator-typed, NOT a blob
+    carrier => nothing is redacted on either channel."""
+    sources = {"source": {"options": {"path": "/tmp/user.csv"}}}
+    composer_meta = {"guided_session": {"step_1_result": {"options": {"path": "/tmp/user.csv", "schema": {"mode": "observed"}}}}}
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+    assert sources_out["source"]["options"]["path"] == "/tmp/user.csv"
+    assert meta_out["guided_session"]["step_1_result"]["options"]["path"] == "/tmp/user.csv"
+    assert REDACTED_BLOB_SOURCE_PATH not in str((sources_out, meta_out))
+
+
+def test_redact_guided_snapshot_noop_for_freeform_state() -> None:
+    """Freeform state (composer_meta is None, or has no guided_session snapshot) is
+    returned unchanged — the helper only acts on a guided blob-backed snapshot."""
+    sources = {"source": {"options": {"path": "/some/path.csv", "blob_ref": "x"}}}
+    s1, m1 = redact_guided_snapshot_storage_paths(sources, None)
+    assert s1 == sources
+    assert m1 is None
+    s2, m2 = redact_guided_snapshot_storage_paths(sources, {"repair_turns_used": 0})
+    assert s2["source"]["options"]["path"] == "/some/path.csv"
+    assert m2 == {"repair_turns_used": 0}
+
+
+def test_redact_guided_snapshot_masks_file_carrier() -> None:
+    """``file`` is an equivalent storage-path carrier to ``path`` (elspeth-a7aa07b7ce);
+    the guided snapshot helper masks it on both channels too."""
+    real = "/internal/blobs/sess/zzz_data.csv"
+    sources = {"source": {"options": {"file": real}}}
+    composer_meta = {"guided_session": {"step_1_result": {"options": {"file": real, "blob_ref": "zzz"}}}}
+    sources_out, meta_out = redact_guided_snapshot_storage_paths(sources, composer_meta)
+    assert sources_out["source"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
+    assert meta_out["guided_session"]["step_1_result"]["options"]["file"] == REDACTED_BLOB_SOURCE_PATH
+    assert real not in str((sources_out, meta_out))
 
 
 def test_summarize_set_source_options_accepts_coerced_datetime() -> None:

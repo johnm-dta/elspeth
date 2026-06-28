@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 from elspeth.web.composer.guided.state_machine import TerminalReason, TerminalState
+from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -512,14 +513,26 @@ class TestStep1SourceResolution:
         assert body["next_turn"]["payload"]["plugin"] == "csv"
         # Security: the re-rendered form masks the blob-backed source's absolute
         # storage_path behind a blob:<ref> sentinel (handle_step_1_source re-resolves
-        # it on commit), so the deploy path + OS username never reach the wire. The
-        # committed STATE below still carries the real path (display-only mask).
+        # it on commit), so the deploy path + OS username never reach the wire.
         assert body["next_turn"]["payload"]["prefilled"]["path"].startswith("blob:")
         assert not body["next_turn"]["payload"]["prefilled"]["path"].endswith("_teal_colours.csv")
         assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
         source_options = body["composition_state"]["sources"]["source"]["options"]
         assert source_options["schema"]["mode"] == "observed"
-        assert source_options["path"].endswith("_teal_colours.csv")
+        # composition_state is ALSO an egress surface, on two channels the
+        # source-keyed B4 redaction misses for guided blob sources (the committed
+        # source carries no blob_ref). redact_guided_snapshot_storage_paths closes
+        # both, cross-referencing the GuidedSession snapshot's retained blob_ref:
+        #   1. the committed source path, and
+        #   2. the composer_meta GuidedSession snapshot path.
+        assert source_options["path"] == REDACTED_BLOB_SOURCE_PATH
+        snapshot_options = body["composition_state"]["composer_meta"]["guided_session"]["step_1_result"]["options"]
+        assert snapshot_options["path"] == REDACTED_BLOB_SOURCE_PATH
+        # The snapshot keeps blob_ref (it is the redaction signal, not sensitive).
+        assert snapshot_options["blob_ref"]
+        # Belt-and-braces: the absolute blob path appears NOWHERE in the response
+        # body, at any depth or field.
+        assert "_teal_colours.csv" not in json.dumps(body)
         audits = _llm_call_audit_bodies(composer_test_client, session_id)
         assert len(audits) == 1, audits
         assert audits[0]["status"] == "success"

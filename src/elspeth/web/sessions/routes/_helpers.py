@@ -119,6 +119,7 @@ from elspeth.web.composer.protocol import (
 )
 from elspeth.web.composer.redaction import (
     MANIFEST,
+    redact_guided_snapshot_storage_paths,
     redact_source_storage_path,
     redact_tool_call_arguments,
     redact_tool_call_response,
@@ -519,6 +520,18 @@ def _state_response(
         redacted = redact_source_storage_path({"sources": sources_data})
         sources_data = redacted["sources"]
 
+    # B4 (guided): a guided blob-backed source is committed via the manual
+    # set_source path, which strips ``blob_ref`` (it cannot prove
+    # ``path == storage_path``). So the committed source AND the persisted
+    # GuidedSession snapshot in ``composer_meta`` both carry the absolute
+    # storage_path with no ``blob_ref`` for the source-keyed redaction above to
+    # key off, and the snapshot is serialised here unredacted. Cross-reference
+    # the snapshot's RETAINED ``blob_ref`` (a no-DB-lookup signal that the source
+    # is blob-backed) to mask the storage_path in both the snapshot and the
+    # committed source before either reaches the wire.
+    composer_meta_data = deep_thaw(state.composer_meta) if state.composer_meta is not None else None
+    sources_data, composer_meta_data = redact_guided_snapshot_storage_paths(sources_data, composer_meta_data)
+
     return CompositionStateResponse(
         id=str(state.id),
         session_id=str(state.session_id),
@@ -542,7 +555,7 @@ def _state_response(
         else None,
         derived_from_state_id=str(state.derived_from_state_id) if state.derived_from_state_id is not None else None,
         created_at=state.created_at,
-        composer_meta=deep_thaw(state.composer_meta) if state.composer_meta is not None else None,
+        composer_meta=composer_meta_data,
     )
 
 

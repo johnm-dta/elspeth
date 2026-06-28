@@ -4075,8 +4075,8 @@ class TestForkRecoveryInvariant:
         ``(None, BUFFERED)`` audit record per input row that derive() counts
         (run_status.py line ~113), so an N-row aggregation completes with
         ``rows_buffered == N`` (cf. test_terminal_states.py and
-        test_t18_characterization.py, which both assert ``rows_buffered == N``
-        on COMPLETED aggregation runs).  This cell reconciles all 12 fields on
+        test_orchestrator_execute_run_characterization.py, which both assert
+        ``rows_buffered == N`` on COMPLETED aggregation runs).  This cell reconciles all 12 fields on
         such a topology where ``rows_buffered >= 1`` (non-vacuous).
 
         TOPOLOGY (``_build_end_of_source_flush_aggregation``, N=3):

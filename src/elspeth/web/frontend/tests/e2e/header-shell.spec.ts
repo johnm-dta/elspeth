@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { ComposerPage } from "./page-objects/composer-page";
 
-test.describe("Phase 3A shell", () => {
+test.describe("header-owned shell", () => {
   test("renders the header-owned session and account controls without the legacy sidebar", async ({
     page,
   }) => {

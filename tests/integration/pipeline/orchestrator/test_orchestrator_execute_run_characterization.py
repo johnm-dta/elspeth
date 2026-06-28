@@ -1,12 +1,9 @@
-# tests/integration/pipeline/orchestrator/test_t18_characterization.py
-"""Characterization tests for T18 orchestrator decomposition.
+"""Characterization tests for the orchestrator run path.
 
 These tests exercise the full _execute_run() and _process_resumed_rows() paths
-with multi-feature pipelines. They serve as regression oracles for the 15-commit
-extraction sequence — if any extraction breaks behavior, these tests catch it.
-
-IMPORTANT: Do NOT modify these tests during the extraction. If a test fails
-after an extraction commit, the extraction introduced a regression.
+with multi-feature pipelines. They are behavioural regression oracles: a failure
+here means a change to the orchestrator altered observable run behaviour, so the
+fix is to the orchestrator, not to these assertions.
 """
 
 from __future__ import annotations
@@ -131,8 +128,8 @@ def _begin_test_run(db: LandscapeDB) -> tuple[RecorderFactory, str, MockPayloadS
 # ---------------------------------------------------------------------------
 
 
-class TestT18CharacterizationExecuteRun:
-    """Regression oracle for the T18 extraction sequence.
+class TestExecuteRunCharacterization:
+    """Regression oracle for the orchestrator run path.
 
     Pipeline: QuarantiningSource → DoubleValueTransform → CollectSink("output") + CollectSink("errors")
     Input: 5 rows — first 2 quarantined, next 3 valid.
@@ -402,7 +399,7 @@ class TestT18CharacterizationExecuteRun:
 # ---------------------------------------------------------------------------
 
 
-class TestT18CharacterizationResumePath:
+class TestResumePathCharacterization:
     """Resume-specific characterization tests.
 
     These verify the behavioral divergences between _execute_run() and
@@ -511,7 +508,7 @@ class TestT18CharacterizationResumePath:
             payload_store=payload_store,
             incomplete_by_row={},
             recovery_manager=MagicMock(),
-            resume_checkpoint_id="t18-test-checkpoint",
+            resume_checkpoint_id="char-test-checkpoint",
             schema_contracts_by_source={source_node_id: resume_contract},
             coordination_token=leader_coordination_token(factory, run_id),
         )
@@ -632,7 +629,7 @@ class TestT18CharacterizationResumePath:
                 payload_store=payload_store,
                 incomplete_by_row={},
                 recovery_manager=MagicMock(),
-                resume_checkpoint_id="t18-test-checkpoint",
+                resume_checkpoint_id="char-test-checkpoint",
                 schema_contracts_by_source={source_node_id: schema_contract},
                 coordination_token=leader_coordination_token(factory, run_id),
             )
@@ -739,7 +736,7 @@ def _build_aggregation_pipeline() -> tuple[SourceProtocol, TransformProtocol, An
 # ---------------------------------------------------------------------------
 
 
-class TestT18CharacterizationAggregation:
+class TestAggregationCharacterization:
     """Regression oracle for aggregation/deaggregation through _execute_run().
 
     Exercises end-of-source aggregation flush: rows buffer during processing

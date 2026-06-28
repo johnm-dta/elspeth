@@ -1,4 +1,4 @@
-"""Regression tests for Phase 8 Sweep A — truthiness → is not None.
+"""Regression tests for truthiness checks that should be ``is not None``.
 
 These tests verify that falsy-but-valid values (0, 0.0, "", False) are not
 incorrectly treated as missing/None.

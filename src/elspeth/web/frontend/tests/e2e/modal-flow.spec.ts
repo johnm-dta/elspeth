@@ -1,6 +1,6 @@
-// Phase 3B modal flow spec — Graph modal, YAML modal, Catalog modal.
+// Modal flow spec — Graph modal, YAML modal, Catalog modal.
 //
-// Covers the riskiest Phase 3B surface: modal open/close via three entry
+// Covers the riskiest modal surface: modal open/close via three entry
 // points (SideRail click, Escape key, keyboard shortcut) plus hash-routed
 // deep links for graph and yaml.
 //
@@ -28,7 +28,7 @@ import { ComposerPage } from "./page-objects/composer-page";
 // does not accumulate orphaned sessions. The deleteSession helper tolerates
 // 404 (session already gone).
 
-test.describe("phase-3b-modals — Graph, YAML, Catalog modal flows", () => {
+test.describe("modal flows — Graph, YAML, Catalog", () => {
   // ── Graph modal ──────────────────────────────────────────────────────────
 
   test.describe("Graph modal", () => {

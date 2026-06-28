@@ -461,7 +461,7 @@ class TestTerminalStateAggregation:
         transform = as_transform(SumBatchTransform())
         sink = as_sink(CollectSink())
 
-        # Build graph via production path (same as T18 characterization tests)
+        # Build graph via production path (same as the orchestrator characterization tests)
         graph = ExecutionGraph.from_plugin_instances(
             sources={"primary": source},
             source_settings_map={"primary": SourceSettings(plugin=source.name, on_success="source_out", options={})},

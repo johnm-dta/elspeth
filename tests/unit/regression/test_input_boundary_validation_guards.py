@@ -1,4 +1,4 @@
-"""Regression tests for Phase 8 Sweep D — validation guards.
+"""Regression tests for input-boundary validation guards.
 
 Each test verifies that a specific input-boundary validation now rejects
 invalid configurations or data that previously passed silently.

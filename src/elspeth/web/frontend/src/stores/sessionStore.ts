@@ -1373,7 +1373,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         compositionState: response.composition_state ?? get().compositionState,
         guidedChatPending: false,
       });
-    } catch {
+    } catch (err) {
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -1382,10 +1382,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // unavailable assistant message AND appends both turns to
       // chat_history — that path completes the optimistic write
       // server-side, so even a synthetic reply round-trips through this
-      // success branch.  This catch fires only when the request itself
-      // failed (no response shape at all).
+      // success branch.  This catch fires when the request itself failed
+      // (no response shape at all) OR the backend rejected with a 4xx/5xx.
+      //
+      // Surface the backend's `detail` when present: a 409 step-mismatch
+      // tells the user to retry, a 400 names the bad step — far more
+      // actionable than a blanket "failed", which forced the user to GUESS
+      // the cause. Backend details are egress-safe by construction (Tier-3
+      // row data is never placed in an HTTP detail — see guided.py); a bare
+      // network failure with no structured body falls back to the generic line.
+      const apiErr = err as ApiError;
       set({
-        error: "Failed to send chat message. Please try again.",
+        error: apiErr.detail ?? "Failed to send chat message. Please try again.",
         guidedChatPending: false,
       });
     }

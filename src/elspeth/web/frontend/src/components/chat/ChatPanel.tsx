@@ -1428,8 +1428,9 @@ export function ChatPanel({
             <p>{GUIDED_STEP_PURPOSES[guidedSession.step]}</p>
             {stepIsSendDriven && (
               <p className="guided-current-decision-tutorial-note">
-                You don't need to fill this in — pressing <strong>Send</strong>{" "}
-                above builds this step for you.
+                You don't need to fill this in by hand — press{" "}
+                <strong>Send</strong> above and the assistant builds this step.
+                Then confirm the decision below to continue.
               </p>
             )}
           </div>

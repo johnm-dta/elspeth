@@ -2000,11 +2000,25 @@ async def post_guided_chat(
                         session_id=str(session_id),
                     )
                     if not handler_result.tool_result.success:
-                        raise HTTPException(
-                            status_code=400,
-                            detail="Step 1 source commit failed",
+                        # Symmetric with the STEP_2_SINK reject path below: the
+                        # strict commit seam rejected the re-resolved source.
+                        # Degrade to advisory (no mutation) rather than a fatal
+                        # 400 — chat is a non-load-bearing helper and a second
+                        # Send must not be terminal. The raw tool_result message
+                        # can embed Tier-3 row data, so it never reaches the
+                        # response; ``error_class`` is a redaction-safe CLASSIFIER
+                        # that keeps the rejection diagnosable in the audit trail
+                        # (the prior 400 raised before any chat-turn audit, so the
+                        # reason vanished entirely).
+                        chat_result = StepChatResult(
+                            assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
+                            status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+                            latency_ms=int((_perf_counter() - started_perf) * 1000),
+                            error_class="StepHandlerRejected",
                         )
+                        source_resolution = None
 
+                if source_resolution is not None:
                     # Adopt the post-commit state FIRST, BEFORE either leg — the
                     # answered-record emit below reads `state.version`, and
                     # CompositionState bumps version in-memory on every edit

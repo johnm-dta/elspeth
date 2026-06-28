@@ -874,5 +874,30 @@ describe("sessionStore — guided-mode fields and actions", () => {
       expect(state.guidedChatPending).toBe(false);
       expect(state.guidedSession).toEqual(sampleGuidedSession);
     });
+
+    it("surfaces the backend detail on a structured failure", async () => {
+      // A 409 step-mismatch (the wizard advanced under the user) carries an
+      // actionable, egress-safe detail. Surface it verbatim rather than the
+      // blanket "failed" message, which forced the user to GUESS the cause.
+      const { chatGuided } = await import("@/api/client");
+      const detail =
+        "step_index 'step_1_source' does not match the session's current step " +
+        "'step_2_sink'. Re-fetch GET /api/sessions/{id}/guided and retry.";
+      (chatGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+        status: 409,
+        detail,
+      });
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      await useSessionStore.getState().chatGuided("What columns are available?");
+
+      const state = useSessionStore.getState();
+      expect(state.error).toBe(detail);
+      expect(state.guidedChatPending).toBe(false);
+      expect(state.guidedSession).toEqual(sampleGuidedSession);
+    });
   });
 });

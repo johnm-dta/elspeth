@@ -150,21 +150,26 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freez
                 },
                 "problem_summary": {
                     "type": "string",
+                    "maxLength": 2000,
                     "description": (
                         "Your own statement of what you are trying to do and "
-                        "why you are stuck. One or two sentences. Be specific: "
+                        "why you are stuck, with secrets and PII removed. One or two sentences. Be specific: "
                         "'I cannot get llm transform options to validate against "
                         "the Azure provider schema' is useful; 'help' is not."
                     ),
                 },
                 "recent_errors": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": ("The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."),
+                    "maxItems": 5,
+                    "items": {"type": "string", "maxLength": 2000},
+                    "description": (
+                        "Redacted summaries of the last validator errors, most recent first. Include up to 5; remove secrets and PII."
+                    ),
                 },
                 "attempted_actions": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "maxItems": 8,
+                    "items": {"type": "string", "maxLength": 2000},
                     "description": (
                         "What you have already tried, one item per attempt. "
                         "Include the tool name and a one-line summary of the "
@@ -174,8 +179,9 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freez
                 },
                 "schema_excerpt": {
                     "type": "string",
+                    "maxLength": 8000,
                     "description": (
-                        "Optional — the relevant plugin schema snippet you are "
+                        "Optional — the relevant, redacted plugin schema snippet you are "
                         "working against, as returned by `get_plugin_schema`. "
                         "Including this lets the advisor give field-level "
                         "guidance grounded in the exact contract."

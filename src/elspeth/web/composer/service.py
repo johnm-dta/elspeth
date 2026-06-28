@@ -143,6 +143,7 @@ from elspeth.web.interpretation_state import (
 )
 from elspeth.web.sessions._persist_payload import AuditOutcome, RedactedToolRow
 from elspeth.web.sessions.models import sessions_table
+from elspeth.web.validation import _redact_sensitive_content
 
 slog = structlog.get_logger()
 
@@ -158,6 +159,11 @@ _ADVISOR_ARGUMENT_KEYS: Final[frozenset[str]] = frozenset(
         "schema_excerpt",
     }
 )
+_ADVISOR_PROBLEM_SUMMARY_MAX_CHARS: Final[int] = 2_000
+_ADVISOR_SCHEMA_EXCERPT_MAX_CHARS: Final[int] = 8_000
+_ADVISOR_RECENT_ERRORS_MAX_ITEMS: Final[int] = 5
+_ADVISOR_ATTEMPTED_ACTIONS_MAX_ITEMS: Final[int] = 8
+_ADVISOR_LIST_ITEM_MAX_CHARS: Final[int] = 2_000
 
 # Composer LLM sampling is operator-set via WebSettings.composer_temperature /
 # composer_seed: sent verbatim when configured, omitted when None.
@@ -3812,6 +3818,12 @@ class ComposerServiceImpl:
                 "error": "problem_summary must be a string",
                 "error_class": "TypeError",
             }
+        if len(arguments["problem_summary"]) > _ADVISOR_PROBLEM_SUMMARY_MAX_CHARS:
+            return {
+                "status": "ARG_ERROR",
+                "error": f"problem_summary exceeds {_ADVISOR_PROBLEM_SUMMARY_MAX_CHARS} characters",
+                "error_class": "ValueError",
+            }
 
         recent = arguments["recent_errors"]
         if not isinstance(recent, list) or not all(isinstance(e, str) for e in recent):
@@ -3819,6 +3831,18 @@ class ComposerServiceImpl:
                 "status": "ARG_ERROR",
                 "error": "recent_errors must be a list of strings",
                 "error_class": "TypeError",
+            }
+        if len(recent) > _ADVISOR_RECENT_ERRORS_MAX_ITEMS:
+            return {
+                "status": "ARG_ERROR",
+                "error": f"recent_errors may include at most {_ADVISOR_RECENT_ERRORS_MAX_ITEMS} entries",
+                "error_class": "ValueError",
+            }
+        if any(len(error) > _ADVISOR_LIST_ITEM_MAX_CHARS for error in recent):
+            return {
+                "status": "ARG_ERROR",
+                "error": f"recent_errors entries may be at most {_ADVISOR_LIST_ITEM_MAX_CHARS} characters",
+                "error_class": "ValueError",
             }
 
         attempted = arguments["attempted_actions"]
@@ -3828,6 +3852,18 @@ class ComposerServiceImpl:
                 "error": "attempted_actions must be a list of strings",
                 "error_class": "TypeError",
             }
+        if len(attempted) > _ADVISOR_ATTEMPTED_ACTIONS_MAX_ITEMS:
+            return {
+                "status": "ARG_ERROR",
+                "error": f"attempted_actions may include at most {_ADVISOR_ATTEMPTED_ACTIONS_MAX_ITEMS} entries",
+                "error_class": "ValueError",
+            }
+        if any(len(action) > _ADVISOR_LIST_ITEM_MAX_CHARS for action in attempted):
+            return {
+                "status": "ARG_ERROR",
+                "error": f"attempted_actions entries may be at most {_ADVISOR_LIST_ITEM_MAX_CHARS} characters",
+                "error_class": "ValueError",
+            }
 
         if "schema_excerpt" in arguments and arguments["schema_excerpt"] is not None:
             candidate = arguments["schema_excerpt"]
@@ -3836,6 +3872,12 @@ class ComposerServiceImpl:
                     "status": "ARG_ERROR",
                     "error": "schema_excerpt must be a string when provided",
                     "error_class": "TypeError",
+                }
+            if len(candidate) > _ADVISOR_SCHEMA_EXCERPT_MAX_CHARS:
+                return {
+                    "status": "ARG_ERROR",
+                    "error": f"schema_excerpt exceeds {_ADVISOR_SCHEMA_EXCERPT_MAX_CHARS} characters",
+                    "error_class": "ValueError",
                 }
 
         # Approximate provider cost cap: rough 4 chars / token. Compute the
@@ -4849,20 +4891,22 @@ def _build_advisor_user_message(arguments: Mapping[str, Any]) -> str:
     bullets, section labels, and newlines cannot drift from the wire payload.
     Callers validate the Tier-3 argument shapes before invoking this helper.
     """
+    problem_summary = _redact_sensitive_content(cast(str, arguments["problem_summary"]))
     user_msg_parts: list[str] = [
         f"Advisor trigger: {arguments['trigger']}",
-        f"Problem: {arguments['problem_summary']}",
+        f"Problem: {problem_summary}",
     ]
     recent = cast(list[str], arguments["recent_errors"])
     if recent:
-        joined = "\n".join(f"- {e}" for e in recent)
+        joined = "\n".join(f"- {_redact_sensitive_content(e)}" for e in recent)
         user_msg_parts.append(f"\nRecent validator errors (most recent first):\n{joined}")
     attempted = cast(list[str], arguments["attempted_actions"])
     if attempted:
-        joined = "\n".join(f"- {a}" for a in attempted)
+        joined = "\n".join(f"- {_redact_sensitive_content(a)}" for a in attempted)
         user_msg_parts.append(f"\nAlready attempted:\n{joined}")
     if "schema_excerpt" in arguments and arguments["schema_excerpt"]:
-        user_msg_parts.append(f"\nRelevant schema excerpt:\n{cast(str, arguments['schema_excerpt'])}")
+        schema_excerpt = _redact_sensitive_content(cast(str, arguments["schema_excerpt"]))
+        user_msg_parts.append(f"\nRelevant schema excerpt:\n{schema_excerpt}")
     return "\n".join(user_msg_parts)
 
 

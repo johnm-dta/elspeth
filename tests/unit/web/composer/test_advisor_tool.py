@@ -378,6 +378,64 @@ async def test_advisor_call_records_outer_invocation_and_inner_llm_call() -> Non
 
 
 @pytest.mark.asyncio
+async def test_advisor_prompt_redacts_sensitive_argument_text_before_egress() -> None:
+    """LLM-supplied advisor fields are useful context, but not raw egress."""
+
+    catalog = _mock_catalog()
+    service = ComposerServiceImpl(catalog=catalog, settings=_make_settings(budget=3))
+    state = _empty_state()
+    openai_key = "sk-" + ("A" * 48)
+    bearer_token = "Bearer " + ("b" * 24)
+    ssn = "123-45-6789"
+    card_number = "4111 1111 1111 1111"
+    email = "operator@example.com"
+    args = {
+        "trigger": "proactive_security_safety",
+        "problem_summary": f"Validator repeated api_key={openai_key} for {email}",
+        "recent_errors": [f"provider echoed {bearer_token}", f"row owner ssn {ssn}"],
+        "attempted_actions": [f"replayed payment card {card_number}"],
+        "schema_excerpt": f"password field example contains {openai_key}",
+    }
+    advisor_tool_call = _FakeLLMResponse(
+        choices=[
+            _FakeChoice(
+                message=_FakeMessage(
+                    content=None,
+                    tool_calls=[
+                        _FakeToolCall(
+                            id="call_sensitive_advisor",
+                            function=_FakeFunction(
+                                name="request_advisor_hint",
+                                arguments=json.dumps(args),
+                            ),
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+    turns = [advisor_tool_call, _make_text_only_response("done")]
+
+    with (
+        patch.object(service, "_call_llm", new_callable=AsyncMock) as mock_llm,
+        patch(
+            "elspeth.web.composer.service._litellm_acompletion",
+            new_callable=AsyncMock,
+        ) as mock_acompletion,
+    ):
+        mock_llm.side_effect = turns
+        mock_acompletion.return_value = _make_advisor_response()
+        await service.compose("help me", [], state)
+
+    advisor_messages = mock_acompletion.call_args.kwargs["messages"]
+    advisor_user_message = advisor_messages[1]["content"]
+    for raw_value in (openai_key, bearer_token, ssn, card_number, email):
+        assert raw_value not in advisor_user_message
+    assert "Validator repeated api_key=" in advisor_user_message
+    assert "<redacted-sensitive:" in advisor_user_message
+
+
+@pytest.mark.asyncio
 async def test_advisor_only_turn_does_not_consume_discovery_budget() -> None:
     """Advisor-only turns have their own budget and must not spend discovery turns.
 

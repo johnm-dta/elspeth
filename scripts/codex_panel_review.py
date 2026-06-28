@@ -3,10 +3,10 @@
 
 See docs/superpowers/specs/2026-06-28-codex-panel-review-design.md.
 
-Helpers from ``codex_audit_common`` are imported lazily at their first use-site
-(the runner in :func:`run_file_lenses` and the CLI in :func:`main`) via a
-dual-import shim, so this module runs both as a script (``scripts/`` on
-``sys.path``) and as the package ``scripts.codex_panel_review`` under pytest.
+Helpers from ``codex_audit_common`` are bound at module scope (required so the
+runner test can monkeypatch ``run_codex_once``) via a dual-import shim, so this
+module runs both as a script (``scripts/`` on ``sys.path``) and as the package
+``scripts.codex_panel_review`` under pytest.
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from typing import Any
 
 # Dual-import shim: bare import works when run as a script (scripts/ on sys.path);
 # the package form works when pytest imports this as scripts.codex_panel_review.
-# Helpers are pulled in at their first use-site (runner + CLI below) so an
-# unused-import autofix never strips them. See
+# All helpers are bound at module scope (every name is used below) — also required
+# for the runner test's monkeypatch of run_codex_once. See
 # docs/superpowers/plans/2026-06-28-codex-panel-review-foundation.md.
 try:
     from codex_audit_common import (  # type: ignore[import-not-found]
@@ -267,8 +267,21 @@ def main(argv: list[str] | None = None) -> int:
     if not file_path.exists():
         print(f"file not found: {file_path}", file=sys.stderr)
         return 1
+    if not file_path.is_relative_to(REPO_ROOT):
+        # The codex sandbox is scoped to REPO_ROOT (--cd) and run_file_lenses takes
+        # relative_to(repo_root); a target outside the repo would raise an uncaught
+        # ValueError. Fail fast with a clean message instead.
+        print(f"file is outside the repo ({REPO_ROOT}): {file_path}", file=sys.stderr)
+        return 1
     override = [s.strip() for s in args.lenses.split(",")] if args.lenses else None
     lenses = route_lenses(file_path, override=override)
+    missing = [lens for lens in lenses if not (LENSES_DIR / f"{lens}.md").exists()]
+    if missing:
+        # Fail fast BEFORE any (paid) codex call rather than crashing mid-run on a
+        # --lenses typo — capture-and-continue would still spend on the valid lenses.
+        available = ", ".join(sorted(p.stem for p in LENSES_DIR.glob("*.md")))
+        print(f"unknown lens(es): {', '.join(missing)}; available: {available}", file=sys.stderr)
+        return 1
 
     if args.dry_run:
         print(f"Would review {file_path.name} through {len(lenses)} lenses:")

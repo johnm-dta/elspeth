@@ -346,3 +346,6 @@ wardline.yaml
 # Codex CLI drops a routine ./error.log in its working dir; never commit it
 error.log
 .wardline
+
+# Codex panel review writes model-authored raw findings here; never commit them
+/docs/quality-audit/findings-panel-raw/

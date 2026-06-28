@@ -26,6 +26,11 @@ def test_panel_schema_shape():
     # markdown_report is mandatory: run_codex_once extracts it (common.py:365)
     assert "markdown_report" in schema["required"]
     assert schema["properties"]["markdown_report"]["type"] == "string"
+    # the ROOT object also has additionalProperties:false, so it carries the same
+    # strict-mode contract — dropping `findings` from required (or adding a property
+    # not in required) keeps the rest of this test green yet makes codex reject the
+    # schema with HTTP 400, failing every pilot lens silently (gated behind Task 9).
+    assert set(schema["required"]) == set(schema["properties"])
     finding = schema["properties"]["findings"]["items"]
     assert finding["properties"]["priority"]["enum"] == ["P0", "P1", "P2", "P3"]
     # priority, NOT severity, carries the P-level
@@ -262,9 +267,9 @@ def test_run_file_lenses_loops_gates_and_aggregates(tmp_path, monkeypatch):
     import json
 
     try:
-        from codex_audit_common import structured_output_path_for_report
+        from codex_audit_common import _structured_findings, structured_output_path_for_report
     except ModuleNotFoundError:
-        from scripts.codex_audit_common import structured_output_path_for_report
+        from scripts.codex_audit_common import _structured_findings, structured_output_path_for_report
 
     # run_file_lenses reads the target's source, so z.py must exist on disk.
     src_dir = tmp_path / "src"
@@ -288,7 +293,10 @@ def test_run_file_lenses_loops_gates_and_aggregates(tmp_path, monkeypatch):
                             "lens": "x",
                             "category": "security",
                             "summary": "s",
-                            "evidence": [{"path": "src/z.py", "line": 1, "claim": "c"}],
+                            # lineless on purpose: an anchor-required `security`
+                            # finding with no int line MUST be downgraded by the gate,
+                            # giving the integrated test an observable gate effect.
+                            "evidence": [{"path": "src/z.py", "claim": "c"}],
                         }
                     ],
                 }
@@ -316,7 +324,126 @@ def test_run_file_lenses_loops_gates_and_aggregates(tmp_path, monkeypatch):
     )
     assert len(calls) == 2  # one call per lens, serial
     assert stats["cached_input_tokens"] == 120  # 60 * 2 aggregated
+    assert stats["input_tokens"] == 200 and stats["output_tokens"] == 20  # full usage aggregated
     assert stats["failed"] == 0
+    # Gate observability through the INTEGRATED runner path (not just the isolated
+    # gate test): the lineless `security` finding must be downgraded once per lens.
+    assert stats["gated"] == 2
+    # Re-reading each per-lens sidecar via _structured_findings proves the gate (a)
+    # rewrote the sidecar LAST so it is not stale against the .md, and (b) stamped
+    # the caller's lens over the model's "x". Drop the gate call and the sidecar
+    # stays stale -> _structured_findings returns None -> this block fails.
+    for out_path, expected_lens in zip(calls, ["security-architect", "solution-architect"], strict=True):
+        findings = _structured_findings(out_path)
+        assert findings is not None, "gate did not rewrite the sidecar fresh"
+        assert findings[0]["lens"] == expected_lens
+        assert findings[0]["priority"] == "P3"
+
+
+def test_run_file_lenses_captures_and_continues_on_lens_failure(tmp_path, monkeypatch):
+    # The pilot's resilience contract: a lens whose codex call raises is counted in
+    # `failed`, does NOT re-raise, and the loop continues to the next lens.
+    import json
+
+    try:
+        from codex_audit_common import structured_output_path_for_report
+    except ModuleNotFoundError:
+        from scripts.codex_audit_common import structured_output_path_for_report
+
+    calls = []
+
+    async def fake_run_codex_once(**kwargs):
+        calls.append(kwargs["output_path"])
+        if len(calls) == 1:
+            raise RuntimeError("codex exec failed (e.g. schema rejected)")
+        out = kwargs["output_path"]
+        # success path: write a (gate-valid, empty) sidecar then the .md, so the
+        # post-call gate succeeds and only the FIRST lens is counted failed.
+        structured_output_path_for_report(out).write_text(json.dumps({"markdown_report": "n", "findings": []}), encoding="utf-8")
+        out.write_text("narration\n", encoding="utf-8")
+        return {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 10, "total_tokens": 110}
+
+    monkeypatch.setattr(cpr, "run_codex_once", fake_run_codex_once)
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "z.py").write_text("def z(): ...", encoding="utf-8")
+
+    stats = asyncio.run(
+        cpr.run_file_lenses(
+            file_path=tmp_path / "src" / "z.py",
+            lenses=["security-architect", "solution-architect"],
+            output_dir=tmp_path / "out",
+            repo_root=tmp_path,
+            context="CTX",
+            model=None,
+            reasoning_effort=None,
+            rate_limiter=None,
+            log_path=tmp_path / "log.md",
+            log_lock=asyncio.Lock(),
+        )
+    )
+    assert len(calls) == 2  # loop continued past the failing lens
+    assert stats["failed"] == 1  # the raising lens was captured, not propagated
+    assert stats["cached_input_tokens"] == 60  # only the surviving lens aggregated
+
+
+def test_main_non_dry_run_exit_code_follows_failed(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "src" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def x(): ...", encoding="utf-8")
+    monkeypatch.setattr(cpr, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(cpr.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setattr(cpr, "ensure_log_file", lambda *a, **k: None)
+    monkeypatch.setattr(cpr, "load_context", lambda *a, **k: "CTX")
+    monkeypatch.setattr(cpr, "make_codex_rate_limiter", lambda *a, **k: None)
+
+    def fake_stats(failed):
+        async def _run(**kwargs):
+            return {
+                "input_tokens": 100,
+                "cached_input_tokens": 50,
+                "output_tokens": 10,
+                "total_tokens": 110,
+                "gated": 0,
+                "failed": failed,
+            }
+
+        return _run
+
+    # fail-closed: a failed lens makes main exit 1
+    monkeypatch.setattr(cpr, "run_file_lenses", fake_stats(1))
+    assert cpr.main(["--file", str(target)]) == 1
+    out = capsys.readouterr().out
+    assert "cache_hit=50.0%" in out and "failed=1" in out
+
+    # clean run exits 0
+    monkeypatch.setattr(cpr, "run_file_lenses", fake_stats(0))
+    assert cpr.main(["--file", str(target)]) == 0
+
+
+def test_main_rejects_missing_and_out_of_repo_file(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cpr, "REPO_ROOT", tmp_path)
+    # nonexistent --file -> 1
+    assert cpr.main(["--file", str(tmp_path / "nope.py")]) == 1
+    # existing file OUTSIDE the repo -> clean 1, not an uncaught ValueError
+    outside = tmp_path.parent / "outside.py"
+    outside.write_text("x = 1\n", encoding="utf-8")
+    try:
+        assert cpr.main(["--file", str(outside)]) == 1
+        assert "outside the repo" in capsys.readouterr().err
+    finally:
+        outside.unlink()
+
+
+def test_main_rejects_unknown_lens_before_spend(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "src" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def x(): ...", encoding="utf-8")
+    monkeypatch.setattr(cpr, "REPO_ROOT", tmp_path)
+    # a --lenses typo is rejected up front (return 1) — no codex call is attempted.
+    assert cpr.main(["--file", str(target), "--lenses", "no-such-lens"]) == 1
+    assert "unknown lens" in capsys.readouterr().err
 
 
 def test_dry_run_prints_lens_plan(tmp_path, capsys, monkeypatch):

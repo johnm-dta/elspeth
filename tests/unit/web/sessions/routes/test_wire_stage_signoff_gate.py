@@ -17,10 +17,9 @@ from tests.unit.web.sessions.routes._wire_fixtures import (  # P3 helper; see no
     make_wire_ready_session_and_state,
 )
 
-# TUTORIAL_PROFILE now carries advisor_checkpoints=False (matches live guided);
-# the gate short-circuits to COMPLETE before the provider is reached. The gate-
-# behavior cases below need an advisor-ON profile to exercise the sign-off path,
-# so use a synthetic clone that flips only the advisor toggle.
+# TUTORIAL_PROFILE carries advisor_checkpoints=False as the explicit demo
+# bypass. The gate-behavior cases below use a synthetic clone so they remain
+# independent of the live profile constant.
 ADVISOR_ON_PROFILE = dataclasses.replace(TUTORIAL_PROFILE, advisor_checkpoints=True)
 
 
@@ -77,13 +76,14 @@ async def _dispatch(
 
 
 @pytest.mark.asyncio
-async def test_empty_profile_completes_with_zero_provider_calls() -> None:
+async def test_live_profile_clean_verdict_calls_advisor_and_completes() -> None:
     session, state = make_wire_ready_session_and_state(profile=EMPTY_PROFILE)
-    svc = _service(None)  # asserts run_signoff_checkpoint is never awaited
+    svc = _service(AdvisorCheckpointVerdict(ok=True, blocking=False, findings_text="CLEAN"))
     _state, guided, _turn = await _dispatch(session, state, svc)
     assert guided.terminal is not None
     assert guided.terminal.kind is TerminalKind.COMPLETED
-    svc.run_signoff_checkpoint.assert_not_awaited()
+    assert guided.advisor_checkpoint_passes_used == 1
+    svc.run_signoff_checkpoint.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -119,10 +119,8 @@ async def test_custom_inputs_never_acknowledge_unavailable_escape() -> None:
 
 @pytest.mark.asyncio
 async def test_tutorial_profile_clean_completes() -> None:
-    # CHANGE 2: TUTORIAL_PROFILE now carries advisor_checkpoints=False (matches
-    # live guided), so the tutorial wire-confirm completes clean on a valid
-    # pipeline WITHOUT the terminal advisor sign-off — the gate short-circuits
-    # before the provider is reached and never touches the pass counter.
+    # TUTORIAL_PROFILE is the explicit demo bypass, so the tutorial wire-confirm
+    # completes clean on a valid pipeline WITHOUT the terminal advisor sign-off.
     session, state = make_wire_ready_session_and_state(profile=TUTORIAL_PROFILE)
     svc = _service(None)  # advisor must NOT be called for the advisor-off profile
     _state, guided, _turn = await _dispatch(session, state, svc)

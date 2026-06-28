@@ -3748,14 +3748,11 @@ async def _dispatch_guided_respond(
             )
             return state, guided, next_turn
 
-        # D13 — profile-gated terminal advisor sign-off. The empty/live-
-        # guided profile (advisor_checkpoints=False) skips the provider
-        # entirely and completes on a valid pipeline (no blocking advisor
-        # round-trip; the wire stage stays a benign topology-review
-        # improvement for live guided). The tutorial profile runs the
-        # whole-pipeline END sign-off as a PRE-terminal gate so a FLAG can
-        # still re-emit a revise turn (a post-terminal hook would be
-        # foreclosed by the composer.py:2131 terminal-409).
+        # D13 — profile-gated terminal advisor sign-off. The live profile runs
+        # the whole-pipeline END sign-off as a PRE-terminal gate so a FLAG can
+        # still re-emit a revise turn (a post-terminal hook would be foreclosed
+        # by the composer.py:2131 terminal-409). Tutorial is the explicit
+        # advisor-off demo bypass for the passive known-good walkthrough.
         from elspeth.web.composer.guided.signoff import SignoffOutcome, run_wire_signoff, signoff_audit_event_name
 
         if not guided.profile.advisor_checkpoints:

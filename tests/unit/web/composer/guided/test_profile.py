@@ -23,14 +23,14 @@ class TestWorkflowProfileShape:
 
     def test_empty_profile_is_live_guided_default(self) -> None:
         assert EMPTY_PROFILE.coaching is False
-        assert EMPTY_PROFILE.advisor_checkpoints is False
+        assert EMPTY_PROFILE.advisor_checkpoints is True
         assert EMPTY_PROFILE.recipe_match is True
         assert EMPTY_PROFILE.bookends is False
 
     def test_tutorial_profile_enables_coaching_bookends(self) -> None:
         assert TUTORIAL_PROFILE.coaching is True
-        # Matches live guided (EMPTY_PROFILE): the tutorial is the normal guided
-        # flow, so it skips the nondeterministic terminal advisor sign-off.
+        # Tutorial is the explicit demo bypass: it skips the nondeterministic
+        # terminal advisor sign-off for a known-good passive walkthrough.
         assert TUTORIAL_PROFILE.advisor_checkpoints is False
         assert TUTORIAL_PROFILE.recipe_match is True
         assert TUTORIAL_PROFILE.bookends is True

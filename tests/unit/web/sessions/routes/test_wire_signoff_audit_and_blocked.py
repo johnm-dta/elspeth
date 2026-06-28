@@ -20,10 +20,9 @@ from elspeth.web.composer.service import AdvisorCheckpointVerdict, _advisor_sign
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond
 from tests.unit.web.sessions.routes._wire_fixtures import make_wire_ready_session_and_state
 
-# The terminal advisor sign-off is no shipped profile's behaviour anymore
-# (TUTORIAL_PROFILE.advisor_checkpoints is now False, matching live guided). These
-# sign-off-audit tests pin the still-live advisor-gate code path with a synthetic
-# advisor-ON profile so coverage survives the tutorial flip.
+# The live profile now uses terminal advisor sign-off; tutorial remains the
+# explicit demo bypass. These sign-off-audit tests use a synthetic advisor-ON
+# profile so coverage stays independent of either shipped profile constant.
 ADVISOR_ON_PROFILE = dataclasses.replace(TUTORIAL_PROFILE, advisor_checkpoints=True)
 
 

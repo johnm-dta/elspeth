@@ -1,5 +1,5 @@
-# tests/integration/test_rc6_concurrent_pumping_proof.py
-"""RC6 C2 proofs: the durable token scheduler pumps overlapping token lifecycles.
+# tests/integration/test_concurrent_pumping_proof.py
+"""C2 proofs: the durable token scheduler pumps overlapping token lifecycles.
 
 The claim under test (ADR-026): token progress through the DAG is interleaved
 via the durable work queue — a later-admitted token can be claimed and advanced

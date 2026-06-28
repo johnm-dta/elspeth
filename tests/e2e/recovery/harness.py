@@ -8,7 +8,7 @@ reuse exactly the same production-writer state builders. Zero behavior
 changes in the move; ``test_concurrent_resume.py`` imports everything back.
 
 Construction note (kept honest, same technique as
-test_rc6_eof_resume_proof.py): the crashed-mid-claim state cannot be reached
+test_eof_resume_proof.py): the crashed-mid-claim state cannot be reached
 by a graceful shutdown — the engine always finishes the in-flight row before
 honoring the shutdown event — and a real SIGKILL is not deterministic inside
 a unit process. So each test first runs the REAL pipeline (real Orchestrator,

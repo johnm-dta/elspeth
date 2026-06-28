@@ -1,7 +1,7 @@
 """Characterization tests for durable token-scheduler admission, lease, and parking semantics.
 
 These tests pin the CURRENT behavior of ``TokenSchedulerRepository`` (the
-SQLite-backed work queue behind the RC6 token scheduler) at the repository
+SQLite-backed work queue behind the durable token scheduler) at the repository
 level, against a real Tier-1 SQLite engine:
 
 1. Claim admission follows the documented deterministic ORDER BY policy
@@ -39,7 +39,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 
-RUN_ID = "run-rc6-order"
+RUN_ID = "run-order"
 LEADER_WORKER_ID = "test-leader"
 # Epoch-1 token; _insert_run_and_nodes seeds the matching seat.
 COORD_TOKEN = CoordinationToken(run_id=RUN_ID, worker_id=LEADER_WORKER_ID, leader_epoch=1)

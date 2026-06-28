@@ -61,7 +61,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 
-RUN_ID = "run-rc6-lease-sweep"
+RUN_ID = "run-lease-sweep"
 
 
 def _make_scheduler_engine() -> Tier1Engine:

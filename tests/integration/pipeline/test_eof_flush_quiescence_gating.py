@@ -1,7 +1,7 @@
 # tests/integration/pipeline/test_eof_flush_quiescence_gating.py
 """ADR-030 §D steps 2-3 — the end-of-input flush is journal-quiescence gated.
 
-Sibling of test_rc6_eof_resume_proof.py, real pipelines end-to-end. The §D
+Sibling of test_eof_resume_proof.py, real pipelines end-to-end. The §D
 rule: the EOF barrier flush may run ONLY when the journal holds zero READY
 rows and zero non-pending-sink LEASED rows — otherwise a still-in-flight work
 item (a slice-4/5 slow follower's claim) could deposit a barrier arrival

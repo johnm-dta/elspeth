@@ -1,4 +1,4 @@
-"""RC6 storage-discipline verification on scheduler-bearing SQLite connections.
+"""Storage-discipline verification on scheduler-bearing SQLite connections.
 
 The token scheduler (``TokenSchedulerRepository``) persists its work queue in
 ``token_work_items`` / ``scheduler_events`` and depends on four SQLite PRAGMA
@@ -52,7 +52,7 @@ from elspeth.core.landscape.schema import (
     tokens_table,
 )
 
-RUN_ID = "run-rc6-pragma"
+RUN_ID = "run-pragma"
 SCHEDULER_TABLES = ("token_work_items", "scheduler_events")
 
 

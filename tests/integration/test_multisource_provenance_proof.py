@@ -1,4 +1,4 @@
-"""RC6.0 C1 proofs: multi-source entry with durable per-source provenance.
+"""C1 proofs: multi-source entry with durable per-source provenance.
 
 Drives the REAL orchestrator (real SQLite LandscapeDB, real scheduler, real
 plugin instantiation from YAML settings) and asserts ADR-025 semantics:

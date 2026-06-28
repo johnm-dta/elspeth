@@ -182,7 +182,7 @@ class TestAggregationFlushResult:
 
 
 # ---------------------------------------------------------------------------
-# T18: New type tests
+# New type tests
 # ---------------------------------------------------------------------------
 
 
@@ -286,10 +286,10 @@ class TestLoopContext:
 
 
 class TestExecutionCountersToRunResultRequired:
-    """Test that to_run_result requires status parameter (T18 safety fix)."""
+    """Test that to_run_result requires the status parameter (no implicit default)."""
 
     def test_status_is_required_parameter(self) -> None:
-        """After T18, status has no default — callers must be explicit.
+        """Status has no default — callers must be explicit.
 
         Phase 2.2 (elspeth-0de989c56d): the biconditional invariant on
         :class:`RunResult` rejects ``status=COMPLETED`` with zero counters

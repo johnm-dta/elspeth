@@ -1,7 +1,7 @@
-# tests/unit/engine/orchestrator/test_rc6_checkpoint_interrupted_edge.py
+# tests/unit/engine/orchestrator/test_checkpoint_interrupted_edge.py
 """Shutdown-checkpoint behavior for the scalar barrier projection.
 
-History: the original RC6 edge here was the token-anchor selection chain
+History: the original edge here was the token-anchor selection chain
 (commit f487d7b13 fixed a ``tokens[-1]`` IndexError on counter-only nodes).
 The anchor itself was deleted as vestigial (F2, 2026-06-10) — the entire
 fallback chain is gone, so the crash surface no longer exists. F1 Task 1.2

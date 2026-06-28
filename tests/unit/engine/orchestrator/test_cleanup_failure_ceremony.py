@@ -1,4 +1,4 @@
-# tests/unit/engine/orchestrator/test_rc6_cleanup_failure_ceremony.py
+# tests/unit/engine/orchestrator/test_cleanup_failure_ceremony.py
 """Plugin-cleanup failures must not mask an in-flight run failure.
 
 ``cleanup_plugins`` runs in the orchestrator's ``finally`` blocks. Raising a

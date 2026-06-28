@@ -23,7 +23,7 @@ semantics of the source iteration loop (source_iteration.py):
    "first source" legacy default (run_core.py RowProcessor construction;
    ``record_source_node_state``'s ``source_node_id or self._source_node_id``
    fallback) against silent misattribution. Strengthens
-   tests/integration/test_rc6_multisource_provenance_proof.py::
+   tests/integration/test_multisource_provenance_proof.py::
    test_per_source_provenance_is_durable_in_audit_database, which proves
    positional attribution but not content->node binding.
 """

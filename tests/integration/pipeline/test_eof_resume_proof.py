@@ -1,5 +1,5 @@
-# tests/integration/pipeline/test_rc6_eof_resume_proof.py
-"""RC6 exhausted-source EOF resume proof (elspeth-b2142988b4).
+# tests/integration/pipeline/test_eof_resume_proof.py
+"""Exhausted-source EOF resume proof (elspeth-b2142988b4).
 
 The claim under test: a crash AFTER source exhaustion but BEFORE the
 end-of-input engine work (count/EOF-triggered aggregation flush) completes

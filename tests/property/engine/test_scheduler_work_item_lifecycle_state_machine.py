@@ -221,7 +221,7 @@ class SchedulerWorkItemLifecycleStateMachine(RuleBasedStateMachine):
         Production orders by (ingest_sequence, step_index, created_at,
         work_item_id); every modelled token has a unique ingest_sequence and a
         constant step_index, so ingest_sequence alone is disambiguating here
-        (the tie legs are pinned by test_rc6_scheduler_ordering_characterization).
+        (the tie legs are pinned by test_scheduler_ordering_characterization).
         """
         candidates = [item for item in self.model.values() if item.status is status]
         if not candidates:

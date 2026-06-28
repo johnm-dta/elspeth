@@ -114,11 +114,14 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
                 "filename": "urls.json",
                 "mime_type": "application/json",
                 "content": '[{"url": "https://example.test/a"}]',
-                # The model parrots the server-owned keys it saw in current_source.
+                # The model parrots the server-owned keys it saw in current_source,
+                # alongside legitimate keys (schema) and a PENDING invented-source
+                # review requirement, which must SURVIVE the narrow strip.
                 "options": {
                     "schema": {"mode": "observed"},
                     "blob_ref": "abc",
                     "source_authoring": {"creation_modality": "verbatim", "content_hash": "0" * 64},
+                    "interpretation_requirements": [{"kind": "invented_source", "status": "pending"}],
                 },
                 "observed_columns": ["url"],
                 "sample_rows": [{"url": "https://example.test/a"}],
@@ -140,11 +143,31 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
         )
 
     assert result is not None
-    # Both keys are server-owned; neither may survive an LLM source resolution
-    # (set_source rejects caller-supplied blob_ref / source_authoring, which
-    # turned the next Send into a 400 "Step 1 source commit failed").
+    # Drop-direction: both keys are server-owned; neither may survive an LLM source
+    # resolution (set_source rejects caller-supplied blob_ref / source_authoring,
+    # which turned the next Send into a 400 "Step 1 source commit failed").
     assert "blob_ref" not in result.options
     assert "source_authoring" not in result.options
+    # Keep-direction: the strip is deliberately NARROW — legitimate keys and a
+    # pending invented-source review requirement must be preserved (a regression
+    # that wiped all options, or widened the blocklist, would be caught here).
+    # (options are deep-frozen to mappingproxy/tuples — assert presence/readability,
+    # not deep dict/list equality.)
+    assert result.options["schema"]["mode"] == "observed"
+    assert "interpretation_requirements" in result.options
+    assert result.options["interpretation_requirements"][0]["kind"] == "invented_source"
+
+
+def test_resolver_forbidden_keys_stay_in_lockstep_with_commit_side_class() -> None:
+    """The resolver strip set MUST equal the commit-side class of server-owned source
+    keys (``_WEB_ONLY_SOURCE_KEYS``) that ``set_source`` rejects. If a new server-owned
+    key gains a reject guard but is not added to the resolver strip, a re-Send echo of
+    that key silently re-triggers the original commit-failure mode. This guard fails
+    loudly on that drift."""
+    from elspeth.web.composer.guided.chat_solver import _RESOLVER_FORBIDDEN_SOURCE_OPTION_KEYS
+    from elspeth.web.composer.tools._common import _WEB_ONLY_SOURCE_KEYS
+
+    assert _RESOLVER_FORBIDDEN_SOURCE_OPTION_KEYS == _WEB_ONLY_SOURCE_KEYS
 
 
 @pytest.mark.asyncio

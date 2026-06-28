@@ -18,6 +18,7 @@ from tests.integration.web.composer.guided.test_step_3_e2e import (
     _respond,
     _seed_blob,
 )
+from tests.integration.web.composer.guided.test_step_chat import _chat_turn_audit_bodies
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 
@@ -348,6 +349,55 @@ def test_step_1_chat_resend_strips_server_owned_keys_and_recommits(composer_test
     assert body2["next_turn"] is not None
     assert body2["next_turn"]["type"] == "schema_form"
     assert body2["guided_session"]["step"] == "step_1_source"
+
+
+def test_step_1_chat_handler_rejection_degrades_to_advisory_and_audits_classifier(
+    composer_test_client: TestClient,
+) -> None:
+    """When the source driver resolves a source but handle_step_1_source rejects it
+    (strict commit seam), the STEP_1 branch must DEGRADE to advisory — symmetric with
+    STEP_2: synthetic message, next_turn=None, NO mutation, phase unchanged — instead
+    of raising a fatal 400. The degrade records the redaction-safe classifier
+    error_class="StepHandlerRejected" on the chat-turn audit (the whole justification
+    for degrading rather than 400'ing). Status==200 alone does NOT distinguish this
+    from a successful apply, so the message + next_turn + audit are the discriminators.
+    """
+    client = composer_test_client
+    session_id = _create_session(client)
+    _seed_blob(client, session_id)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["json"])
+    before = _get_guided(client, session_id)
+    # Duck-typed failure: the reject leg reads only tool_result.success.
+    rejected = SimpleNamespace(tool_result=SimpleNamespace(success=False))
+    with (
+        patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(
+                return_value=_fake_resolve_source_response(
+                    options={"schema": {"mode": "observed"}},
+                    assistant_message="Built the URL source.",
+                )
+            ),
+        ),
+        patch(
+            "elspeth.web.sessions.routes.composer.guided.handle_step_1_source",
+            return_value=rejected,
+        ),
+    ):
+        status, body = _post_chat(client, session_id, message="ten urls please", step_index="step_1_source")
+    assert status == 200, body
+    # Advisory degradation — NOT a fatal 400, NOT a successful apply.
+    assert body["next_turn"] is None
+    assert body["assistant_message"] == _SYNTHETIC_UNAVAILABLE_MESSAGE
+    assert body["guided_session"]["step"] == "step_1_source"
+    # No mutation: the rejected commit did not write a source.
+    after = _get_guided(client, session_id)
+    assert before["composition_state"].get("source") == after["composition_state"].get("source")
+    # Diagnosability with zero egress: the rejection is recorded as a fixed classifier.
+    audit = _chat_turn_audit_bodies(client, session_id)
+    assert audit, "expected a chat_turn audit on the degrade path"
+    assert audit[-1]["error_class"] == "StepHandlerRejected"
 
 
 def test_step_3_chat_reproposes_in_place_without_committing(composer_test_client: TestClient) -> None:

@@ -1,9 +1,9 @@
 """Phase p4 — the 3 synthetic tutorial-site pages (Component 1 of the spec).
 
-Reads the SOURCE files under frontend/public/ (Vite copies public/ -> dist/
-verbatim, so what is here is what serves at <origin>/tutorial-site/...). The
-pages must be unmistakably marked test data, noindexed, and carry three tables
-whose values DIFFER across the three projects so the derived facts vary.
+Reads the SOURCE files under website/tutorial-site/, which is the GitHub Pages
+publish tree. The pages must be unmistakably marked test data, noindexed, and
+carry three tables whose values DIFFER across the three projects so the derived
+facts vary.
 """
 
 from __future__ import annotations
@@ -12,13 +12,15 @@ from pathlib import Path
 
 import pytest
 
-_PUBLIC = Path(__file__).resolve().parents[3] / "src/elspeth/web/frontend/public/tutorial-site"
+_ROOT = Path(__file__).resolve().parents[3]
+_WEBSITE = _ROOT / "website/tutorial-site"
+_FRONTEND_PUBLIC = _ROOT / "src/elspeth/web/frontend/public/tutorial-site"
 _PAGES = ("project-1.html", "project-2.html", "project-3.html")
 
 
 @pytest.mark.parametrize("name", _PAGES)
 def test_synthetic_page_is_marked_test_data(name: str) -> None:
-    html = (_PUBLIC / name).read_text(encoding="utf-8")
+    html = (_WEBSITE / name).read_text(encoding="utf-8")
     assert "SYNTHETIC TEST DATA ONLY — DO NOT USE" in html
     # Match either the self-closing (' />') or plain ('>') form so the
     # assertion agrees with the XML self-closing fixtures below.
@@ -27,7 +29,7 @@ def test_synthetic_page_is_marked_test_data(name: str) -> None:
 
 @pytest.mark.parametrize("name", _PAGES)
 def test_synthetic_page_has_three_tables(name: str) -> None:
-    html = (_PUBLIC / name).read_text(encoding="utf-8").lower()
+    html = (_WEBSITE / name).read_text(encoding="utf-8").lower()
     # Risk register / schedule / cost breakdown headings.
     assert "risk register" in html
     assert "schedule" in html
@@ -36,13 +38,18 @@ def test_synthetic_page_has_three_tables(name: str) -> None:
     assert html.count("$") >= 3
 
 
+@pytest.mark.parametrize("name", _PAGES)
+def test_frontend_public_tree_does_not_duplicate_tutorial_page(name: str) -> None:
+    assert not (_FRONTEND_PUBLIC / name).exists()
+
+
 def test_synthetic_pages_have_distinct_cost_totals() -> None:
     # The whole point of differing values: the derived total_cost must vary.
     import re
 
     totals: list[int] = []
     for name in _PAGES:
-        html = (_PUBLIC / name).read_text(encoding="utf-8")
+        html = (_WEBSITE / name).read_text(encoding="utf-8")
         figures = [int(m.replace(",", "")) for m in re.findall(r"\$([\d,]+)", html)]
         assert figures, f"{name} has no dollar figures"
         totals.append(sum(figures))
@@ -58,7 +65,7 @@ def test_synthetic_pages_have_distinct_go_live_dates() -> None:
 
     dates: list[str] = []
     for name in _PAGES:
-        html = (_PUBLIC / name).read_text(encoding="utf-8")
+        html = (_WEBSITE / name).read_text(encoding="utf-8")
         m = re.search(r"Go-live</td><td>(\d{4}-\d{2}-\d{2})</td>", html)
         assert m, f"{name} has no Go-live date row"
         dates.append(m.group(1))
@@ -72,7 +79,7 @@ def test_synthetic_pages_have_distinct_project_names() -> None:
 
     names: list[str] = []
     for name in _PAGES:
-        html = (_PUBLIC / name).read_text(encoding="utf-8")
+        html = (_WEBSITE / name).read_text(encoding="utf-8")
         m = re.search(r"<h1>([^<]+)</h1>", html)
         assert m, f"{name} has no hero <h1>"
         names.append(m.group(1).strip())

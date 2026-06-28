@@ -239,3 +239,11 @@ repos:
         # be set to false here (the framework's commit-msg stage passes the
         # message file path as the sole positional argument).
         always_run: true
+  - repo: local
+    hooks:
+      - id: wardline-scan
+        name: wardline scan
+        entry: wardline scan
+        language: system
+        types: [python]
+        pass_filenames: false

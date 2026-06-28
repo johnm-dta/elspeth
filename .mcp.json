@@ -40,13 +40,13 @@
       "type": "stdio"
     },
     "wardline": {
+      "type": "stdio",
+      "command": "/home/john/.local/bin/wardline",
       "args": [
         "mcp",
         "--root",
         "."
-      ],
-      "command": "/home/john/.local/bin/wardline",
-      "type": "stdio"
+      ]
     },
     "warpline": {
       "args": [],

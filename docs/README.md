@@ -34,6 +34,7 @@ reference to `docs/<path>` resolves at `docs-archive/2026-06-28-docs-cleanout/do
 
 Current architecture and design references.
 
+- [Repository Directory Strategy](repository-structure.md) — purpose of every top-level folder and where new files belong
 - [Architecture Overview](../ARCHITECTURE.md) — C4 model, data flows, and system-level orientation
 - [System Overview](architecture/overview.md) — compatibility pointer to the maintained root architecture overview
 - [Requirements Matrix](architecture/requirements.md) — compatibility pointer to current requirement and contract sources

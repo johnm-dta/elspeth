@@ -234,7 +234,7 @@ class BaseTransform(ABC):
     additionally rejects bare-string members that pass mypy under
     StrEnum/str inference."""
 
-    discovery_secret_requirements: ClassVar[Mapping[str, tuple[str, ...]]] = {}
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]] = {}
     """Credential-bearing config fields that must have a configured secret ref
     before composer discovery advertises the plugin.
 
@@ -978,7 +978,7 @@ class BaseSink(ABC):
     declaration site rather than disappearing silently from the rendered
     catalog card."""
 
-    discovery_secret_requirements: ClassVar[Mapping[str, tuple[str, ...]]] = {}
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]] = {}
     """Credential-bearing config fields that must have a configured secret ref
     before composer discovery advertises the plugin. See BaseTransform."""
 
@@ -1379,7 +1379,7 @@ class BaseSource(ABC):
     declaration site rather than disappearing silently from the rendered
     catalog card."""
 
-    discovery_secret_requirements: ClassVar[Mapping[str, tuple[str, ...]]] = {}
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]] = {}
     """Credential-bearing config fields that must have a configured secret ref
     before composer discovery advertises the plugin. See BaseTransform."""
 

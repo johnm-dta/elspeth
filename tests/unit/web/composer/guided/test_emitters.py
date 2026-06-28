@@ -8,11 +8,13 @@ from elspeth.web.composer.guided.emitters import (
     _step_index,
     build_initial_step_1_turn,
     build_step_1_schema_form_turn,
+    build_step_1_schema_form_turn_from_resolved,
     build_step_2_schema_form_turn,
     build_step_3_schema_form_turn,
     build_step_4_wire_turn,
 )
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnType, validate_payload
+from elspeth.web.composer.guided.state_machine import SourceResolved
 from elspeth.web.composer.source_inspection import SourceInspectionFacts
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.sessions.routes._helpers import _guided_step_index
@@ -142,3 +144,35 @@ class TestStep1SourcePicker:
         option_ids = [opt["id"] for opt in turn["payload"]["options"]]
         assert "null" not in option_ids
         assert option_ids == ["csv", "json"]
+
+
+class TestSchemaFormPathMask:
+    """Fix B: a blob-backed source's absolute storage_path must never reach the
+    wire — it is rendered as a stable blob:<ref> sentinel that the step_1 commit
+    handler re-resolves to the real path."""
+
+    def test_step_1_from_resolved_masks_blob_backed_path(self) -> None:
+        source = SourceResolved(
+            plugin="json",
+            options={
+                "path": "/home/someuser/elspeth/data/blobs/sess/abc123_urls.json",
+                "blob_ref": "abc123",
+                "schema": {"mode": "observed"},
+            },
+            observed_columns=("url",),
+            sample_rows=(),
+        )
+        turn = build_step_1_schema_form_turn_from_resolved(source, _Catalog())
+        assert turn["payload"]["prefilled"]["path"] == "blob:abc123"
+        # the absolute path (deploy dir + OS username) is gone from the payload
+        assert "/home/someuser" not in str(turn["payload"]["prefilled"])
+
+    def test_step_1_from_resolved_leaves_non_blob_path_untouched(self) -> None:
+        source = SourceResolved(
+            plugin="json",
+            options={"path": "data/input.json", "schema": {"mode": "observed"}},
+            observed_columns=("url",),
+            sample_rows=(),
+        )
+        turn = build_step_1_schema_form_turn_from_resolved(source, _Catalog())
+        assert turn["payload"]["prefilled"]["path"] == "data/input.json"

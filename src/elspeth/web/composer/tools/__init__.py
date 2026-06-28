@@ -74,6 +74,7 @@ from elspeth.web.composer.tools.blobs import (
     _persist_prepared_blob_create,
     _prepare_blob_create,
     _session_blob_lock,
+    _sync_get_blob_by_id,
     _sync_get_blob_by_storage_path,
     _sync_list_blobs,
 )
@@ -170,6 +171,7 @@ __all__ = [
     "_prevalidate_plugin_options",
     "_resolve_source_blob",
     "_session_blob_lock",
+    "_sync_get_blob_by_id",
     "_sync_get_blob_by_storage_path",
     "_sync_list_blobs",
     "_utc_day_start",

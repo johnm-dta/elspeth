@@ -587,3 +587,51 @@ class TestStep1ObservedColumnsDerivation:
         assert result.tool_result.success is True
         # non-empty LLM columns are preserved (bounded scan must not overwrite)
         assert result.session.step_1_result.observed_columns == ("url", "extra")
+
+    def test_resolves_blob_ref_path_sentinel_to_real_storage_path(self, _seeded_json_urls) -> None:
+        # Fix B round-trip: a re-submitted schema_form carries the masked
+        # blob:<ref> path (the absolute storage_path is kept off the wire). The
+        # commit must restore the real path so the pipeline can read the blob.
+        engine, session_id, storage_path = _seeded_json_urls
+        blob_id = storage_path.split("/")[-1].split("_", 1)[0]
+        result = handle_step_1_source(
+            state=_empty_state(),
+            session=GuidedSession.initial(),
+            resolved=SourceResolved(
+                plugin="json",
+                options={"path": f"blob:{blob_id}", "schema": {"mode": "observed"}},
+                observed_columns=("url",),
+                sample_rows=(),
+            ),
+            catalog=create_catalog_service(),
+            data_dir=None,
+            session_engine=engine,
+            session_id=session_id,
+        )
+        assert result.tool_result.success is True
+        committed_path = result.session.step_1_result.options["path"]
+        # the real absolute path is restored, not the blob: sentinel
+        assert committed_path == storage_path
+        assert not str(committed_path).startswith("blob:")
+        # blob_ref enrichment runs on the restored real path
+        assert "blob_ref" in result.session.step_1_result.options
+
+    def test_blob_ref_path_to_unknown_blob_raises(self, _seeded_json_urls) -> None:
+        # A sentinel that resolves to no blob must fail loudly, never commit a
+        # broken blob: path that the run cannot open.
+        engine, session_id, _ = _seeded_json_urls
+        with pytest.raises(InvariantError):
+            handle_step_1_source(
+                state=_empty_state(),
+                session=GuidedSession.initial(),
+                resolved=SourceResolved(
+                    plugin="json",
+                    options={"path": f"blob:{uuid4()}", "schema": {"mode": "observed"}},
+                    observed_columns=("url",),
+                    sample_rows=(),
+                ),
+                catalog=create_catalog_service(),
+                data_dir=None,
+                session_engine=engine,
+                session_id=session_id,
+            )

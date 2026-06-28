@@ -31,6 +31,7 @@ from elspeth.web.catalog.knob_schema import KnobSchema
 from elspeth.web.composer._producer_resolver import source_producer_id
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import (
+    BLOB_REF_PATH_PREFIX,
     GuidedStep,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
@@ -254,6 +255,15 @@ def build_step_1_schema_form_turn_from_resolved(
 
     schema_info = catalog.get_schema("source", source.plugin)
     prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(deep_thaw(source.options))}
+    # Mask a blob-backed source's absolute storage_path behind a stable
+    # ``blob:<ref>`` sentinel so the deploy dir + OS username never reach the wire
+    # (the un-gated egress that bypasses the blobs/schemas.py "storage_path is
+    # never exposed" doctrine). handle_step_1_source re-resolves the sentinel to
+    # the real path on commit. Gated on blob_ref so an operator-typed path knob is
+    # left untouched.
+    blob_ref = source.options.get("blob_ref")
+    if blob_ref is not None and isinstance(prefilled.get("path"), str):
+        prefilled["path"] = f"{BLOB_REF_PATH_PREFIX}{blob_ref}"
     # on_validation_failure is a required-no-default source-node knob, so the
     # schema_form's Continue stays disabled until it has a value. Seed it from the
     # resolved node field (assigned AFTER the options spread so the authoritative

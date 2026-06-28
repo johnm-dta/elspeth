@@ -22,7 +22,7 @@ from sqlalchemy import Engine
 
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX, GuidedStep
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
@@ -39,6 +39,7 @@ from elspeth.web.composer.tools import (
     _execute_set_output,
     _execute_set_pipeline,
     _execute_set_source,
+    _sync_get_blob_by_id,
     _sync_get_blob_by_storage_path,
 )
 from elspeth.web.composer.yaml_generator import generate_yaml
@@ -61,6 +62,39 @@ class StepHandlerResult:
     state: CompositionState
     session: GuidedSession
     tool_result: ToolResult
+
+
+def _resolve_blob_ref_path(
+    resolved: SourceResolved,
+    *,
+    session_engine: Engine | None,
+    session_id: str | None,
+) -> SourceResolved:
+    """Re-resolve a masked ``blob:<ref>`` source path to the real storage_path.
+
+    ``build_step_1_schema_form_turn_from_resolved`` renders a blob-backed
+    source's ``path`` knob as ``blob:<blob_ref>`` so the absolute storage_path
+    (deploy dir + OS username) never reaches the wire. On commit we must restore
+    the real path or the pipeline cannot read the blob. The lookup is
+    authoritative (by-id DB query, session-scoped), mirroring the storage_path
+    enrichment below.
+
+    A non-sentinel path — an operator-typed path, or a first chat-resolve commit
+    that already carries the real path — is returned unchanged.
+    """
+    path_value = resolved.options.get("path")
+    if not (isinstance(path_value, str) and path_value.startswith(BLOB_REF_PATH_PREFIX)):
+        return resolved
+    blob_ref = path_value[len(BLOB_REF_PATH_PREFIX) :]
+    if session_engine is None or session_id is None:
+        raise InvariantError(
+            "handle_step_1_source: a blob:<ref> source path requires session_engine and session_id to resolve, but they were not provided."
+        )
+    blob = _sync_get_blob_by_id(session_engine, blob_ref, session_id)
+    if blob is None:
+        raise InvariantError(f"handle_step_1_source: blob:<ref> path references blob {blob_ref!r}, which no longer exists in this session.")
+    restored = {**dict(resolved.options), "path": blob["storage_path"]}
+    return dataclasses.replace(resolved, options=restored)
 
 
 def handle_step_1_source(
@@ -104,6 +138,10 @@ def handle_step_1_source(
     enrichment is silently skipped, which is the correct behavior for non-blob
     sources.
     """
+    # Restore the real storage_path from a masked blob:<ref> path (emitted to keep
+    # the absolute path off the wire) before committing, so the pipeline can read
+    # the blob. No-op for non-sentinel paths.
+    resolved = _resolve_blob_ref_path(resolved, session_engine=session_engine, session_id=session_id)
     args = {
         "plugin": resolved.plugin,
         "options": dict(resolved.options),

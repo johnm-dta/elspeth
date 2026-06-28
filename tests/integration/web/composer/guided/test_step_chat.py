@@ -510,7 +510,12 @@ class TestStep1SourceResolution:
         # The re-rendered form is POPULATED from the committed source (the whole
         # point of LLM-primary: the form shows what was just built).
         assert body["next_turn"]["payload"]["plugin"] == "csv"
-        assert body["next_turn"]["payload"]["prefilled"]["path"].endswith("_teal_colours.csv")
+        # Security: the re-rendered form masks the blob-backed source's absolute
+        # storage_path behind a blob:<ref> sentinel (handle_step_1_source re-resolves
+        # it on commit), so the deploy path + OS username never reach the wire. The
+        # committed STATE below still carries the real path (display-only mask).
+        assert body["next_turn"]["payload"]["prefilled"]["path"].startswith("blob:")
+        assert not body["next_turn"]["payload"]["prefilled"]["path"].endswith("_teal_colours.csv")
         assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
         source_options = body["composition_state"]["sources"]["source"]["options"]
         assert source_options["schema"]["mode"] == "observed"

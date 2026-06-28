@@ -198,6 +198,28 @@ def _sync_get_blob_by_storage_path(
         return _blob_row_to_tool_dict(row)
 
 
+def _sync_get_blob_by_id(
+    engine: Engine,
+    blob_id: str,
+    session_id: str,
+) -> BlobToolRecord | None:
+    """Look up a blob by its UUID within a session (authoritative DB query).
+
+    The inverse of :func:`_sync_get_blob_by_storage_path`: used by
+    ``handle_step_1_source`` (steps.py) to resolve a ``blob:<ref>`` path sentinel
+    — emitted by ``build_step_1_schema_form_turn_from_resolved`` to keep the
+    absolute storage_path off the wire — back to the blob's real ``storage_path``
+    before the source is committed. Session-scoped so a blob ref cannot resolve
+    across sessions (project/tenant isolation). Returns None if no row matches.
+    """
+    with engine.connect() as conn:
+        query = select(blobs_table).where(blobs_table.c.session_id == session_id).where(blobs_table.c.id == blob_id)
+        row = conn.execute(query).first()
+        if row is None:
+            return None
+        return _blob_row_to_tool_dict(row)
+
+
 def _sync_list_blobs(engine: Engine, session_id: str) -> list[dict[str, Any]]:
     """Synchronous blob listing for use in the tool executor thread."""
     with engine.connect() as conn:

@@ -12,6 +12,15 @@ from typing import Any, NotRequired, TypedDict
 
 from elspeth.web.catalog.knob_schema import SchemaFormPayload as SchemaFormPayload
 
+# Wire sentinel for a blob-backed source's ``path`` knob in a schema_form payload.
+# The emitter renders ``blob:<blob_ref>`` instead of the blob's ABSOLUTE
+# storage_path (which would leak the deploy dir + OS username — see
+# blobs/schemas.py, where storage_path is forbidden from HTTP responses); the
+# step_1 commit handler re-resolves it to the real path via an authoritative
+# by-id blob lookup. A filesystem path never starts with this prefix, so the
+# sentinel is unambiguous.
+BLOB_REF_PATH_PREFIX = "blob:"
+
 
 class TurnType(StrEnum):
     """The closed taxonomy of turn types the protocol allows."""

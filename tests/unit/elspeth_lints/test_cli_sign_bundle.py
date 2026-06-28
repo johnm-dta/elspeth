@@ -470,12 +470,40 @@ def test_sign_bundle_rotation_no_judge(tmp_path: Path) -> None:
         raise AssertionError("the judge must not run for a rotation action")
 
     with _patch_judge(_raise):
-        rc = main(_argv(bundle_path, root, allowlist_dir, extra=("--yes",)))
+        rc = main(_argv(bundle_path, root, allowlist_dir, extra=("--yes", "--rotation-log", str(tmp_path / "rotations.log"))))
 
     assert rc == 0
     text = (allowlist_dir / "gadget.yaml").read_text(encoding="utf-8")
     assert f"- key: {live_key}" in text
     assert stale_key not in text
+
+
+def test_sign_bundle_rotation_records_rotation_manifest(tmp_path: Path) -> None:
+    """A rotation action MUST append the .elspeth/rotations.log manifest record the
+    governance gate (check-rotation-audit) consumes -- the gate derives expected
+    rotations from the git diff of the allowlist and fails any old->new key change
+    with no covering manifest record. Regression for the hardcoded
+    ``rotation_log_path=None`` that rewrote the key but suppressed the manifest.
+    """
+    root = _build_root(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_source(root, "plugins/gadget.py", "gadget")
+    finding = _live_finding(root, "plugins/gadget.py")
+    live_key = _canonical_key(finding)
+    stale_key = _stale_rotation_key(finding)
+    _write_pre_judge_entry(allowlist_dir, "gadget.yaml", key=stale_key)
+    rot_log = tmp_path / "rotations.log"
+    bundle = _bundle(root, allowlist_dir, (BundleAction(lane="resign", kind="rotation", key=stale_key, source_file="gadget.yaml"),))
+    bundle_path = _write_bundle_file(tmp_path, bundle)
+
+    rc = main(_argv(bundle_path, root, allowlist_dir, extra=("--yes", "--rotation-log", str(rot_log))))
+
+    assert rc == 0
+    assert f"- key: {live_key}" in (allowlist_dir / "gadget.yaml").read_text(encoding="utf-8")
+    assert rot_log.exists(), "rotation applied but no .elspeth/rotations.log manifest record was written -- check-rotation-audit will fail"
+    records = [json.loads(line) for line in rot_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rotations = [item for rec in records for item in rec.get("rotations", [])]
+    assert {"source_file": "gadget.yaml", "old_key": stale_key, "new_key": live_key} in rotations
 
 
 def test_sign_bundle_rotation_execute_minimal_plan_no_unfiltered_rescan(tmp_path: Path) -> None:
@@ -516,7 +544,7 @@ def test_sign_bundle_rotation_execute_minimal_plan_no_unfiltered_rescan(tmp_path
     bundle = _bundle(root, allowlist_dir, (BundleAction(lane="resign", kind="rotation", key=gadget_stale, source_file="gadget.yaml"),))
     bundle_path = _write_bundle_file(tmp_path, bundle)
 
-    rc = main(_argv(bundle_path, root, allowlist_dir, extra=("--yes",)))
+    rc = main(_argv(bundle_path, root, allowlist_dir, extra=("--yes", "--rotation-log", str(tmp_path / "rotations.log"))))
 
     assert rc == 0  # (a) did NOT raise on the judge-gated fp-shifted non-action
     gadget_text = (allowlist_dir / "gadget.yaml").read_text(encoding="utf-8")

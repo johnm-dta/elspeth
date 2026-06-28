@@ -830,6 +830,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip the interactive confirmation prompt before the (destructive) write phase.",
     )
     sign_bundle.add_argument(
+        "--rotation-log",
+        type=Path,
+        default=Path(".elspeth/rotations.log"),
+        help=(
+            "JSONL audit manifest written when a rotation action applies, so "
+            "check-rotation-audit finds a record for the allowlist key rewrite "
+            "(mirrors `rotate --rotation-log`). Default: .elspeth/rotations.log."
+        ),
+    )
+    sign_bundle.add_argument(
         "--format",
         dest="justify_format",
         choices=("text", "json"),
@@ -3957,7 +3967,10 @@ def _execute_rotation_action(action: Any, *, rotation_plan: Any, args: argparse.
             allowlist_dir=args.allowlist_dir,
             remove_stale=False,
             accept_todo_debt=False,
-            rotation_log_path=None,
+            # CLI applies MUST record the manifest (mirrors _run_rotate) so the
+            # check-rotation-audit governance gate finds a record for the YAML key
+            # rewrite. A bundle without rotation actions never reaches here.
+            rotation_log_path=args.rotation_log,
         )
     except RuntimeError as exc:
         message = str(exc)

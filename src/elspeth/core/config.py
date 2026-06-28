@@ -1120,8 +1120,13 @@ class LandscapeSettings(BaseModel):
     )
     # NOTE: Using str instead of Path - Path mangles PostgreSQL DSNs
     # (pathlib interprets // as a UNC path).
+    # Default lives under data/ alongside the other system DBs (sessions.db,
+    # auth.db, runs/audit.db) so ad-hoc CLI/MCP runs don't scatter a separate
+    # state/ tree. Kept distinct from the web's data/runs/audit.db to avoid
+    # SQLite write-contention with the long-running web service; examples and
+    # explicit deployments override this in their own settings.yaml.
     url: str = Field(
-        default="sqlite:///./state/audit.db",
+        default="sqlite:///./data/audit.db",
         description="Full SQLAlchemy database URL",
     )
     encryption_key_env: str = Field(

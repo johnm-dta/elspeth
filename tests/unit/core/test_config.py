@@ -458,7 +458,11 @@ class TestLandscapeSettings:
         ls = LandscapeSettings()
         assert ls.enabled is True
         assert ls.backend == "sqlite"
-        assert ls.url == "sqlite:///./state/audit.db"
+        # Default audit DB lives under data/ alongside the other system DBs
+        # (sessions.db, auth.db, runs/audit.db) — a separate file from the web's
+        # data/runs/audit.db to avoid SQLite write-contention with the running
+        # web service. Examples override landscape.url in their own settings.yaml.
+        assert ls.url == "sqlite:///./data/audit.db"
 
     def test_landscape_settings_postgresql_url(self) -> None:
         """LandscapeSettings accepts PostgreSQL DSNs without mangling."""

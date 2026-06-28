@@ -511,7 +511,7 @@ class LandscapeDB:
 
         Args:
             connection_string: SQLAlchemy connection string
-                e.g., "sqlite:///./state/audit.db"
+                e.g., "sqlite:///./data/audit.db"
                       "postgresql://user@host/dbname"
             passphrase: SQLCipher encryption passphrase. When provided, the
                 database is opened with AES-256 encryption via sqlcipher3.
@@ -722,7 +722,7 @@ class LandscapeDB:
         (used by _configure_sqlite for WAL/FK/busy_timeout) fires afterwards.
 
         Args:
-            url: SQLAlchemy SQLite URL (e.g., "sqlite:///./state/audit.db")
+            url: SQLAlchemy SQLite URL (e.g., "sqlite:///./data/audit.db")
             passphrase: Encryption passphrase for PRAGMA key
 
         Returns:

@@ -819,14 +819,14 @@ def main() -> None:
         epilog="""
 Examples:
     # Run with SQLite database
-    elspeth-mcp --database sqlite:///./state/audit.db
+    elspeth-mcp --database sqlite:///./data/audit.db
 
     # Run with PostgreSQL
     elspeth-mcp --database postgresql://user@host/dbname
 
     # Run with SQLCipher-encrypted database
     export ELSPETH_AUDIT_KEY="<set-out-of-band>"
-    elspeth-mcp --database sqlite:///./state/audit.db --passphrase-env ELSPETH_AUDIT_KEY
+    elspeth-mcp --database sqlite:///./data/audit.db --passphrase-env ELSPETH_AUDIT_KEY
 
     # Interactive mode - finds and prompts for databases
     elspeth-mcp

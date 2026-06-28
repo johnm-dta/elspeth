@@ -5,9 +5,12 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from elspeth.contracts import CallStatus, CallType, NodeType
 from elspeth.contracts.schema import SchemaConfig
@@ -23,6 +26,7 @@ from elspeth.web.composer.tutorial_service import (
     _rows_from_artifacts,
 )
 from elspeth.web.config import WebSettings
+from elspeth.web.sessions.protocol import RunRecord
 from tests.fixtures.landscape import make_factory, make_landscape_db
 
 
@@ -37,6 +41,61 @@ def _make_tutorial_settings(data_dir: Path, **overrides: Any) -> WebSettings:
     }
     values.update(overrides)
     return WebSettings(**values)
+
+
+@pytest.mark.asyncio
+async def test_failed_live_tutorial_run_response_omits_raw_run_error(tmp_path: Path) -> None:
+    run_id = uuid4()
+    session_id = uuid4()
+    state_id = uuid4()
+    sentinel_error = "INTERNAL_ROW_VALUE_SHOULD_NOT_LEAVE_TUTORIAL_RESPONSE"
+
+    class FakeExecutionService:
+        async def execute(self, session_id: Any, *, user_id: str, auth_provider_type: str) -> Any:
+            del session_id, user_id, auth_provider_type
+            return run_id
+
+    class FakeSessionService:
+        async def get_run(self, requested_run_id: Any) -> RunRecord:
+            assert requested_run_id == run_id
+            now = datetime.now(UTC)
+            return RunRecord(
+                id=run_id,
+                session_id=session_id,
+                state_id=state_id,
+                status="failed",
+                started_at=now,
+                finished_at=now,
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                rows_quarantined=0,
+                error=sentinel_error,
+                landscape_run_id=None,
+                pipeline_yaml=None,
+            )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(execution_service=FakeExecutionService())))
+    settings = _make_tutorial_settings(tmp_path)
+    user = SimpleNamespace(user_id="tutorial-user")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await tutorial_service_module._run_live_tutorial(
+            request=request,
+            user=user,
+            session_id=session_id,
+            settings=settings,
+            session_service=FakeSessionService(),
+        )
+
+    assert exc_info.value.status_code == 500
+    detail = exc_info.value.detail
+    assert detail["error_type"] == "tutorial_live_run_failed"
+    assert detail["status"] == "failed"
+    assert detail["detail"] == "The tutorial run did not complete successfully."
+    assert sentinel_error not in repr(detail)
 
 
 def test_count_calls_for_run_counts_only_llm_calls() -> None:

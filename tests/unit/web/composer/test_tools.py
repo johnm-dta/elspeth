@@ -12034,6 +12034,100 @@ class TestPreviewProofStep:
         assert mismatch[0]["evidence_locator"]["observed_type"] == "str"
         assert result.data["is_valid"] is False
 
+    def test_observed_named_csv_batch_stats_string_value_field_blocks_through_transform(self) -> None:
+        """Named CSV sources must participate in source-field proof walk-back."""
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        csv_content = b"respondent_id,community,financial_barrier\nR-1,Community-A,yes\nR-2,Community-B,no\n"
+        self.csv_storage_path.write_bytes(csv_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                )
+            )
+
+        base_state = self._state_with_csv_source(schema_mode="observed")
+        named_csv_source = SourceSpec(
+            plugin="csv",
+            on_success="survey_rows",
+            options={
+                "blob_ref": self.csv_blob_id,
+                "schema": {"mode": "observed"},
+            },
+            on_validation_failure="discard",
+        )
+        state = (
+            base_state.without_source()
+            .with_named_source("survey_csv", named_csv_source)
+            .with_node(
+                NodeSpec(
+                    id="classify",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="survey_rows",
+                    on_success="classified_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "operations": [{"target": "financial_only", "expression": "row['financial_barrier']"}],
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="summarize",
+                    node_type="aggregation",
+                    plugin="batch_stats",
+                    input="classified_rows",
+                    on_success="out",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "value_field": "financial_barrier",
+                        "group_by": "community",
+                        "compute_mean": True,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        mismatch = [d for d in diagnostics if d["code"] == "aggregation_numeric_value_field_type_mismatch_against_source_schema"]
+        assert mismatch, diagnostics
+        assert mismatch[0]["severity"] == "blocking"
+        assert mismatch[0]["evidence_locator"]["node_id"] == "summarize"
+        assert mismatch[0]["evidence_locator"]["field"] == "financial_barrier"
+        assert mismatch[0]["evidence_locator"]["observed_type"] == "str"
+        assert result.data["is_valid"] is False
+
     def test_observed_csv_numeric_aggregation_does_not_block_after_field_overwrite(self) -> None:
         """The proof step abstains once an upstream transform overwrites the field."""
         from sqlalchemy import update

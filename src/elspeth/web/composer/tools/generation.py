@@ -28,7 +28,7 @@ from elspeth.plugins.transforms.llm.model_catalog import (
     read_litellm_model_list,
 )
 from elspeth.web.catalog.protocol import PluginKind
-from elspeth.web.composer._producer_resolver import ProducerResolver
+from elspeth.web.composer._producer_resolver import ProducerResolver, is_source_producer_id
 from elspeth.web.composer.source_inspection import (
     SourceInspectionFacts,
     derive_extra_column_risk,
@@ -1142,7 +1142,7 @@ def _source_field_reaches_connection_without_type_change(
         producer = resolver.find_producer_for(current)
         if producer is None:
             return False
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return True
 
         node = resolver.get_node(producer.producer_id)

@@ -850,6 +850,86 @@ describe("ChatPanel mode discriminator", () => {
     });
   });
 
+  it("tutorial: keeps the retry chat box (not the 'Sent' line) when a Send-driven step was sent but produced no forward affordance", () => {
+    // Regression: a transient chain-solve failure at step_3 appends a user turn
+    // but returns next_turn=null. The 'Sent' line must NOT replace the box, or
+    // the passive learner is stranded with no widget and no exit.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_3_transforms",
+        chat_history: [
+          {
+            role: "user",
+            content: "do the transforms",
+            seq: 1,
+            step: "step_3_transforms",
+            ts_iso: "2026-05-12T10:00:00Z",
+          },
+        ],
+      },
+      guidedNextTurn: null,
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_3_transforms: "do the transforms" }}
+      />,
+    );
+
+    // Retry box present; the stranding "Sent" line absent; the "press Send"
+    // guidance still shown so the learner knows what to do.
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/your request is in the transcript above/i),
+    ).toBeNull();
+    expect(
+      container.querySelector(".guided-current-decision-tutorial-note"),
+    ).not.toBeNull();
+  });
+
+  it("tutorial: shows the 'Sent' line and drops the 'press Send' note once the step was sent AND a forward turn exists", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_1_source",
+        chat_history: [
+          {
+            role: "user",
+            content: "create the source",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-05-12T10:00:00Z",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    expect(
+      screen.getByText(/your request is in the transcript above/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    // The contradictory "press Send above" note is gone once Sent.
+    expect(
+      container.querySelector(".guided-current-decision-tutorial-note"),
+    ).toBeNull();
+  });
+
   it("passes the backend guided-chat message limit to the guided ChatInput", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",

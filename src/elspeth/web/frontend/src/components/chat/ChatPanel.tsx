@@ -1306,6 +1306,25 @@ export function ChatPanel({
     !guidedSession.terminal &&
     (guidedNextTurn || atStep3AwaitingTransforms)
   ) {
+    // Tutorial: the per-stage locked prompt has already been Sent once the
+    // current step carries a user turn in the server-authoritative chat_history.
+    // Only true after a SUCCESSFUL chatGuided round-trip (an HTTP failure leaves
+    // chat_history untouched — see sessionStore.chatGuided catch), so a failed
+    // send still shows the box for retry.
+    const tutorialPromptSentForStep =
+      isTutorial === true &&
+      guidedSession.chat_history.some(
+        (t) => t.role === "user" && t.step === guidedSession.step,
+      );
+    // Only swap the locked box for the static "Sent" line when there is actually
+    // a forward affordance to confirm below — the turn widget OR a pending
+    // interpretation review. If a Send-driven step was sent but produced neither
+    // (e.g. a transient chain-solve failure at step_3 returns next_turn=null),
+    // keep the box so the learner can retry; hiding it would strand them with no
+    // widget and no exit (the tutorial suppresses ExitToFreeform / opt-out).
+    const tutorialStepBuilt =
+      tutorialPromptSentForStep &&
+      (guidedNextTurn != null || hasPendingGuidedInterpretations);
     return (
       <div
         id="chat-main"
@@ -1339,7 +1358,10 @@ export function ChatPanel({
           deliberately omits its own aria-live region under the convention that
           the parent ChatPanel wraps turn content in one).
         */}
-        <GuidedHistory history={guidedSession.history} />
+        <GuidedHistory
+          history={guidedSession.history}
+          currentStep={guidedSession.step}
+        />
         {/*
           Per-step chat log (Phase A slice 6). Placed ABOVE the editable
           form. GuidedChatHistory carries its OWN role="log" + aria-live so
@@ -1355,7 +1377,10 @@ export function ChatPanel({
           they belong at the top of the reply surface, not buried below it. The
           widget owns its own role/aria; empty-state returns nothing.
         */}
-        <GuidedInterpretationReviews sessionId={activeSessionId ?? ""} />
+        <GuidedInterpretationReviews
+          sessionId={activeSessionId ?? ""}
+          isTutorial={isTutorial}
+        />
         {/*
           Intent box (LLM-primary, spec §"Core model" point 1). This is the
           PRIMARY input for the phase and renders ABOVE the editable form.
@@ -1381,28 +1406,40 @@ export function ChatPanel({
           aria-label="Describe what you want"
         >
           <h2 className="guided-step-chat-heading">Describe what you want</h2>
-          <ChatInput
-            onSend={(content) => void chatGuided(content)}
-            // Gate on BOTH pending flags: `guidedChatPending` blocks
-            // double-submits of a chat in flight; `guidedResponsePending` blocks
-            // a chat WHILE a turn-respond is advancing the step — otherwise the
-            // chat captures the stale `guidedSession.step` and the backend
-            // rejects the step mismatch with 409 (guided.py step-match guard).
-            disabled={guidedChatPending || guidedResponsePending}
-            inputRef={inputRef}
-            placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
-            maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
-            // Tutorial: the box is locked read-only and prefilled with the
-            // CURRENT phase's per-stage prompt (recipe/wire have none → empty,
-            // confirm-only). Kept controlled (value defined) across all phases
-            // to avoid controlled↔uncontrolled flips. Normal session: undefined
-            // value → editable freeform-intent box.
-            value={
-              isTutorial ? (lockedChatPrompt?.[guidedSession.step] ?? "") : undefined
-            }
-            onChange={isTutorial ? () => undefined : undefined}
-            readOnly={isTutorial === true}
-          />
+          {tutorialStepBuilt ? (
+            // Tutorial: the locked prompt was already Sent for this step (it is
+            // in the transcript above) AND a forward affordance exists below.
+            // Replace the redundant active box — which otherwise kept the
+            // just-sent prompt with a live Send and read as "did it send?" —
+            // with a static confirmation line.
+            <p className="guided-step-chat-sent" role="status">
+              Sent — your request is in the transcript above and the assistant
+              has built this step. Confirm the decision below to continue.
+            </p>
+          ) : (
+            <ChatInput
+              onSend={(content) => void chatGuided(content)}
+              // Gate on BOTH pending flags: `guidedChatPending` blocks
+              // double-submits of a chat in flight; `guidedResponsePending` blocks
+              // a chat WHILE a turn-respond is advancing the step — otherwise the
+              // chat captures the stale `guidedSession.step` and the backend
+              // rejects the step mismatch with 409 (guided.py step-match guard).
+              disabled={guidedChatPending || guidedResponsePending}
+              inputRef={inputRef}
+              placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
+              maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
+              // Tutorial: the box is locked read-only and prefilled with the
+              // CURRENT phase's per-stage prompt (recipe/wire have none → empty,
+              // confirm-only). Kept controlled (value defined) across all phases
+              // to avoid controlled↔uncontrolled flips. Normal session: undefined
+              // value → editable freeform-intent box.
+              value={
+                isTutorial ? (lockedChatPrompt?.[guidedSession.step] ?? "") : undefined
+              }
+              onChange={isTutorial ? () => undefined : undefined}
+              readOnly={isTutorial === true}
+            />
+          )}
         </section>
         {/* Tutorial de-emphasis applies ONLY to Send-driven steps — those with
             a locked chat prompt (source / sink / transforms). Confirm-only steps
@@ -1426,7 +1463,7 @@ export function ChatPanel({
               Current decision
             </h2>
             <p>{GUIDED_STEP_PURPOSES[guidedSession.step]}</p>
-            {stepIsSendDriven && (
+            {stepIsSendDriven && !tutorialStepBuilt && (
               <p className="guided-current-decision-tutorial-note">
                 You don't need to fill this in by hand — press{" "}
                 <strong>Send</strong> above and the assistant builds this step.

@@ -34,6 +34,12 @@
   /* ── Borders — teal-tinted ───────────────────────────────────────────────── */
   --color-border:            rgba(143, 200, 200, 0.12);
   --color-border-strong:     rgba(143, 200, 200, 0.25);
+  /* Interactive-option (chip) border. A brighter accent-green than --color-accent
+     (#1a7a52, only ~2.2:1 on the chip surface) so the resting button affordance
+     clears WCAG 1.4.11 (3:1) in the dark default theme: #3fa980 ≈ 4:1 vs
+     --color-surface-elevated #1a3d47. Light theme overrides to the plain accent
+     (already ~7.5:1 on white). */
+  --color-chip-border:       #3fa980;
 
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
   --color-bubble-user:           rgba(40, 130, 100, 0.14);
@@ -257,6 +263,8 @@
   /* ── Borders — darker for light backgrounds ───────────────────────────── */
   --color-border:            rgba(15, 45, 53, 0.12);
   --color-border-strong:     rgba(15, 45, 53, 0.25);
+  /* Light theme: the plain accent already clears 3:1 on the white chip surface. */
+  --color-chip-border:       var(--color-accent);
 
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
   --color-bubble-user:           rgba(40, 130, 100, 0.10);

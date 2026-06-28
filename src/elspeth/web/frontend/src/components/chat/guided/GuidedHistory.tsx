@@ -25,6 +25,13 @@ const STEP_LABELS: Record<GuidedStep, string> = {
 interface Props {
   /** Completed turn records from GuidedSession.history. */
   history: TurnRecord[];
+  /**
+   * The step the learner is currently on. The in-progress step is NOT a
+   * completed decision, so its turns are excluded even when an already-answered
+   * sub-turn (e.g. the source single_select before the source schema_form) has
+   * recorded a summary.
+   */
+  currentStep: GuidedStep;
 }
 
 /**
@@ -33,34 +40,31 @@ interface Props {
  * Returns null when history is empty — the parent should not render this
  * widget unless there are completed steps to show.
  */
-export function GuidedHistory({ history }: Props): React.ReactElement | null {
+export function GuidedHistory({ history, currentStep }: Props): React.ReactElement | null {
   // Empty history: nothing to show.
   if (history.length === 0) {
     return null;
   }
 
-  // One row per step: a step can emit several turns (e.g. a single_select then a
-  // schema_form), which previously rendered as duplicate "Source" rows. Collapse
-  // to the most-recent turn that carries a SUMMARY, falling back to the most
-  // recent turn only when the step has produced no summary yet. Preferring the
-  // summarised record stops a freshly-emitted, not-yet-answered next-turn record
-  // (summary === null) from masking the step's actual decision. The Map preserves
-  // first-seen step order.
+  // One row per COMPLETED step — a step the learner has moved PAST. The current
+  // step is in progress (its answered single_select may already carry a summary
+  // while a schema_form sub-turn is still pending), so it is never "decided" yet
+  // and is excluded outright. Among past steps, keep the most-recent summarised
+  // turn (Map.set on the chronological history wins last); a step that produced
+  // no summary at all contributes nothing. The Map preserves first-seen order.
   const latestByStep = new Map<GuidedStep, TurnRecord>();
   for (const turn of history) {
-    const existing = latestByStep.get(turn.step);
-    if (existing === undefined) {
-      latestByStep.set(turn.step, turn);
-    } else if (turn.summary !== null) {
-      // A summarised record always supersedes (most-recent summary wins).
-      latestByStep.set(turn.step, turn);
-    } else if (existing.summary === null) {
-      // Neither is summarised: keep the most recent as the fallback.
-      latestByStep.set(turn.step, turn);
-    }
-    // else: existing is summarised and this one is not — keep the summary.
+    if (turn.step === currentStep) continue;
+    if (turn.summary === null) continue;
+    latestByStep.set(turn.step, turn);
   }
   const rows = [...latestByStep.values()];
+
+  // No completed decisions yet (e.g. still on the first step before any Send):
+  // render nothing rather than an empty "Decisions so far" card.
+  if (rows.length === 0) {
+    return null;
+  }
 
   return (
     <section
@@ -76,12 +80,11 @@ export function GuidedHistory({ history }: Props): React.ReactElement | null {
             <span className="guided-history-step-name">
               {STEP_LABELS[turn.step]}
             </span>
-            {/* Show the decision summary only. The prior code fell back to the
-                widget-type label ("Single select") when summary was null, which
-                read as a meaningless "decision"; a step with no summary now
-                shows a muted "Decided" instead of leaking the widget type. */}
+            {/* Only past, summarised steps reach here (the current step and
+                summary-null turns are filtered above), so every row has a real
+                summary — no fallback needed. */}
             <span className="guided-history-summary">
-              {turn.summary ?? "Decided"}
+              {turn.summary}
             </span>
           </li>
         ))}

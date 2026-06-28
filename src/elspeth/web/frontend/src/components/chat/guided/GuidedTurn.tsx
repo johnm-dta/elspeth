@@ -86,6 +86,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = fals
           payload={turn.payload as SingleSelectPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "inspect_and_confirm":
@@ -95,6 +96,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = fals
           payload={turn.payload as InspectAndConfirmPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "multi_select_with_custom":
@@ -104,6 +106,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = fals
           payload={turn.payload as MultiSelectWithCustomPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "schema_form":
@@ -123,6 +126,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = fals
           payload={turn.payload as ProposeChainPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "recipe_offer":

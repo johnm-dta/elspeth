@@ -6,6 +6,9 @@ import type { InterpretationEvent } from "@/types/interpretation";
 
 interface GuidedInterpretationReviewsProps {
   sessionId: string;
+  /** Tutorial passive mode: hide the per-card "Change it: I meant…" amend
+   *  escape hatch (the passive learner approves, not re-authors). */
+  isTutorial?: boolean;
 }
 
 function byCreatedAt(a: InterpretationEvent, b: InterpretationEvent): number {
@@ -25,6 +28,7 @@ function byCreatedAt(a: InterpretationEvent, b: InterpretationEvent): number {
  */
 export function GuidedInterpretationReviews({
   sessionId,
+  isTutorial = false,
 }: GuidedInterpretationReviewsProps): JSX.Element | null {
   const pendingBySession = useInterpretationEventsStore(
     (s) => s.pendingBySession,
@@ -57,7 +61,7 @@ export function GuidedInterpretationReviews({
           event={event}
           sessionId={sessionId}
           showOptOut={false}
-          showAmend={event.kind === "vague_term"}
+          showAmend={!isTutorial && event.kind === "vague_term"}
           autoFocusOnMount={index === 0}
           onResolved={(newState) => {
             if (newState !== null) {

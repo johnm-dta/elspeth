@@ -621,3 +621,32 @@ describe("MultiSelectWithCustomTurn — focus restoration on custom-chip removal
     );
   });
 });
+
+describe("MultiSelectWithCustomTurn — tutorial passive mode", () => {
+  it("suppresses the 'Select all that apply' subtext but keeps the chips", () => {
+    render(
+      <MultiSelectWithCustomTurn
+        payload={PAYLOAD_THREE_OPTIONS_TWO_DEFAULT}
+        onSubmit={vi.fn()}
+        isTutorial
+      />,
+    );
+    expect(
+      screen.queryByText("Select all that apply, then press Continue."),
+    ).toBeNull();
+    // The option chips remain interactive (mirrors the SingleSelectTurn gate).
+    expect(screen.getByRole("button", { name: "qty" })).toBeInTheDocument();
+  });
+
+  it("shows the subtext in normal (non-tutorial) mode", () => {
+    render(
+      <MultiSelectWithCustomTurn
+        payload={PAYLOAD_THREE_OPTIONS_TWO_DEFAULT}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByText("Select all that apply, then press Continue."),
+    ).toBeInTheDocument();
+  });
+});

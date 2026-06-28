@@ -377,5 +377,62 @@ describe("SchemaFormTurn", () => {
       );
       expect(screen.queryByText(/quarantine sink/i)).not.toBeInTheDocument();
     });
+
+    it("masks an absolute blob storage_path to its friendly basename (read-only) in tutorial mode", () => {
+      // Path-leak guard: a blob-backed source commits the server's absolute
+      // storage_path. In tutorial the field shows the friendly basename and is
+      // read-only so the mask cannot overwrite the real submitted value.
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", kind: "text", required: true })], {
+            path: "/home/john/elspeth/data/blobs/sess/cb7f1f46-b724-4472-9acb-1680cefef45e_project_pages.json",
+          })}
+          onSubmit={vi.fn()}
+          isTutorial
+        />,
+      );
+      const input = screen.getByLabelText("path") as HTMLInputElement;
+      expect(input.value).toBe("project_pages.json");
+      expect(input).toHaveAttribute("readonly");
+    });
+
+    it("does NOT mask the path outside tutorial mode (operator sees the real value)", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", kind: "text", required: true })], {
+            path: "/home/john/elspeth/data/blobs/sess/cb7f1f46-b724-4472-9acb-1680cefef45e_project_pages.json",
+          })}
+          onSubmit={vi.fn()}
+        />,
+      );
+      const input = screen.getByLabelText("path") as HTMLInputElement;
+      expect(input.value).toBe(
+        "/home/john/elspeth/data/blobs/sess/cb7f1f46-b724-4472-9acb-1680cefef45e_project_pages.json",
+      );
+      expect(input).not.toHaveAttribute("readonly");
+    });
+
+    it("submits the REAL absolute path (not the mask) on Continue in tutorial mode", async () => {
+      // Load-bearing: the mask is display-only. The committed pipeline must still
+      // receive the real storage_path so the run can read the blob.
+      const onSubmit = vi.fn();
+      const realPath =
+        "/home/john/elspeth/data/blobs/sess/cb7f1f46-b724-4472-9acb-1680cefef45e_project_pages.json";
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", kind: "text", required: true })], {
+            path: realPath,
+          })}
+          onSubmit={onSubmit}
+          isTutorial
+        />,
+      );
+      await userEvent.click(screen.getByRole("button", { name: /continue/i }));
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      const body = onSubmit.mock.calls[0][0] as {
+        edited_values: { options: Record<string, unknown> };
+      };
+      expect(body.edited_values.options.path).toBe(realPath);
+    });
   });
 });

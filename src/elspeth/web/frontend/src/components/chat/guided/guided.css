@@ -146,6 +146,15 @@
   background-color: var(--color-surface-elevated);
 }
 
+/* Tutorial: shown in place of the locked chat box once the step's prompt has
+   been Sent (the request is in the transcript above). */
+.guided-step-chat-sent {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
 /* Base wrapper — each widget is an isolated block in the chat stream */
 .guided-turn {
   padding: var(--space-md) 0;
@@ -231,29 +240,44 @@
 }
 
 /* Chip group: horizontal wrapping row of option buttons */
+/* Chip group: a uniform option grid. auto-fill keeps the option buttons a tidy,
+   even width (left-packed) instead of the prior flex row where each item's width
+   was dragged out by its hint to a ragged 280px max. align-items: stretch evens
+   item heights so a two-line hint (the dataverse case) no longer staggers the
+   row. On a ~358px mobile column only one 180px track fits → one option per row. */
 .guided-chip-group {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: var(--space-sm);
+  align-items: stretch;
 }
 
-/* One option: button + optional hint stacked vertically */
+/* One option: button + optional hint stacked vertically. The grid track now owns
+   the width (the prior max-width:280px let the hint drag the button to a ragged
+   width). */
 .guided-chip-item {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
-  max-width: 280px;
 }
 
-/* The option button itself */
+/* The option button itself. Styled as an accent-OUTLINED option, not a text
+   input: the saturated --color-chip-border (accent-green, dark-aware so it clears
+   WCAG 1.4.11 3:1 in the dark default theme) + medium weight is the resting
+   affordance that distinguishes it from .guided-schema-input (faint
+   --color-border-strong, regular weight). Hover deepens to an accent tint; the
+   selected state (.guided-chip-btn[aria-pressed="true"], below) fills with
+   accent — a clear outlined → tinted → filled ladder. */
 .guided-chip-btn {
+  width: 100%;
   padding: var(--space-sm) var(--space-md);
   background-color: var(--color-surface-elevated);
   color: var(--color-text);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-chip-border);
   border-radius: var(--radius-md);
   cursor: pointer;
   font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
   font-family: inherit;
   text-align: left;
   min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
@@ -261,8 +285,8 @@
 }
 
 .guided-chip-btn:hover {
-  background-color: var(--color-surface-hover);
-  border-color: var(--color-accent);
+  background-color: var(--color-highlight);
+  border-color: var(--color-chip-border);
 }
 
 .guided-chip-btn:focus-visible {
@@ -906,6 +930,9 @@
   color: var(--color-text-secondary);
   margin-bottom: var(--space-md);
   line-height: 1.5;
+  /* Readable measure — same constraint as the chat narration; the LLM
+     rationale must not run the full guided column. */
+  max-width: 70ch;
 }
 
 /* Blockers section — only rendered when payload.blockers is non-empty */
@@ -999,6 +1026,20 @@
   gap: var(--space-xs);
 }
 
+/* Tutorial passive mode: the option dump is collapsed behind a summary so the
+   learner sees a friendly label, not a monospace config wall. */
+.guided-propose-options-details {
+  margin: 0 0 var(--space-sm) 0;
+}
+
+.guided-propose-options-summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono, monospace);
+  padding: var(--space-2xs) 0;
+}
+
 /* Each option row: key and value side-by-side */
 .guided-propose-option-row {
   display: flex;
@@ -1028,11 +1069,20 @@
   line-height: 1.5;
   padding-top: var(--space-sm);
   border-top: 1px solid var(--color-border);
+  /* Readable measure — matches .guided-propose-why and the chat narration so
+     the per-step rationale doesn't run the full guided column. */
+  max-width: 70ch;
 }
 
-/* Action row: Accept proposal button */
+/* Action row: Reject / Ask advisor / Accept. The sibling
+   .guided-propose-step-actions (below) already carries gap; this row had neither
+   gap nor justification, so the buttons rendered flush. Right-align with the
+   primary (Accept) rightmost; wrap on narrow panels so the row never overflows. */
 .guided-propose-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: flex-end;
   margin-top: var(--space-md);
 }
 
@@ -1386,6 +1436,10 @@
 
 .guided-chat-history-content {
   margin: var(--space-2xs) 0 0;
+  /* Readable measure — the narration must not run the full ~1300px guided
+     column. ~70 characters keeps lines scannable; on mobile the viewport is
+     already narrower than 70ch so this never constrains the small screen. */
+  max-width: 70ch;
   color: var(--color-text-secondary);
   font-size: var(--font-size-sm);
   line-height: 1.45;

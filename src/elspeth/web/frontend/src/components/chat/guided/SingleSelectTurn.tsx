@@ -26,12 +26,20 @@ interface SingleSelectTurnProps {
   payload: SingleSelectPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
   disabled?: boolean;
+  /**
+   * Tutorial mode is passive — the per-stage prompt is built by pressing Send,
+   * so the learner does not have to pick an option here (the chips still work
+   * if clicked). Suppresses the "Choosing an option continues" subtext that
+   * otherwise contradicts the "press Send" coaching note above the widget.
+   */
+  isTutorial?: boolean;
 }
 
 export function SingleSelectTurn({
   payload,
   onSubmit,
   disabled = false,
+  isTutorial = false,
 }: SingleSelectTurnProps) {
   const [customText, setCustomText] = useState("");
 
@@ -69,11 +77,20 @@ export function SingleSelectTurn({
 
   return (
     <div className="guided-turn guided-single-select">
-      <fieldset className="guided-chip-fieldset" aria-describedby={instructionId}>
+      <fieldset
+        className="guided-chip-fieldset"
+        // Tutorial is passive: pressing Send builds the step. Suppress the
+        // "Choosing an option continues" subtext (it contradicts the coaching
+        // note) and drop its aria-describedby so the fieldset carries no
+        // dangling IDREF. The chips remain interactive for anyone who does pick.
+        aria-describedby={isTutorial ? undefined : instructionId}
+      >
         <legend className="guided-chip-legend">{payload.question}</legend>
-        <p id={instructionId} className="guided-chip-instruction">
-          Select one. Choosing an option continues to the next step.
-        </p>
+        {!isTutorial && (
+          <p id={instructionId} className="guided-chip-instruction">
+            Select one. Choosing an option continues to the next step.
+          </p>
+        )}
         {/* No role="group" on the inner div — <fieldset> already provides
             group semantics; duplicating creates two nested groups in the
             accessibility tree. */}

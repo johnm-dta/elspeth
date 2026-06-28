@@ -357,3 +357,65 @@ describe("ProposeChainTurn — focus management", () => {
     expect(document.activeElement).toBe(document.body);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 6. Tutorial passive mode (isTutorial)
+// ---------------------------------------------------------------------------
+
+describe("ProposeChainTurn — tutorial passive mode", () => {
+  it("hides Edit / Reject / Ask advisor and keeps only Accept all steps", () => {
+    render(
+      <ProposeChainTurn payload={TWO_STEP_PAYLOAD} onSubmit={vi.fn()} isTutorial />,
+    );
+    expect(screen.queryByRole("button", { name: /edit step/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^reject$/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /ask advisor/i })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /accept all steps/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("still emits the accept wire-shape from the passive Accept button", async () => {
+    const onSubmit = vi.fn();
+    render(
+      <ProposeChainTurn payload={TWO_STEP_PAYLOAD} onSubmit={onSubmit} isTutorial />,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /accept all steps/i }),
+    );
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: ["accept"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+  });
+
+  it("collapses each step's raw config behind a closed <details> (no monospace wall)", () => {
+    const { container } = render(
+      <ProposeChainTurn payload={TWO_STEP_PAYLOAD} onSubmit={vi.fn()} isTutorial />,
+    );
+    // One <details> per step that has options (both steps here).
+    const details = container.querySelectorAll(
+      "details.guided-propose-options-details",
+    );
+    expect(details).toHaveLength(2);
+    // Collapsed by default — the config wall is not expanded on mount.
+    details.forEach((d) => expect(d.hasAttribute("open")).toBe(false));
+    // Transparency preserved: a friendly summary label is shown, not the dump.
+    expect(screen.getAllByText(/configuration \(\d+\)/i).length).toBe(2);
+  });
+
+  it("does NOT collapse config in normal (non-tutorial) mode", () => {
+    const { container } = render(
+      <ProposeChainTurn payload={TWO_STEP_PAYLOAD} onSubmit={vi.fn()} />,
+    );
+    expect(
+      container.querySelector("details.guided-propose-options-details"),
+    ).toBeNull();
+    // The inline option list is rendered directly.
+    expect(screen.getByText("delimiter")).toBeInTheDocument();
+  });
+});

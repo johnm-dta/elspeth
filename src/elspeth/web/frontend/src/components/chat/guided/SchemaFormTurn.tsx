@@ -224,7 +224,20 @@ function KnobFieldRenderer({
 
   switch (field.kind) {
     case "text":
-    case "blob-ref":
+    case "blob-ref": {
+      const rawString = value === null ? "" : String(value ?? "");
+      // Tutorial path-leak mask (audience-sensitive: this is the public
+      // Composer-screenshot surface). A blob-backed source/sink commits its
+      // `path` knob as the server's ABSOLUTE blob storage_path
+      // (/home/<user>/.../data/blobs/<session>/<blob_id>_name.json — see
+      // web/blobs/service.py _storage_path), leaking the deploy dir + OS
+      // username. Show the friendly basename to the passive learner; the real
+      // path stays in form state and flows to submit unchanged (handleContinue
+      // reads `values`, never this DOM string). readOnly so the masked string
+      // can never overwrite the real value.
+      const maskPathLeak =
+        isTutorial && field.name === "path" && rawString.startsWith("/");
+      const displayString = maskPathLeak ? friendlyBlobRef(rawString) : rawString;
       return (
         <div className="guided-schema-field-row">
           <label htmlFor={id} className="guided-schema-label">
@@ -234,11 +247,12 @@ function KnobFieldRenderer({
             id={id}
             type="text"
             className="guided-schema-input"
-            value={value === null ? "" : String(value ?? "")}
+            value={displayString}
             placeholder={field.kind === "blob-ref" ? "blob UUID" : undefined}
             aria-describedby={descriptionId}
             onChange={(event) => onChange(event.target.value)}
             disabled={disabled}
+            readOnly={maskPathLeak}
           />
           {field.description && (
             <p id={descriptionId} className="guided-schema-hint">
@@ -257,6 +271,7 @@ function KnobFieldRenderer({
           )}
         </div>
       );
+    }
     case "number-int":
     case "number-float":
       return (
@@ -404,6 +419,18 @@ function KnobFieldRenderer({
   }
   const _exhaustive: never = field.kind;
   return _exhaustive;
+}
+
+// A blob storage_path basename is "<blob_uuid>_<original_filename>"
+// (web/blobs/service.py _storage_path). Strip the uuid_ prefix to recover the
+// friendly filename; if no uuid prefix is present the basename is returned
+// unchanged. Never returns the directory portion, so the deploy path + OS
+// username are dropped.
+const BLOB_ID_PREFIX_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_/i;
+function friendlyBlobRef(absPath: string): string {
+  const base = absPath.split("/").pop() ?? absPath;
+  return base.replace(BLOB_ID_PREFIX_RE, "");
 }
 
 function jsonText(value: unknown, kind: "json-object" | "json-array" | "json-value"): string {

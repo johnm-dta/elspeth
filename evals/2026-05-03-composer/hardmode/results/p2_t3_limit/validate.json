@@ -1,1 +1,0 @@
-{"is_valid":false,"checks":[{"name":"state_exists","passed":false,"detail":"No composition state exists for this session"}],"errors":[{"component_id":null,"component_type":null,"message":"No composition state exists for this session","suggestion":"Use the composer to build a pipeline first."}],"semantic_contracts":[]}

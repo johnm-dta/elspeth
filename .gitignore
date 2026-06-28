@@ -41,6 +41,14 @@ scratch/
 # pytest-benchmark output dir — never tracked (recreated on demand).
 /.benchmarks/
 
+# evals/ — internal eval corpus + harness kept locally, not shipped (2026-06-28).
+# The eval *library* is a test dependency (tests/unit/evals import evals.lib.*),
+# so evals/__init__.py and evals/lib/ stay tracked; the dated run records and
+# harnesses do not.
+/evals/*
+!/evals/__init__.py
+!/evals/lib/
+
 # Generated bug analysis docs (can be regenerated)
 docs/bugs/generated/
 

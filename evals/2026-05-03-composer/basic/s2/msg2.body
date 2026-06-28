@@ -1,1 +1,0 @@
-{"content":"Now add an LLM transform that reads the row's `subject` and `body` columns, classifies the ticket into one of: bug | billing | feature_request | other. Use openrouter as the provider, model openai/gpt-4o-mini. Wire OPENROUTER_API_KEY as a secret reference (do not paste a literal). Write the classification into a new field called `category`."}

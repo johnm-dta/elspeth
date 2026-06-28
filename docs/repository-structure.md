@@ -24,7 +24,7 @@ the root README and [ARCHITECTURE.md](../ARCHITECTURE.md) for the code tree.
 | Deliverable-artifact build | `tools/` | Build pipelines that render *distributable artifacts* (currently `tools/pdf/`). |
 | CI/CD & governance config | `config/`, `.github/`, `.githooks/` | Declarative policy + workflow triggers + local hook bindings (see [§ CI three-way](#ci-the-three-way-split)). |
 | Deployment | `deploy/`, root `Dockerfile` / `docker-compose.yaml` | How the service is shipped and run (systemd unit + env; container image/compose). |
-| Internal evaluation | `evals/` | Self-contained LLM/composer evaluation harness + dated run records. Imported only by itself; not part of the shipped package. |
+| Internal evaluation | `evals/` | LLM/composer evaluation harness + dated run records. **Local-only (gitignored) as of 2026-06-28** — *except* `evals/__init__.py` and `evals/lib/`, which stay tracked because `tests/unit/evals/` import `evals.lib.*`. The dated run records and harnesses live on contributors' machines, not in the repo. |
 | Engineering notes | `notes/` | Ad-hoc engineering memos and baselines — explicitly internal, low-ceremony. |
 | Auxiliary package | `elspeth-lints/` | The CI tier-model linter — its own Python package (own `pyproject.toml`) consumed by CI, not by `src/`. |
 | Marketing / landing site | `website/` | Standalone static site (HTML/CSS/JS), built and served independently of the app frontend. |

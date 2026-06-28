@@ -1,3 +1,0 @@
-{
-  "content": "OK here's the source: CSV with submission_id, timestamp, name, email, company, message. Scoring is binary — real lead vs spam, based on the message content (spam = generic/promotional/gibberish, real = specific ask or context). Real leads → one sink (call it qualified_leads), spam dropped.\n\nOn the webhook — Zapier does this in literally two clicks but whatever, we'll do the HubSpot writeback downstream in Zapier off the qualified_leads output. Skip it.\n\nSo just build: CSV in → LLM spam classifier → real leads get LLM enrichment (inferred_industry, inferred_company_size, urgency from message + email domain) → qualified_leads sink with all original fields + the 3 enrichment fields. Spam dropped. Set it up.\n"
-}

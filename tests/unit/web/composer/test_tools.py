@@ -7901,6 +7901,138 @@ class TestSetPipeline:
         assert "header-only inline CSV" in result.data["error"]
         assert uploaded_id in result.data["error"]
 
+    def test_set_pipeline_header_only_inline_csv_check_does_not_read_full_candidate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Custody check should stream/prefix-read candidate headers, not use read_text()."""
+        from datetime import UTC, datetime
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        uploaded_content = "name,email\n" + "\n".join(f"User {idx},user{idx}@example.com" for idx in range(2000))
+        uploaded_path = tmp_path / "blobs" / session_id / f"{uploaded_id}_contacts.csv"
+        uploaded_path.parent.mkdir(parents=True)
+        uploaded_path.write_text(uploaded_content, encoding="utf-8")
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=uploaded_id,
+                    session_id=session_id,
+                    filename="contacts.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(uploaded_content.encode("utf-8")),
+                    content_hash=_STUB_SHA256,
+                    storage_path=str(uploaded_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description="uploaded contact rows",
+                    status="ready",
+                )
+            )
+
+        original_read_text = Path.read_text
+
+        def _forbid_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path == uploaded_path:
+                raise AssertionError("header-only custody check must not read candidate CSVs in full")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _forbid_read_text)
+
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": "name,email\n",
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "name,email\n"),
+        )
+
+        assert result.success is False
+        assert "header-only inline CSV" in result.data["error"]
+        assert uploaded_id in result.data["error"]
+
+    def test_set_pipeline_header_only_inline_csv_decode_failure_escalates(self, tmp_path: Path) -> None:
+        """Non-UTF-8 ready CSV candidates should raise audit integrity, not UnicodeDecodeError."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        uploaded_content = b"name,email\nAlice,\xff\n"
+        uploaded_path = tmp_path / "blobs" / session_id / f"{uploaded_id}_contacts.csv"
+        uploaded_path.parent.mkdir(parents=True)
+        uploaded_path.write_bytes(uploaded_content)
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=uploaded_id,
+                    session_id=session_id,
+                    filename="contacts.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(uploaded_content),
+                    content_hash=_STUB_SHA256,
+                    storage_path=str(uploaded_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description="uploaded contact rows",
+                    status="ready",
+                )
+            )
+
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": "name,email\n",
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        with pytest.raises(AuditIntegrityError, match="could not be decoded"):
+            execute_tool(
+                "set_pipeline",
+                args,
+                state,
+                catalog,
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                **_verbatim_blob_context(engine, session_id, "name,email\n"),
+            )
+
     def test_set_pipeline_unknown_source_plugin_fails(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -11483,6 +11615,59 @@ class TestInspectSourceTool:
             _mock_catalog(),
         )
         assert result.success is False
+
+    def test_missing_blob_id_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'inspect_source arguments' must be object conforming to InspectSourceArgumentsModel, got ValidationError",
+        ) as exc_info:
+            execute_tool(
+                "inspect_source",
+                {},
+                _empty_state(),
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_inspect_source_does_not_use_unbounded_read_bytes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        large_content = b"order_id,customer,price\n" + (b"O-1,Alice,49.95\n" * 2048)
+        self.storage_path.write_bytes(large_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.update()
+                .where(blobs_table.c.id == self.blob_id)
+                .values(size_bytes=len(large_content), content_hash=_content_hash(large_content))
+            )
+
+        original_read_bytes = Path.read_bytes
+
+        def _forbid_storage_read_bytes(path: Path) -> bytes:
+            if path == self.storage_path:
+                raise AssertionError("inspect_source must not slurp the full blob with Path.read_bytes")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", _forbid_storage_read_bytes)
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        assert result.data["byte_range_inspected"][1] <= 8 * 1024
 
     def test_hash_mismatch_raises_blob_integrity_error(self) -> None:
         """Tier-1 invariant — corrupted blob must escalate, not return facts."""

@@ -105,6 +105,7 @@ def inspect_blob_content(
     mime_type: str,
     blob_id: UUID | None = None,
     content_hash: str | None = None,
+    total_size_bytes: int | None = None,
 ) -> SourceInspectionFacts:
     """Inspect raw blob bytes and return bounded structural facts.
 
@@ -114,12 +115,13 @@ def inspect_blob_content(
     """
     inspected = content[:_MAX_BYTES]
     byte_range = (0, len(inspected))
-    truncated = len(content) > _MAX_BYTES
+    byte_size = len(content) if total_size_bytes is None else total_size_bytes
+    truncated = byte_size > len(inspected)
 
     redacted_identity = _redacted_identity(
         filename=filename,
         mime_type=mime_type,
-        byte_size=len(content),
+        byte_size=byte_size,
         blob_id=blob_id,
         content_hash=content_hash,
     )

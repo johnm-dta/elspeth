@@ -1663,11 +1663,15 @@ def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
     silently passing through unverified bytes would let the audit
     trail confidently record decisions made on garbage.
     """
+    _verify_blob_content_hash(blob, content_hash(data))
+
+
+def _verify_blob_content_hash(blob: BlobToolRecord, actual_hash: str) -> None:
+    """Verify a precomputed SHA-256 digest against a blob row."""
     blob_id = blob["id"]
     stored_hash = blob["content_hash"]
     if stored_hash is None:
         raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
-    actual_hash = content_hash(data)
     if not hmac.compare_digest(actual_hash, stored_hash):
         raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
 

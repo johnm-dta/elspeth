@@ -304,23 +304,36 @@ After a file's lenses all complete:
 
 ## Outputs
 
-Output directory (e.g. `docs/quality-audit/findings-panel/`), laid out so the
-**shared counters see exactly one finding-set per file** by exploiting the
-existing `iter_report_files` exclusion of copy-dirs:
+Two directories: the **counted tree** (one synthesis report + one sidecar per
+file, nothing else) and a **sibling raw tree** for per-lens detail. They are kept
+separate because `iter_report_files` only excludes `by-priority` + the metadata
+filenames — it does **not** skip an arbitrary subdir, so raw per-lens `.md` files
+placed *under* the counted tree would be scanned and double-counted. A sibling
+dir sidesteps that without modifying the shared walker.
 
 ```
-findings-panel/
-  src/elspeth/foo.py.md                 ← synthesis PROSE (human-facing primary)
-  src/elspeth/foo.py.md.structured.json ← deterministic-merge findings  ← counters read THIS
-  _lenses/                              ← excluded from iter_report_files (like PRIORITY_COPY_DIR)
+docs/quality-audit/
+  findings-panel/                          ← the COUNTED tree (generate_summary scans this)
+    src/elspeth/foo.py.md                  ← synthesis PROSE (human-facing primary)
+    src/elspeth/foo.py.md.structured.json  ← deterministic-merge findings ← counters read THIS
+    SUMMARY.md, FINDINGS_INDEX.md, RUN_METADATA.md, run.log
+  findings-panel-raw/                      ← sibling; NOT scanned by the counters
     src/elspeth/foo.py.security.md (+ .structured.json)   ← raw per-lens detail
     src/elspeth/foo.py.python.md   (+ .structured.json)
-  SUMMARY.md, FINDINGS_INDEX.md, RUN_METADATA.md, run.log
 ```
+
+**Write ordering matters.** `_structured_findings` ignores a sidecar older than
+its `.md` report (a staleness guard at `:820`). The merge produces the counted
+sidecar and the synthesis produces the prose `.md`; if the sidecar is written
+*first*, the newer prose trips the guard and `generate_summary` silently falls
+back to markdown parsing and miscounts every file. So feed the merged findings to
+synthesis **in memory** (not via the counted sidecar), and write the counted
+`…structured.json` **last**, after the prose `.md` exists.
 
 - **Reused unchanged:** `generate_summary`, `write_summary_file`,
   `write_run_metadata`, `exit_code_from_stats` — these reuse cleanly *because*
-  the schema keeps `priority` and the layout gives them one sidecar per file.
+  the schema keeps `priority`, the counted tree holds one sidecar per file, and
+  the sidecar is written last (so it is never stale).
 - **New writer:** `write_panel_findings_index` (in the new module) emits the
   `lens / category / priority / effort / impact / confidence` columns, **sortable
   by impact-per-effort**. The shared `write_findings_index` is **not** reused for
@@ -342,12 +355,19 @@ The global ranked `SUMMARY.md` is the v1 funnel; `--lodge` is the v2 funnel.
 
 | Reused from `codex_audit_common.py` (unchanged) | New in this tool |
 |---|---|
-| `run_codex_once` / retry wrapper, retry + rate-limiter, usage parsing, `load_context`, `generate_summary`, `write_summary_file`, `write_run_metadata`, `exit_code_from_stats`, `has_file_line_evidence` primitive, `iter_report_files` (+ its copy-dir exclusion) | streaming JSONL runner; file-level worker pool + serial-file-major orchestration; commit pinning; completion-sentinel resume; layered/inlined prompt builder; lens roster + routing; scope selection (`--path` / `--since` / `--files`, composable); **structured category-aware gate** (`apply_panel_evidence_gate`); cross-lens deterministic merge; synthesis pass; **panel findings-index writer**; global impact/effort rollup; live dashboard; persona prompt files |
+| `run_codex_once`, `make_codex_rate_limiter` + rate-limiter, usage parsing (`_parse_codex_jsonl_usage`), `load_context`, `generate_summary`, `write_summary_file`, `write_run_metadata`, `print_summary`, `exit_code_from_stats`, `ensure_log_file`/`append_log`, `has_file_line_evidence` primitive, `iter_report_files` | streaming JSONL runner; **own retry/rate-limit/log sequencing** (see note); file-level worker pool + serial-file-major orchestration; commit pinning; completion-sentinel resume; layered/inlined prompt builder; lens roster + routing; scope selection (`--path` / `--since` / `--files`, composable); **structured category-aware gate** (`apply_panel_evidence_gate`); cross-lens deterministic merge; synthesis pass; **panel findings-index writer**; global impact/effort rollup; live dashboard; persona prompt files |
 
-The shared `run_codex_once` / `run_codex_with_retry_and_logging` and the markdown
-`apply_evidence_gate` are **not modified**; the streaming runner and the panel
-gate are new functions, so the four existing scripts are byte-for-byte unaffected
-(verified by an import/smoke check — see Verification plan).
+The shared `run_codex_once` and the markdown `apply_evidence_gate` are **not
+modified**. The panel **cannot reuse `run_codex_with_retry_and_logging`** — that
+wrapper hardcodes both `run_codex_once` (not the streaming runner) and
+`apply_evidence_gate` (not the category-aware gate). So the panel re-implements
+the retry/rate-limit/log sequencing in its own module around its streaming runner
++ structured gate. (Plan-time decision: duplicate that sequencing additively, or
+refactor the wrapper to take pluggable runner+gate params — the latter modifies
+shared code and must re-verify the four scripts; default to duplication.) The
+streaming runner and panel gate are new functions, so the four existing scripts
+are byte-for-byte unaffected (verified by an import/smoke check — see Verification
+plan).
 
 ## Verification plan
 

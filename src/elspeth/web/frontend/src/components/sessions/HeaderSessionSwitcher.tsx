@@ -189,6 +189,15 @@ export function HeaderSessionSwitcher(): JSX.Element {
           closeAndReturnFocus();
           break;
         case "Tab":
+          // Shift+Tab must move BACKWARD into the filter controls (the filter
+          // input + "Show archived" toggle sit before the menu in the DOM and
+          // are natively tabbable). Previously this branch closed the menu on
+          // BOTH directions, leaving those controls keyboard-unreachable
+          // (WCAG 2.1.1 — elspeth-0730f27017). Let Shift+Tab flow naturally;
+          // plain Tab still dismisses the menu forward.
+          if (e.shiftKey) {
+            break;
+          }
           e.preventDefault();
           closeAndReturnFocus();
           break;

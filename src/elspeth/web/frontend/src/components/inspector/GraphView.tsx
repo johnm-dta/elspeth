@@ -806,6 +806,49 @@ export function GraphView() {
     return layoutGraph(rfNodes, rfEdges);
   }, [compositionState, nodeValidationMap, nodeMessageMap, selectedNodeId]);
 
+  // Accessible, keyboard-operable equivalent of the visual DAG. The React Flow
+  // canvas is a visual diagram (role="img"); this list is its text alternative
+  // (WCAG 1.1.1 — elspeth-ef897110dd) AND the keyboard path to node inspection,
+  // since onNodeClick is mouse-only (WCAG 2.1.1 — elspeth-d37b7217c9). Activating
+  // an item drives the same selectedNodeId store that opens NodeConfigPanel.
+  const accessibleNodes = useMemo(() => {
+    if (!compositionState) {
+      return [] as Array<{ id: string; status?: ValidationStatus; label: string }>;
+    }
+    const describe = (
+      id: string,
+      typeLabel: string,
+      plugin: string | null,
+    ): { id: string; status?: ValidationStatus; label: string } => {
+      const status = nodeValidationMap[id];
+      const validity =
+        status === "error"
+          ? "has validation errors"
+          : status === "warning"
+            ? "has warnings"
+            : status === "valid"
+              ? "valid"
+              : "not yet validated";
+      const message = nodeMessageMap[id];
+      return {
+        id,
+        status,
+        label: `${typeLabel}: ${id}${plugin ? ` (${plugin})` : ""} — ${validity}${message ? `. ${message}` : ""}`,
+      };
+    };
+    const out: Array<{ id: string; status?: ValidationStatus; label: string }> = [];
+    for (const [sourceName, source] of sortedSourceEntries(compositionState)) {
+      out.push(describe(sourceComponentId(sourceName), "source", source.plugin));
+    }
+    for (const node of compositionState.nodes) {
+      out.push(describe(node.id, node.node_type, node.plugin));
+    }
+    for (const output of compositionState.outputs) {
+      out.push(describe(output.name, "sink", output.plugin));
+    }
+    return out;
+  }, [compositionState, nodeValidationMap, nodeMessageMap]);
+
   // Empty state — must match the hasContent check above so that a
   // source-to-sink pipeline (zero transform nodes) still renders.
   if (nodes.length === 0) {
@@ -825,6 +868,30 @@ export function GraphView() {
     <div
       className="graph-view-shell"
     >
+      {/* Accessible + keyboard-operable equivalent of the visual DAG.
+          The canvas below stays role="img" (a visual diagram); THIS list is its
+          text alternative (WCAG 1.1.1) and the keyboard path to node inspection
+          (WCAG 2.1.1), since onNodeClick is mouse-only. Visually hidden until a
+          child is focused (.graph-a11y-list, inspector.css) — a real keyboard
+          target with a visible focus state, not an invisible tab trap. */}
+      <ol
+        className="graph-a11y-list"
+        aria-label={`Pipeline components in source-to-sink order (${accessibleNodes.length})`}
+      >
+        {accessibleNodes.map((node) => (
+          <li key={node.id}>
+            <button
+              type="button"
+              aria-pressed={selectedNodeId === node.id}
+              onClick={() =>
+                selectNode(selectedNodeId === node.id ? null : node.id)
+              }
+            >
+              {node.label}. Activate to inspect.
+            </button>
+          </li>
+        ))}
+      </ol>
       <div
         className="graph-view-canvas"
         aria-label={ariaLabel}
@@ -845,6 +912,10 @@ export function GraphView() {
           edges={edges}
           nodesDraggable={false}
           nodesConnectable={false}
+          // Visual nodes are display-only; keyboard node selection is provided
+          // by the .graph-a11y-list above, so the canvas nodes are not extra
+          // (invisible, role="img"-hidden) tab stops.
+          nodesFocusable={false}
           elementsSelectable={true}
           onNodeClick={onNodeClick}
           onPaneClick={onPaneClick}

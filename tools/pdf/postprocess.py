@@ -28,7 +28,6 @@ import re
 import sys
 from pathlib import Path
 
-
 # ─────────────────────────────────────────────────────────────
 # Strip per-cell alignment directives
 # ─────────────────────────────────────────────────────────────

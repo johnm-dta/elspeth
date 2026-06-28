@@ -396,6 +396,68 @@ class TestGuidedSession:
         with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
             GuidedSession.from_dict(current)
 
+    @pytest.mark.parametrize(
+        ("field", "bad_value", "match"),
+        [
+            ("schema_version", "7", "schema_version"),
+            ("schema_version", 7.0, "schema_version"),
+            ("schema_version", True, "schema_version"),
+            ("step_1_chosen_plugin", 123, "step_1_chosen_plugin"),
+            ("step_2_chosen_plugin", ["json"], "step_2_chosen_plugin"),
+            ("transition_consumed", "false", "transition_consumed"),
+            ("transition_consumed", 1, "transition_consumed"),
+            ("step_3_edit_index", "0", "step_3_edit_index"),
+            ("step_3_edit_index", True, "step_3_edit_index"),
+            ("step_3_edit_index", -1, "step_3_edit_index"),
+            ("chat_turn_seq", "0", "chat_turn_seq"),
+            ("chat_turn_seq", True, "chat_turn_seq"),
+            ("chat_turn_seq", -1, "chat_turn_seq"),
+        ],
+    )
+    def test_guided_session_from_dict_rejects_coerced_scalar_fields(
+        self,
+        field: str,
+        bad_value: object,
+        match: str,
+    ) -> None:
+        d = GuidedSession.initial().to_dict()
+        d[field] = bad_value
+
+        with pytest.raises(InvariantError, match=match):
+            GuidedSession.from_dict(d)
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value", "match"),
+        [
+            ("role", 1, "GuidedSession\\.from_dict"),
+            ("content", 42, "GuidedSession\\.from_dict"),
+            ("seq", "0", "GuidedSession\\.from_dict"),
+            ("seq", True, "GuidedSession\\.from_dict"),
+            ("seq", -1, "GuidedSession\\.from_dict"),
+            ("step", 1, "GuidedSession\\.from_dict"),
+            ("ts_iso", None, "GuidedSession\\.from_dict"),
+        ],
+    )
+    def test_guided_session_from_dict_rejects_malformed_chat_history_entry(
+        self,
+        field: str,
+        bad_value: object,
+        match: str,
+    ) -> None:
+        d = GuidedSession.initial().to_dict()
+        chat_entry = {
+            "role": ChatRole.USER.value,
+            "content": "Need help with this step.",
+            "seq": 0,
+            "step": GuidedStep.STEP_1_SOURCE.value,
+            "ts_iso": "2026-05-13T12:00:00+00:00",
+        }
+        chat_entry[field] = bad_value
+        d["chat_history"] = [chat_entry]
+
+        with pytest.raises(InvariantError, match=match):
+            GuidedSession.from_dict(d)
+
 
 class TestGuidedSessionProfileFields:
     def test_initial_defaults_to_empty_profile(self) -> None:

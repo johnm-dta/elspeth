@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy import Engine, select
 
@@ -60,6 +62,7 @@ from elspeth.web.composer.tools.blobs import (
     _blob_row_to_tool_dict,
     _PreparedBlobCreate,
     _sync_get_blob,
+    _verify_blob_content_hash,
     _verify_blob_content_integrity,
 )
 from elspeth.web.composer.tools.declarations import (
@@ -68,6 +71,16 @@ from elspeth.web.composer.tools.declarations import (
 )
 from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY, SourceAuthoringMetadata
 from elspeth.web.sessions.models import blobs_table
+
+_INSPECT_SOURCE_MAX_BYTES = 8 * 1024
+_BLOB_HASH_CHUNK_BYTES = 1024 * 1024
+_INLINE_CSV_HEADER_READ_BYTES = 64 * 1024
+
+
+class InspectSourceArgumentsModel(BaseModel):
+    blob_id: str
+
+    model_config = ConfigDict(extra="forbid")
 
 
 def _handle_list_sources(
@@ -484,7 +497,7 @@ def _execute_set_source(
         return credential_error
 
     # S2: Validate source path allowlist
-    path_error = _validate_source_path(options, context.data_dir)
+    path_error = _validate_source_path(options, context.data_dir, require_data_dir=context.require_data_dir_for_paths)
     if path_error is not None:
         return _failure_result(state, path_error)
 
@@ -640,12 +653,35 @@ def _first_nonempty_csv_row(content: str) -> tuple[str, ...] | None:
     return None
 
 
+def _first_nonempty_csv_row_from_path(path: Path) -> tuple[str, ...] | None:
+    """Return a candidate CSV header from a bounded file prefix."""
+    with path.open("rb") as handle:
+        content = handle.read(_INLINE_CSV_HEADER_READ_BYTES)
+    return _first_nonempty_csv_row(content.decode("utf-8"))
+
+
 def _is_header_only_csv(content: str) -> tuple[str, ...] | None:
     """Return the sole CSV row when content is header-only, otherwise None."""
     nonempty_rows = [tuple(row) for row in csv.reader(io.StringIO(content)) if any(cell.strip() for cell in row)]
     if len(nonempty_rows) != 1:
         return None
     return nonempty_rows[0]
+
+
+def _read_inspection_prefix_and_hash(path: Path) -> tuple[bytes, str]:
+    """Read the bounded inspection prefix while hashing the full file."""
+    digest = hashlib.sha256()
+    prefix = bytearray()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(_BLOB_HASH_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining = _INSPECT_SOURCE_MAX_BYTES - len(prefix)
+            if remaining > 0:
+                prefix.extend(chunk[:remaining])
+    return bytes(prefix), digest.hexdigest()
 
 
 def _header_only_inline_csv_conflict(
@@ -668,6 +704,7 @@ def _header_only_inline_csv_conflict(
                 blobs_table.c.mime_type == "text/csv",
                 blobs_table.c.status == "ready",
                 blobs_table.c.created_by == "user",
+                blobs_table.c.size_bytes > len(prepared.content_bytes),
             )
         ).fetchall()
 
@@ -675,12 +712,16 @@ def _header_only_inline_csv_conflict(
     for row in rows:
         blob = _blob_row_to_tool_dict(row)
         try:
-            candidate_header = _first_nonempty_csv_row(Path(blob["storage_path"]).read_text(encoding="utf-8"))
+            candidate_header = _first_nonempty_csv_row_from_path(Path(blob["storage_path"]))
+        except UnicodeDecodeError as exc:
+            raise AuditIntegrityError(
+                f"Ready uploaded blob '{blob['id']}' storage_path could not be decoded during set_pipeline inline CSV custody check"
+            ) from exc
         except OSError as exc:
             raise AuditIntegrityError(
                 f"Ready uploaded blob '{blob['id']}' storage_path could not be read during set_pipeline inline CSV custody check"
             ) from exc
-        if candidate_header == header and blob["size_bytes"] > len(prepared.content_bytes):
+        if candidate_header == header:
             matches.append(blob)
 
     if not matches:
@@ -712,7 +753,16 @@ def _execute_inspect_source(
     if context.session_engine is None or context.session_id is None:
         return _failure_result(state, "Blob tools require session context.")
 
-    blob_id = arguments["blob_id"]
+    try:
+        validated = InspectSourceArgumentsModel.model_validate(arguments)
+    except PydanticValidationError as exc:
+        raise ToolArgumentError(
+            argument="inspect_source arguments",
+            expected="object conforming to InspectSourceArgumentsModel",
+            actual_type=type(exc).__name__,
+        ) from exc
+
+    blob_id = validated.blob_id
     blob_id_error = _blob_id_uuid_validation_error(blob_id)
     if blob_id_error is not None:
         return _failure_result(state, blob_id_error)
@@ -731,9 +781,8 @@ def _execute_inspect_source(
     if not storage_path.exists():
         return _failure_result(state, f"Blob storage file missing for '{blob_id}'.")
 
-    data = storage_path.read_bytes()
-
-    _verify_blob_content_integrity(blob, data)
+    data, actual_hash = _read_inspection_prefix_and_hash(storage_path)
+    _verify_blob_content_hash(blob, actual_hash)
 
     facts = inspect_blob_content(
         content=data,
@@ -741,6 +790,7 @@ def _execute_inspect_source(
         mime_type=blob["mime_type"],
         blob_id=UUID(blob_id),
         content_hash=blob["content_hash"],
+        total_size_bytes=blob["size_bytes"],
     )
     return _discovery_result(state, facts_to_dict(facts))
 
@@ -852,7 +902,7 @@ def _execute_patch_source_options(
         return credential_error
 
     # S2: Validate patched source paths against allowlist
-    path_error = _validate_source_path(new_options, context.data_dir)
+    path_error = _validate_source_path(new_options, context.data_dir, require_data_dir=context.require_data_dir_for_paths)
     if path_error is not None:
         return _failure_result(state, path_error)
 

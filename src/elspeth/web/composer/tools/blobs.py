@@ -166,7 +166,7 @@ def _blob_id_uuid_validation_error(blob_id: Any) -> str | None:
         UUID(blob_id)
     except ValueError:
         return (
-            f"blob_id {blob_id!r} is not a valid UUID. Use list_blobs or "
+            "blob_id is not a valid UUID. Use list_blobs or "
             "list_composer_blobs to select an uploaded blob, ask the user to "
             "upload the source file, or use create_blob for inline content "
             "before calling this tool."
@@ -329,11 +329,20 @@ def _handle_get_blob_metadata(
     session_id = context.session_id
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
+    blob_id_error = _blob_id_uuid_validation_error(arguments["blob_id"])
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     blob = _sync_get_blob(session_engine, arguments["blob_id"], session_id)
     if blob is None:
-        return _failure_result(state, f"Blob '{arguments['blob_id']}' not found.")
-    # Exclude storage_path from response
-    safe_blob = {k: v for k, v in blob.items() if k != "storage_path"}
+        return _failure_result(state, "Blob not found for this session.")
+    safe_blob = {
+        "id": blob["id"],
+        "filename": blob["filename"],
+        "mime_type": blob["mime_type"],
+        "size_bytes": blob["size_bytes"],
+        "content_hash": blob["content_hash"],
+        "status": blob["status"],
+    }
     return _discovery_result(state, safe_blob)
 
 
@@ -1261,7 +1270,14 @@ def _execute_update_blob(
             return _failure_result(state, f"Blob '{blob_id}' not found.")
 
         storage_path = Path(blob["storage_path"])
-        content_bytes = content.encode("utf-8")
+        try:
+            content_bytes = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolArgumentError(
+                argument="update_blob content",
+                expected="valid UTF-8 text",
+                actual_type=type(exc).__name__,
+            ) from exc
         file_hash = content_hash(content_bytes)
         new_size = len(content_bytes)
 
@@ -1669,11 +1685,15 @@ def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
     silently passing through unverified bytes would let the audit
     trail confidently record decisions made on garbage.
     """
+    _verify_blob_content_hash(blob, content_hash(data))
+
+
+def _verify_blob_content_hash(blob: BlobToolRecord, actual_hash: str) -> None:
+    """Verify a precomputed SHA-256 digest against a blob row."""
     blob_id = blob["id"]
     stored_hash = blob["content_hash"]
     if stored_hash is None:
         raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
-    actual_hash = content_hash(data)
     if not hmac.compare_digest(actual_hash, stored_hash):
         raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
 

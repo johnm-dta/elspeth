@@ -3331,6 +3331,65 @@ class TestBlobTools:
         assert result.success is True
         assert "storage_path" not in result.data
 
+    def test_get_blob_metadata_uses_allowlist_response_contract(self) -> None:
+        """Metadata response must not default-expose prose or provenance fields."""
+        from elspeth.web.sessions.models import blobs_table
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.update().where(blobs_table.c.id == self.blob_id).values(source_description="customer export sk-test-secret")
+            )
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        assert set(result.data) == {"id", "filename", "mime_type", "size_bytes", "content_hash", "status"}
+        assert "source_description" not in result.data
+        assert "creation_modality" not in result.data
+        assert "created_from_message_id" not in result.data
+        assert "sk-test-secret" not in str(result.data)
+
+    def test_get_blob_metadata_rejects_invalid_blob_id_without_echoing_value(self) -> None:
+        sentinel = "sk-test-secret-not-a-uuid"
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": sentinel},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert "not a valid UUID" in result.data["error"]
+        assert sentinel not in result.data["error"]
+
+    def test_get_blob_metadata_not_found_does_not_echo_blob_id(self) -> None:
+        from uuid import uuid4
+
+        missing_blob_id = str(uuid4())
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": missing_blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert "not found" in result.data["error"].lower()
+        assert missing_blob_id not in result.data["error"]
+
     def test_get_blob_metadata_wrong_session_returns_failure(self) -> None:
         """IDOR at tool layer: blob belongs to session A, caller is session B."""
         state = _empty_state()
@@ -5612,17 +5671,12 @@ class TestSecretTools:
 
 
 class TestSecretToolsArgumentValidation:
-    """Tier-3 shape contract for the secret-ref handlers.
+    """Tier-3 shape contract for secret-ref dispatch.
 
     Pairs with ``TestSecretTools`` (semantic / state-mutation paths).  These
-    tests exercise the Pydantic argument-model layer that converts shape
-    failures into :class:`ToolArgumentError` — the same dispatch-layer
-    contract sources/blobs/outputs/sessions already satisfy.  Without this
-    layer, a malformed LLM call (wrong type, extra field, unknown ``target``
-    enum) would escape ``execute_tool`` as a bare exception and be
-    laundered by the compose loop's catch-all into
-    :class:`ComposerPluginCrashError` → HTTP 500, denying the LLM the
-    recoverable ARG_ERROR payload it needs to self-correct.
+    tests exercise the central JSON Schema dispatcher guard. Malformed LLM
+    calls (wrong type, extra field, unknown ``target`` enum) must fail before
+    handler dispatch without echoing attacker-controlled values.
     """
 
     def _svc(self) -> MagicMock:
@@ -5636,89 +5690,96 @@ class TestSecretToolsArgumentValidation:
         return svc
 
     def test_validate_secret_ref_wrong_type_for_name(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "validate_secret_ref",
-                {"name": 42},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": 42},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'validate_secret_ref'" in result.data["error"]
+        assert "type" in result.data["error"]
+        assert "42" not in result.data["error"]
 
     def test_validate_secret_ref_rejects_extra_field(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "validate_secret_ref",
-                {"name": "OPENROUTER_API_KEY", "bogus": "value"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": "OPENROUTER_API_KEY", "bogus": "value"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'validate_secret_ref'" in result.data["error"]
+        assert "unsupported" in result.data["error"]
+        assert "OPENROUTER_API_KEY" not in result.data["error"]
+        assert "value" not in result.data["error"]
 
     def test_wire_secret_ref_wrong_type_for_name(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {"name": 42, "target": "source", "option_key": "api_key"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {"name": 42, "target": "source", "option_key": "api_key"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "type" in result.data["error"]
+        assert "42" not in result.data["error"]
 
     def test_wire_secret_ref_unknown_target_enum(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {"name": "OPENROUTER_API_KEY", "target": "global", "option_key": "api_key"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {"name": "OPENROUTER_API_KEY", "target": "global", "option_key": "api_key"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "declared values" in result.data["error"]
+        assert "global" not in result.data["error"]
 
     def test_wire_secret_ref_rejects_extra_field(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {
-                    "name": "OPENROUTER_API_KEY",
-                    "target": "source",
-                    "option_key": "api_key",
-                    "bogus": "value",
-                },
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "source",
+                "option_key": "api_key",
+                "bogus": "value",
+            },
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "unsupported" in result.data["error"]
+        assert "OPENROUTER_API_KEY" not in result.data["error"]
+        assert "value" not in result.data["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -7839,6 +7900,138 @@ class TestSetPipeline:
         assert _default_source(result.updated_state) is None
         assert "header-only inline CSV" in result.data["error"]
         assert uploaded_id in result.data["error"]
+
+    def test_set_pipeline_header_only_inline_csv_check_does_not_read_full_candidate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Custody check should stream/prefix-read candidate headers, not use read_text()."""
+        from datetime import UTC, datetime
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        uploaded_content = "name,email\n" + "\n".join(f"User {idx},user{idx}@example.com" for idx in range(2000))
+        uploaded_path = tmp_path / "blobs" / session_id / f"{uploaded_id}_contacts.csv"
+        uploaded_path.parent.mkdir(parents=True)
+        uploaded_path.write_text(uploaded_content, encoding="utf-8")
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=uploaded_id,
+                    session_id=session_id,
+                    filename="contacts.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(uploaded_content.encode("utf-8")),
+                    content_hash=_STUB_SHA256,
+                    storage_path=str(uploaded_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description="uploaded contact rows",
+                    status="ready",
+                )
+            )
+
+        original_read_text = Path.read_text
+
+        def _forbid_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path == uploaded_path:
+                raise AssertionError("header-only custody check must not read candidate CSVs in full")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _forbid_read_text)
+
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": "name,email\n",
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "name,email\n"),
+        )
+
+        assert result.success is False
+        assert "header-only inline CSV" in result.data["error"]
+        assert uploaded_id in result.data["error"]
+
+    def test_set_pipeline_header_only_inline_csv_decode_failure_escalates(self, tmp_path: Path) -> None:
+        """Non-UTF-8 ready CSV candidates should raise audit integrity, not UnicodeDecodeError."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        uploaded_content = b"name,email\nAlice,\xff\n"
+        uploaded_path = tmp_path / "blobs" / session_id / f"{uploaded_id}_contacts.csv"
+        uploaded_path.parent.mkdir(parents=True)
+        uploaded_path.write_bytes(uploaded_content)
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=uploaded_id,
+                    session_id=session_id,
+                    filename="contacts.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(uploaded_content),
+                    content_hash=_STUB_SHA256,
+                    storage_path=str(uploaded_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description="uploaded contact rows",
+                    status="ready",
+                )
+            )
+
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": "name,email\n",
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        with pytest.raises(AuditIntegrityError, match="could not be decoded"):
+            execute_tool(
+                "set_pipeline",
+                args,
+                state,
+                catalog,
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                **_verbatim_blob_context(engine, session_id, "name,email\n"),
+            )
 
     def test_set_pipeline_unknown_source_plugin_fails(self) -> None:
         state = _empty_state()
@@ -10242,6 +10435,42 @@ class TestUpdateBlobTypeGuard:
         # __cause__ chain MUST preserve the structured Pydantic detail.
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
+    def test_unpaired_surrogate_content_raises_tool_argument_error(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        catalog = _mock_catalog()
+        state = _empty_state()
+
+        create_result = execute_tool(
+            "create_blob",
+            {"filename": "a.txt", "mime_type": "text/plain", "content": "initial"},
+            state,
+            catalog,
+            data_dir=str(self.data_dir),
+            session_engine=self.engine,
+            session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "initial"),
+        )
+        blob_id = create_result.data["blob_id"]
+        user_message_id = _insert_user_message(self.engine, self.session_id, "Please update the blob.")
+
+        with pytest.raises(ToolArgumentError, match="valid UTF-8"):
+            execute_tool(
+                "update_blob",
+                {"blob_id": blob_id, "content": "bad\ud800"},
+                create_result.updated_state,
+                catalog,
+                data_dir=str(self.data_dir),
+                session_engine=self.engine,
+                session_id=self.session_id,
+                user_message_id=user_message_id,
+                composer_model_identifier="test-model",
+                composer_model_version="test-model-2026-06-28",
+                composer_provider="test-provider",
+                composer_skill_hash="a" * 64,
+                tool_arguments_hash="b" * 64,
+            )
+
 
 # ---------------------------------------------------------------------------
 # set_source_from_blob Tier-3 type guard
@@ -11386,6 +11615,59 @@ class TestInspectSourceTool:
             _mock_catalog(),
         )
         assert result.success is False
+
+    def test_missing_blob_id_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'inspect_source arguments' must be object conforming to InspectSourceArgumentsModel, got ValidationError",
+        ) as exc_info:
+            execute_tool(
+                "inspect_source",
+                {},
+                _empty_state(),
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_inspect_source_does_not_use_unbounded_read_bytes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        large_content = b"order_id,customer,price\n" + (b"O-1,Alice,49.95\n" * 2048)
+        self.storage_path.write_bytes(large_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.update()
+                .where(blobs_table.c.id == self.blob_id)
+                .values(size_bytes=len(large_content), content_hash=_content_hash(large_content))
+            )
+
+        original_read_bytes = Path.read_bytes
+
+        def _forbid_storage_read_bytes(path: Path) -> bytes:
+            if path == self.storage_path:
+                raise AssertionError("inspect_source must not slurp the full blob with Path.read_bytes")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", _forbid_storage_read_bytes)
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        assert result.data["byte_range_inspected"][1] <= 8 * 1024
 
     def test_hash_mismatch_raises_blob_integrity_error(self) -> None:
         """Tier-1 invariant — corrupted blob must escalate, not return facts."""

@@ -145,16 +145,13 @@ def validate_pipeline_decision_semantics(
         return
     if plugin != "field_mapper":
         raise ValueError(
-            f"{context}: raw-html cleanup decision {user_term!r} must be implemented by a field_mapper node; "
-            f"node {node_id!r} has plugin {plugin!r}"
+            f"{context}: raw-html cleanup decision must be implemented by a field_mapper node; node {node_id!r} has plugin {plugin!r}"
         )
     if options.get("select_only") is not True:
-        raise ValueError(f"{context}: raw-html cleanup decision {user_term!r} requires field_mapper.select_only=true on node {node_id!r}")
+        raise ValueError(f"{context}: raw-html cleanup decision requires field_mapper.select_only=true on node {node_id!r}")
     mapping = options.get("mapping")
     if not isinstance(mapping, Mapping) or not mapping:
-        raise ValueError(
-            f"{context}: raw-html cleanup decision {user_term!r} requires a non-empty field_mapper.mapping on node {node_id!r}"
-        )
+        raise ValueError(f"{context}: raw-html cleanup decision requires a non-empty field_mapper.mapping on node {node_id!r}")
     preserved_raw_fields = sorted(
         {
             field_name
@@ -165,7 +162,7 @@ def validate_pipeline_decision_semantics(
     )
     if preserved_raw_fields:
         raise ValueError(
-            f"{context}: raw-html cleanup decision {user_term!r} preserves raw HTML/fingerprint field(s) "
+            f"{context}: raw-html cleanup decision preserves raw HTML/fingerprint field(s) "
             f"on node {node_id!r}: {preserved_raw_fields}. Remove them from mapping when select_only=true."
         )
 

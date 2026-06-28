@@ -535,8 +535,10 @@ async def test_02_happy_path_produces_success_and_db_row(service: SessionService
     assert result.data["_kind"] == "interpretation_review_pending"
     assert result.data["affected_node_id"] == "rate_node"
     assert result.data["kind"] == "vague_term"
-    assert result.data["user_term"] == "cool"
-    assert result.data["llm_draft"] == "Visually appealing."
+    assert "user_term" not in result.data
+    assert "llm_draft" not in result.data
+    assert "cool" not in result.data["message"]
+    assert "Visually appealing" not in result.data["message"]
     assert result.data["interpretation_source"] == "user_approved"
 
     # Pending row exists in the DB.
@@ -621,7 +623,8 @@ async def test_02c_structured_pending_requirement_happy_path(service: SessionSer
     assert result.data["_kind"] == "interpretation_review_pending"
     assert result.data["affected_node_id"] == "rate_node"
     assert result.data["kind"] == "vague_term"
-    assert result.data["user_term"] == "cool"
+    assert "user_term" not in result.data
+    assert "llm_draft" not in result.data
 
 
 # --------------------------------------------------------------------------- #
@@ -1188,7 +1191,8 @@ def test_07_proposal_summary_text() -> None:
             "llm_draft": "Visually appealing.",
         },
     )
-    assert summary.summary == 'Surface the interpretation of "cool" for user review.'
+    assert summary.summary == "Surface an interpretation draft for user review."
+    assert "cool" not in summary.summary
     assert summary.affects == ("interpretation",)
     assert "subjective" in summary.rationale.lower() or "underspecified" in summary.rationale.lower()
 
@@ -1534,14 +1538,15 @@ async def test_dedup_second_pending_restage_is_idempotent(service: SessionServic
     assert second.data["_kind"] == "interpretation_review_pending_idempotent"
     # Idempotent return MUST echo the original event id, not a fresh one.
     assert second.data["event_id"] == first_event_id
-    # Affected node + kind + user_term flow through for frontend rendering.
+    # Affected node + kind flow through for frontend correlation. Raw review
+    # text stays in the scoped interpretation-events API, not the ToolResult
+    # sent back to the LLM or persisted in chat-message audit payloads.
     assert second.data["affected_node_id"] == "rate_node"
     assert second.data["kind"] == "vague_term"
-    assert second.data["user_term"] == "cool"
+    assert "user_term" not in second.data
+    assert "llm_draft" not in second.data
     assert second.affected_nodes == ("rate_node",)
-    # Message names the user_term so the LLM/frontend can attribute the
-    # idempotent response.
-    assert "cool" in second.data["message"]
+    assert "cool" not in second.data["message"]
     assert "reusing" in second.data["message"]
 
     # Critically: only ONE pending row in the DB. No duplicate persisted.

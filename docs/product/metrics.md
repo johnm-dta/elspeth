@@ -1,4 +1,4 @@
-# Metrics — ELSPETH                     Last read: 2026-06-14 (bootstrap)
+# Metrics — ELSPETH                     Last read: 2026-06-28
 
 > Seeded at bootstrap. Targets are BASELINE → TARGET placeholders for the owner
 > to set real numbers against — every one is falsifiable by construction, but the
@@ -29,4 +29,6 @@ explainable. The north-star measures exactly that.
 | Silent Tier-3 coercions (the C1 bug class) | = 0 (floor) | 0 in-branch (C1 fixed 5190bb016) | 2026-06-14 |
 | Composer-accepted pipelines that fail runtime validation (false-accept rate) | ≤ TARGET% (ceiling) | BASELINE (uninstrumented) | 2026-06-14 |
 | Test battery — pass count with 0 hard failures | ≥ 5507 pass / 0 fail | ~5507 / 0 (1 pre-existing P3 fingerprint) | 2026-06-14 |
-| Trust-tier red-gate — never bypassed or blessed without provenance | qualitative floor: green only on signed state | held by operator | 2026-06-14 |
+| Trust-tier red-gate — never bypassed or blessed without provenance | qualitative floor: green only on signed state | **2026-06-28: STRENGTHENED — operator-only HMAC custody now structurally enforced (stage→sign-bundle seam; MCP staging fails closed on key presence; CI-never-signs standing test). Pending live-judge e2e. (PDR-0002, proposed)** | 2026-06-28 |
+
+> 2026-06-28 reading note: elspeth-lints unit suite green (1419 passed / 83 py-version skips) + 70 new judge/signature tests, all five security invariants non-vacuously pinned. The full ~5507 test battery was **not** re-run this session, so the test-battery guardrail above keeps its 2026-06-14 reading. No reversal trigger crossed.

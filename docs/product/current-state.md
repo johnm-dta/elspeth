@@ -1,56 +1,62 @@
-# Current State — ELSPETH        Checkpoint: 2026-06-14 (bootstrap) · commit e14406436
+# Current State — ELSPETH        Checkpoint: 2026-06-28 · branch release/0.7.0
 
-> Bootstrapped, not resumed — no prior workspace existed. This brief is inferred
-> from the repo, git history, and the filigree tracker, then reconciled with the
-> owner's two confirmations (authority grant; primary bet = Web hardening to GA).
+> ⚠️ **This workspace is ~2 weeks stale.** It was last written at the 2026-06-14
+> bootstrap; only the tier-model-signing delta below was checkpointed since.
+> Reality has moved to the `release/0.7.0` line (composer UX phases 1–8, passive
+> tutorial e2e, website, design system — see project memory), none of which is
+> reflected here. **The next session must run `/own-product` for a full RESUME +
+> re-orient and re-confirm the Now bet with the owner — do not treat the bet below
+> as current.**
 
-## The bet right now
+## The bet right now (stated, NOT re-confirmed this session)
 
-**Web hardening to GA** — close the five Web-surface assurance clusters so the
-Composer path is safe for real users. Moves the north-star (run assurance
-completeness) and the Web-GA readiness input metric. The 0.6.0 multi-worker +
-plugins-remediation line is in-flight delivery alongside it, not the strategic
-primary.
+**Web hardening to GA** — the 2026-06-14 owner-confirmed primary (close the five
+Web-surface assurance clusters). It was **not advanced this session** and predates
+the 0.7.0 line; treat it as unverified until the next RESUME re-confirms or replaces
+it. Metric: north-star (run assurance completeness) + Web-GA input.
 
 ## In flight
 
-- **Web hardening clusters** — Now (primary), not yet dispatched. tracker:
-  elspeth-250f698aaf (auth/OIDC/JWKS), elspeth-ef52049338 (sessions/Alembic),
-  elspeth-0fd9dfcb7e (blobs/MIME), elspeth-16ddaa7d02 (secrets), elspeth-248536c9e6
-  (execution service). All open; none scoped into a PRD yet.
-- **0.6.0 / plugins-subsystem remediation** — active branch
-  fix/plugins-subsystem-remediation (off release/0.6.0). Batch 1 criticals
-  C1/C2/C3 fixed in-branch (5190bb016 / 6aaf02b43 / a8f4b531b); B3.6 scanner fix
-  (acf470546). Batches 2–4 outstanding per project memory.
-- **0.6.0 release line** — slices 1–6 landed on release/0.6.0 (ADR-030 accepted).
-  Ship path = PR release/0.6.0 → main; gate reconciliation + signing is
-  operator-owed (escalation, not agent action).
+- **Turnkey tier-model signing (this session) — BUILT, not pushed, e2e owed.** The
+  stage→sign-bundle seam: agent stages key-free via the `elspeth-judge` MCP server;
+  operator fires `sign-bundle` / `rekey` with the HMAC key. Committed to
+  `release/0.7.0`: feature `6e0d66f9`, spec `b87829bc3`, plan `d59fbccdd`, refinements
+  `af30dfc6e` / `786a609ab`. Green (70 new tests; 5 security invariants pinned).
+  tracker: **elspeth-281582acc9** (still `building` — built, not closed pending e2e).
+  See `decisions/0002` (proposed) + `docs/judge-signature-handoff.md`.
+- **Web hardening clusters** — still Now per roadmap, still un-dispatched. tracker:
+  elspeth-250f698aaf, elspeth-ef52049338, elspeth-0fd9dfcb7e, elspeth-16ddaa7d02,
+  elspeth-248536c9e6. (Reconcile against 0.7.0 reality at next RESUME.)
 
 ## Open questions / blocked-on-owner
 
-- **Tracker drift (needs reconcile):** plugin criticals elspeth-ebe13515f4 /
-  elspeth-e62478e5db / elspeth-a46c6e361f are listed P0-READY in filigree but are
-  fixed-in-branch and uncommitted-to-closed. Close-on-merge, or close now? (A
-  DECIDE/CHECKPOINT act — not done here; RESUME is read-only.)
-- **Stale claims:** 5 issues carry stale assignees (phase-8 controller, advisor,
-  tool-decl, judge-tools, codex). Re-home or release?
-- **Metrics are uninstrumented:** every north-star/input target is a BASELINE→
-  TARGET placeholder. Owner to set real numbers, or approve an instrumentation
-  bet first.
-- **Landscape MCP is on epoch 11 vs DB epoch 21** — the audit-DB MCP can't open
-  the configured DB; operator-owed DB delete (authorized class) to recreate.
+- **[owner sign-off — PDR-0002] Tier-model signing is an escalate-before-acting
+  domain.** Three calls gate to you: (a) adopt the stage→sign-bundle seam as the
+  *sanctioned* signing workflow; (b) confirm the runbook removal stands (the
+  `notes/060-*` runbooks are gone from disk — gitignored scratch; `sign_accept_backlog.py`
+  is git-recoverable); (c) authorize the **push** of `release/0.7.0`.
+- **[owner] Live-judge e2e not yet run** — the new path is unit-tested with a
+  monkeypatched judge only; it has not been exercised `stage_scan → sign-bundle`
+  against a real `ELSPETH_JUDGE_METADATA_HMAC_KEY` + live LLM. Run before relying on it.
+- **[next RESUME] Workspace staleness** — roadmap still says "Ship the 0.6.0 line" as
+  Now; we're on 0.7.0. The whole workspace needs reconciliation against the actual
+  shipped line and a re-confirmed Now bet.
+- **[carried from bootstrap, unresolved]** metrics uninstrumented (every north-star/
+  input is a placeholder); tracker drift (C1/C2/C3 fixed-in-branch vs P0-READY); 5
+  stale claims; Landscape MCP epoch 11 vs DB epoch 21.
 
 ## Last checkpoint did
 
-- Bootstrap only — created the workspace (vision, roadmap, metrics, current-state,
-  decisions/0001) from observed reality. Nothing committed (commit is the job of
-  /product-checkpoint).
-- Owner confirmed the authority grant as proposed, and named Web hardening to GA
-  as the primary bet (over the observed 0.6.0-branch inference).
+- Recorded the tier-model signing seam as **PDR-0002 (proposed)** — built + shipped
+  to `release/0.7.0` this session under direct owner direction; flagged the three
+  signing-domain items for owner sign-off (adopt / runbook-removal / push).
+- Refreshed `metrics.md`: red-gate guardrail **strengthened** (structural operator-only
+  custody + CI-never-signs); no reversal trigger crossed; full battery not re-run.
+- Did **not** touch `roadmap.md` (no roadmap bet changed horizon — the signing seam was
+  an owner-directed side task, not a tracked bet).
 
 ## Next session, start here
 
-DECIDE on the Now bet: pick the first Web-hardening cluster to spec, then run
-/write-prd against it (north-star + Web-GA input metric as success criteria) and
-route the top item to /axiom-planning. In parallel, reconcile the C1/C2/C3
-tracker drift at the next /product-checkpoint.
+Run **`/own-product`** for a full RESUME — the workspace is stale and the Now bet must
+be re-confirmed against the 0.7.0 reality. Then get owner sign-off on **PDR-0002**
+(signing workflow + push) and run the live-judge e2e before closing elspeth-281582acc9.

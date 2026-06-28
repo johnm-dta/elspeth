@@ -1645,6 +1645,151 @@ class TestRemoveEdge:
         assert r2.success is True
         assert len(r2.updated_state.edges) == 0
 
+    @pytest.mark.parametrize(
+        ("edge_type", "field_name"),
+        [
+            ("on_success", "on_success"),
+            ("on_error", "on_error"),
+        ],
+    )
+    def test_remove_sink_edge_clears_node_runtime_route(self, edge_type: str, field_name: str) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with_node = execute_tool(
+            "upsert_node",
+            {
+                "id": "t1",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "input": "in",
+                "on_success": "normal_rows",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}},
+            },
+            state,
+            catalog,
+        )
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            with_node.updated_state,
+            catalog,
+        )
+        routed = execute_tool(
+            "upsert_edge",
+            {"id": "e1", "from_node": "t1", "to_node": "main", "edge_type": edge_type},
+            with_output.updated_state,
+            catalog,
+        )
+        assert routed.success is True
+        assert getattr(next(n for n in routed.updated_state.nodes if n.id == "t1"), field_name) == "main"
+
+        result = execute_tool("remove_edge", {"id": "e1"}, routed.updated_state, catalog)
+
+        assert result.success is True
+        assert len(result.updated_state.edges) == 0
+        assert getattr(next(n for n in result.updated_state.nodes if n.id == "t1"), field_name) is None
+
+    def test_remove_sink_edge_clears_source_runtime_route(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with_source = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            with_source.updated_state,
+            catalog,
+        )
+        routed = execute_tool(
+            "upsert_edge",
+            {"id": "e1", "from_node": "source", "to_node": "main", "edge_type": "on_success"},
+            with_output.updated_state,
+            catalog,
+        )
+        assert routed.success is True
+        assert _default_source(routed.updated_state).on_success == "main"
+
+        result = execute_tool("remove_edge", {"id": "e1"}, routed.updated_state, catalog)
+
+        assert result.success is True
+        assert len(result.updated_state.edges) == 0
+        assert _default_source(result.updated_state).on_success == "discard"
+
+    def test_remove_gate_sink_edges_clears_route_and_fork_runtime_routes(self) -> None:
+        state = _empty_state().with_node(
+            NodeSpec(
+                id="g1",
+                node_type="gate",
+                plugin=None,
+                input="in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="row['flag']",
+                routes={"true": "old_true", "false": "old_false"},
+                fork_to=("existing",),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        catalog = _mock_catalog()
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        with_route = execute_tool(
+            "upsert_edge",
+            {"id": "route_edge", "from_node": "g1", "to_node": "main", "edge_type": "route_true"},
+            with_output.updated_state,
+            catalog,
+        )
+        with_fork = execute_tool(
+            "upsert_edge",
+            {"id": "fork_edge", "from_node": "g1", "to_node": "main", "edge_type": "fork"},
+            with_route.updated_state,
+            catalog,
+        )
+        gate = next(n for n in with_fork.updated_state.nodes if n.id == "g1")
+        assert dict(gate.routes or {}) == {"true": "main", "false": "old_false"}
+        assert gate.fork_to == ("existing", "main")
+
+        without_route = execute_tool("remove_edge", {"id": "route_edge"}, with_fork.updated_state, catalog)
+        without_fork = execute_tool("remove_edge", {"id": "fork_edge"}, without_route.updated_state, catalog)
+
+        assert without_fork.success is True
+        assert len(without_fork.updated_state.edges) == 0
+        gate = next(n for n in without_fork.updated_state.nodes if n.id == "g1")
+        assert dict(gate.routes or {}) == {"false": "old_false"}
+        assert gate.fork_to == ("existing",)
+
     def test_remove_nonexistent_fails(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()

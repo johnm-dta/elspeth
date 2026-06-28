@@ -638,8 +638,49 @@ def _execute_remove_edge(
     new_state = state.without_edge(edge_id)
     if new_state is None:
         return _failure_result(state, f"Edge '{edge_id}' not found.")
+    new_state = _clear_removed_sink_edge_route(new_state, edge)
 
     return _mutation_result(new_state, affected)
+
+
+def _clear_removed_sink_edge_route(state: CompositionState, edge: EdgeSpec) -> CompositionState:
+    """Clear runtime routing that was written for a removed sink edge."""
+    output_names = {output.name for output in state.outputs}
+    if edge.to_node not in output_names:
+        return state
+
+    if edge.from_node in state.sources:
+        if edge.edge_type != "on_success":
+            return state
+        source = state.sources[edge.from_node]
+        if source.on_success == edge.to_node:
+            return state.with_named_source(edge.from_node, replace(source, on_success="discard"))
+        return state
+
+    node = next((candidate for candidate in state.nodes if candidate.id == edge.from_node), None)
+    if node is None:
+        return state
+    if edge.edge_type == "on_success":
+        if node.on_success == edge.to_node:
+            return state.with_node(replace(node, on_success=None))
+        return state
+    if edge.edge_type == "on_error":
+        if node.on_error == edge.to_node:
+            return state.with_node(replace(node, on_error=None))
+        return state
+    if edge.edge_type in ("route_true", "route_false"):
+        route_key = "true" if edge.edge_type == "route_true" else "false"
+        routes = dict(node.routes or {})
+        if routes.get(route_key) != edge.to_node:
+            return state
+        del routes[route_key]
+        return state.with_node(replace(node, routes=routes or None))
+    if edge.edge_type == "fork":
+        fork_to = tuple(target for target in (node.fork_to or ()) if target != edge.to_node)
+        if fork_to == (node.fork_to or ()):
+            return state
+        return state.with_node(replace(node, fork_to=fork_to or None))
+    return state
 
 
 def _execute_set_metadata(

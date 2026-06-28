@@ -25,8 +25,8 @@ from typing import Any
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder, begin_dispatch, finish_success
+from elspeth.web.composer.discovery_cache import serialize_tool_result
 from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
-from elspeth.web.composer.service import _serialize_tool_result
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._dispatch import execute_tool
 
@@ -97,4 +97,4 @@ def _execute_discovery_call(
         audit = begin_dispatch(tool_call.id, name, arguments, version_before=state.version, actor=actor)
         invocation = finish_success(audit, result_payload=result.to_dict(), version_after=state.version)
         recorder.record(invocation)
-    return {"role": "tool", "tool_call_id": tool_call.id, "content": _serialize_tool_result(result)}
+    return {"role": "tool", "tool_call_id": tool_call.id, "content": serialize_tool_result(result)}

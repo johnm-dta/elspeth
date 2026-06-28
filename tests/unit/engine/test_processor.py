@@ -5225,15 +5225,8 @@ class TestDurableSchedulerResumeDrain:
             ).one()
         assert (status, barrier_key) == ("blocked", str(agg_node))
 
-    def test_aggregation_flush_refuses_to_orphan_unconsumed_blocked_work(self) -> None:
-        """Flush completion REFUSES when a BLOCKED row under the barrier is not in the buffer.
-
-        F1/D6 strict exhaustiveness: an aggregation flush is ONE atomic
-        ``complete_barrier`` transition over the WHOLE barrier key (one node =
-        one in-progress batch), so a durable BLOCKED row the live buffer does
-        not account for is journal/buffer divergence — the completion must
-        refuse loudly instead of silently leaving (or sweeping) the orphan.
-        """
+    def test_aggregation_intake_adopts_follower_blocked_work_before_flush(self) -> None:
+        """A fresh leader journal-adopts a follower-blocked aggregation row."""
         db, factory = _make_factory()
         source_node = NodeID("source-0")
         agg_node = NodeID("agg-1")
@@ -5319,29 +5312,41 @@ class TestDurableSchedulerResumeDrain:
             expected_lease_owner="test-worker",
         )
 
-        # Slice 3 re-pin (ADR-030 §E.2/§E.3): the refusal moved EARLIER — the
-        # journal-first intake refuses to ADOPT a row this leader cannot
-        # attribute (no live stash entry, no resume provenance) before any
-        # durable mutation, instead of the flush-time orphan refusal.
-        with pytest.raises(AuditIntegrityError, match="no live stash entry and no resume checkpoint provenance"):
-            processor.process_row(
-                row_index=1,
-                source_row=_make_source_row({"value": 2}),
-                transforms=[transform],
-                ctx=ctx,
-                source_row_index=1,
-                ingest_sequence=1,
-            )
+        second_results = processor.process_row(
+            row_index=1,
+            source_row=_make_source_row({"value": 2}),
+            transforms=[transform],
+            ctx=ctx,
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+
+        # The follower-shaped durable row is not an orphan: it is accepted
+        # from the journal, triggers the count flush with the leader's own
+        # buffered row, and the current row then buffers normally.
+        assert [(r.outcome, r.path) for r in second_results] == [
+            (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
+            (None, TerminalPath.BUFFERED),
+        ]
+        assert second_results[0].sink_name == "agg_sink"
+        assert second_results[0].scheduler_pending_sink is True
+        flushed_token_id = second_results[0].token.token_id
+        current_token_id = second_results[1].token.token_id
 
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import token_work_items_table
 
-        # The refused completion mutated nothing: buffered and stray rows stay BLOCKED.
+        # The consumed journal rows are both terminalized by the atomic flush.
         with db.connection() as conn:
-            statuses = dict(
-                conn.execute(
-                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+            rows = {
+                row.token_id: row
+                for row in conn.execute(
+                    select(
+                        token_work_items_table.c.token_id,
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.barrier_adopted_epoch,
+                    ).where(
                         token_work_items_table.c.token_id.in_(
                             [
                                 first_token_id,
@@ -5349,11 +5354,25 @@ class TestDurableSchedulerResumeDrain:
                             ]
                         )
                     )
-                ).all()
-            )
+                )
+            }
+        assert {token_id: (row.status, row.barrier_adopted_epoch) for token_id, row in rows.items()} == {
+            first_token_id: ("terminal", 1),
+            stray_token.token_id: ("terminal", 1),
+        }
+
+        with db.connection() as conn:
+            statuses = {
+                row.token_id: row.status
+                for row in conn.execute(
+                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                        token_work_items_table.c.token_id.in_([flushed_token_id, current_token_id])
+                    )
+                )
+            }
         assert statuses == {
-            first_token_id: "blocked",
-            stray_token.token_id: "blocked",
+            flushed_token_id: "pending_sink",
+            current_token_id: "blocked",
         }
 
     def test_passthrough_aggregation_sink_flush_marks_all_outputs_pending_sink(self) -> None:

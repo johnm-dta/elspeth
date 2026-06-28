@@ -3805,21 +3805,16 @@ class RowProcessor:
         """Resolve the TokenInfo to feed executor memory for one adopted row.
 
         Live stash first (N=1 parity: the exact post-transform token the old
-        in-claim accept used, with its original resume provenance); journal
-        rehydration with audit-derived attempt offsets as the inherited-row
-        fallback (leader takeover) — the same semantics as the restore path,
-        stamped with this processor's resume checkpoint provenance.
+        in-claim accept used, with its original resume provenance). Without a
+        live stash, the durable row is still authoritative: fresh leaders use
+        offset zero for normal follower handoffs, while resume leaders use the
+        audit-derived offset stamped with checkpoint provenance.
         """
         hold = self._live_barrier_holds.pop(row.token_id, None)
         if hold is not None:
             return hold.token
         if self._resume_checkpoint_id is None:
-            raise AuditIntegrityError(
-                f"Barrier intake for run {self._run_id!r} found an intake-pending BLOCKED row for token "
-                f"{row.token_id!r} with no live stash entry and no resume checkpoint provenance: a fresh "
-                "(non-resume) leader adopted a row it never blocked. At N=1 every intake-pending row is "
-                "either this leader's own hold (stashed) or takeover inheritance (resume provenance set)."
-            )
+            return token_from_journal_item(row, attempt_offset=0, resume_checkpoint_id=None)
         max_attempts = self._execution.get_max_node_state_attempts(self._run_id, [row.token_id])
         return token_from_journal_item(
             row,
@@ -3893,9 +3888,9 @@ class RowProcessor:
             raise AuditIntegrityError(f"Intake aggregation row {row.work_item_id!r} has no barrier_key.")
         node_id = NodeID(row.barrier_key)
         coordination_token = self._require_coordination_token()
-        # Resolve the token BEFORE the fenced verb: a row this leader cannot
-        # attribute (no live stash, no resume provenance — e.g. a stray
-        # deposit) must be refused with ZERO durable mutation.
+        # Resolve the token BEFORE the fenced verb so an invalid journal row is
+        # refused with ZERO durable mutation. Valid follower handoffs can be
+        # rebuilt from the durable row even without a live stash entry.
         token = self._token_for_intake(row)
         batch_id, ordinal = self._aggregation_executor.open_batch_membership(node_id)
         adoption = self._scheduler.adopt_blocked_barrier_item(
@@ -3949,7 +3944,7 @@ class RowProcessor:
         coalesce_name = CoalesceName(row.barrier_key)
         coordination_token = self._require_coordination_token()
         # Resolve the token BEFORE the fenced verb (refusal-before-mutation
-        # for unattributable rows — see the aggregation arm).
+        # for invalid journal rows — see the aggregation arm).
         token = self._token_for_intake(row)
         adoption = self._scheduler.adopt_blocked_barrier_item(
             run_id=self._run_id,

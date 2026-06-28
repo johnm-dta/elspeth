@@ -26,11 +26,20 @@ judge = ["openai>=1.0,<2"]
 # Install with:
 #     uv pip install -e ".[judge-agent]"  (from the elspeth-lints/ directory)
 judge-agent = ["claude-agent-sdk>=0.2.87"]
+# The 'mcp' extra pulls in the Model Context Protocol SDK used by the key-free
+# `elspeth-judge` staging server (`python -m elspeth_lints.mcp`). Pinned to the
+# root project's `mcp>=1.27,<2` constraint so the single shared .venv resolves
+# one SDK version. The full elspeth-judge runtime also needs the 'judge-agent'
+# extra for the `stage_preview` tool; the other four tools are key-free and
+# SDK-light. Install with:
+#     uv pip install -e ".[mcp,judge-agent]"  (from the elspeth-lints/ directory)
+mcp = ["mcp>=1.27,<2"]
 
 [project.scripts]
 elspeth-lints = "elspeth_lints.core.cli:main"
 diagnose-judge-signatures = "elspeth_lints.core.judge_signature_diagnosis:main"
 sign-judge-signatures = "elspeth_lints.core.judge_signature_signing:main"
+elspeth-judge-mcp = "elspeth_lints.mcp:main"
 
 [project.entry-points."elspeth_lints.rules"]
 meta-no-new-bespoke-cicd-enforcer = "elspeth_lints.rules.meta_no_new_bespoke_cicd_enforcer:RULE"

@@ -1309,8 +1309,8 @@ def _scan_findings_for_file(
     Two scanner shapes exist. ``trust_tier.tier_model`` has bespoke
     ``scan_file`` + ``scan_layer_imports_file`` entry points (layer
     imports cross file boundaries in a way ``Rule.analyze`` does not
-    model; the merge mirrors ``cli._scan_single_file_findings`` so
-    reaudit sees the same finding set the CI run would see). Every
+    model; the merge mirrors ``tier_model_scan.scan_single_file_findings``
+    so reaudit sees the same finding set the CI run would see). Every
     other supported rule uses the standard ``Rule.analyze`` protocol;
     ``_scan_via_rule_analyze`` dispatches to the matching
     ``BUILTIN_RULES`` entry.
@@ -1335,8 +1335,8 @@ def _scan_findings_for_file(
 def _scan_tier_model(*, target_file: Path, root: Path) -> list[Any]:
     """Run tier_model's bespoke scanners (R1-R7, TC, L1) against ``target_file``.
 
-    Mirrors ``cli._scan_single_file_findings`` so the reaudit finding
-    set matches the CI finding set on the same file. Lazy import:
+    Mirrors ``tier_model_scan.scan_single_file_findings`` so the reaudit
+    finding set matches the CI finding set on the same file. Lazy import:
     tier_model is heavy and importing it at module scope would slow
     every ``elspeth-lints --help`` invocation.
     """

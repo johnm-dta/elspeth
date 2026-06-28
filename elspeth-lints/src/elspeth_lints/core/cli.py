@@ -56,17 +56,6 @@ _JUDGE_SIGNING_ENV_FILE_KEYS = frozenset(
         OPERATOR_OVERRIDE_TOKEN_SHA256_ENV,
     }
 )
-_SIGNABLE_DIAGNOSIS_STATUSES = frozenset(
-    {
-        "MISSING_SIGNATURE",
-        "INVALID_SIGNATURE",
-        "AST_PATH_BINDING_DRIFT",
-        "SCOPE_BINDING_DRIFT",
-        "BINDING_DRIFT",
-    }
-)
-
-
 _MAX_AUDIT_IDENTITY_LENGTH = 200
 
 
@@ -284,6 +273,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_diagnose_judge_signatures(args)
     if args.command == "sign-judge-signatures":
         return _run_sign_judge_signatures(args)
+    if args.command == "sign-bundle":
+        return _run_sign_bundle(args)
+    if args.command == "rekey":
+        return _run_rekey(args)
     if args.command == "migrate-judge-scope":
         return _run_migrate_judge_scope(args)
     if args.command == "check-judge-coverage":
@@ -774,6 +767,137 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_judge_transport_arg(sign_judge_signatures)
     _add_judge_tools_arg(sign_judge_signatures)
+
+    sign_bundle = subparsers.add_parser(
+        "sign-bundle",
+        help=(
+            "OPERATOR-ONLY: re-verify a staged review bundle against the source "
+            "tree and fire it. The ONLY place a judge signature is minted from a "
+            "bundle. Re-derives every binding from the tree and aborts on any "
+            "staleness BEFORE a single write; drift_repair / new_judgment run the "
+            "real judge (re-judging prevents laundering a stale verdict over "
+            "changed content); rotation / stale_delete carry no verdict. Requires "
+            "ELSPETH_JUDGE_METADATA_HMAC_KEY (an agent may PROPOSE the bundle, only "
+            "an operator-held environment signs it)."
+        ),
+    )
+    sign_bundle.add_argument("bundle", type=Path, help="Path to the staged review bundle JSON to fire.")
+    # Mirror sign-judge-signatures' arg set so the drift_repair lane's
+    # _namespace_for_signing_spec(spec, args) finds every attr it reads.
+    sign_bundle.add_argument(
+        "--root",
+        type=Path,
+        default=Path("src/elspeth"),
+        help="Source tree to re-scan for the entries' underlying findings",
+    )
+    sign_bundle.add_argument(
+        "--repo-root",
+        type=Path,
+        default=None,
+        help="Repository root used by trust-boundary scanners. Omit for the tier-model-only default.",
+    )
+    sign_bundle.add_argument(
+        "--allowlist-dir",
+        type=Path,
+        default=Path("config/cicd/enforce_tier_model"),
+        help="Directory of per-module allowlist YAML files to repair in place",
+    )
+    sign_bundle.add_argument(
+        "--owner",
+        type=_non_empty_string,
+        required=True,
+        help="Audit identity (operator) recorded on freshly signed entries.",
+    )
+    sign_bundle.add_argument(
+        "--operator-override",
+        action="store_true",
+        help="Forward --operator-override to each justify call. Requires the operator override token environment exactly like justify.",
+    )
+    sign_bundle.add_argument(
+        "--max-tokens",
+        type=_positive_int,
+        default=None,
+        help="Override the judge response max_tokens for each justify call.",
+    )
+    sign_bundle.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the verify + per-lane plan without calling the judge, removing rows, or writing signed entries.",
+    )
+    sign_bundle.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt before the (destructive) write phase.",
+    )
+    sign_bundle.add_argument(
+        "--format",
+        dest="justify_format",
+        choices=("text", "json"),
+        default="text",
+        help="Per-entry justify output format.",
+    )
+    _add_judge_transport_arg(sign_bundle)
+    _add_judge_tools_arg(sign_bundle)
+
+    rekey = subparsers.add_parser(
+        "rekey",
+        help=(
+            "OPERATOR-ONLY: rotate the judge-metadata HMAC key. Verifies every "
+            "judge-gated entry under the OLD key, recomputes its signature under the "
+            "NEW key, and atomically rewrites ONLY the judge_metadata_signature line "
+            "(binding + audit lines stay byte-identical -- a scheme-preserving "
+            "signature-only swap). Re-derives the full judge-gated set from the live "
+            "tree at fire time; idempotent/re-runnable (Pass-1 accepts OLD or NEW, "
+            "Pass-2 skips already-NEW), so a partial run self-heals. Requires BOTH "
+            "key env vars (named by --old-key-env / --new-key-env); fails closed "
+            "without them. An agent may PROPOSE the bundle; only an operator-held "
+            "environment holds the keys and signs."
+        ),
+    )
+    # ``--in`` maps to a python keyword as a dest; bind an explicit non-keyword dest.
+    rekey.add_argument(
+        "--in",
+        dest="bundle_path",
+        type=Path,
+        required=True,
+        help="Path to the staged rekey bundle JSON (its RekeyPlan env-var names cross-check the flags).",
+    )
+    rekey.add_argument(
+        "--old-key-env",
+        dest="old_key_env",
+        type=_non_empty_string,
+        required=True,
+        help="NAME of the env var holding the OLD (current) HMAC key bytes. The key never appears on the CLI.",
+    )
+    rekey.add_argument(
+        "--new-key-env",
+        dest="new_key_env",
+        type=_non_empty_string,
+        required=True,
+        help="NAME of the env var holding the NEW (target) HMAC key bytes.",
+    )
+    rekey.add_argument(
+        "--root",
+        type=Path,
+        default=Path("src/elspeth"),
+        help="Source tree (for the canonical-pair baseline-regen gate; rekey itself loads source-less).",
+    )
+    rekey.add_argument(
+        "--allowlist-dir",
+        type=Path,
+        default=Path("config/cicd/enforce_tier_model"),
+        help="Directory of per-module allowlist YAML files to re-key in place",
+    )
+    rekey.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the verify + planned re-key count without verifying-and-writing any signature.",
+    )
+    rekey.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip the interactive confirmation prompt before the (destructive) write phase.",
+    )
 
     migrate_judge_scope = subparsers.add_parser(
         "migrate-judge-scope",
@@ -1961,27 +2085,6 @@ def _parse_symbol(symbol_arg: str) -> tuple[str, ...]:
     return parts
 
 
-def _scan_single_file_findings(
-    *,
-    target_file: Path,
-    root: Path,
-    scan_file: Any,
-    scan_layer_imports_file: Any,
-) -> list[Any]:
-    """Re-run both tier_model scanners against a single file.
-
-    Merges the R1-R7 findings from ``scan_file`` with the layer-import
-    violations + TC warnings from ``scan_layer_imports_file``. Mirrors
-    the way ``scan_for_rotations`` combines them, so the symbol-match
-    pass below sees the same set of findings the CI run would see.
-    """
-    findings: list[Any] = list(scan_file(target_file, root))
-    layer_violations, layer_tc = scan_layer_imports_file(target_file, root)
-    findings.extend(layer_violations)
-    findings.extend(layer_tc)
-    return findings
-
-
 def _scan_single_file_findings_for_justify(
     *,
     target_file: Path,
@@ -1997,6 +2100,7 @@ def _scan_single_file_findings_for_justify(
     existing exact ``--rule`` cross-check.
     """
     from elspeth_lints.core.ast_walker import parse_python_file
+    from elspeth_lints.core.tier_model_scan import scan_single_file_findings
     from elspeth_lints.rules.trust_boundary.scope import rule as scope_rule
     from elspeth_lints.rules.trust_boundary.scope.metadata import RULE_DEAD, RULE_NOPARAM
     from elspeth_lints.rules.trust_boundary.scope.metadata import RULE_NONLITERAL as SCOPE_NONLITERAL
@@ -2021,7 +2125,7 @@ def _scan_single_file_findings_for_justify(
     from elspeth_lints.rules.trust_boundary.tier import rule as tier_rule
     from elspeth_lints.rules.trust_boundary.tier.metadata import RULE_INVALID
     from elspeth_lints.rules.trust_boundary.tier.metadata import RULE_NONLITERAL as TIER_NONLITERAL
-    from elspeth_lints.rules.trust_tier.tier_model.rule import RULES, scan_file, scan_layer_imports_file
+    from elspeth_lints.rules.trust_tier.tier_model.rule import RULES
 
     scope_rule_ids = frozenset({RULE_NOPARAM, RULE_DEAD, SCOPE_NONLITERAL})
     tests_rule_ids = frozenset(
@@ -2045,12 +2149,7 @@ def _scan_single_file_findings_for_justify(
 
     if asserted_rule == "trust_tier.tier_model" or asserted_rule in RULES:
         return (
-            _scan_single_file_findings(
-                target_file=target_file,
-                root=root,
-                scan_file=scan_file,
-                scan_layer_imports_file=scan_layer_imports_file,
-            ),
+            scan_single_file_findings(target_file=target_file, root=root),
             frozenset({"trust_tier.tier_model"}),
             frozenset(RULES.keys()),
         )
@@ -3274,6 +3373,8 @@ def _signing_specs_from_diagnosis(
     report: Any,
 ) -> tuple[tuple[_JudgeSignatureSigningSpec, ...], tuple[tuple[str, str], ...], tuple[Any, ...]]:
     """Convert actionable diagnosis rows into exact signing specs."""
+    from elspeth_lints.core.judge_signature_diagnosis import _SIGNABLE_DIAGNOSIS_STATUSES
+
     specs: list[_JudgeSignatureSigningSpec] = []
     stale_keys: list[tuple[str, str]] = []
     unrepairable: list[Any] = []
@@ -3577,6 +3678,644 @@ def _render_signing_spec_command(spec: _JudgeSignatureSigningSpec, args: argpars
     return " ".join(shlex.quote(part) for part in parts)
 
 
+# --------------------------------------------------------------------------- #
+# sign-bundle: the operator (key-bearing) firing command
+# --------------------------------------------------------------------------- #
+
+
+def _run_sign_bundle(args: argparse.Namespace) -> int:
+    """OPERATOR-ONLY: re-verify a staged review bundle against the tree and fire it.
+
+    ``sign-bundle`` is the *only* place a judge signature is minted from a
+    ``ReviewBundle``. It composes the existing primitives rather than
+    reimplementing them: the bundle carries *claims*; this command re-derives
+    every binding from the live source (``verify_bundle_against_tree``) and
+    aborts the whole run before a single write if any claim is stale (the
+    atomicity gate -- "staging asserts, firing verifies"). After the confirm
+    gate, each action fires per-``kind``:
+
+    * ``drift_repair`` re-runs the **real** judge through the
+      ``sign-judge-signatures`` pop -> ``_run_justify`` -> restore-on-failure
+      ceremony (re-judging is what prevents laundering a stale verdict over
+      drifted/changed content);
+    * ``justify`` (new_judgment) runs the real judge inside the keyed step;
+    * ``rotation`` mechanically re-binds a *non-judge-gated* key via
+      ``apply_plan`` (no judge, no verdict) from the verify-time filtered plan;
+    * ``stale_delete`` removes an orphaned entry (no judge).
+
+    Execute is **per-action non-transactional** by design (the verify gate is the
+    atomicity boundary): a mid-bundle BLOCK leaves earlier-accepted writes in
+    place, restores/skips the blocked action, and returns non-zero with a
+    per-action report.
+    """
+    if args.judge_tools == "readonly":
+        return _reject_readonly_judge_tools_for_signing("sign-bundle")
+
+    from elspeth_lints.core.allowlist import _judge_metadata_hmac_key
+    from elspeth_lints.core.bundle_verify import verify_bundle_against_tree
+    from elspeth_lints.core.review_bundle import read_bundle
+
+    # Fail-closed key hoist (mirrors migrate-judge-scope): even --dry-run must
+    # hold the operator HMAC key, so a keyless run aborts before any tree read
+    # and the dry output is honest. A stale_delete-only bundle still fails closed
+    # here, not in a per-lane delegate.
+    try:
+        _judge_metadata_hmac_key()
+    except ValueError as exc:
+        sys.stderr.write(f"sign-bundle: judge metadata signature configuration error: {exc}\n")
+        return 2
+
+    try:
+        bundle = read_bundle(args.bundle)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"sign-bundle: cannot read bundle {args.bundle}: {exc}\n")
+        return 2
+
+    # --- Re-verify gate: the all-or-nothing atomicity boundary ---------------
+    try:
+        verification = verify_bundle_against_tree(bundle, root=args.root, allowlist_dir=args.allowlist_dir)
+    except ValueError as exc:
+        sys.stderr.write(f"sign-bundle: verify error: {exc}\n")
+        return 2
+    if not verification.ok:
+        sys.stderr.write("sign-bundle: staged claims no longer match the source tree; refusing to sign (re-run stage_scan):\n")
+        for mismatch in verification.mismatches:
+            sys.stderr.write(f"  mismatch: {mismatch}\n")
+        return 2
+
+    # --- Pre-write summary (pure read) ---------------------------------------
+    _emit_sign_bundle_summary(bundle, args=args)
+
+    if args.dry_run:
+        sys.stdout.write("sign-bundle: dry-run; nothing written (re-run without --dry-run to fire).\n")
+        return 0
+
+    if not args.yes and not _confirm_sign_bundle():
+        sys.stderr.write("sign-bundle: aborted at the confirmation prompt; nothing written.\n")
+        return 0
+
+    return _execute_sign_bundle(bundle, verification=verification, args=args)
+
+
+def _emit_sign_bundle_summary(bundle: Any, *, args: argparse.Namespace) -> None:
+    """Print the per-lane plan + the planned operator-override action count.
+
+    The planned override **count** is the deterministic, load-bearing integer the
+    operator weighs before confirming (it feeds the C3 override-rate gate at the
+    next CI run). Any *rate* we print is explicitly approximate/directional: the
+    authoritative C3 number is a rolling-window recompute the CLI does post-write,
+    so an inline projection here must not be mistaken for it.
+    """
+    counts = {"justify": 0, "drift_repair": 0, "rotation": 0, "stale_delete": 0}
+    for action in bundle.actions:
+        counts[action.kind] = counts.get(action.kind, 0) + 1
+    planned_override = (counts["justify"] + counts["drift_repair"]) if args.operator_override else 0
+
+    sys.stdout.write(
+        "sign-bundle: "
+        f"{len(bundle.actions)} action(s) -- "
+        f"new_judgment={counts['justify']}, drift_repair={counts['drift_repair']}, "
+        f"rotation={counts['rotation']}, stale_delete={counts['stale_delete']}\n"
+    )
+    sys.stdout.write(f"sign-bundle: planned operator-override actions: {planned_override}\n")
+    sys.stdout.write(
+        "sign-bundle: directional override-rate impact (approx.; the CI C3 gate recomputes the "
+        f"authoritative rolling-window rate post-write): +{planned_override} override action(s) staged\n"
+    )
+
+
+def _confirm_sign_bundle() -> bool:
+    """Interactive confirmation gate for the destructive write phase."""
+    sys.stdout.write("sign-bundle: proceed with the write phase? [y/N]: ")
+    sys.stdout.flush()
+    response = sys.stdin.readline()
+    return response.strip().lower() in {"y", "yes"}
+
+
+def _execute_sign_bundle(bundle: Any, *, verification: Any, args: argparse.Namespace) -> int:
+    """Fire each action per-``kind`` after the verify gate + confirm gate."""
+    diagnosis = verification.diagnosis
+    specs, _stale_keys, unrepairable = _signing_specs_from_diagnosis(diagnosis)
+    specs_by_stale_key = {spec.stale_key: spec for spec in specs if spec.stale_key is not None}
+    unrepairable_keys = {item.key for item in unrepairable}
+
+    # A drift_repair action that is no longer signable (now in `unrepairable`)
+    # is a stale claim -- abort before any write, mirroring sign-judge-signatures.
+    blocked = {a.key for a in bundle.actions if a.kind == "drift_repair"} & unrepairable_keys
+    if blocked:
+        sys.stderr.write("sign-bundle: drift_repair action(s) are no longer signable in the fresh diagnosis; re-run stage_scan:\n")
+        for key in sorted(blocked):
+            sys.stderr.write(f"  {key}\n")
+        return 2
+
+    total = len(bundle.actions)
+    successes = 0
+    failures: list[str] = []
+    first_failure_code = 0
+
+    for index, action in enumerate(bundle.actions, start=1):
+        if action.kind == "drift_repair":
+            code = _execute_drift_repair_action(action, specs_by_stale_key=specs_by_stale_key, args=args)
+        elif action.kind == "justify":
+            code = _execute_new_judgment_action(action, args=args)
+        elif action.kind == "rotation":
+            code = _execute_rotation_action(action, rotation_plan=verification.rotation_plan, args=args)
+        elif action.kind == "stale_delete":
+            code = _execute_stale_delete_action(action, args=args)
+        else:  # pragma: no cover - BundleAction.__post_init__ rejects unknown kinds
+            sys.stderr.write(f"sign-bundle: unknown action kind {action.kind!r}\n")
+            code = 2
+
+        if code == 0:
+            successes += 1
+        else:
+            failures.append(f"[{index}/{total}] {action.kind} {action.key} exit={code}")
+            if first_failure_code == 0:
+                first_failure_code = code
+
+    if successes:
+        # Baseline regen runs only AFTER a successful write phase (Task 2.5);
+        # an all-failed run wrote nothing, so there is nothing to re-baseline.
+        _maybe_regen_fingerprint_baseline(args)
+    _emit_sign_bundle_post_state(args)
+
+    if failures:
+        sys.stderr.write(
+            f"sign-bundle: {successes} succeeded / {len(failures)} failed (verify was the atomic gate; "
+            "execute is per-action -- earlier writes stand, the blocked action's prior state was restored/skipped):\n"
+        )
+        for line in failures:
+            sys.stderr.write(f"  {line}\n")
+        return first_failure_code
+
+    sys.stdout.write(f"sign-bundle: completed; {successes} action(s) applied.\n")
+    return 0
+
+
+def _execute_drift_repair_action(action: Any, *, specs_by_stale_key: dict[str, Any], args: argparse.Namespace) -> int:
+    """Re-judge a drifted entry: pop the stale row, re-run justify, restore on failure.
+
+    Replicates the ``sign-judge-signatures`` pop -> ``_run_justify`` ->
+    restore-on-failure loop (``cli.py`` ``_run_sign_judge_signatures``) verbatim
+    for the single bundle action. Driving the namespace through
+    ``_namespace_for_signing_spec`` is what makes R1 evaporate for this lane.
+    BLOCK-not-signed, override gating, and no-laundering are inherited from
+    ``_run_justify``.
+    """
+    spec = specs_by_stale_key.get(action.key)
+    if spec is None:
+        sys.stderr.write(
+            f"sign-bundle: drift_repair {action.key!r} has no signing spec in the fresh diagnosis (stale claim); re-run stage_scan.\n"
+        )
+        return 2
+
+    removed_stale_entry: str | None = None
+    stale_yaml: Path | None = None
+    try:
+        if spec.stale_source_file is not None and spec.stale_key is not None:
+            stale_yaml = args.allowlist_dir / spec.stale_source_file
+            removed_stale_entry = _pop_allow_hits_entry(stale_yaml, spec.stale_key)
+    except ValueError as exc:
+        sys.stderr.write(f"sign-bundle: drift_repair error: {exc}\n")
+        return 2
+
+    exit_code = _run_justify(_namespace_for_signing_spec(spec, args))
+    if exit_code != 0 and stale_yaml is not None and removed_stale_entry is not None:
+        _append_entry_to_yaml(stale_yaml, removed_stale_entry)
+        sys.stderr.write(
+            f"sign-bundle: judge did not re-sign {action.key!r}; restored the original signed entry intact. "
+            "No stale verdict was laundered onto the changed scope.\n"
+        )
+    return exit_code
+
+
+def _execute_new_judgment_action(action: Any, *, args: argparse.Namespace) -> int:
+    """Run the real judge for a brand-new finding inside the keyed step.
+
+    ``new_judgment`` actions have no diagnose item (no entry exists yet), so the
+    adapter mirrors ``_namespace_for_signing_spec``'s full field set verbatim
+    (a missing attr is a loud ``AttributeError`` in ``_run_justify``, not a
+    default). The agent-authored ``draft_rationale`` is an *input* to the judge
+    prompt, never the verdict: the fire-time ``call_judge`` issues the
+    authoritative ACCEPTED/BLOCKED independently ([O1] preserved).
+    """
+    namespace = argparse.Namespace(
+        root=args.root,
+        repo_root=args.repo_root,
+        allowlist_dir=args.allowlist_dir,
+        file_path=action.file_path,
+        rule=action.rule or "trust_tier.tier_model",
+        symbol=action.symbol,
+        fingerprint=action.fingerprint,
+        rationale=action.draft_rationale or "Staged via sign-bundle; see bundle provenance for the agent rationale.",
+        owner=args.owner,
+        operator_override=args.operator_override,
+        max_tokens=args.max_tokens,
+        dry_run=False,
+        justify_format=args.justify_format,
+        judge_transport=args.judge_transport,
+        judge_tools=args.judge_tools,
+    )
+    return _run_justify(namespace)
+
+
+def _execute_rotation_action(action: Any, *, rotation_plan: Any, args: argparse.Namespace) -> int:
+    """Mechanically re-bind ONE non-judge-gated key from the carried filtered plan.
+
+    Builds a MINIMAL per-action ``RotationPlan`` (the single ``Rotation`` whose
+    ``old_key == action.key``) from ``verification.rotation_plan`` -- the
+    ``scan_for_rotations(..., exclude_judge_gated=True)`` whole-dir result the
+    verify gate already proved applicable. It NEVER re-scans at execute (an
+    unfiltered re-scan would re-open the judge-gated crash this fix closes) and
+    NEVER hands the whole survey plan to ``apply_plan`` (which would over-apply
+    surveyed-but-unstaged rotations). ``apply_plan`` has no judge-gated guard of
+    its own; the non-judge-gated guarantee is enforced at survey/verify time.
+    """
+    from elspeth_lints.rules.trust_tier.tier_model.rotate import RotationPlan, apply_plan
+
+    if rotation_plan is None:
+        sys.stderr.write(f"sign-bundle: rotation {action.key!r} reached execute without a verified rotation plan (contract violation).\n")
+        return 2
+    matching = [rotation for rotation in rotation_plan.rotations if rotation.old_key == action.key]
+    if len(matching) != 1:
+        sys.stderr.write(
+            f"sign-bundle: rotation {action.key!r} matched {len(matching)} rotation(s) in the verified plan (expected exactly one).\n"
+        )
+        return 2
+
+    minimal_plan = RotationPlan(
+        rotations=(matching[0],),
+        ambiguous=(),
+        stale_entries=(),
+        todo_entries=(),
+        new_findings=(),
+        unchanged_count=0,
+    )
+    try:
+        apply_plan(
+            minimal_plan,
+            allowlist_dir=args.allowlist_dir,
+            remove_stale=False,
+            accept_todo_debt=False,
+            rotation_log_path=None,
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        if "occurs" in message and "refusing" in message:
+            # The verified dup-key dataloss guard: _replace_allow_hit_key refused
+            # a span count > 1 rather than deleting both copies.
+            sys.stderr.write(f"sign-bundle: rotation apply refused -- duplicate key, BOTH copies preserved: {exc}\n")
+        else:
+            sys.stderr.write(f"sign-bundle: rotation apply failed: {exc}\n")
+        return 2
+    return 0
+
+
+def _execute_stale_delete_action(action: Any, *, args: argparse.Namespace) -> int:
+    """Surgically remove one orphaned ``allow_hits`` entry from its owning YAML."""
+    if action.source_file is None:  # pragma: no cover - enforced by BundleAction.__post_init__
+        sys.stderr.write(f"sign-bundle: stale_delete {action.key!r} is missing source_file.\n")
+        return 2
+    target_yaml = args.allowlist_dir / action.source_file
+    try:
+        _pop_allow_hits_entry(target_yaml, action.key)
+    except ValueError as exc:
+        sys.stderr.write(f"sign-bundle: stale_delete error: {exc}\n")
+        return 2
+    return 0
+
+
+def _emit_sign_bundle_post_state(args: argparse.Namespace) -> None:
+    """Print a post-write diagnosis (best-effort; out-of-bundle drift is reported)."""
+    from elspeth_lints.core.judge_signature_diagnosis import (
+        diagnose_judge_signatures,
+        render_judge_signature_diagnosis_text,
+    )
+
+    try:
+        report = diagnose_judge_signatures(root=args.root, allowlist_dir=args.allowlist_dir)
+    except ValueError as exc:
+        sys.stderr.write(f"sign-bundle: post-state diagnosis could not run: {exc}\n")
+        return
+    sys.stdout.write("sign-bundle: post-state diagnosis (bundle-covered repairs land OK; any residual is out-of-bundle tree drift):\n")
+    sys.stdout.write(render_judge_signature_diagnosis_text(report))
+
+
+def _maybe_regen_fingerprint_baseline(args: argparse.Namespace) -> None:
+    """Regenerate the fingerprint baseline ONLY for the canonical allowlist pair.
+
+    ``regen_fingerprint_baseline.py`` is hard-wired to the real repo
+    (``REPO_ROOT/src/elspeth`` + ``REPO_ROOT/config/cicd/enforce_tier_model``)
+    and ignores ``--root``/``--allowlist-dir``. So shell it only when the run's
+    pair resolves to that canonical target; otherwise skip with an explicit
+    message. This keeps ``tmp_path`` tests hermetic and stops a non-canonical
+    operator run from regenerating the wrong baseline. When it does run, its exit
+    is surfaced as a WARNING -- the signed enforce gate is held deliberately RED
+    in prerelease, so a non-zero regen must not retroactively fail an
+    authoritative successful sign.
+    """
+    import subprocess
+
+    repo_root = Path(__file__).resolve().parents[4]
+    canonical_src = repo_root / "src" / "elspeth"
+    canonical_allowlist = repo_root / "config" / "cicd" / "enforce_tier_model"
+    regen_script = repo_root / "scripts" / "cicd" / "regen_fingerprint_baseline.py"
+
+    is_canonical = args.root.resolve() == canonical_src and args.allowlist_dir.resolve() == canonical_allowlist and regen_script.is_file()
+    if not is_canonical:
+        sys.stdout.write(
+            f"{args.command}: baseline regen is canonical-allowlist-only -- skipped (--root/--allowlist-dir are not the canonical pair).\n"
+        )
+        return
+
+    result = subprocess.run(
+        [sys.executable, str(regen_script)],
+        cwd=str(repo_root),
+        check=False,
+    )
+    if result.returncode != 0:
+        sys.stderr.write(
+            f"{args.command}: WARNING -- regen_fingerprint_baseline.py exited "
+            f"{result.returncode} (the signed enforce gate is held RED in prerelease; "
+            "this does NOT fail the authoritative sign).\n"
+        )
+
+
+# --------------------------------------------------------------------------- #
+# rekey: the operator dual-key custody window
+# --------------------------------------------------------------------------- #
+
+
+def _entry_verifies_under_key(entry: Any, hmac_key: bytes) -> bool:
+    """Return True iff ``entry``'s signature verifies under ``hmac_key`` (no raise)."""
+    from elspeth_lints.core.allowlist import verify_entry_signature_with_key
+
+    try:
+        verify_entry_signature_with_key(entry, hmac_key=hmac_key)
+    except ValueError:
+        return False
+    return True
+
+
+def _confirm_rekey() -> bool:
+    """Interactive confirmation gate for the destructive re-key write phase."""
+    sys.stdout.write("rekey: proceed with the re-key write phase? [y/N]: ")
+    sys.stdout.flush()
+    response = sys.stdin.readline()
+    return response.strip().lower() in {"y", "yes"}
+
+
+def _run_rekey(args: argparse.Namespace) -> int:
+    """OPERATOR-ONLY: rotate the judge-metadata HMAC key (dual-key custody window).
+
+    ``rekey`` is a *scheme-preserving signature-only swap*: it verifies every
+    judge-gated entry under the OLD key, recomputes its signature under the NEW key
+    via the SHARED ``_recompute_entry_signature`` marshaller (guaranteeing
+    verify/write field-parity with the production loader), and atomically rewrites
+    ONLY the ``judge_metadata_signature`` line -- every binding (``scope_fingerprint``/
+    ``ast_path``) and audit line stays byte-identical.
+
+    It follows ``migrate-judge-scope``'s two-pass STRUCTURE (integrity gate over
+    every entry first, then per-file atomic write) but re-derives the entry set
+    from the live TREE, not the bundle: an entry present in the tree but absent from
+    the staged ``RekeyPlan.keys`` is still re-keyed (self-healing). The bundle's
+    ``old_key_env``/``new_key_env`` are advisory provenance that cross-check the CLI
+    flags (a stale/transposed bundle must not select which key signs).
+
+    Idempotent/re-runnable: Pass-1 accepts an entry verifying under OLD *or* NEW (an
+    already-NEW entry is a completed prior-run end state, not a broken one) and
+    Pass-2 skips already-NEW entries, so a partial/interrupted run self-heals on a
+    second invocation rather than self-bricking. The ONLY abort-the-run condition is
+    an entry verifying under NEITHER key (no laundering a broken entry into NEW).
+    """
+    from elspeth_lints.core.allowlist import (
+        _hmac_key_bytes_from_env,
+        _recompute_entry_signature,
+        load_allowlist,
+    )
+    from elspeth_lints.core.review_bundle import read_bundle
+    from elspeth_lints.rules.trust_tier.tier_model.rule import RULES
+
+    allowlist_dir: Path = args.allowlist_dir
+    if not allowlist_dir.is_dir():
+        sys.stderr.write(f"--allowlist-dir: {allowlist_dir} is not a directory\n")
+        return 2
+
+    # --- Fail-closed: BOTH keys must resolve before any tree read ------------
+    # The keys live in two operator-named env vars (never the single production
+    # ELSPETH_JUDGE_METADATA_HMAC_KEY, never the CLI). A missing/short key aborts
+    # here, before the bundle is even read.
+    try:
+        old_key = _hmac_key_bytes_from_env(args.old_key_env)
+        new_key = _hmac_key_bytes_from_env(args.new_key_env)
+    except ValueError as exc:
+        sys.stderr.write(f"rekey: HMAC key configuration error: {exc}\n")
+        return 2
+
+    # --- Read the bundle + advisory-vs-authoritative env-name cross-check -----
+    # The flags + the live tree are authoritative; the RekeyPlan is advisory
+    # provenance. The one load-bearing check: the bundle's recorded env-var NAMES
+    # must match the flags. This catches a transposed --old/--new flag set on a
+    # partial-recovery re-run BEFORE Pass-1 (where OLD-or-NEW would otherwise let
+    # both sets pass and Pass-2 would silently revert already-NEW files to OLD).
+    try:
+        bundle = read_bundle(args.bundle_path)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"rekey: cannot read bundle {args.bundle_path}: {exc}\n")
+        return 2
+    plan = bundle.rekey
+    if plan is None:
+        sys.stderr.write("rekey: the bundle carries no RekeyPlan (was it staged with stage_rekey?); refusing.\n")
+        return 2
+    if plan.old_key_env != args.old_key_env or plan.new_key_env != args.new_key_env:
+        sys.stderr.write(
+            "rekey: env-var name mismatch -- the staged bundle names "
+            f"(old={plan.old_key_env!r}, new={plan.new_key_env!r}) disagree with the flags "
+            f"(--old-key-env {args.old_key_env!r}, --new-key-env {args.new_key_env!r}). "
+            "A stale/transposed bundle must not select which key signs; refusing before any write.\n"
+        )
+        return 2
+
+    # --- Enumerate the FULL judge-gated set from the tree (source-less load) ---
+    # Source-less load skips the production HMAC + file-fingerprint gates (the
+    # entries are signed under the OLD key, which may already be retired from the
+    # production env). Pass-1 below is the authoritative keyed gate using the
+    # explicit OLD/NEW key bytes. A tree entry absent from RekeyPlan.keys is still
+    # enumerated here -- the plan does not drive selection.
+    valid_rule_ids = frozenset(RULES.keys())
+    try:
+        allowlist = load_allowlist(allowlist_dir, valid_rule_ids=valid_rule_ids, source_root=None)
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        sys.stderr.write(f"rekey error: {exc}\n")
+        return 2
+    judge_gated = [entry for entry in allowlist.entries if entry.judge_verdict is not None]
+
+    # --- Pass 1: integrity gate over EVERY entry (idempotent; no laundering) --
+    # Accept an entry verifying under OLD *or* NEW; an entry verifying under
+    # NEITHER stops the whole run with zero writes (a broken/tampered entry is
+    # never re-keyed clean). already_new drives the Pass-2 skip.
+    already_new: dict[str, bool] = {}
+    for entry in judge_gated:
+        verifies_old = _entry_verifies_under_key(entry, old_key)
+        verifies_new = _entry_verifies_under_key(entry, new_key)
+        if not verifies_old and not verifies_new:
+            sys.stderr.write(
+                f"rekey: entry {entry.key!r} verifies under NEITHER the old nor the new key. "
+                "Refusing to launder a broken/tampered entry into the new key. Stopping the run; "
+                "NO entries were written. Repair (re-justify) the entry first.\n"
+            )
+            return 2
+        already_new[entry.key] = verifies_new
+
+    # --- Plan: still-OLD entries are the REMAINING re-key work ----------------
+    to_rekey = [entry for entry in judge_gated if not already_new[entry.key]]
+    skipped = len(judge_gated) - len(to_rekey)
+
+    sys.stdout.write(
+        f"rekey: {len(judge_gated)} judge-gated entr{'y' if len(judge_gated) == 1 else 'ies'} enumerated from the tree "
+        f"(old-key-env={args.old_key_env}, new-key-env={args.new_key_env}).\n"
+    )
+    sys.stdout.write(f"rekey: planned re-key actions: {len(to_rekey)} (still under OLD); {skipped} already under NEW (skipped).\n")
+
+    if args.dry_run:
+        sys.stdout.write("rekey: dry-run; nothing written (re-run without --dry-run to re-key).\n")
+        return 0
+
+    if not args.yes and not _confirm_rekey():
+        sys.stderr.write("rekey: aborted at the confirmation prompt; nothing written.\n")
+        return 0
+
+    # --- Pass 2: per-file atomic signature-only rewrite of still-OLD entries ---
+    specs_by_yaml: dict[Path, list[_RekeyRewriteSpec]] = {}
+    for entry in to_rekey:
+        new_signature = _recompute_entry_signature(entry, hmac_key=new_key)
+        target_yaml = allowlist_dir / entry.source_file
+        specs_by_yaml.setdefault(target_yaml, []).append(_RekeyRewriteSpec(entry_key=entry.key, new_signature=new_signature))
+    for target_yaml, specs in specs_by_yaml.items():
+        _rekey_entries_in_yaml(target_yaml, specs)
+
+    sys.stdout.write(
+        f"rekey: re-keyed {len(to_rekey)} entr{'y' if len(to_rekey) == 1 else 'ies'} across "
+        f"{len(specs_by_yaml)} file(s) under {args.new_key_env}.\n"
+    )
+
+    # Regen baseline last, under the same canonical-only + warning-not-return-code
+    # treatment as sign-bundle (Task 2.5): a tmp_path run never shells the script.
+    _maybe_regen_fingerprint_baseline(args)
+    return 0
+
+
+@dataclass(frozen=True)
+class _RekeyRewriteSpec:
+    """One entry's signature-only re-key, resolved before any file write."""
+
+    entry_key: str
+    new_signature: str
+
+
+def _rekey_entries_in_yaml(target_yaml: Path, specs: list[_RekeyRewriteSpec]) -> None:
+    """Rewrite a batch of entries' judge_metadata_signature lines, in one atomic write.
+
+    Mirrors ``_rewrite_v1_entries_as_v2_in_yaml``'s byte-preserving line surgery
+    (locate each entry by its ``- key:`` line; operate ONLY on its line range,
+    resolving all spans against the SAME snapshot so a single splice pass has no
+    index drift) but the per-entry mutation is the *single* signature-line swap --
+    every binding and audit line stays byte-identical, so a re-key changes only the
+    signature. All ``specs`` for ``target_yaml`` are applied to one in-memory copy
+    and written ONCE under ``atomic_update_text`` (per-file atomicity; dup-key safe).
+    """
+    specs_by_key = {spec.entry_key: spec for spec in specs}
+    if len(specs_by_key) != len(specs):
+        raise ValueError(f"{target_yaml}: duplicate entry keys in rekey batch")
+
+    def rewrite_in(current: str | None) -> str:
+        if current is None:
+            raise ValueError(f"{target_yaml}: allowlist YAML file is required")
+
+        lines = current.splitlines(keepends=True)
+        header_index = None
+        for idx, line in enumerate(lines):
+            if line.rstrip("\r\n") == "allow_hits:":
+                header_index = idx
+                break
+        if header_index is None:
+            raise ValueError(f"{target_yaml}: no allow_hits block found")
+
+        block_end = len(lines)
+        for idx in range(header_index + 1, len(lines)):
+            line = lines[idx]
+            if not line.strip():
+                continue
+            if _is_allow_hits_block_line(line):
+                continue
+            block_end = idx
+            break
+
+        entry_ranges = _allow_hit_entry_ranges(lines, start=header_index + 1, end=block_end)
+        range_by_key: dict[str, tuple[int, int]] = {}
+        for entry_start, entry_end in entry_ranges:
+            key_line = lines[entry_start].rstrip("\r\n")
+            if not key_line.startswith("- key: "):
+                continue
+            entry_key = key_line.removeprefix("- key: ")
+            if entry_key not in specs_by_key:
+                continue
+            if entry_key in range_by_key:
+                raise ValueError(f"{target_yaml}: duplicate allow_hits entries found for key {entry_key!r}")
+            range_by_key[entry_key] = (entry_start, entry_end)
+
+        for entry_key in specs_by_key:
+            if entry_key not in range_by_key:
+                raise ValueError(f"{target_yaml}: no allow_hits entry found for key {entry_key!r}")
+
+        ordered = sorted(range_by_key.items(), key=lambda item: item[1][0])
+        result_lines = list(lines)
+        for entry_key, (entry_start, entry_end) in reversed(ordered):
+            spec = specs_by_key[entry_key]
+            rewritten = _rekey_entry_signature_line(
+                target_yaml=target_yaml,
+                entry_key=entry_key,
+                entry_lines=lines[entry_start:entry_end],
+                new_signature=spec.new_signature,
+            )
+            result_lines[entry_start:entry_end] = rewritten
+
+        return "".join(result_lines)
+
+    atomic_update_text(target_yaml, rewrite_in, encoding="utf-8", create_parent=False)
+
+
+def _rekey_entry_signature_line(
+    *,
+    target_yaml: Path,
+    entry_key: str,
+    entry_lines: list[str],
+    new_signature: str,
+) -> list[str]:
+    """Return ``entry_lines`` with ONLY its judge_metadata_signature value swapped.
+
+    Indent-exact match on the writer's 2-space prefix (the same corruption-avoidance
+    discipline as ``_rewrite_entry_binding_lines``: a 4-space block-scalar BODY line
+    inside ``reason``/``safety``/``judge_rationale`` that *strips* to
+    ``judge_metadata_signature:`` is NOT a binding line and is passed through
+    unchanged). The new value goes through ``_yaml_inline_scalar`` so quoting matches
+    the canonical writer (``_build_yaml_entry_text``) exactly; every other line --
+    binding and audit alike -- is byte-identical, so a re-key changes only the
+    signature.
+    """
+    rewritten: list[str] = []
+    saw_signature = False
+    for line in entry_lines:
+        if line.startswith("  judge_metadata_signature:"):
+            saw_signature = True
+            rewritten.append(f"  judge_metadata_signature: {_yaml_inline_scalar(new_signature)}\n")
+            continue
+        rewritten.append(line)
+    if not saw_signature:
+        raise ValueError(f"{target_yaml}: entry {entry_key!r} has no judge_metadata_signature line to re-key.")
+    return rewritten
+
+
 def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
     """Mechanically re-sign currently-valid v1 judge-gated entries as v2.
 
@@ -3624,11 +4363,8 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
         SourceExcerptPathOutsideRootError,
         resolve_safe_excerpt_path,
     )
-    from elspeth_lints.rules.trust_tier.tier_model.rule import (
-        RULES,
-        scan_file,
-        scan_layer_imports_file,
-    )
+    from elspeth_lints.core.tier_model_scan import scan_single_file_findings
+    from elspeth_lints.rules.trust_tier.tier_model.rule import RULES
 
     root: Path = args.root.resolve()
     if not root.is_dir():
@@ -3696,12 +4432,7 @@ def _run_migrate_judge_scope(args: argparse.Namespace) -> int:
     def _findings_for_file(target_file: Path) -> list[Any]:
         cached = findings_by_file.get(target_file)
         if cached is None:
-            cached = _scan_single_file_findings(
-                target_file=target_file,
-                root=root,
-                scan_file=scan_file,
-                scan_layer_imports_file=scan_layer_imports_file,
-            )
+            cached = scan_single_file_findings(target_file=target_file, root=root)
             findings_by_file[target_file] = cached
         return cached
 

@@ -524,7 +524,7 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
     it through the helper or add a written rationale.
 
     The check is byte-grep over ``cli.py`` for the helper's name. The
-    expected count is 15:
+    expected count is 16:
       7 entry-level scalars in ``_build_yaml_entry_text`` (owner,
         judge_model, judge_policy_hash, scope_fingerprint, judge_transport,
         ast_path, judge_metadata_signature)
@@ -542,6 +542,11 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
         through the helper so a migrated entry quotes identically to a
         justified one. (judge_transport is the constant ``"openrouter"`` —
         still routed through the helper for byte-congruence with justify.)
+      1 signature-line rewrite in ``_rekey_entry_signature_line`` (the
+        ``rekey`` scheme-preserving signature-only swap): judge_metadata_signature.
+        Re-routes the SAME existing field through the helper so a re-keyed
+        entry quotes identically to a justified one — not a new field, so the
+        existing judge_metadata_signature round-trip coverage already applies.
     Update this number deliberately when the inventory legitimately
     grows.
     """
@@ -552,8 +557,8 @@ def test_yaml_inline_scalar_call_sites_are_inventoried() -> None:
     total_token_matches = text.count("_yaml_inline_scalar(")
     definition_count = text.count("def _yaml_inline_scalar(")
     call_count = total_token_matches - definition_count
-    assert call_count == 15, (
-        f"expected 15 _yaml_inline_scalar(...) call sites in cli.py, found "
+    assert call_count == 16, (
+        f"expected 16 _yaml_inline_scalar(...) call sites in cli.py, found "
         f"{call_count}; if a new field was added, also extend "
         "the helper-routed field round-trip tests above."
     )

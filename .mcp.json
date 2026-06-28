@@ -8,6 +8,23 @@
       "command": "/home/john/elspeth/.venv/bin/elspeth-composer",
       "type": "stdio"
     },
+    "elspeth-judge": {
+      "args": [
+        "-m",
+        "elspeth_lints.mcp",
+        "--root",
+        "src/elspeth",
+        "--allowlist-dir",
+        "config/cicd/enforce_tier_model",
+        "--staged-dir",
+        ".elspeth/staged-reviews"
+      ],
+      "command": "/home/john/elspeth/.venv/bin/python",
+      "env": {
+        "PYTHONPATH": "/home/john/elspeth/elspeth-lints/src"
+      },
+      "type": "stdio"
+    },
     "elspeth-landscape": {
       "args": [
         "--database",

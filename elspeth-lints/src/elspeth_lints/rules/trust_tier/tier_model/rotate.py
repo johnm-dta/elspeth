@@ -303,6 +303,7 @@ def scan_for_rotations(
     source_root: Path,
     allowlist_path: Path,
     allow_symmetric_pairing: bool = True,
+    exclude_judge_gated: bool = False,
 ) -> RotationPlan:
     """Scan + classify wrapper around ``plan_rotations``.
 
@@ -310,6 +311,17 @@ def scan_for_rotations(
     classification to ``plan_rotations``. Keep ``plan_rotations`` separate
     so unit tests can exercise the algorithm without touching the
     filesystem or running the rule's full visitor.
+
+    ``exclude_judge_gated`` (default ``False``) preserves the standalone
+    ``rotate`` CLI's raise-by-design: a judge-gated entry with positional
+    (fp) drift is refused at scan time inside ``plan_rotations``
+    (``_refuse_rotation_of_judge_gated_entry``). The read-only survey/verify
+    paths that feed ``sign-bundle`` pass ``True`` to filter
+    ``allowlist.entries`` to ``judge_verdict is None`` *before* delegating, so
+    the raise can never fire on a read-only scan over the canonical
+    (mostly judge-gated) corpus. Judge-gated drift is not silently lost -- it is
+    independently surfaced by ``diagnose_judge_signatures`` -> the drift_repair
+    lane.
     """
     findings: list[Finding] = list(scan_directory(source_root))
     layer_violations, layer_warnings = scan_layer_imports_directory(source_root)
@@ -317,10 +329,13 @@ def scan_for_rotations(
     findings.extend(layer_warnings)
 
     allowlist = _load_tier_model_allowlist(allowlist_path)
+    entries = allowlist.entries
+    if exclude_judge_gated:
+        entries = [entry for entry in entries if entry.judge_verdict is None]
 
     return plan_rotations(
         findings=findings,
-        allowlist_entries=allowlist.entries,
+        allowlist_entries=entries,
         per_file_rules=allowlist.per_file_rules,
         allow_symmetric_pairing=allow_symmetric_pairing,
     )
@@ -523,10 +538,13 @@ def apply_plan(
 ) -> dict[str, ApplyResult]:
     """Apply rotations (and optionally stale-entry removals) to YAML files.
 
-    Rotations use surgical full-string replacement keyed on the entire
-    ``old_key``. Governance forbids duplicate canonical keys within a YAML
-    file, so a single ``str.replace`` is sufficient and preserves all
-    surrounding structure (comments, ordering, indentation).
+    Rotations replace the ``old_key`` by its YAML-AST node span via
+    ``_replace_allow_hit_key``, preserving all surrounding structure
+    (comments, ordering, indentation). Governance forbids duplicate canonical
+    keys within a YAML file, and the span replacer enforces it: it raises
+    ``RuntimeError`` if the ``old_key`` span count is not exactly one
+    (``> 1`` -> "occurs Nx"; ``0`` -> "not found"), so a duplicated key can
+    never have both copies deleted.
 
     Stale removal walks the YAML line-by-line, deletes the ``- key: <STALE>``
     line and the indented child lines that belong to that entry block,

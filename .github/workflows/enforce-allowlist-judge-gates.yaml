@@ -35,6 +35,18 @@
 # All gates are implemented as elspeth-lints subcommands; the workflow
 # orchestrates checkout and invocation.
 #
+# VERIFY-ONLY — NEVER SIGNS (elspeth-2b351cd004, spec [O1] custody rule). This
+# workflow only ever *verifies*: it must never invoke a signing verb
+# (sign-bundle / rekey / justify / sign-judge-signatures / migrate-judge-scope).
+# The judge-metadata HMAC key is operator-custody and must never be reachable
+# from PR-controlled code, so minting or rotating a signature runs ONLY in an
+# operator-controlled shell, never here. Agents stage a review bundle via the
+# elspeth-judge MCP server; an operator fires `elspeth-lints sign-bundle` /
+# `rekey` in a key-bearing shell (see docs/judge-signature-handoff.md). This
+# invariant is enforced as a standing regression guard by
+# tests/unit/elspeth_lints/test_meta_ci_never_signs.py. (Re-enabling C1 is out
+# of scope for this change.)
+#
 # BRANCH PROTECTION: the aggregate ``judge-gates-success`` job at the bottom
 # is the single required status check for these gates (mirroring ci.yaml's
 # ``ci-success``). Branch protection MUST require ``judge-gates-success`` —

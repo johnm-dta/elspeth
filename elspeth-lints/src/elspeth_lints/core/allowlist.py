@@ -775,6 +775,28 @@ def _judge_metadata_hmac_key() -> bytes:
     return key
 
 
+def _hmac_key_bytes_from_env(var_name: str) -> bytes:
+    """Load + validate an HMAC key from an operator-NAMED env var (min 32 bytes).
+
+    Mirrors :func:`_judge_metadata_hmac_key`'s validation but reads a caller-chosen
+    variable name: ``rekey`` holds the OLD and NEW keys in two distinct env vars
+    (``--old-key-env`` / ``--new-key-env``), never the single production
+    ``ELSPETH_JUDGE_METADATA_HMAC_KEY``. Raises ``ValueError`` when the named var is
+    unset/empty or the key is too short — the fail-closed gate ``rekey`` runs before
+    any tree read.
+    """
+    raw = os.environ.get(var_name)
+    if raw is None or raw == "":
+        raise ValueError(f"{var_name} is required (HMAC key environment variable) but is unset or empty.")
+    key = raw.encode("utf-8")
+    if len(key) < _MIN_JUDGE_METADATA_HMAC_KEY_BYTES:
+        raise ValueError(
+            f"{var_name} must be at least {_MIN_JUDGE_METADATA_HMAC_KEY_BYTES} bytes when UTF-8 encoded; "
+            "shorter HMAC keys are not acceptable for audit metadata binding."
+        )
+    return key
+
+
 def _judge_metadata_signature_verify_mode() -> str:
     raw = os.environ.get(_JUDGE_METADATA_SIGNATURE_VERIFY_MODE_ENV_VAR, _JUDGE_METADATA_SIGNATURE_VERIFY_REQUIRED)
     if raw not in {
@@ -824,7 +846,40 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
     assert entry.judge_policy_hash is not None
     if allow_shape_only and _can_skip_judge_metadata_hmac_recompute_for_missing_key():
         return
-    expected = compute_judge_metadata_signature(
+    expected = _recompute_entry_signature(entry, hmac_key=_judge_metadata_hmac_key())
+    if not hmac.compare_digest(entry.judge_metadata_signature, expected):
+        raise ValueError(
+            f"{context}: judge_metadata_signature mismatch for entry {entry.key!r}; "
+            "the persisted judge verdict/rationale/model/recorded_at or binding "
+            "fields were edited without the deployment HMAC key. Re-run "
+            "`elspeth-lints justify` to produce a fresh signed entry."
+        )
+
+
+def _recompute_entry_signature(entry: AllowlistEntry, *, hmac_key: bytes) -> str:
+    """Recompute ``entry``'s HMAC signature under ``hmac_key`` (the ONE marshalling).
+
+    This is the single field-marshalling shared by the keyless load-time verifier
+    (:func:`_verify_judge_metadata_signature_at_load`), the keyed verify
+    (:func:`verify_entry_signature_with_key`), and the ``rekey`` keyed write. It
+    passes the FULL signed field set off the already-persisted parsed
+    ``AllowlistEntry`` — including the version branch (``file_fingerprint`` vs
+    ``scope_fingerprint``) and the ``judge_transport`` fallback — VERBATIM. ``hmac_key``
+    is the *only* thing callers vary, so a keyed recompute is field-identical to the
+    production verifier and cannot drift out of parity with it.
+
+    No write-time transform runs here: ``judge_confidence`` is passed off the parsed
+    entry as-is (the round-at-write-time transform in ``cli.py`` is not re-applied;
+    the parsed entry already carries the rounded value).
+    """
+    version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
+    assert entry.ast_path is not None
+    assert entry.judge_verdict is not None
+    assert entry.judge_recorded_at is not None
+    assert entry.judge_model is not None
+    assert entry.judge_rationale is not None
+    assert entry.judge_policy_hash is not None
+    return compute_judge_metadata_signature(
         key=entry.key,
         ast_path=entry.ast_path,
         judge_verdict=entry.judge_verdict,
@@ -843,14 +898,26 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
         # where the signer's v2 branch never reads it. Passing it
         # unconditionally keeps the recompute call uniform across versions.
         judge_transport=entry.judge_transport if entry.judge_transport is not None else "openrouter",
+        hmac_key=hmac_key,
     )
+
+
+def verify_entry_signature_with_key(entry: AllowlistEntry, *, hmac_key: bytes) -> None:
+    """Authoritatively verify ``entry``'s signature under an EXPLICIT key.
+
+    Unlike :func:`_verify_judge_metadata_signature_at_load` (keyless — env var only,
+    with a shape-only escape hatch when the deployment key is absent), this takes the
+    key bytes directly and has NO shape-only path: an explicit key is always
+    authoritative. Raises ``ValueError`` if the entry carries no signature or the
+    recomputed signature does not match. Used by ``rekey``'s dual-key verify window
+    (verify-under-OLD-or-NEW) and shares the one marshalling with the production
+    loader via :func:`_recompute_entry_signature`, so a pass here is a pass there.
+    """
+    if entry.judge_metadata_signature is None:
+        raise ValueError(f"verify_entry_signature_with_key: entry {entry.key!r} has no judge_metadata_signature to verify")
+    expected = _recompute_entry_signature(entry, hmac_key=hmac_key)
     if not hmac.compare_digest(entry.judge_metadata_signature, expected):
-        raise ValueError(
-            f"{context}: judge_metadata_signature mismatch for entry {entry.key!r}; "
-            "the persisted judge verdict/rationale/model/recorded_at or binding "
-            "fields were edited without the deployment HMAC key. Re-run "
-            "`elspeth-lints justify` to produce a fresh signed entry."
-        )
+        raise ValueError(f"verify_entry_signature_with_key: judge_metadata_signature mismatch for entry {entry.key!r}")
 
 
 def _validate_judge_metadata_signature_shape(signature: str, *, context: str) -> None:

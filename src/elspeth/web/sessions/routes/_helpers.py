@@ -2902,9 +2902,14 @@ async def _dispatch_guided_respond(
                 session_id=session_id,
             )
             if not handler_result.tool_result.success:
+                # Egress control (symmetric with /guided/chat): the raw tool_result
+                # repr dumps CompositionState — incl. inline-content source options
+                # that can carry Tier-3 row data — so it must NOT reach the HTTP body.
+                # Keep the 400 (respond is a deliberate, load-bearing accept); redact
+                # the detail to the generic step label.
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+                    detail="Step 1 source commit failed",
                 )
             state = handler_result.state
             # Advance step pointer to STEP_2.
@@ -3020,9 +3025,11 @@ async def _dispatch_guided_respond(
             session_id=session_id,
         )
         if not handler_result.tool_result.success:
+            # Egress control (see the step_1 source commit above): never interpolate
+            # the tool_result repr (dumps Tier-3-bearing CompositionState) into the body.
             raise HTTPException(
                 status_code=400,
-                detail=f"Step 1 source commit failed: {handler_result.tool_result}",
+                detail="Step 1 source commit failed",
             )
         state = handler_result.state
         guided = handler_result.session
@@ -3204,9 +3211,11 @@ async def _dispatch_guided_respond(
             data_dir=data_dir,
         )
         if not sink_handler_result.tool_result.success:
+            # Egress control (see the step_1 source commits above): never interpolate
+            # the tool_result repr (dumps Tier-3-bearing CompositionState) into the body.
             raise HTTPException(
                 status_code=400,
-                detail=f"Step 2 sink commit failed: {sink_handler_result.tool_result}",
+                detail="Step 2 sink commit failed",
             )
         state = sink_handler_result.state
         guided = sink_handler_result.session

@@ -3109,6 +3109,75 @@ class TestMessageRoutes:
         # No mutation: the rejected commit must not advance or apply.
         assert send_resp.json()["guided_session"]["step"] == "step_1_source"
 
+    def test_guided_respond_source_commit_failure_does_not_leak_tool_result_repr(self, tmp_path) -> None:
+        """Step-1 RESPOND (accept) source commit failures must not return ToolResult
+        reprs — symmetric with the /guided/chat egress control. The respond path is
+        load-bearing (a deliberate accept), so it KEEPS the 400; only the leaky detail
+        is redacted to the generic string. The default ToolResult repr dumps
+        updated_state + data, which for inline-content sources can carry raw row data.
+        """
+        from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+        from elspeth.web.composer.tools import ToolResult
+
+        app, _ = _make_app(tmp_path)
+        catalog = MagicMock(spec=["list_sources", "list_sinks", "get_schema"])
+        catalog.list_sources.return_value = [
+            PluginSummary(name="csv", description="CSV source", plugin_type="source", config_fields=[]),
+        ]
+        catalog.list_sinks.return_value = []
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="csv",
+            plugin_type="source",
+            description="CSV source",
+            json_schema={"title": "CSV", "type": "object", "properties": {}},
+            knob_schema={"fields": []},
+        )
+        app.state.catalog_service = catalog
+        app.state.blob_service = MagicMock()
+        app.state.blob_service.list_blobs = AsyncMock(return_value=[])
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post("/api/sessions", json={"title": "Guided respond source failure"})
+        session_id = uuid.UUID(resp.json()["id"])
+        assert client.get(f"/api/sessions/{session_id}/guided").status_code == 200
+        choose = client.post(f"/api/sessions/{session_id}/guided/respond", json={"chosen": ["csv"]})
+        assert choose.status_code == 200
+        assert choose.json()["next_turn"]["type"] == "schema_form"
+
+        raw_row_secret = "raw-customer-ssn-123-45-6789"
+        tool_result_private_detail = "REDACTED tool result detail"
+        failing_tool_result = ToolResult(
+            success=False,
+            updated_state=_EMPTY_STATE,
+            validation=ValidationSummary(is_valid=False, errors=()),
+            affected_nodes=(),
+            data={"internal_detail": tool_result_private_detail, "row": raw_row_secret},
+        )
+        with patch(
+            "elspeth.web.sessions.routes._helpers.handle_step_1_source",
+            return_value=MagicMock(tool_result=failing_tool_result),
+        ):
+            commit = client.post(
+                f"/api/sessions/{session_id}/guided/respond",
+                json={
+                    "edited_values": {
+                        "plugin": "csv",
+                        "options": {"path": "inline://source.csv", "schema": {"mode": "observed"}},
+                        "observed_columns": ["name"],
+                        "sample_rows": [{"name": "alice"}],
+                    }
+                },
+            )
+
+        # Load-bearing accept path KEEPS the 400, but the detail must be the generic
+        # string with NO ToolResult repr / Tier-3 data leaked.
+        assert commit.status_code == 400, commit.text
+        body = commit.text
+        assert "ToolResult(" not in body
+        assert raw_row_secret not in body
+        assert tool_result_private_detail not in body
+        assert commit.json()["detail"] == "Step 1 source commit failed"
+
     def test_guided_chat_malformed_source_tool_args_return_synthetic_unavailable(self, tmp_path) -> None:
         """Malformed Step-1 source resolver tool output must not escape as HTTP 500."""
         from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary

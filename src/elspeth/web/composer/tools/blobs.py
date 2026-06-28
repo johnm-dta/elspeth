@@ -543,6 +543,7 @@ _WIRE_BLOB_INLINE_REF_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["field_path", "blob_id"],
+        "additionalProperties": False,
     },
 )
 
@@ -1626,6 +1627,7 @@ _DELETE_BLOB_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
     blob_store_only=True,
 )

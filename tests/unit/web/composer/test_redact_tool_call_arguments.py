@@ -473,6 +473,40 @@ def test_blob_discovery_unknown_argument_keys_are_sentinelised(
 
 
 @pytest.mark.parametrize(
+    ("tool_name", "arguments"),
+    [
+        ("delete_blob", {"blob_id": "11111111-1111-4111-8111-111111111111"}),
+        (
+            "wire_blob_inline_ref",
+            {
+                "field_path": "node:llm.options.prompt_template",
+                "blob_id": "11111111-1111-4111-8111-111111111111",
+            },
+        ),
+    ],
+)
+def test_blob_mutation_unknown_argument_keys_are_sentinelised(
+    tool_name: str,
+    arguments: dict[str, object],
+) -> None:
+    """Blob mutation arguments are persisted; extra LLM-authored keys must not pass through raw."""
+    tel = NoopRedactionTelemetry()
+    raw_payload = "RAW_EXTRA_BLOB_MUTATION_PAYLOAD: prompt-injected private data"
+
+    result = redact_tool_call_arguments(
+        tool_name,
+        {**arguments, "note": raw_payload},
+        telemetry=tel,
+    )
+
+    assert "note" not in result
+    assert result[REDACTED_UNKNOWN_ARGUMENTS_FIELD] == REDACTED_UNKNOWN_ARGUMENT_KEY
+    assert raw_payload not in str(result)
+    for key, value in arguments.items():
+        assert result[key] == value
+
+
+@pytest.mark.parametrize(
     ("tool_name", "arguments", "passthrough_keys", "summarized_keys"),
     [
         ("clear_source", {"source_name": "source"}, ("source_name",), ()),

@@ -3023,12 +3023,16 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         # _BLOB_MUTATION_TOOLS remaining, 2 entries.
         "delete_blob": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("blob_id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_DELETE_BLOB_REASON,
             )
         ),
         "wire_blob_inline_ref": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("field_path", "blob_id", "encoding"),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_WIRE_BLOB_INLINE_REF_REASON,
             )

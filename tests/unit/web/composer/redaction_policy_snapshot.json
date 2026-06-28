@@ -15,7 +15,7 @@
     "shape": "type_driven"
   },
   "delete_blob": {
-    "hash": "f8fc60d599d435c05c7de139a3aeb28f163201a32215639b66e20451a5e59b8b",
+    "hash": "64aecb1a7ac479a05ce1478612d026e699f53bae8bf65287841c93a047897b3a",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
@@ -200,7 +200,7 @@
     "shape": "declarative"
   },
   "wire_blob_inline_ref": {
-    "hash": "8eebedf2cdfff2202f6f9f16db56c3c9215530d8be593302cc5eaa7531fcd5ad",
+    "hash": "6764beb5df85d19755283e9c5ecd87662e067b2d1066a494e80cf4bf19822443",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },

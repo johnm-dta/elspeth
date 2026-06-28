@@ -119,6 +119,7 @@ _EXPECTED_DELETE_BLOB_DEFINITION: dict[str, object] = {
             },
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
 }
 
@@ -877,6 +878,7 @@ class TestStep3BlobDiscoveryTierMigration:
                     },
                 },
                 "required": ["field_path", "blob_id"],
+                "additionalProperties": False,
             },
         }
 

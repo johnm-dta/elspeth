@@ -896,8 +896,11 @@ def _csv_source_field_resolution_error_diagnostic(
         code="csv_source_field_resolution_error",
         message=(
             "CSV source header resolution failed before proof diagnostics could compare "
-            f"declared fields to observed headers: {exc}. CSVSource would reject this "
-            "shape at runtime, so preview_pipeline is blocking it for repair."
+            "declared fields to observed headers. CSVSource would reject this shape at "
+            "runtime, so preview_pipeline is blocking it for repair. The raw resolver "
+            "error text and observed header values are withheld: header-resolution "
+            "failure means a headerless or malformed CSV can make the first data row "
+            "look like headers, so those values are treated as potential row content."
         ),
         suggested_repair=(
             "Rename colliding or invalid CSV headers, correct field_mapping keys and "
@@ -907,7 +910,9 @@ def _csv_source_field_resolution_error_diagnostic(
         evidence_locator={
             "source": "blob",
             "blob_id": str(blob_id),
-            "observed_headers": list(facts.observed_headers or ()),
+            "error_class": type(exc).__name__,
+            "observed_header_count": len(facts.observed_headers or ()),
+            "observed_headers_redacted": True,
         },
     )
 
@@ -928,15 +933,19 @@ def _csv_source_schema_config_error_diagnostic(
     is a malformed *schema declaration* (bad ``schema.mode``, a malformed field
     spec, a non-bool required flag), NOT a header-resolution problem — so the
     generic field-resolution repair text would misdirect the operator and the
-    LLM. The raw ``{exc}`` already carries the precise cause; this builder makes
-    the surrounding guidance accurate and auditable.
+    LLM. The raw ``{exc}`` is NOT interpolated: it can quote observed header /
+    field values that, under a failed header resolution, may be row content; the
+    exception class is surfaced structurally instead and the repair text points
+    at the ``schema.*`` knob.
     """
     return _blocking_diagnostic(
         code="csv_source_field_resolution_error",
         message=(
             "CSV source schema declaration failed to parse before proof diagnostics "
-            f"could compare declared fields to observed headers: {exc}. CSVSource would "
-            "reject this schema at runtime, so preview_pipeline is blocking it for repair."
+            "could compare declared fields to observed headers. CSVSource would reject "
+            "this schema at runtime, so preview_pipeline is blocking it for repair. The "
+            "raw parser error text and observed header values are withheld (they may "
+            "carry row content for a headerless or malformed CSV)."
         ),
         suggested_repair=(
             "Correct the source `schema` block: `schema.mode` must be one of "
@@ -947,7 +956,9 @@ def _csv_source_schema_config_error_diagnostic(
         evidence_locator={
             "source": "blob",
             "blob_id": str(blob_id),
-            "observed_headers": list(facts.observed_headers or ()),
+            "error_class": type(exc).__name__,
+            "observed_header_count": len(facts.observed_headers or ()),
+            "observed_headers_redacted": True,
         },
     )
 
@@ -1046,14 +1057,15 @@ def _gate_expression_type_diagnostics_for_observed_csv(
         for row_index, row in enumerate(rows):
             try:
                 parser.evaluate(row)
-            except ExpressionEvaluationError as exc:
+            except ExpressionEvaluationError:
                 diagnostics.append(
                     _blocking_diagnostic(
                         code="gate_expression_type_mismatch_against_source_schema",
                         message=(
                             f"Gate '{node.id}' condition {condition!r} fails against sampled observed CSV "
-                            f"rows before runtime: {exc}. Observed CSV source values are strings unless the "
-                            "source schema declares explicit field types."
+                            "rows before runtime. Observed CSV source values are strings unless the "
+                            "source schema declares explicit field types. (The raw evaluation error is "
+                            "withheld: it can quote sampled row values and the observed field/key set.)"
                         ),
                         suggested_repair=(
                             "Patch the source schema to declare the compared field with an explicit numeric "
@@ -1505,10 +1517,12 @@ def compute_proof_diagnostics(
                             _blocking_diagnostic(
                                 code="csv_fixed_schema_omits_observed_columns",
                                 message=(
-                                    f"Source schema is mode=fixed but omits observed columns "
-                                    f"{list(missing)} (observed: {list(facts.observed_headers or ())}). "
-                                    "Combined with on_validation_failure='discard', every row will be "
-                                    "dropped because each contains an undeclared column."
+                                    f"Source schema is mode=fixed but {len(missing)} observed column(s) "
+                                    "are not declared in schema.fields. Combined with "
+                                    "on_validation_failure='discard', every row will be dropped because "
+                                    "each contains an undeclared column. (Observed and missing column "
+                                    "values are withheld: an observed-mode or headerless CSV can make a "
+                                    "data row look like column headers.)"
                                 ),
                                 suggested_repair=(
                                     "patch_source_options with schema.mode='flexible' to accept extra "
@@ -1518,8 +1532,9 @@ def compute_proof_diagnostics(
                                 evidence_locator={
                                     "source": "blob",
                                     "blob_id": str(blob_id),
-                                    "missing_columns": list(missing),
-                                    "observed_columns": list(facts.observed_headers or ()),
+                                    "missing_column_count": len(missing),
+                                    "observed_column_count": len(facts.observed_headers or ()),
+                                    "observed_columns_redacted": True,
                                 },
                             )
                         )

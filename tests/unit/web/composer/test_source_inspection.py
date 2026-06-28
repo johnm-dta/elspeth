@@ -225,8 +225,56 @@ class TestCsvInspection:
         )
         serialized = facts_to_dict(f)
 
-        assert serialized["url_candidates"] == ["https://example.com/download?<redacted>"]
+        assert serialized["url_candidates"] == ["https://example.com"]
         assert "SECRET_TOKEN" not in repr(serialized)
+
+    def test_url_candidates_drop_userinfo_and_path(self) -> None:
+        """Userinfo (embedded credentials) and path segments (reset tokens,
+        emails, other PII) must NOT survive redaction — only scheme + host
+        (+ port). Regression for the credential/PII egress where
+        ``_redact_url_candidate`` rebuilt the URL with raw ``netloc`` + ``path``
+        and so leaked ``user:pass@`` and ``/reset/<token>`` into the
+        tool-result / proof-diagnostic / sessions-DB surfaces.
+        """
+        f = inspect_blob_content(
+            content=(
+                b"name,site\n"
+                b"A,https://user:s3cr3t@host.example/reset-password/TOK123?sig=Z#frag\n"
+                b"B,https://api.example:8443/v1/users/alice@corp.example\n"
+            ),
+            filename="x.csv",
+            mime_type="text/csv",
+        )
+        serialized = facts_to_dict(f)
+
+        # Host preserved (routing hint); port preserved; everything else gone.
+        assert serialized["url_candidates"] == [
+            "https://host.example",
+            "https://api.example:8443",
+        ]
+        blob = repr(serialized)
+        assert "s3cr3t" not in blob  # userinfo credential
+        assert "TOK123" not in blob  # path-embedded token
+        assert "reset-password" not in blob  # path segment
+        assert "alice@corp.example" not in blob  # PII in path
+
+    def test_url_candidates_malformed_port_does_not_raise(self) -> None:
+        """A malformed/out-of-range port must not break the never-raise contract.
+
+        ``urlsplit(...).port`` raises ``ValueError`` for ``h:99999`` / ``h:abc``
+        and ``_URL_PATTERN`` matches those. Inspection runs over arbitrary blob
+        bytes, so the candidate must degrade gracefully (host kept, bad port
+        dropped) rather than propagate a ValueError up through
+        ``compute_proof_diagnostics``.
+        """
+        f = inspect_blob_content(
+            content=(b"name,site\nA,http://host.example:99999/p\nB,http://other.example:abc/q\n"),
+            filename="x.csv",
+            mime_type="text/csv",
+        )
+        serialized = facts_to_dict(f)
+        # No crash; out-of-range / non-numeric ports dropped, hosts kept, paths gone.
+        assert serialized["url_candidates"] == ["http://host.example", "http://other.example"]
 
     def test_headerless_warning(self) -> None:
         f = inspect_blob_content(
@@ -275,7 +323,11 @@ class TestCsvInspection:
         assert not any("csv_jagged_rows" in w for w in f.warnings), f.warnings
 
     def test_csv_source_content_with_columns_treats_first_record_as_data(self) -> None:
-        body = b"https://example.com/a\nhttps://example.com/b\n"
+        # Two distinct hosts so the multi-URL detection is still exercised after
+        # path-dropping redaction collapses same-host candidates. The per-path
+        # segment (``/a``, ``/b``) is intentionally dropped — only scheme + host
+        # survives (see test_url_candidates_drop_userinfo_and_path).
+        body = b"https://example.com/a\nhttps://example.org/b\n"
         f = inspect_csv_source_content(
             content=body,
             filename="urls.txt",
@@ -287,7 +339,7 @@ class TestCsvInspection:
         assert f.source_kind == "csv"
         assert f.observed_headers == ("url",)
         assert f.sample_row_count == 2
-        assert f.url_candidates == ("https://example.com/a", "https://example.com/b")
+        assert f.url_candidates == ("https://example.com", "https://example.org")
 
     def test_replacement_chars_in_csv_emit_warning(self) -> None:
         """Non-UTF-8 bytes get replaced with U+FFFD on decode; surface the

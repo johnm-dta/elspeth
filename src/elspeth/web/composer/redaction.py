@@ -2115,9 +2115,15 @@ _PREVIEW_PIPELINE_REASON = HandlesNoSensitiveDataReason(
         "value on this surface; the handler reads the current composer state directly."
     ),
     why_responses_safe=(
-        "Response is the validation summary plus structural source/node/output overview; "
-        "validator entries name fields by path without quoting LLM-supplied option values, "
-        "and the preview does NOT execute the pipeline so no row payload is materialised."
+        "Response is the validation summary plus structural source/node/output overview "
+        "and proof diagnostics. The proof step DOES read and parse the bound source blob's "
+        "bytes and evaluate sampled rows (it does not run the full pipeline), but every "
+        "diagnostic that derives from those bytes redacts the observed headers/columns to "
+        "counts and withholds the raw resolver/evaluation error text — mirroring the "
+        "deliberate header redaction in compute_proof_diagnostics — so no raw row payload "
+        "or observed-value PII crosses this surface. Validator entries carry component, "
+        "severity, and a human-readable message in the same class as every other composer "
+        "tool's validation surface (the message may name a declared field or path)."
     ),
 )
 

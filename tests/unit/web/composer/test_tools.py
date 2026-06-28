@@ -11345,7 +11345,9 @@ class TestInspectSourceTool:
         )
         assert result.success is True
         assert result.data["source_kind"] == "text"
-        assert tuple(result.data["url_candidates"]) == ("https://example.com/api",)
+        # url_candidates are redacted to scheme + host (+ port): userinfo and path
+        # are dropped because they can carry credentials / reset tokens / PII.
+        assert tuple(result.data["url_candidates"]) == ("https://example.com",)
         assert any("web_scrape" in w for w in result.data["warnings"])
 
     def test_pending_blob_refused(self) -> None:

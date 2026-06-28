@@ -49,6 +49,7 @@ from elspeth.web.composer.tools._common import (
     _options_with_pending_requirement,
     _pending_interpretation_requirement,
     _prevalidate_source,
+    _resolver_owned_interpretation_requirement_error,
     _validate_plugin_name,
     _validate_source_path,
     _vf_destination_note,
@@ -466,6 +467,13 @@ def _execute_set_source(
     manual_authoring_error = _reject_manual_source_authoring(options, tool_name="set_source")
     if manual_authoring_error is not None:
         return _failure_result(state, manual_authoring_error)
+    # Reject LLM-supplied resolver-owned review metadata (a forged "resolved"
+    # INVENTED_SOURCE requirement would bypass _pending_source_sites' human
+    # review). Symmetric with the LLM-node write paths; resolved review metadata
+    # may only be written by resolve_interpretation_event.
+    review_metadata_error = _resolver_owned_interpretation_requirement_error(options, tool_name="set_source")
+    if review_metadata_error is not None:
+        return _failure_result(state, review_metadata_error)
     credential_error = _credential_wiring_contract_failure(
         state,
         component_id=_source_component_id(source_name),
@@ -538,6 +546,14 @@ def _execute_set_source_from_blob(
 
     source_name = validated.source_name
     _validate_source_name_argument(source_name)
+
+    # Caller options merge into the bound source's options, so a forged
+    # "resolved" INVENTED_SOURCE requirement here would bypass human review even
+    # though the blob path also re-stamps a pending requirement — guard at the
+    # boundary rather than relying on that downstream overwrite.
+    review_metadata_error = _resolver_owned_interpretation_requirement_error(validated.options, tool_name="set_source_from_blob")
+    if review_metadata_error is not None:
+        return _failure_result(state, review_metadata_error)
 
     on_vf = validated.on_validation_failure if validated.on_validation_failure is not None else _DEFAULT_SOURCE_VALIDATION_FAILURE
     resolved = _resolve_source_blob(
@@ -793,6 +809,13 @@ def _execute_patch_source_options(
     manual_authoring_error = _reject_manual_source_authoring(patch, tool_name="patch_source_options")
     if manual_authoring_error is not None:
         return _failure_result(state, manual_authoring_error)
+    # Check the LLM-supplied PATCH delta (not the merged result): a patch that
+    # carries a forged "resolved" INVENTED_SOURCE requirement is the live review
+    # bypass vector. Checking the delta — mirroring patch_node_options — leaves a
+    # legitimately-resolved requirement already in stored options untouched.
+    review_metadata_error = _resolver_owned_interpretation_requirement_error(patch, tool_name="patch_source_options")
+    if review_metadata_error is not None:
+        return _failure_result(state, review_metadata_error)
     if "blob_ref" in patch:
         return _failure_result(
             state,

@@ -31,7 +31,7 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.protocol import YamlGenerator
-from elspeth.web.execution.schemas import ValidationCheck
+from elspeth.web.execution.schemas import CHECK_OUTCOME_SKIPPED_AFTER_FAILURE, ValidationCheck
 from elspeth.web.execution.validation import (
     _ALL_CHECKS,
     _append_skipped_checks,
@@ -392,6 +392,37 @@ class TestValidatePipelineWebScrapeNetworkPolicy:
         assert result.errors[0].error_code == "web_scrape_private_network_not_allowed"
         assert "CIDR" in result.errors[0].message
         mock_yaml_gen.generate_yaml.assert_not_called()
+
+    def test_web_scrape_failure_skips_later_managed_identity_and_llm_retry_checks(self) -> None:
+        # Regression: managed_identity_policy (declared #8) and llm_retry_budget_policy
+        # (declared #9) must NOT be reported as passed when web_scrape_network_policy
+        # (declared #2) fails earlier in the contract order. They previously executed
+        # before web_scrape in code, so their pass records were already emitted and the
+        # skipped-after-failure record was suppressed — the trail then showed a
+        # later-declared gate passing under an earlier-declared failure.
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options=self._web_scrape_options(["10.0.0.0/8"]),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "web_scrape_network_policy").passed is False
+        for later_check in ("managed_identity_policy", "llm_retry_budget_policy"):
+            check = _check(result, later_check)
+            assert check.passed is False, f"{later_check} must not pass after an earlier gate failed"
+            assert check.outcome_code == CHECK_OUTCOME_SKIPPED_AFTER_FAILURE
 
     def test_web_scrape_public_only_allowed_to_reach_yaml_generation(self) -> None:
         state = _make_state(
@@ -1040,7 +1071,12 @@ class TestValidatePipelineLlmRetryBudgetPolicy:
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
 
-            result = validate_pipeline(state, settings, mock_yaml_gen)
+            # Authoring-preflight path (allow_pending_interpretation_placeholders=True):
+            # masks the llm node's pending llm_prompt_template/llm_model_choice review so
+            # validation reaches llm_retry_budget_policy (declared #9, after
+            # interpretation_review #6). This is the same flag the composer authoring
+            # preflight uses; without it interpretation_review blocks first.
+            result = validate_pipeline(state, settings, mock_yaml_gen, allow_pending_interpretation_placeholders=True)
 
         assert result.is_valid is False
         assert any(c.name == "llm_retry_budget_policy" and c.passed is False for c in result.checks)
@@ -1059,7 +1095,9 @@ class TestValidatePipelineLlmRetryBudgetPolicy:
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
-            result = validate_pipeline(state, settings, mock_yaml_gen)
+            # Authoring-preflight path so llm_retry_budget_policy (#9) is reached past
+            # interpretation_review (#6); see the blocked-budget test above.
+            result = validate_pipeline(state, settings, mock_yaml_gen, allow_pending_interpretation_placeholders=True)
 
         retry_budget_check = next(c for c in result.checks if c.name == "llm_retry_budget_policy")
         assert retry_budget_check.passed is True
@@ -1072,7 +1110,9 @@ class TestValidatePipelineLlmRetryBudgetPolicy:
         mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
         with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
             mock_load.side_effect = ValueError("invalid settings")
-            result = validate_pipeline(state, settings, mock_yaml_gen)
+            # Authoring-preflight path so llm_retry_budget_policy (#9) is reached past
+            # interpretation_review (#6); see the blocked-budget test above.
+            result = validate_pipeline(state, settings, mock_yaml_gen, allow_pending_interpretation_placeholders=True)
 
         retry_budget_check = next(c for c in result.checks if c.name == "llm_retry_budget_policy")
         assert retry_budget_check.passed is True
@@ -2952,6 +2992,44 @@ sinks:
         assert mock_instantiate.call_args.kwargs == {"preflight_mode": True}
         fake_graph.validate.assert_called_once_with()
         fake_graph.validate_edge_compatibility.assert_called_once_with()
+
+    def test_validate_pipeline_emits_checks_in_declared_order(self) -> None:
+        # Regression guard for the *bug class*, not just one case: the physical
+        # emission order of the blocking checks must match
+        # VALIDATION_BLOCKING_CHECK_NAMES. A check appended at the wrong physical
+        # spot (as managed_identity_policy/llm_retry_budget_policy once were —
+        # emitted before web_scrape_network_policy despite being declared after it)
+        # leaves a later-declared gate's pass record ahead of an earlier-declared
+        # gate, which corrupts the skipped-after-failure trail on any earlier
+        # failure. The order-vs-constant test only checks the declared tuple; this
+        # asserts the live emission sequence on a fully-passing pipeline.
+        from elspeth.web.execution.schemas import VALIDATION_BLOCKING_CHECK_NAMES
+
+        state = _make_state(
+            source_options={"path": "/tmp/test_data/blobs/input.csv"},
+            outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+        fake_graph = MagicMock()
+        with (
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.build_runtime_graph", return_value=fake_graph),
+            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", return_value=MagicMock()),
+        ):
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        declared_index = {name: i for i, name in enumerate(VALIDATION_BLOCKING_CHECK_NAMES)}
+        emitted = [check.name for check in result.checks if check.name in declared_index]
+        emitted_indices = [declared_index[name] for name in emitted]
+        assert emitted_indices == sorted(emitted_indices), f"blocking checks emitted out of declared order: {emitted}"
+        # And the relocation is concretely asserted: the two policy checks sit
+        # after blob_inline_refs (their declared #8/#9 home), not before web_scrape.
+        assert emitted.index("managed_identity_policy") > emitted.index("blob_inline_refs")
+        assert emitted.index("llm_retry_budget_policy") > emitted.index("managed_identity_policy")
+        assert emitted.index("web_scrape_network_policy") < emitted.index("managed_identity_policy")
 
     @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")

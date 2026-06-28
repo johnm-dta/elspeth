@@ -99,14 +99,35 @@ def _assert_provider_body_redacted(message: str, *forbidden_fragments: str) -> N
         assert fragment not in message
 
 
-def test_provider_rejects_loopback_http_base_url(
+def test_provider_accepts_loopback_http_base_url(
     mock_recorder: MagicMock,
     mock_telemetry_emit: MagicMock,
 ) -> None:
+    # Loopback HTTP is permitted for local OpenAI-compatible dev servers (the
+    # shipped ChaosLLM examples target http://127.0.0.1:8199/v1); the bearer
+    # token never leaves the machine. Remote HTTP is still rejected.
+    provider = OpenRouterLLMProvider(
+        api_key="test-key",
+        base_url="http://127.0.0.1:8199/v1",
+        timeout_seconds=30.0,
+        recorder=mock_recorder,
+        run_id="run-1",
+        telemetry_emit=mock_telemetry_emit,
+    )
+    assert provider._base_url == "http://127.0.0.1:8199/v1"
+
+
+def test_provider_rejects_remote_http_base_url(
+    mock_recorder: MagicMock,
+    mock_telemetry_emit: MagicMock,
+) -> None:
+    # The loopback exception must NOT widen to network-reachable hosts — a remote
+    # HTTP base_url would send the bearer token over plaintext. Guards against the
+    # allow_http_loopback exception being silently broadened.
     with pytest.raises(ValueError, match="base_url"):
         OpenRouterLLMProvider(
             api_key="test-key",
-            base_url="http://127.0.0.1:8199/v1",
+            base_url="http://api.example.com/v1",
             timeout_seconds=30.0,
             recorder=mock_recorder,
             run_id="run-1",
@@ -546,8 +567,7 @@ class TestHTTPErrorMapping:
 
     def test_400_context_length_raises_context_length_error(self, provider: OpenRouterLLMProvider) -> None:
         provider_body = (
-            '{"error": {"message": "This model\'s maximum context length is 8192 tokens", '
-            '"api_key": "sk-or-v1-context-secret"}}'
+            '{"error": {"message": "This model\'s maximum context length is 8192 tokens", "api_key": "sk-or-v1-context-secret"}}'
         )
         with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
@@ -828,10 +848,7 @@ class TestRuntimePreflight:
 
     def test_execute_query_400_redacts_response_body(self, provider: OpenRouterLLMProvider) -> None:
         """The same redaction contract applies to per-row execute_query calls."""
-        provider_body = (
-            '{"error":{"message":"Model openai/gpt-5-mini not found",'
-            '"token":"sk-or-v1-query-secret","code":400}}'
-        )
+        provider_body = '{"error":{"message":"Model openai/gpt-5-mini not found","token":"sk-or-v1-query-secret","code":400}}'
         with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(400, body=provider_body)

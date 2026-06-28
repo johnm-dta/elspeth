@@ -22,17 +22,18 @@ export const HARNESS_VERSION = "2.0.0";
 // concrete URLs present IN the message — it never invents them. A URL-less
 // prompt yields zero scrape targets, so the run produces no rows and
 // JUDGE_RUBRIC.minReachableSources:3 / minSubstantiveRows:3 become
-// UNSATISFIABLE (dim-c/dim-d permanently fail). These are staging-absolute URLs
-// because this is a .staging.spec.ts driving the live staging origin; there is
-// no harness base-URL constant to resolve {base} from. If a deployment serves
-// the tutorial pages elsewhere, change these three literals to that origin.
+// UNSATISFIABLE (dim-c/dim-d permanently fail). These are the canonical public
+// GitHub Pages URLs the tutorial resolves to by default (TUTORIAL_SAMPLE_PAGES_BASE_URL);
+// the backend no longer derives the base from the request origin. If a deployment
+// overrides ELSPETH_WEB__TUTORIAL_SAMPLE_BASE_URL, change these three literals to
+// that origin.
 export const FIXED_PROMPT =
   "Fetch each of these three synthetic project-brief pages and have an LLM " +
   "write a short summary of each page. Drop the raw HTML and write the rows " +
   "to a JSON file.\n" +
-  "https://elspeth.foundryside.dev/tutorial-site/project-1.html\n" +
-  "https://elspeth.foundryside.dev/tutorial-site/project-2.html\n" +
-  "https://elspeth.foundryside.dev/tutorial-site/project-3.html";
+  "https://johnm-dta.github.io/elspeth/tutorial-site/project-1.html\n" +
+  "https://johnm-dta.github.io/elspeth/tutorial-site/project-2.html\n" +
+  "https://johnm-dta.github.io/elspeth/tutorial-site/project-3.html";
 
 // Dimension (c): which interpretation kinds the composer SHOULD raise vs NOT.
 // Graded on kind, not exact wording. InterpretationKind values come from the

@@ -402,15 +402,14 @@ class TutorialSampleResponse(_StrictResponse):
 
     Runtime-derived inputs for the tutorial's prefilled worked example: the 3
     synthetic sample-page URLs (appended to the locked STEP_1 prompt the learner
-    Sends verbatim) and the SSRF host-class (``allowed_hosts``) for the active
-    tutorial session's resolved origin. The URLs are computed from the resolved
-    base at request time (they cannot ride the frozen profile constants), and
-    ``allowed_hosts`` is the deterministic resolver output — ``"public_only"``
-    for a public base, or a tight CIDR list for a loopback/private dev base.
+    sends verbatim) for the active tutorial session's resolved origin. The URLs
+    are computed from the resolved base at request time (they cannot ride the
+    frozen profile constants). The tutorial's ``web_scrape`` node relies on the
+    plugin default ``allowed_hosts="public_only"`` — the pages are publicly
+    hosted, so the server injects no SSRF allowlist.
     """
 
     sample_urls: list[str]
-    allowed_hosts: Literal["public_only"] | list[str]
 
 
 class GuidedRespondRequest(_RequestModel):

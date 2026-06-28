@@ -247,19 +247,21 @@ class TestOpenRouterConfig:
         assert config.base_url == "https://custom.proxy.com/api/v1"
 
     @pytest.mark.parametrize("base_url", ["http://127.0.0.1:8199/v1", "http://localhost:8199/v1", "http://[::1]:8199/v1"])
-    def test_config_rejects_loopback_http_base_url(self, base_url: str) -> None:
-        """OpenRouter always sends a bearer token, so loopback HTTP is unsafe."""
-        with pytest.raises(PluginConfigError, match="base_url"):
-            OpenRouterConfig.from_dict(
-                {
-                    "api_key": "sk-test-key",
-                    "model": "openai/gpt-4",
-                    "prompt_template": "{{ row.text }}",
-                    "schema": DYNAMIC_SCHEMA,
-                    "required_input_fields": [],
-                    "base_url": base_url,
-                }
-            )
+    def test_config_accepts_loopback_http_base_url(self, base_url: str) -> None:
+        """Loopback HTTP is allowed for local OpenAI-compatible dev servers — the
+        shipped ChaosLLM examples target http://127.0.0.1:8199/v1, and the bearer
+        token never leaves the machine. Remote HTTP stays rejected (next test)."""
+        config = OpenRouterConfig.from_dict(
+            {
+                "api_key": "sk-test-key",
+                "model": "openai/gpt-4",
+                "prompt_template": "{{ row.text }}",
+                "schema": DYNAMIC_SCHEMA,
+                "required_input_fields": [],
+                "base_url": base_url,
+            }
+        )
+        assert config.base_url == base_url
 
     @pytest.mark.parametrize(
         "base_url",

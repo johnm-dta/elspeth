@@ -208,7 +208,13 @@ class OpenRouterConfig(LLMConfig):
     @field_validator("base_url")
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:
-        return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url"))
+        # allow_http_loopback=True: HTTPS is required for real (network-reachable)
+        # bearer endpoints, but HTTP is permitted for loopback hosts so the
+        # documented local ChaosLLM/OpenAI-compatible dev servers
+        # (http://127.0.0.1:8199/v1, used by the shipped examples) validate and
+        # run. The bearer token never leaves the local machine, so this does not
+        # weaken the "no bearer over plaintext to a remote host" guarantee.
+        return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url", allow_http_loopback=True))
 
     # Catalog membership for ``model`` is enforced as a value-source concern,
     # NOT in config construction: the ``CatalogValueSource`` declaration below
@@ -284,7 +290,13 @@ class OpenRouterLLMProvider:
             "HTTP-Referer": OPENROUTER_APP_REFERER,
             "X-OpenRouter-Title": OPENROUTER_APP_TITLE,
         }
-        self._base_url = normalize_openrouter_base_url(validate_credential_safe_https_url(base_url, field_name="base_url"))
+        # allow_http_loopback=True: mirror the config field-validator — local
+        # loopback dev servers (ChaosLLM at http://127.0.0.1:8199/v1) are
+        # permitted; the bearer token stays on the local machine. Remote hosts
+        # still require HTTPS.
+        self._base_url = normalize_openrouter_base_url(
+            validate_credential_safe_https_url(base_url, field_name="base_url", allow_http_loopback=True)
+        )
         self._timeout = timeout_seconds
         self._recorder = recorder
         self._run_id = run_id

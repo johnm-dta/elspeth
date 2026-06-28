@@ -282,12 +282,13 @@ class TestStep3Handler:
         assert result.session.step is GuidedStep.STEP_4_WIRE
         assert result.session.step_3_proposal is proposal
 
-    def test_chain_accept_injects_tutorial_web_scrape_allowed_hosts(self) -> None:
-        """F2: the SSRF allowlist the seam resolved for the tutorial's synthetic
-        pages is injected into the committed web_scrape node's
-        ``http.allowed_hosts`` (the LLM never sets an SSRF control), MERGING into
-        the LLM-set http block rather than replacing it. Re-homes the injection
-        the removed STEP_2.5 recipe-accept seam used to perform.
+    def test_chain_accept_does_not_inject_web_scrape_allowed_hosts(self) -> None:
+        """The tutorial's synthetic pages are publicly hosted, so commit injects
+        NO SSRF allowlist into the web_scrape node: its ``http`` block is exactly
+        what the LLM set (abuse_contact/scraping_reason), and ``allowed_hosts`` is
+        absent so the plugin default ``public_only`` applies — full parity with a
+        normal backend run (the loopback-CIDR seam was removed once the synthetic
+        pages moved to public hosting).
         """
         from elspeth.web.composer.guided.state_machine import ChainProposal
         from elspeth.web.composer.guided.steps import handle_step_3_chain_accept
@@ -301,7 +302,7 @@ class TestStep3Handler:
                 plugin="json",
                 options={"path": "urls.json", "schema": {"mode": "observed", "guaranteed_fields": ["url"]}},
                 observed_columns=("url",),
-                sample_rows=({"url": "http://localhost:8000/a.html"},),
+                sample_rows=({"url": "https://johnm-dta.github.io/elspeth/tutorial-site/project-1.html"},),
             ),
         )
         step_2 = handle_step_2_sink(
@@ -344,16 +345,15 @@ class TestStep3Handler:
             session=step_2.session,
             catalog=catalog,
             proposal=proposal,
-            tutorial_web_scrape_allowed_hosts=["127.0.0.1/32", "::1/128"],
         )
 
         assert result.tool_result.success is True, f"set_pipeline failed: {getattr(result.tool_result, 'data', result.tool_result)}"
         web_scrape_node = result.state.nodes[0]
         assert web_scrape_node.plugin == "web_scrape"
         http = dict(web_scrape_node.options["http"])
-        # The seam injected the loopback CIDR...
-        assert list(http["allowed_hosts"]) == ["127.0.0.1/32", "::1/128"]
-        # ...and the LLM-set http fields survive the merge.
+        # No SSRF allowlist is injected — the plugin default 'public_only' applies.
+        assert "allowed_hosts" not in http
+        # The LLM-set http fields are committed unchanged.
         assert http["abuse_contact"] == "noreply@example.com"
         assert http["scraping_reason"] == "demo"
 

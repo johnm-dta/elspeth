@@ -53,11 +53,12 @@ class WebSettings(BaseModel):
     registration_mode: Literal["open", "email_verified", "closed"] = "open"
     cors_origins: tuple[str, ...] = ("http://localhost:5173",)
     data_dir: Path = Field(default=Path("data"), validate_default=True)
-    # Phase p4: explicit public base URL the tutorial synthetic-scrape pages
-    # are reachable at (e.g. "https://elspeth.foundryside.dev"). When None, the
-    # base is derived from the inbound request origin at compose time. Used ONLY
-    # to build {base}/tutorial-site/project-N.html and the SSRF allowed_hosts
-    # for the tutorial's web_scrape node — never a general egress allowlist.
+    # Phase p4: override for the public base URL the tutorial synthetic-scrape
+    # pages are reachable at. When None (the default), the canonical public
+    # GitHub Pages copy (TUTORIAL_SAMPLE_PAGES_BASE_URL) is used. Used ONLY to
+    # build {base}/tutorial-site/project-N.html for the tutorial's web_scrape
+    # node; that node uses the plugin default allowed_hosts="public_only" and the
+    # server injects no allowlist. Set this only to host your own copy (a fork).
     tutorial_sample_base_url: str | None = Field(default=None)
     composer_model: str = "gpt-5.5"
     # Operator-set LLM sampling. Default None means omitted from the

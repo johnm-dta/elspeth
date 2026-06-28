@@ -258,7 +258,6 @@ def handle_step_3_chain_accept(
     data_dir: str | None = None,
     session_engine: Engine | None = None,
     session_id: str | None = None,
-    tutorial_web_scrape_allowed_hosts: str | list[str] | None = None,
 ) -> StepHandlerResult:
     """Commit *proposal* atomically via _execute_set_pipeline and redirect to wire.
 
@@ -312,22 +311,6 @@ def handle_step_3_chain_accept(
         input_label = "chain_in" if idx == 0 else f"chain_{idx - 1}"
         on_success_label = "main" if idx == n - 1 else f"chain_{idx}"
         options = dict(step["options"])
-        if step["plugin"] == "web_scrape" and tutorial_web_scrape_allowed_hosts is not None:
-            # SSRF seam (tutorial only): the LLM never sets ``allowed_hosts`` (an
-            # SSRF control) — the server injects the host-class-derived allowlist
-            # for the synthetic tutorial pages so a loopback/private dev origin is
-            # reachable. A public origin resolves to ``"public_only"`` (the
-            # default), so this is a no-op for the deployed/staging case. Merges
-            # into the LLM-set ``http`` block (abuse_contact/scraping_reason)
-            # rather than replacing it. This re-homes the injection the removed
-            # STEP_2.5 recipe-accept seam used to perform.
-            http = dict(options.get("http") or {})
-            http["allowed_hosts"] = (
-                list(tutorial_web_scrape_allowed_hosts)
-                if isinstance(tutorial_web_scrape_allowed_hosts, list)
-                else tutorial_web_scrape_allowed_hosts
-            )
-            options["http"] = http
         node_args.append(
             {
                 "id": f"guided_xform_{idx}",

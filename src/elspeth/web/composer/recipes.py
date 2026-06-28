@@ -176,7 +176,7 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
         slot_type="str",
         required=False,
         default="openrouter",
-        description="LLM provider — 'openrouter' or 'azure'",
+        description="LLM provider — only 'openrouter' is wired by this recipe (Azure needs deployment_name/endpoint, which the recipe does not provide)",
     ),
     "label_field": SlotSpec(
         slot_type="str",
@@ -206,8 +206,28 @@ _RECIPE1_SLOTS: Final[dict[str, SlotSpec]] = {
 }
 
 
+def _require_openrouter_provider(slots: Mapping[str, Any]) -> None:
+    """These recipes wire only the OpenRouter LLM provider.
+
+    The ``provider`` slot once advertised ``'azure'`` too, but the recipes emit
+    only ``provider``/``model``/``api_key`` — never the ``deployment_name`` +
+    ``endpoint`` that ``AzureOpenAIConfig`` requires, and ``validate_slots``
+    rejects extra slots, so an Azure selection cannot materialise a valid
+    pipeline. Fail loud and early with an actionable message rather than deep in
+    config validation with an opaque "missing Azure fields" error.
+    """
+    provider = slots["provider"]
+    if provider != "openrouter":
+        raise RecipeValidationError(
+            f"recipe provider {provider!r} is not supported — this recipe wires only 'openrouter'. "
+            "For Azure OpenAI, compose the pipeline directly (an llm node with provider='azure', "
+            "deployment_name and endpoint) rather than via apply_pipeline_recipe."
+        )
+
+
 def _build_classify_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     """Build set_pipeline args for the classify-rows-llm-jsonl recipe."""
+    _require_openrouter_provider(slots)
     # ``blob_id`` is a TOP-LEVEL key of ``source`` (sibling of ``options``),
     # NOT a member of ``options``. ``_execute_set_pipeline`` reads it via
     # ``src_args.get("blob_id")`` and feeds it to ``_resolve_source_blob``,
@@ -614,7 +634,7 @@ _RECIPE_WEB_SCRAPE_SLOTS: Final[dict[str, SlotSpec]] = {
         slot_type="str",
         required=False,
         default="openrouter",
-        description="LLM provider — 'openrouter' or 'azure'",
+        description="LLM provider — only 'openrouter' is wired by this recipe (Azure needs deployment_name/endpoint, which the recipe does not provide)",
     ),
     "rating_template": SlotSpec(
         slot_type="str",
@@ -654,9 +674,8 @@ _RECIPE_WEB_SCRAPE_SLOTS: Final[dict[str, SlotSpec]] = {
         description=(
             "SSRF allowlist for the web_scrape node, as a list of CIDR strings. "
             "Empty (the default) omits the key so the web_scrape field default "
-            "'public_only' applies — the correct value for a public host. "
-            "Intended source: the server-side resolve_tutorial_allowed_hosts "
-            "output (a tight loopback CIDR for local dev). SSRF safety comes "
+            "'public_only' applies — the correct value for a public host, including "
+            "the tutorial's publicly-hosted synthetic pages. SSRF safety comes "
             "from the web_scrape enforcement boundary (CidrStr validation + the "
             "'public_only' field default), not from the slot being unreachable — "
             "apply_pipeline_recipe is a Tier-3 boundary that can forward an "
@@ -677,6 +696,7 @@ def _build_web_scrape_recipe(slots: Mapping[str, Any]) -> dict[str, Any]:
     (elspeth-abb2cb0931); the existing medium-severity prompt-shield advisory
     is left to fire from validate() — the recipe MUST NOT suppress it.
     """
+    _require_openrouter_provider(slots)
     # Function-level imports: recipes.py is imported by recipe_match.py and the
     # tools plane; hoisting these to module scope risks a circular import.
     from elspeth.contracts.composer_interpretation import InterpretationKind

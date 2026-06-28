@@ -61,7 +61,7 @@ describe("TutorialGuidedShell", () => {
     startGuidedMock.mockReset().mockResolvedValue(undefined);
     getTutorialSampleMock
       .mockReset()
-      .mockResolvedValue({ sample_urls: SAMPLE_URLS, allowed_hosts: "public_only" });
+      .mockResolvedValue({ sample_urls: SAMPLE_URLS });
     // Start with NO active session so the test exercises the real production
     // path: TutorialGuidedShell must itself bind activeSessionId (D3/B4). A
     // pre-set activeSessionId here would mask a shell that forgot to bind it.
@@ -160,7 +160,7 @@ describe("TutorialGuidedShell", () => {
       screen.getByText("Preparing the tutorial's sample pages…"),
     ).toBeInTheDocument();
     // Resolve and the panel appears with the URL-bearing locked prompt.
-    resolveSample({ sample_urls: SAMPLE_URLS, allowed_hosts: "public_only" });
+    resolveSample({ sample_urls: SAMPLE_URLS });
     const stub = await screen.findByTestId("chat-panel-stub");
     expect(stub.dataset.lockedPrompt).toContain(SAMPLE_URLS[2]);
   });

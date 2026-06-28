@@ -332,16 +332,16 @@ Then open `http://localhost:5173`.
 - Run audit data defaults to `data/runs/audit.db`; payloads default to
   `data/payloads/`. Override these with `ELSPETH_WEB__LANDSCAPE_URL` and
   `ELSPETH_WEB__PAYLOAD_STORE_PATH` when you need explicit deployment paths.
-- The first-run tutorial scrapes three synthetic pages it expects at
-  `{base}/tutorial-site/project-N.html`, where `{base}` is
-  `ELSPETH_WEB__TUTORIAL_SAMPLE_BASE_URL` or, when unset, the inbound request
-  origin. A public deployment serves its own pages and needs no override. On a
-  **loopback dev origin** the origin is private, so the execution preflight
-  (correctly) rejects the server-injected private-network allowlist and the
-  tutorial composes but will not run — set
-  `ELSPETH_WEB__TUTORIAL_SAMPLE_BASE_URL=https://johnm-dta.github.io/elspeth`
-  (the project's public GitHub Pages copy of those pages) so it scrapes a public
-  origin and executes end-to-end.
+- The first-run tutorial scrapes three synthetic pages at
+  `{base}/tutorial-site/project-N.html`, where `{base}` defaults to the
+  project's public GitHub Pages copy (`https://johnm-dta.github.io/elspeth`).
+  That base is operator-controlled content that needs no local hosting, so the
+  tutorial runs end-to-end on any deployment — including a pure loopback dev box
+  — without the app serving the pages itself. The tutorial's `web_scrape` node
+  uses the default `allowed_hosts="public_only"` SSRF policy, so it only fetches
+  public origins, exactly like any other web-authored pipeline. Override the
+  base with `ELSPETH_WEB__TUTORIAL_SAMPLE_BASE_URL` only if you host your own
+  copy of the pages (e.g. a fork).
 
 ---
 

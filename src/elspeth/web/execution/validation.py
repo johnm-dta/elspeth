@@ -949,96 +949,6 @@ def validate_pipeline(
             )
         )
 
-    for node in state.nodes:
-        if node.node_type != "transform":
-            continue
-        provider_policy_error = web_rag_provider_config_policy_error(node.options)
-        if provider_policy_error is not None:
-            checks.append(
-                ValidationCheck(
-                    name=_CHECK_MANAGED_IDENTITY_POLICY,
-                    passed=False,
-                    detail=f"Transform '{node.id}' uses disallowed managed identity provider_config",
-                    affected_nodes=(node.id,),
-                    outcome_code=None,
-                )
-            )
-            _append_skipped_checks(checks, _CHECK_MANAGED_IDENTITY_POLICY)
-            return ValidationResult(
-                is_valid=False,
-                checks=checks,
-                errors=[
-                    ValidationError(
-                        component_id=node.id,
-                        component_type="transform",
-                        message=provider_policy_error,
-                        suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
-                        error_code=None,
-                    ),
-                ],
-                readiness=_blocked_readiness(
-                    code=_CHECK_MANAGED_IDENTITY_POLICY,
-                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
-                    component_id=node.id,
-                    component_type="transform",
-                ),
-            )
-    checks.append(
-        ValidationCheck(
-            name=_CHECK_MANAGED_IDENTITY_POLICY,
-            passed=True,
-            detail="No web-authored managed identity provider_config",
-            affected_nodes=(),
-            outcome_code=None,
-        )
-    )
-
-    for node in state.nodes:
-        if node.node_type != "transform":
-            continue
-        llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
-        if llm_retry_policy_error is not None:
-            checks.append(
-                ValidationCheck(
-                    name=_CHECK_LLM_RETRY_BUDGET_POLICY,
-                    passed=False,
-                    detail=f"Transform '{node.id}' uses disallowed sequential multi-query LLM retry budget",
-                    affected_nodes=(node.id,),
-                    outcome_code=None,
-                )
-            )
-            _append_skipped_checks(checks, _CHECK_LLM_RETRY_BUDGET_POLICY)
-            return ValidationResult(
-                is_valid=False,
-                checks=checks,
-                errors=[
-                    ValidationError(
-                        component_id=node.id,
-                        component_type="transform",
-                        message=llm_retry_policy_error,
-                        suggestion=(
-                            "Set max_capacity_retry_seconds to a small positive value or configure pool_size > 1 for pooled retry handling."
-                        ),
-                        error_code=None,
-                    ),
-                ],
-                readiness=_blocked_readiness(
-                    code=_CHECK_LLM_RETRY_BUDGET_POLICY,
-                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
-                    component_id=node.id,
-                    component_type="transform",
-                ),
-            )
-    checks.append(
-        ValidationCheck(
-            name=_CHECK_LLM_RETRY_BUDGET_POLICY,
-            passed=True,
-            detail="No unsafe web-authored sequential multi-query LLM retry budget",
-            affected_nodes=(),
-            outcome_code=None,
-        )
-    )
-
     web_scrape_network_errors: list[ValidationError] = []
     for node in state.nodes:
         if node.plugin != "web_scrape":
@@ -1487,6 +1397,104 @@ def validate_pipeline(
                 outcome_code=None,
             )
         )
+
+    # managed_identity_policy (#8) and llm_retry_budget_policy (#9) run here to
+    # match their declared position in VALIDATION_BLOCKING_CHECK_NAMES — AFTER
+    # web_scrape_network_policy (#2) through blob_inline_refs (#7). Emitting them
+    # earlier left their pass records in ``checks`` before an earlier-declared
+    # gate could fail, which suppressed the canonical skipped-after-failure record
+    # and made the trail report a later gate passing under an earlier failure.
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        provider_policy_error = web_rag_provider_config_policy_error(node.options)
+        if provider_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_MANAGED_IDENTITY_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' uses disallowed managed identity provider_config",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_MANAGED_IDENTITY_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=provider_policy_error,
+                        suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
+                        error_code=None,
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_MANAGED_IDENTITY_POLICY,
+                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_MANAGED_IDENTITY_POLICY,
+            passed=True,
+            detail="No web-authored managed identity provider_config",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
+        if llm_retry_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_LLM_RETRY_BUDGET_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' uses disallowed sequential multi-query LLM retry budget",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_LLM_RETRY_BUDGET_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=llm_retry_policy_error,
+                        suggestion=(
+                            "Set max_capacity_retry_seconds to a small positive value or configure pool_size > 1 for pooled retry handling."
+                        ),
+                        error_code=None,
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_LLM_RETRY_BUDGET_POLICY,
+                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_LLM_RETRY_BUDGET_POLICY,
+            passed=True,
+            detail="No unsafe web-authored sequential multi-query LLM retry budget",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
 
     # Step 3: Settings loading
     #

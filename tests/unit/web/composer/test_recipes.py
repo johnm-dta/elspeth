@@ -1665,3 +1665,57 @@ def test_recipe_catalog_content_hash_covers_recipes_module() -> None:
 
 def test_recipe_catalog_content_hash_is_deterministic() -> None:
     assert recipe_catalog_content_hash() == recipe_catalog_content_hash()
+
+
+class TestRecipeProviderGuard:
+    """The LLM recipes wire only the OpenRouter provider.
+
+    The ``provider`` slot accepts a string, but these recipes emit only
+    provider/model/api_key on the llm node — never the deployment_name/endpoint
+    that AzureOpenAIConfig requires — so ``provider='azure'`` must fail loud at
+    build time (RecipeValidationError) rather than producing an unbuildable
+    Azure pipeline that dies in config validation with "missing Azure fields".
+    """
+
+    _CLASSIFY_SLOTS: ClassVar[dict] = {
+        "classifier_template": "Classify {{ row.text }}.",
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key_secret": "OPENROUTER_API_KEY",
+    }
+    _WEB_SCRAPE_SLOTS: ClassVar[dict] = {
+        "source_plugin": "json",
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key_secret": "OPENROUTER_API_KEY",
+        "abuse_contact": "noreply@dta.gov.au",
+        "scraping_reason": "DTA technical demonstration",
+    }
+
+    def test_classify_recipe_rejects_azure_provider(self) -> None:
+        with pytest.raises(RecipeValidationError, match="only 'openrouter'"):
+            apply_recipe(
+                "classify-rows-llm-jsonl",
+                {"source_blob_id": str(uuid4()), **self._CLASSIFY_SLOTS, "provider": "azure"},
+            )
+
+    def test_classify_recipe_builds_with_openrouter(self) -> None:
+        args = apply_recipe(
+            "classify-rows-llm-jsonl",
+            {"source_blob_id": str(uuid4()), **self._CLASSIFY_SLOTS, "provider": "openrouter"},
+        )
+        llm_node = next(node for node in args["nodes"] if node["plugin"] == "llm")
+        assert llm_node["options"]["provider"] == "openrouter"
+
+    def test_web_scrape_recipe_rejects_azure_provider(self) -> None:
+        with pytest.raises(RecipeValidationError, match="only 'openrouter'"):
+            apply_recipe(
+                "web-scrape-llm-rate-jsonl",
+                {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS, "provider": "azure"},
+            )
+
+    def test_web_scrape_recipe_builds_with_openrouter(self) -> None:
+        args = apply_recipe(
+            "web-scrape-llm-rate-jsonl",
+            {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS, "provider": "openrouter"},
+        )
+        llm_node = next(node for node in args["nodes"] if node["plugin"] == "llm")
+        assert llm_node["options"]["provider"] == "openrouter"

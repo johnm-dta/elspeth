@@ -8,7 +8,6 @@ from elspeth.web.composer.protocol import ComposerService
 from elspeth.web.composer.tools._common import ToolContext
 from elspeth.web.composer.tools._shield_availability import azure_prompt_shield_available
 from elspeth.web.composer.tutorial_sample import (
-    resolve_tutorial_allowed_hosts,
     resolve_tutorial_sample_urls,
     tutorial_sample_base_url,
 )
@@ -614,19 +613,6 @@ async def get_guided(
                         )
 
 
-def _request_origin(request: Request) -> str:
-    """Externally-visible origin (scheme://host[:port]) of this request.
-
-    Used ONLY as the dev fallback for ``tutorial_sample_base_url`` — a
-    configured ``WebSettings.tutorial_sample_base_url`` takes precedence.
-    ``request.base_url`` honours forwarded-proto/host middleware when present.
-    The host-class resolver never echoes this host into the allowlist (it maps
-    to a fixed loopback CIDR list or ``public_only``), so a spoofed Host cannot
-    widen egress beyond loopback.
-    """
-    return str(request.base_url).rstrip("/")
-
-
 @router.get("/{session_id}/guided/tutorial-sample", response_model=TutorialSampleResponse)
 async def get_guided_tutorial_sample(
     session_id: UUID,
@@ -635,11 +621,13 @@ async def get_guided_tutorial_sample(
 ) -> TutorialSampleResponse:
     """Return the runtime-derived synthetic-scrape inputs for a TUTORIAL session.
 
-    Exposes the 3 synthetic sample-page URLs + the SSRF host-class
-    (``allowed_hosts``) for the active tutorial session's resolved origin. The
-    base is resolved via ``tutorial_sample_base_url`` (a configured
-    ``WebSettings.tutorial_sample_base_url`` wins, else the request origin).
-    The URLs are a runtime-derived payload computed by the server seam.
+    Exposes the 3 synthetic sample-page URLs for the active tutorial session.
+    The base is resolved via ``tutorial_sample_base_url`` (a configured
+    ``WebSettings.tutorial_sample_base_url`` wins, else the canonical public
+    GitHub Pages copy). The URLs are a runtime-derived payload computed by the
+    server seam. The pages are publicly hosted, so the tutorial's ``web_scrape``
+    node needs no server-injected SSRF allowlist (it uses the plugin default
+    ``allowed_hosts="public_only"``).
 
     Read-only: this route never mutates state. Returns 404 if the session does
     not exist or does not belong to the requesting user. Returns 400 if the
@@ -669,10 +657,9 @@ async def get_guided_tutorial_sample(
         )
 
     settings = request.app.state.settings
-    base_url = tutorial_sample_base_url(settings=settings, request_origin=_request_origin(request))
+    base_url = tutorial_sample_base_url(settings=settings)
     sample_urls = resolve_tutorial_sample_urls(base_url=base_url)
-    allowed_hosts = resolve_tutorial_allowed_hosts(base_url=base_url)
-    return TutorialSampleResponse(sample_urls=list(sample_urls), allowed_hosts=allowed_hosts)
+    return TutorialSampleResponse(sample_urls=list(sample_urls))
 
 
 @router.post("/{session_id}/guided/reenter", response_model=GetGuidedResponse)
@@ -1470,10 +1457,7 @@ async def post_guided_respond(
                         seed=settings.composer_seed,
                         composer_service=request.app.state.composer_service,
                         advisor_checkpoint_max_passes=settings.composer_advisor_checkpoint_max_passes,
-                        # p4 Task 8a: the tutorial STEP_2.5 accept seam resolves the
-                        # web_scrape SSRF allowed_hosts server-side from these.
                         settings=settings,
-                        request_origin=_request_origin(request),
                     )
                 except HTTPException:
                     # Dispatcher-level 400s happen after the turn has been

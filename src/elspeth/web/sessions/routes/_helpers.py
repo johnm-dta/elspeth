@@ -133,7 +133,6 @@ from elspeth.web.composer.telemetry_phase8 import (
     record_session_switched,
 )
 from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
-from elspeth.web.composer.tutorial_sample import resolve_tutorial_allowed_hosts, tutorial_sample_base_url
 from elspeth.web.composer.yaml_generator import generate_yaml
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
@@ -1068,36 +1067,6 @@ def _transforms_intent_from_chat_history(guided: GuidedSession) -> str | None:
         if turn.role is ChatRole.USER:
             return turn.content
     return None
-
-
-def _tutorial_web_scrape_allowed_hosts(
-    guided: GuidedSession,
-    settings: WebSettings | None,
-    request_origin: str | None,
-) -> str | list[str] | None:
-    """SSRF allowlist the seam injects into a TUTORIAL session's web_scrape node.
-
-    The LLM never sets ``allowed_hosts`` (an SSRF control). For a tutorial session
-    the server resolves it from the synthetic-page origin's host class — a
-    loopback/private dev origin gets a tight CIDR; a public origin gets
-    ``"public_only"`` (the default, hence a no-op for the deployed/staging case).
-    Returns ``None`` for a live session (``EMPTY_PROFILE`` — the operator owns its
-    own allowlist there) or when no settings are wired. Re-homes the injection the
-    removed STEP_2.5 recipe-accept seam used to perform now that the staged flow
-    builds web_scrape via the per-stage transforms chat.
-    """
-    if guided.profile == EMPTY_PROFILE or settings is None:
-        return None
-    try:
-        base_url = tutorial_sample_base_url(settings=settings, request_origin=request_origin)
-    except ValueError:
-        # Base unresolvable (no configured base AND no request origin). The GET
-        # tutorial-sample already gates this — it calls the same resolver, so a
-        # real tutorial cannot reach accept without a base — but degrade SAFELY to
-        # no injection (web_scrape's default ``public_only``, never a widening)
-        # rather than 500 the accept on a misconfigured local-dev edge.
-        return None
-    return resolve_tutorial_allowed_hosts(base_url=base_url)
 
 
 def _composer_chat_history(messages: Sequence[ChatMessageRecord]) -> list[dict[str, str]]:
@@ -2726,8 +2695,7 @@ async def _dispatch_guided_respond(
     seed: int | None,
     composer_service: ComposerService | None = None,  # compatibility default; tutorial profile fails closed on None (P5.6)
     advisor_checkpoint_max_passes: int | None = None,  # compatibility default; tutorial profile requires positive int (P5.6)
-    settings: WebSettings | None = None,  # compatibility default; tutorial recipe accept fails closed on None (p4 Task 8a)
-    request_origin: str | None = None,  # dev fallback for tutorial_sample_base_url; a configured setting wins
+    settings: WebSettings | None = None,  # compatibility default; supplies composer_max_discovery_turns when wired
 ) -> tuple[CompositionState, GuidedSession, Any | None]:
     """Dispatch a guided respond to the correct step handler and next-turn emitter.
 
@@ -3391,7 +3359,6 @@ async def _dispatch_guided_respond(
                     data_dir=data_dir,
                     session_engine=session_engine,
                     session_id=session_id,
-                    tutorial_web_scrape_allowed_hosts=_tutorial_web_scrape_allowed_hosts(guided, settings, request_origin),
                 )
                 if not handler_result.tool_result.success:
                     # Initial commit failed. Attempt one LLM repair: feed the
@@ -3465,7 +3432,6 @@ async def _dispatch_guided_respond(
                         data_dir=data_dir,
                         session_engine=session_engine,
                         session_id=session_id,
-                        tutorial_web_scrape_allowed_hosts=_tutorial_web_scrape_allowed_hosts(guided, settings, request_origin),
                     )
                     if repair_result.tool_result.success:
                         guided, next_turn = _emit_wire_turn(

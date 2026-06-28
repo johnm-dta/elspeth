@@ -2,14 +2,14 @@
 
 Behaviour-preserving: no slot value -> the web_scrape node omits allowed_hosts
 (the field default "public_only" applies, the current behaviour). A non-empty
-CIDR list (loopback dev) -> the node carries it. The list comes from the Task 2
-resolver, NEVER from the LLM (SSRF control).
+CIDR list -> the node carries it under ``http``. The list is operator/recipe
+supplied and constrained by the web_scrape enforcement boundary (CidrStr
+validation + the "public_only" field default), NEVER fabricated by the LLM.
 """
 
 from __future__ import annotations
 
 from elspeth.web.composer.recipes import get_recipe, validate_slots
-from elspeth.web.composer.tutorial_sample import resolve_tutorial_allowed_hosts
 
 _BASE_SLOTS = {
     "source_blob_id": "00000000-0000-0000-0000-000000000001",
@@ -41,30 +41,24 @@ def test_default_omits_allowed_hosts() -> None:
     assert "allowed_hosts" not in node["options"]
 
 
-def test_loopback_cidr_list_is_emitted() -> None:
+def test_supplied_cidr_list_nests_under_http() -> None:
     recipe = get_recipe("web-scrape-llm-rate-jsonl")
     assert recipe is not None
-    hosts = resolve_tutorial_allowed_hosts(base_url="http://127.0.0.1:5173")
-    assert isinstance(hosts, list)
-    slots = validate_slots(recipe, {**_BASE_SLOTS, "allowed_hosts": hosts})
+    slots = validate_slots(recipe, {**_BASE_SLOTS, "allowed_hosts": ["127.0.0.1/32", "::1/128"]})
     args = recipe.build(slots)
     node = _web_scrape_node(args)
     # allowed_hosts is a WebScrapeHTTPConfig field -> nests under ``http`` (the
-    # plugin rejects a top-level key with extra:forbid). The previous assertion
-    # checked the top level and only passed because it never applied the dict
-    # through WebScrapeConfig.
+    # plugin rejects a top-level key with extra:forbid). It must not be stranded
+    # at the top level.
     assert node["options"]["http"]["allowed_hosts"] == ["127.0.0.1/32", "::1/128"]
     assert "allowed_hosts" not in node["options"]
 
 
-def test_public_resolver_yields_omit() -> None:
-    # The public resolver returns "public_only" (scalar), which the tutorial
-    # threading maps to an EMPTY slot list -> omit (field default applies).
+def test_empty_slot_omits_allowed_hosts() -> None:
+    # An explicitly empty slot list -> omit (the field default "public_only"
+    # applies), same as supplying no slot at all.
     recipe = get_recipe("web-scrape-llm-rate-jsonl")
     assert recipe is not None
-    hosts = resolve_tutorial_allowed_hosts(base_url="https://elspeth.foundryside.dev")
-    assert hosts == "public_only"
-    # public_only is the field default; the slot stays empty -> omit.
     slots = validate_slots(recipe, {**_BASE_SLOTS, "allowed_hosts": []})
     args = recipe.build(slots)
     node = _web_scrape_node(args)

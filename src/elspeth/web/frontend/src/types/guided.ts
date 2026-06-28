@@ -158,18 +158,15 @@ export interface GuidedRespondResponse {
  *
  * Runtime-derived inputs for the tutorial worked example: the 3 synthetic
  * sample-page URLs (`sample_urls`) computed from the active tutorial session's
- * resolved origin, and the SSRF host-class (`allowed_hosts`) — `"public_only"`
- * for a public base, or a tight CIDR list for a loopback/private dev base.
+ * resolved origin and appended to the locked STEP_1 prompt so the source driver
+ * can parse the runtime-served addresses.
  *
- * The tutorial shell consumes only `sample_urls` (appended to the locked STEP_1
- * prompt so the source driver can parse the runtime-served addresses). The
- * client NEVER sends `allowed_hosts` back: the SSRF allowlist is injected
- * server-side at the STEP_2.5 recipe-accept seam (Task 8a) — surfacing it here
- * is informational only.
+ * No `allowed_hosts` is carried: the synthetic pages are publicly hosted, so the
+ * tutorial's web_scrape node relies on the plugin default
+ * `allowed_hosts="public_only"` — the client never sets an SSRF allowlist.
  */
 export interface TutorialSampleResponse {
   sample_urls: string[];
-  allowed_hosts: "public_only" | string[];
 }
 
 /**

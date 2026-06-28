@@ -1,10 +1,10 @@
 """p4 Task 8a — GET /guided/tutorial-sample surface.
 
 Exposes the runtime-derived synthetic-scrape inputs for the active TUTORIAL
-session: the 3 sample URLs + the SSRF host-class (``allowed_hosts``). The URLs
-are runtime-derived (they cannot ride the frozen profile constants) and the
-host-class is the deterministic resolver output. The wire carries only those two
-runtime-derived fields.
+session: the 3 sample URLs. The URLs are runtime-derived (they cannot ride the
+frozen profile constants). The synthetic pages are publicly hosted, so the
+tutorial's web_scrape node carries no server-injected SSRF allowlist (it relies
+on the plugin default ``allowed_hosts="public_only"``).
 """
 
 from __future__ import annotations
@@ -32,8 +32,9 @@ def _get_sample(client: TestClient, session_id: str):
     return client.get(f"/api/sessions/{session_id}/guided/tutorial-sample")
 
 
-def test_tutorial_sample_default_origin_is_public_only(composer_test_client: TestClient) -> None:
-    """No configured base -> request origin (host 'test') is a public host -> public_only."""
+def test_tutorial_sample_default_is_github_pages(composer_test_client: TestClient) -> None:
+    """No configured base -> the canonical public GitHub Pages URLs (never the
+    request origin, which produced loopback URLs the web_scrape gate refuses)."""
     session_id = _create_session(composer_test_client)
     _start(composer_test_client, session_id, "tutorial")
 
@@ -41,32 +42,32 @@ def test_tutorial_sample_default_origin_is_public_only(composer_test_client: Tes
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    assert len(body["sample_urls"]) == 3
-    for i, url in enumerate(body["sample_urls"], start=1):
-        assert url.endswith(f"/tutorial-site/project-{i}.html"), url
-    assert body["allowed_hosts"] == "public_only"
-
-
-def test_tutorial_sample_configured_loopback_base_yields_cidr(composer_test_client: TestClient) -> None:
-    """A configured loopback base -> the tight loopback CIDR list, urls under that base."""
-    session_id = _create_session(composer_test_client)
-    _start(composer_test_client, session_id, "tutorial")
-    _set_base_url(composer_test_client, "http://127.0.0.1:8000")
-
-    resp = _get_sample(composer_test_client, session_id)
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-
-    assert body["allowed_hosts"] == ["127.0.0.1/32", "::1/128"]
     assert body["sample_urls"] == [
-        "http://127.0.0.1:8000/tutorial-site/project-1.html",
-        "http://127.0.0.1:8000/tutorial-site/project-2.html",
-        "http://127.0.0.1:8000/tutorial-site/project-3.html",
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-1.html",
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-2.html",
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-3.html",
     ]
 
 
-def test_tutorial_sample_exposes_only_urls_and_allowed_hosts(composer_test_client: TestClient) -> None:
-    """The tutorial-sample wire carries ONLY the runtime-derived inputs."""
+def test_tutorial_sample_configured_base_builds_urls_under_it(composer_test_client: TestClient) -> None:
+    """A configured (publicly-hosted) base -> the 3 URLs built under that base."""
+    session_id = _create_session(composer_test_client)
+    _start(composer_test_client, session_id, "tutorial")
+    _set_base_url(composer_test_client, "https://johnm-dta.github.io/elspeth")
+
+    resp = _get_sample(composer_test_client, session_id)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["sample_urls"] == [
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-1.html",
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-2.html",
+        "https://johnm-dta.github.io/elspeth/tutorial-site/project-3.html",
+    ]
+
+
+def test_tutorial_sample_exposes_only_sample_urls(composer_test_client: TestClient) -> None:
+    """The tutorial-sample wire carries ONLY the runtime-derived sample URLs."""
     session_id = _create_session(composer_test_client)
     _start(composer_test_client, session_id, "tutorial")
 
@@ -74,7 +75,7 @@ def test_tutorial_sample_exposes_only_urls_and_allowed_hosts(composer_test_clien
     assert resp.status_code == 200, resp.text
     body = resp.json()
 
-    assert set(body.keys()) == {"sample_urls", "allowed_hosts"}
+    assert set(body.keys()) == {"sample_urls"}
 
 
 def test_tutorial_sample_rejects_non_tutorial_session(composer_test_client: TestClient) -> None:

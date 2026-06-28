@@ -115,13 +115,11 @@ export function TutorialGuidedShell({
         // start above). Appended to the locked STEP_1 prompt; the box stays
         // gated (never editable) until they arrive.
         const sample = await getTutorialSample(sessionId);
-        // Only sample_urls are consumed client-side. sample.allowed_hosts is
-        // surfaced informationally but DELIBERATELY NOT used here: allowed_hosts
-        // is an SSRF control the client must never carry (a client-set allowlist
-        // is a widening vector). The server injects it into the web_scrape node
-        // at the per-stage transforms commit (handle_step_3_chain_accept) from
-        // the host class of the resolved origin. Do not "fix" this by threading
-        // allowed_hosts into the prompt or the pipeline from here.
+        // Only sample_urls are consumed client-side, appended to the locked
+        // STEP_1 prompt. The synthetic pages are publicly hosted, so the
+        // tutorial's web_scrape node carries no SSRF allowlist — it uses the
+        // plugin default `allowed_hosts="public_only"`. The client must never
+        // set an allowlist (a client-set allowlist is an SSRF widening vector).
         setSampleUrls(sample.sample_urls);
         await startGuided(sessionId);
       } catch (err) {

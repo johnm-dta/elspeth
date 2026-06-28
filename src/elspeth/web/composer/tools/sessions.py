@@ -1633,8 +1633,8 @@ async def _check_interpretation_rate_limits(
             argument="user_term",
             expected=f"at most {per_term_cap} interpretation requests per term in this composition",
             actual_type=(
-                f"term {user_term!r} would be surfaced {per_term_count + 1} times — use a direct "
-                f"interpretation in the prompt template instead"
+                f"per-term cap would be exceeded on request {per_term_count + 1}; use a direct interpretation "
+                "in the prompt template instead"
             ),
             # Compose-loop discriminant (F-6): the rate-cap branch is the
             # trigger for the

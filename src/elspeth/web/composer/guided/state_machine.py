@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
@@ -42,6 +42,64 @@ from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_
 # (v6->v7 dropped the vestigial ``entry_seed`` key from the nested
 # WorkflowProfile sub-shape; bumped in lockstep with SESSION_SCHEMA_EPOCH.)
 GUIDED_SESSION_SCHEMA_VERSION = 7
+
+
+def _require_guided_int(value: Any, field_name: str) -> int:
+    if type(value) is not int:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be int")
+    return value
+
+
+def _require_guided_non_negative_int(value: Any, field_name: str) -> int:
+    parsed = _require_guided_int(value, field_name)
+    if parsed < 0:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be a non-negative int")
+    return parsed
+
+
+def _require_guided_bool(value: Any, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be bool")
+    return value
+
+
+def _require_guided_optional_str(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be str or None")
+    return value
+
+
+def _require_guided_sequence(value: Any, field_name: str) -> Sequence[Any]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be a sequence")
+    return cast(Sequence[Any], value)
+
+
+def _chat_turn_from_guided_dict(entry: Any) -> ChatTurn:
+    if not isinstance(entry, Mapping):
+        raise InvariantError("GuidedSession.from_dict: chat_history entries must be mappings")
+    role_raw = entry["role"]
+    content_raw = entry["content"]
+    seq_raw = entry["seq"]
+    step_raw = entry["step"]
+    ts_iso_raw = entry["ts_iso"]
+    if type(role_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.role must be str")
+    if type(step_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.step must be str")
+    if type(content_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.content must be str")
+    if type(ts_iso_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.ts_iso must be str")
+    return ChatTurn(
+        role=ChatRole(role_raw),
+        content=content_raw,
+        seq=_require_guided_non_negative_int(seq_raw, "chat_history.seq"),
+        step=GuidedStep(step_raw),
+        ts_iso=ts_iso_raw,
+    )
 
 
 class TerminalKind(StrEnum):
@@ -394,7 +452,7 @@ class GuidedSession:
         KeyError, ValueError, and TypeError all indicate Tier 1 corruption.
         """
         try:
-            schema_version = int(d["schema_version"])
+            schema_version = _require_guided_int(d["schema_version"], "schema_version")
             if schema_version != GUIDED_SESSION_SCHEMA_VERSION:
                 raise InvariantError(f"GuidedSession.from_dict: unsupported schema_version {schema_version}")
             history = tuple(TurnRecord.from_dict(r) for r in d["history"])
@@ -419,24 +477,21 @@ class GuidedSession:
             sink_intent_raw = d["step_2_sink_intent"]
             step_2_chosen_plugin_raw = d["step_2_chosen_plugin"]
             step_3_edit_index_raw = d["step_3_edit_index"]
+            transition_consumed = _require_guided_bool(d["transition_consumed"], "transition_consumed")
+            step_1_chosen_plugin = _require_guided_optional_str(step_1_chosen_plugin_raw, "step_1_chosen_plugin")
+            step_2_chosen_plugin = _require_guided_optional_str(step_2_chosen_plugin_raw, "step_2_chosen_plugin")
+            step_3_edit_index = (
+                _require_guided_non_negative_int(step_3_edit_index_raw, "step_3_edit_index") if step_3_edit_index_raw is not None else None
+            )
             # Phase A slice 5 chat-history fields.  Tier-1 strict: every entry
             # must declare role / content / seq / step / ts_iso.  Per CLAUDE.md
             # "Our data crash on any anomaly" — no coercion of missing keys
             # to defaults.  An empty list (default for sessions created before
             # slice 5 landed in production) is valid; the entries themselves
             # must be well-formed.
-            chat_history_raw = d["chat_history"]
-            chat_turn_seq_raw = d["chat_turn_seq"]
-            chat_history: tuple[ChatTurn, ...] = tuple(
-                ChatTurn(
-                    role=ChatRole(entry["role"]),
-                    content=entry["content"],
-                    seq=entry["seq"],
-                    step=GuidedStep(entry["step"]),
-                    ts_iso=entry["ts_iso"],
-                )
-                for entry in chat_history_raw
-            )
+            chat_history_raw = _require_guided_sequence(d["chat_history"], "chat_history")
+            chat_turn_seq = _require_guided_non_negative_int(d["chat_turn_seq"], "chat_turn_seq")
+            chat_history: tuple[ChatTurn, ...] = tuple(_chat_turn_from_guided_dict(entry) for entry in chat_history_raw)
             return cls(
                 step=GuidedStep(d["step"]),
                 history=history,
@@ -447,15 +502,15 @@ class GuidedSession:
                 advisor_checkpoint_passes_used=advisor_checkpoint_passes_used_raw,
                 advisor_signoff_escape_offered=advisor_signoff_escape_offered_raw,
                 step_1_inspection_facts=facts_from_dict(inspection_facts_raw) if inspection_facts_raw is not None else None,
-                step_1_chosen_plugin=str(step_1_chosen_plugin_raw) if step_1_chosen_plugin_raw is not None else None,
+                step_1_chosen_plugin=step_1_chosen_plugin,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
-                transition_consumed=d["transition_consumed"],
+                transition_consumed=transition_consumed,
                 step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
-                step_2_chosen_plugin=str(step_2_chosen_plugin_raw) if step_2_chosen_plugin_raw is not None else None,
-                step_3_edit_index=int(step_3_edit_index_raw) if step_3_edit_index_raw is not None else None,
+                step_2_chosen_plugin=step_2_chosen_plugin,
+                step_3_edit_index=step_3_edit_index,
                 chat_history=chat_history,
-                chat_turn_seq=int(chat_turn_seq_raw),
+                chat_turn_seq=chat_turn_seq,
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"GuidedSession.from_dict: malformed record {d!r}") from exc

@@ -37,3 +37,21 @@ def test_panel_schema_shape():
     assert set(finding["required"]) == set(finding["properties"])
     evidence_item = finding["properties"]["evidence"]["items"]
     assert set(evidence_item["required"]) == set(evidence_item["properties"])
+
+
+def test_layered_prompt_orders_stable_content_first():
+    prompt = cpr.build_layered_prompt(
+        context="CONTEXT_MARKER project rules",
+        file_source="SOURCE_MARKER def f(): ...",
+        file_path="src/elspeth/web/foo.py",
+        persona="PERSONA_MARKER act as a security architect",
+        lens="security-architect",
+    )
+    i_ctx = prompt.index("CONTEXT_MARKER")
+    i_src = prompt.index("SOURCE_MARKER")
+    i_persona = prompt.index("PERSONA_MARKER")
+    i_path = prompt.index("src/elspeth/web/foo.py")
+    # stable (cacheable) content first, variable per-call content last
+    assert i_ctx < i_src < i_persona < i_path
+    # the focus path must NOT appear in the cacheable head (before persona)
+    assert prompt[:i_persona].count("src/elspeth/web/foo.py") == 0

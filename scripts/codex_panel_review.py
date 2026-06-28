@@ -27,3 +27,35 @@ DEFAULT_OUTPUT_DIR = "docs/quality-audit/findings-panel-raw"
 STRICT_CATEGORIES = frozenset({"bug", "correctness", "security", "smell"})
 RELAXED_CATEGORIES = frozenset({"improvement", "efficiency"})
 ANCHOR_REQUIRED_CATEGORIES = STRICT_CATEGORIES | frozenset({"easy-win"})
+
+
+def build_layered_prompt(
+    *,
+    context: str,
+    file_source: str,
+    file_path: str,
+    persona: str,
+    lens: str,
+) -> str:
+    """Layer the prompt most-shared -> least-shared to ENABLE the codex prompt
+    cache to key on [context][source] across every lens of a file (necessary, not
+    sufficient — actual cross-process reuse is verified empirically in Task 9). The
+    per-call tail (file_path, lens) is the only variable content and comes last."""
+    return (
+        f"{context}\n\n"
+        "=== TARGET FILE SOURCE (inlined; you MAY read any other repo file via the "
+        "read-only sandbox for investigation) ===\n"
+        f"```\n{file_source}\n```\n\n"
+        "=== REVIEW LENS ===\n"
+        f"{persona}\n\n"
+        "Output: a JSON object matching the provided schema — a non-empty "
+        "`markdown_report` narration string and a `findings` array. Every finding "
+        f'MUST set `lens` to "{lens}" and `priority` to one of P0|P1|P2|P3. For '
+        "categories bug/correctness/security/smell/easy-win, `evidence` MUST cite a "
+        "real path and integer line. The schema is STRICT: every finding MUST "
+        "include ALL fields — for any field you have no value for (confidence, "
+        "effort, impact, suggested_fix, target_file, gate_note, or an evidence "
+        "`line`), emit JSON `null`; do NOT omit the key. If you find nothing, "
+        "return an empty findings array and say so in markdown_report.\n"
+        f"--- review target: {file_path} · lens: {lens} ---\n"
+    )

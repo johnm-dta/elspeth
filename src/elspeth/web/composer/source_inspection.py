@@ -304,13 +304,24 @@ def _decode_csv_sample(sample: bytes) -> tuple[str, str | None]:
 
 
 def _redact_url_candidate(raw_url: str) -> str:
-    """Keep URL routing structure while removing query/fragment values."""
+    """Reduce a URL to scheme + host (+ port); drop everything else.
+
+    Every URL component except scheme/host/port is an egress vector:
+    ``netloc`` carries ``user:password@`` userinfo (embedded credentials);
+    ``path`` carries reset tokens, email addresses, and other per-record PII
+    (``/reset-password/<token>``, ``/users/<email>/``); ``query`` and
+    ``fragment`` carry signing params and the like. The hint only needs to
+    convey *which host* a source references, so we rebuild from
+    ``parts.hostname`` (userinfo-stripped, port-less) plus the explicit port.
+    ``urlsplit`` keeps userinfo inside ``netloc``, so reusing ``netloc`` —
+    as the prior implementation did — left credentials intact.
+    """
     parts = urlsplit(raw_url)
-    if not parts.scheme or not parts.netloc:
+    host = parts.hostname
+    if not parts.scheme or not host:
         return _REDACTED_URL_PART
-    query = _REDACTED_URL_PART if parts.query else ""
-    fragment = _REDACTED_URL_PART if parts.fragment else ""
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
+    netloc = f"{host}:{parts.port}" if parts.port is not None else host
+    return urlunsplit((parts.scheme, netloc, "", "", ""))
 
 
 def _url_candidates_from_text(text: str) -> tuple[str, ...]:

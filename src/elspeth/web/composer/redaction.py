@@ -2748,6 +2748,28 @@ def _summarize_advisor_schema_excerpt(value: str) -> str:
     return f"<advisor-schema-excerpt:{len(value)}-chars>"
 
 
+_TOOL_RESULT_REQUIRED_RESPONSE_KEYS: tuple[str, ...] = (
+    "success",
+    "validation",
+    "affected_nodes",
+    "version",
+)
+_TOOL_RESULT_OPTIONAL_RESPONSE_KEYS: tuple[str, ...] = (
+    "runtime_preflight",
+    "validation_delta",
+    "post_call_hints",
+    "plugin_schemas",
+)
+
+
+def _tool_result_response_keys(*, data: bool) -> tuple[str, ...]:
+    """Return the shared top-level ``ToolResult.to_dict`` response envelope."""
+    keys = _TOOL_RESULT_REQUIRED_RESPONSE_KEYS
+    if data:
+        keys = (*keys, "data")
+    return (*keys, *_TOOL_RESULT_OPTIONAL_RESPONSE_KEYS)
+
+
 # Manifest entries are grouped by tool family. The binding is rebuilt as a
 # new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -2876,20 +2898,13 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 },
                 redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
-                # and the failure branches reachable from _execute_upsert_node:
+                # Shared ToolResult.to_dict() envelope plus the data key emitted
+                # by failure branches reachable from _execute_upsert_node:
                 # _mutation_result → always emits success/validation/affected_nodes/version;
                 # _failure_result → adds data={"error": ...};
                 # _credential_wiring_contract_failure → adds data={error, credential_fields,
-                #   components, repair}.  runtime_preflight and validation_delta are not set
-                # by any reachable code path for this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                    "data",
-                ),
+                #   components, repair}.
+                known_response_keys=_tool_result_response_keys(data=True),
             )
         ),
         "upsert_edge": ToolRedaction(
@@ -2945,16 +2960,11 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 argument_summarizers={"patch": _summarize_set_metadata_patch},
                 redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428).
-                # _execute_set_metadata always calls _mutation_result with no data and no
-                # prior_validation, so the response always has exactly these four keys.
-                # runtime_preflight and validation_delta are unreachable from this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                ),
+                # Shared ToolResult.to_dict() envelope. _execute_set_metadata
+                # currently calls _mutation_result without data, so data remains
+                # excluded while optional ToolResult augmentation keys stay
+                # centrally covered.
+                known_response_keys=_tool_result_response_keys(data=False),
             )
         ),
         "set_output": ToolRedaction(
@@ -2969,20 +2979,13 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 argument_summarizers={"options": _summarize_set_source_options},
                 redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
-                # and the failure branches reachable from _execute_set_output:
+                # Shared ToolResult.to_dict() envelope plus the data key emitted
+                # by failure branches reachable from _execute_set_output:
                 # _mutation_result → success/validation/affected_nodes/version;
                 # _failure_result → adds data={"error": ...};
                 # _credential_wiring_contract_failure → adds data={error, credential_fields,
-                #   components, repair}.  runtime_preflight and validation_delta are not set
-                # by any reachable code path for this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                    "data",
-                ),
+                #   components, repair}.
+                known_response_keys=_tool_result_response_keys(data=True),
             )
         ),
         # _BLOB_DISCOVERY_TOOLS, 5 entries (4 declarative + 1 type-driven).

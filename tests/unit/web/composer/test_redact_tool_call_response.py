@@ -497,6 +497,38 @@ def test_declarative_tool_result_redacts_nested_repair_arguments() -> None:
     assert sentinel not in json.dumps(result, sort_keys=True)
 
 
+def test_declarative_tool_result_preserves_shared_optional_envelope_keys() -> None:
+    """Declarative ToolResult policies share the full ``ToolResult.to_dict`` envelope."""
+    response = {
+        "success": False,
+        "validation": {
+            "is_valid": False,
+            "errors": [],
+            "warnings": [],
+            "suggestions": [],
+            "semantic_contracts": [],
+            "graph_repair_suggestions": [],
+        },
+        "affected_nodes": [],
+        "version": 7,
+        "data": {"error": "invalid options"},
+        "post_call_hints": ["Call get_plugin_schema for source/csv before retrying."],
+        "plugin_schemas": {
+            "source/csv": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+    }
+
+    result = redact_tool_call_response("upsert_node", response, telemetry=NoopRedactionTelemetry())
+
+    assert result["post_call_hints"] == response["post_call_hints"]
+    assert result["plugin_schemas"] == response["plugin_schemas"]
+    assert REDACTED_UNKNOWN_RESPONSE_KEY not in json.dumps(result, sort_keys=True)
+
+
 # ---------------------------------------------------------------------------
 # Test 6: summarizer raises → telemetry counter BEFORE AuditIntegrityError
 # ---------------------------------------------------------------------------

@@ -419,7 +419,7 @@ class TestValidatePipelineWebScrapeNetworkPolicy:
 
         assert result.is_valid is False
         assert _check(result, "web_scrape_network_policy").passed is False
-        for later_check in ("managed_identity_policy", "llm_retry_budget_policy"):
+        for later_check in ("managed_identity_policy", "llm_retry_budget_policy", "llm_base_url_policy"):
             check = _check(result, later_check)
             assert check.passed is False, f"{later_check} must not pass after an earlier gate failed"
             assert check.outcome_code == CHECK_OUTCOME_SKIPPED_AFTER_FAILURE
@@ -443,6 +443,124 @@ class TestValidatePipelineWebScrapeNetworkPolicy:
 
         assert _check(result, "web_scrape_network_policy").passed is True
         assert all(error.error_code != "web_scrape_private_network_not_allowed" for error in result.errors)
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+
+
+class TestWebLlmBaseUrlPolicyHelper:
+    """Unit coverage for the web-authored OpenRouter base_url policy helper."""
+
+    def test_non_llm_plugin_is_ignored(self) -> None:
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("web_scrape", {"base_url": "http://127.0.0.1/v1"}) is None
+
+    def test_unset_base_url_is_allowed(self) -> None:
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("llm", {"model": "openai/gpt-4o"}) is None
+
+    def test_canonical_base_url_is_allowed_with_or_without_trailing_slash(self) -> None:
+        from elspeth.web.provider_config_policy import OPENROUTER_BASE_URL, web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("llm", {"base_url": OPENROUTER_BASE_URL}) is None
+        assert web_llm_base_url_policy_error("llm", {"base_url": OPENROUTER_BASE_URL + "/"}) is None
+
+    def test_http_loopback_base_url_is_blocked(self) -> None:
+        # The reviewer's finding: loopback HTTP turns a web-authored config into
+        # a credential-egress / SSRF path.
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("llm", {"base_url": "http://127.0.0.1:8199/v1"}) is not None
+        assert web_llm_base_url_policy_error("llm", {"base_url": "http://localhost/v1"}) is not None
+
+    def test_arbitrary_https_host_is_blocked(self) -> None:
+        # Superset of the loopback finding: an HTTPS host the author controls
+        # would still exfiltrate the server-held bearer credential.
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("llm", {"base_url": "https://evil.example.com/v1"}) is not None
+        assert web_llm_base_url_policy_error("llm", {"base_url": "https://10.0.0.5/v1"}) is not None
+
+
+class TestValidatePipelineLlmBaseUrlPolicy:
+    """Web-authored OpenRouter LLM nodes may not override base_url (credential egress)."""
+
+    @staticmethod
+    def _llm_options(base_url: object | None = None) -> dict[str, object]:
+        # No ``model`` — that would stage an llm_model_choice interpretation
+        # review (gate #6) which fires before the base_url gate (#10). The
+        # base_url gate inspects only base_url, so a model is irrelevant here.
+        options: dict[str, object] = {}
+        if base_url is not None:
+            options["base_url"] = base_url
+        return options
+
+    def test_loopback_base_url_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(_make_node(plugin="llm", options=self._llm_options("http://127.0.0.1:8199/v1")),),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "llm_base_url_policy").passed is False
+        assert result.errors[0].component_id == "test_node"
+        assert result.errors[0].error_code == "llm_base_url_not_allowed"
+
+    def test_arbitrary_https_base_url_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(_make_node(plugin="llm", options=self._llm_options("https://evil.example.com/v1")),),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "llm_base_url_policy").passed is False
+        assert result.errors[0].error_code == "llm_base_url_not_allowed"
+
+    def test_canonical_base_url_passes_gate_and_reaches_yaml_generation(self) -> None:
+        from elspeth.web.provider_config_policy import OPENROUTER_BASE_URL
+
+        state = _make_state(
+            nodes=(_make_node(plugin="llm", options=self._llm_options(OPENROUTER_BASE_URL)),),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert _check(result, "llm_base_url_policy").passed is True
+        assert all(error.error_code != "llm_base_url_not_allowed" for error in result.errors)
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+
+    def test_unset_base_url_passes_gate(self) -> None:
+        state = _make_state(
+            nodes=(_make_node(plugin="llm", options=self._llm_options(None)),),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert _check(result, "llm_base_url_policy").passed is True
         mock_yaml_gen.generate_yaml.assert_called_once_with(state)
 
 
@@ -1559,12 +1677,13 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 15
+        assert len(result.checks) == 16
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
         assert _check(result, "web_scrape_network_policy").passed is True
         assert _check(result, "llm_retry_budget_policy").passed is True
+        assert _check(result, "llm_base_url_policy").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "blob_inline_refs").passed is True
         assert _check(result, "semantic_contracts").passed is True

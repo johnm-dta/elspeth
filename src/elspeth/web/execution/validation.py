@@ -82,6 +82,7 @@ from elspeth.web.execution.schemas import (
     CHECK_BLOB_INLINE_REFS,
     CHECK_IDENTITY_NODE_ADVISORY,
     CHECK_INTERPRETATION_REVIEW,
+    CHECK_LLM_BASE_URL_POLICY,
     CHECK_LLM_RETRY_BUDGET_POLICY,
     CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
@@ -111,7 +112,11 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
 )
-from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
+from elspeth.web.provider_config_policy import (
+    web_llm_base_url_policy_error,
+    web_llm_retry_budget_policy_error,
+    web_rag_provider_config_policy_error,
+)
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
@@ -124,6 +129,7 @@ _CHECK_BATCH_TRANSFORM_OPTIONS = CHECK_BATCH_TRANSFORM_OPTIONS
 _CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
 _CHECK_MANAGED_IDENTITY_POLICY = CHECK_MANAGED_IDENTITY_POLICY
 _CHECK_LLM_RETRY_BUDGET_POLICY = CHECK_LLM_RETRY_BUDGET_POLICY
+_CHECK_LLM_BASE_URL_POLICY = CHECK_LLM_BASE_URL_POLICY
 _CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
@@ -1491,6 +1497,59 @@ def validate_pipeline(
             name=_CHECK_LLM_RETRY_BUDGET_POLICY,
             passed=True,
             detail="No unsafe web-authored sequential multi-query LLM retry budget",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    # llm_base_url_policy (#10) — web-authored OpenRouter LLM nodes may not
+    # override base_url. The api_key resolves server-side (possibly a server-
+    # scoped secret the author cannot read), so a custom base_url would direct
+    # the server's bearer to an author-chosen destination — a credential-egress
+    # / SSRF vector. The plugin config-validator tolerates HTTP loopback for the
+    # CLI dev examples; this web-execution gate is the boundary that makes the
+    # single-machine threat model not leak into the hosted path. Mirrors the
+    # managed_identity / web_scrape network policies.
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        llm_base_url_policy_error = web_llm_base_url_policy_error(node.plugin, node.options)
+        if llm_base_url_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_LLM_BASE_URL_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' overrides OpenRouter base_url in a web-authored pipeline",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_LLM_BASE_URL_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=llm_base_url_policy_error,
+                        suggestion="Remove the base_url option to use the canonical OpenRouter endpoint.",
+                        error_code="llm_base_url_not_allowed",
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_LLM_BASE_URL_POLICY,
+                    detail=f"transform {node.id} overrides OpenRouter base_url in a web-authored pipeline",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_LLM_BASE_URL_POLICY,
+            passed=True,
+            detail="No web-authored OpenRouter base_url override",
             affected_nodes=(),
             outcome_code=None,
         )

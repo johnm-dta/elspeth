@@ -38,6 +38,17 @@ from elspeth.web.composer.llm_response_parsing import attach_llm_calls, build_ll
 from elspeth.web.composer.service import _litellm_acompletion
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._dispatch import get_discovery_tool_definitions
+from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
+
+# Server-owned source-option keys that the LLM must NEVER author. Both are
+# stamped authoritatively at commit (``blob_ref`` by ``handle_step_1_source``,
+# ``source_authoring`` by ``set_source_from_blob`` for LLM-authored/dynamic
+# sources) and REJECTED by ``set_source`` if caller-supplied. On an in-place
+# re-resolve the committed source is threaded into the resolver prompt, so the
+# model parrots these keys straight back; left in, the next Send 400s with
+# "Step 1 source commit failed". Mirrors ``_WEB_ONLY_SOURCE_KEYS`` in
+# ``composer/tools/_common.py`` (the commit-side stripper for prevalidation).
+_RESOLVER_FORBIDDEN_SOURCE_OPTION_KEYS: Final[frozenset[str]] = frozenset({"blob_ref", SOURCE_AUTHORING_KEY})
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +271,13 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
     options = data["options"]
     if not isinstance(options, Mapping):
         raise ValueError(f"resolve_source options must be an object; got {type(options).__name__}")
+    # Drop SERVER-OWNED keys the model may have parroted back from the threaded
+    # current_source (see _RESOLVER_FORBIDDEN_SOURCE_OPTION_KEYS). Their absence
+    # is always correct here — they are re-stamped authoritatively at commit, and
+    # set_source rejects them as caller-supplied. ``interpretation_requirements``
+    # is intentionally NOT stripped: the resolver legitimately stages *pending*
+    # review requirements for invented sources.
+    options = {key: value for key, value in dict(options).items() if key not in _RESOLVER_FORBIDDEN_SOURCE_OPTION_KEYS}
 
     observed_columns_raw = data["observed_columns"]
     if not isinstance(observed_columns_raw, list):

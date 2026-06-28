@@ -3096,12 +3096,18 @@ class TestMessageRoutes:
                 json={"message": "Use this source", "step_index": "step_1_source"},
             )
 
-        assert send_resp.status_code == 400
-        detail = send_resp.json()["detail"]
-        assert detail == "Step 1 source commit failed"
-        assert "ToolResult(" not in detail
-        assert raw_row_secret not in detail
-        assert tool_result_private_detail not in detail
+        # The strict commit seam rejected the proposal. The source step degrades
+        # to advisory (parity with the sink reject path) instead of a fatal 400,
+        # so a second Send is never terminal. The egress guarantee is unchanged:
+        # the raw tool_result (which can carry Tier-3 row data) must NOT reach the
+        # response body on ANY exit path.
+        assert send_resp.status_code == 200
+        body = send_resp.text
+        assert "ToolResult(" not in body
+        assert raw_row_secret not in body
+        assert tool_result_private_detail not in body
+        # No mutation: the rejected commit must not advance or apply.
+        assert send_resp.json()["guided_session"]["step"] == "step_1_source"
 
     def test_guided_chat_malformed_source_tool_args_return_synthetic_unavailable(self, tmp_path) -> None:
         """Malformed Step-1 source resolver tool output must not escape as HTTP 500."""

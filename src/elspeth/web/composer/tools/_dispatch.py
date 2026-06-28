@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from jsonschema import Draft202012Validator
 from sqlalchemy import Engine
@@ -375,6 +375,64 @@ def _inject_prior_validation(
 _ALL_MUTATION_TOOL_NAMES: Final[frozenset[str]] = _MUTATION_TOOL_NAMES | _BLOB_MUTATION_TOOL_NAMES | _SECRET_MUTATION_TOOL_NAMES
 
 
+def _closed_root_schema(tool_name: str) -> dict[str, Any]:
+    """Return the tool's argument schema with a fail-closed root object."""
+    schema = cast(dict[str, Any], deep_thaw(_TOOL_DEFS_BY_NAME[tool_name]["parameters"]))
+    if isinstance(schema, dict) and schema.get("type") == "object" and "additionalProperties" not in schema:
+        schema = {**schema, "additionalProperties": False}
+    return schema
+
+
+def _schema_error_path(error: Any) -> str:
+    parts = ["arguments"]
+    for segment in error.absolute_path:
+        if isinstance(segment, int):
+            parts[-1] = f"{parts[-1]}[]"
+        elif isinstance(segment, str) and segment.isidentifier():
+            parts.append(segment)
+        else:
+            parts.append("<item>")
+    return ".".join(parts)
+
+
+def _json_type_label(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Iterable):
+        return " or ".join(str(item) for item in value)
+    return str(value)
+
+
+def _schema_error_summary(error: Any) -> str:
+    path = _schema_error_path(error)
+    if error.validator == "required" and isinstance(error.instance, Mapping):
+        required = tuple(str(item) for item in error.validator_value)
+        missing = tuple(item for item in required if item not in error.instance)
+        if missing:
+            plural = "properties" if len(missing) != 1 else "property"
+            return f"{path} is missing required {plural}: {', '.join(missing)}"
+    if error.validator == "additionalProperties":
+        return f"{path} contains unsupported properties"
+    if error.validator == "type":
+        return f"{path} must be of type {_json_type_label(error.validator_value)}"
+    if error.validator == "enum":
+        return f"{path} must be one of the declared values"
+    return f"{path} violates schema rule '{error.validator}'"
+
+
+def _validate_tool_arguments(tool_name: str, arguments: Mapping[str, Any], state: CompositionState) -> ToolResult | None:
+    schema = _closed_root_schema(tool_name)
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(arguments), key=lambda error: tuple(error.absolute_path))
+    if not errors:
+        return None
+    return _failure_result(state, f"Invalid arguments for tool '{tool_name}': {_schema_error_summary(errors[0])}.")
+
+
+def _requires_secret_context(tool_name: str) -> bool:
+    return tool_name in _SECRET_DISCOVERY_TOOLS or tool_name in _SECRET_MUTATION_TOOLS
+
+
 def _augment_with_plugin_schemas(
     result: ToolResult,
     tool_name: str,
@@ -505,6 +563,14 @@ def execute_tool(
     if handler is None:
         return _failure_result(state, f"Unknown tool: {tool_name}")
 
+    if tool_arguments_hash is not None:
+        argument_error = _validate_tool_arguments(tool_name, arguments, state)
+        if argument_error is not None:
+            return argument_error
+
+    if _requires_secret_context(tool_name) and (secret_service is None or user_id is None):
+        return _failure_result(state, "Secret tools require secret service context.")
+
     # ``current_validation`` carries the live state's ValidationSummary
     # into ``diff_pipeline`` so its delta against the baseline is computed
     # using the caller's pre-mutation validation rather than re-running
@@ -513,6 +579,7 @@ def execute_tool(
     context = ToolContext(
         catalog=catalog,
         data_dir=data_dir,
+        require_data_dir_for_paths=tool_arguments_hash is not None,
         session_engine=session_engine,
         session_id=session_id,
         secret_service=secret_service,

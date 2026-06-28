@@ -5612,17 +5612,12 @@ class TestSecretTools:
 
 
 class TestSecretToolsArgumentValidation:
-    """Tier-3 shape contract for the secret-ref handlers.
+    """Tier-3 shape contract for secret-ref dispatch.
 
     Pairs with ``TestSecretTools`` (semantic / state-mutation paths).  These
-    tests exercise the Pydantic argument-model layer that converts shape
-    failures into :class:`ToolArgumentError` — the same dispatch-layer
-    contract sources/blobs/outputs/sessions already satisfy.  Without this
-    layer, a malformed LLM call (wrong type, extra field, unknown ``target``
-    enum) would escape ``execute_tool`` as a bare exception and be
-    laundered by the compose loop's catch-all into
-    :class:`ComposerPluginCrashError` → HTTP 500, denying the LLM the
-    recoverable ARG_ERROR payload it needs to self-correct.
+    tests exercise the central JSON Schema dispatcher guard. Malformed LLM
+    calls (wrong type, extra field, unknown ``target`` enum) must fail before
+    handler dispatch without echoing attacker-controlled values.
     """
 
     def _svc(self) -> MagicMock:
@@ -5636,89 +5631,96 @@ class TestSecretToolsArgumentValidation:
         return svc
 
     def test_validate_secret_ref_wrong_type_for_name(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "validate_secret_ref",
-                {"name": 42},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": 42},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'validate_secret_ref'" in result.data["error"]
+        assert "type" in result.data["error"]
+        assert "42" not in result.data["error"]
 
     def test_validate_secret_ref_rejects_extra_field(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "validate_secret_ref",
-                {"name": "OPENROUTER_API_KEY", "bogus": "value"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": "OPENROUTER_API_KEY", "bogus": "value"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'validate_secret_ref'" in result.data["error"]
+        assert "unsupported" in result.data["error"]
+        assert "OPENROUTER_API_KEY" not in result.data["error"]
+        assert "value" not in result.data["error"]
 
     def test_wire_secret_ref_wrong_type_for_name(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {"name": 42, "target": "source", "option_key": "api_key"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {"name": 42, "target": "source", "option_key": "api_key"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "type" in result.data["error"]
+        assert "42" not in result.data["error"]
 
     def test_wire_secret_ref_unknown_target_enum(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {"name": "OPENROUTER_API_KEY", "target": "global", "option_key": "api_key"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {"name": "OPENROUTER_API_KEY", "target": "global", "option_key": "api_key"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "declared values" in result.data["error"]
+        assert "global" not in result.data["error"]
 
     def test_wire_secret_ref_rejects_extra_field(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {
-                    "name": "OPENROUTER_API_KEY",
-                    "target": "source",
-                    "option_key": "api_key",
-                    "bogus": "value",
-                },
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "source",
+                "option_key": "api_key",
+                "bogus": "value",
+            },
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "unsupported" in result.data["error"]
+        assert "OPENROUTER_API_KEY" not in result.data["error"]
+        assert "value" not in result.data["error"]
 
 
 # ---------------------------------------------------------------------------

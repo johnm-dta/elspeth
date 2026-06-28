@@ -1174,19 +1174,25 @@ def _validate_aggregation_trigger(trigger: Any) -> str | None:
 def _validate_source_path(
     options: Mapping[str, Any],
     data_dir: str | None,
+    *,
+    require_data_dir: bool = False,
 ) -> str | None:
     """S2: Validate that path/file options are under allowed source directories.
 
     Returns an error message if validation fails, None if OK.
     Uses Path.resolve() + is_relative_to() to defeat ../ traversal.
     """
-    if data_dir is None:
-        return None
-
-    allowed = allowed_source_directories(data_dir)
-
     for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
         if key in options:
+            if data_dir is None:
+                if not require_data_dir:
+                    return None
+                return (
+                    "Path violation (S2): source path options require data_dir "
+                    "for allowlist enforcement. Bind uploaded files through "
+                    "set_source_from_blob or provide the dispatcher data_dir."
+                )
+            allowed = allowed_source_directories(data_dir)
             resolved = resolve_data_path(options[key], data_dir)
             if not any(resolved.is_relative_to(d) for d in allowed):
                 return (
@@ -1690,6 +1696,9 @@ class ToolContext:
         data_dir: Base data directory enforced for S2 path allowlist checks
             on source/sink options. ``None`` when the caller is not a web
             request (legacy direct tests).
+        require_data_dir_for_paths: Fail closed when a source-local path
+            option appears without ``data_dir``. Enabled for audited web/LLM
+            dispatches.
         session_engine: SQLAlchemy engine for the session database. Required
             for blob tools to perform synchronous lookups; ``None`` for
             non-session callers.
@@ -1735,6 +1744,7 @@ class ToolContext:
 
     catalog: CatalogService
     data_dir: str | None = None
+    require_data_dir_for_paths: bool = False
     session_engine: Engine | None = None
     session_id: str | None = None
     secret_service: WebSecretResolver | None = None

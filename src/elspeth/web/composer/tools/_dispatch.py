@@ -28,6 +28,7 @@ from sqlalchemy import Engine
 from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
     ValidationSummary,
@@ -409,8 +410,9 @@ def _schema_error_summary(error: Any) -> str:
         required = tuple(str(item) for item in error.validator_value)
         missing = tuple(item for item in required if item not in error.instance)
         if missing:
+            missing_paths = tuple(f"{path}.{item}" for item in missing)
             plural = "properties" if len(missing) != 1 else "property"
-            return f"{path} is missing required {plural}: {', '.join(missing)}"
+            return f"{', '.join(missing_paths)} is missing required {plural}"
     if error.validator == "additionalProperties":
         return f"{path} contains unsupported properties"
     if error.validator == "type":
@@ -420,12 +422,33 @@ def _schema_error_summary(error: Any) -> str:
     return f"{path} violates schema rule '{error.validator}'"
 
 
-def _validate_tool_arguments(tool_name: str, arguments: Mapping[str, Any], state: CompositionState) -> ToolResult | None:
+def _schema_argument_model_name(tool_name: str) -> str:
+    return "".join(part.capitalize() for part in tool_name.split("_")) + "ArgumentsModel"
+
+
+def _schema_tool_argument_error(tool_name: str, error: Any) -> ToolArgumentError:
+    return ToolArgumentError(
+        argument=f"{tool_name} arguments",
+        expected=f"object conforming to {_schema_argument_model_name(tool_name)} ({_schema_error_summary(error)})",
+        actual_type="invalid_schema",
+        code="SCHEMA_VALIDATION",
+    )
+
+
+def _validate_tool_arguments(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    state: CompositionState,
+    *,
+    raise_on_error: bool = False,
+) -> ToolResult | None:
     schema = _closed_root_schema(tool_name)
     validator = Draft202012Validator(schema)
     errors = sorted(validator.iter_errors(arguments), key=lambda error: tuple(error.absolute_path))
     if not errors:
         return None
+    if raise_on_error:
+        raise _schema_tool_argument_error(tool_name, errors[0])
     return _failure_result(state, f"Invalid arguments for tool '{tool_name}': {_schema_error_summary(errors[0])}.")
 
 
@@ -492,6 +515,7 @@ def execute_tool(
     composer_provider: str | None = None,
     composer_skill_hash: str | None = None,
     tool_arguments_hash: str | None = None,
+    raise_schema_argument_errors: bool = False,
 ) -> ToolResult:
     """Execute a composition tool by name.
 
@@ -550,6 +574,10 @@ def execute_tool(
             the request.
         tool_arguments_hash: Canonical audited arguments hash for this tool
             call.
+        raise_schema_argument_errors: When true, audited declaration-schema
+            failures raise ``ToolArgumentError`` for compose-loop ARG_ERROR
+            routing. Direct callers keep the historical failed-``ToolResult``
+            contract by leaving this false.
     """
     all_handlers: dict[str, ToolHandler] = {
         **_DISCOVERY_TOOLS,
@@ -564,7 +592,12 @@ def execute_tool(
         return _failure_result(state, f"Unknown tool: {tool_name}")
 
     if tool_arguments_hash is not None:
-        argument_error = _validate_tool_arguments(tool_name, arguments, state)
+        argument_error = _validate_tool_arguments(
+            tool_name,
+            arguments,
+            state,
+            raise_on_error=raise_schema_argument_errors,
+        )
         if argument_error is not None:
             return argument_error
 

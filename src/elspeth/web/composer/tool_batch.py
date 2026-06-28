@@ -1109,6 +1109,7 @@ async def run_tool_batch(
                 composer_provider=_composer_provider,
                 composer_skill_hash=_composer_skill_hash,
                 tool_arguments_hash=_tool_arguments_hash,
+                raise_schema_argument_errors=True,
             )
 
         # ``_arg_error_payload`` is a module-level helper (F2 — testable

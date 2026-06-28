@@ -1011,7 +1011,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                         "from_node": {"type": "string"},
                         "to_node": {"type": "string"},
                         "edge_type": {"type": "string"},
-                        "label": {"type": "string"},
+                        "label": {"type": ["string", "null"]},
                     },
                     "required": ["id", "from_node", "to_node", "edge_type"],
                 },

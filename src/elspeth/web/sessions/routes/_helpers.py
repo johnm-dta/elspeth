@@ -133,7 +133,7 @@ from elspeth.web.composer.telemetry_phase8 import (
     record_session_switched,
 )
 from elspeth.web.composer.tools import _DATA_ERROR_KEY, execute_tool
-from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
 from elspeth.web.execution.schemas import RunAccounting, RunStatusResponse, ValidationResult
@@ -3759,7 +3759,7 @@ async def _dispatch_guided_respond(
         from elspeth.web.composer.guided.signoff import SignoffOutcome, run_wire_signoff, signoff_audit_event_name
 
         if not guided.profile.advisor_checkpoints:
-            yaml_text = generate_yaml(state)
+            yaml_text = generate_public_yaml(state)
             terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
             guided = _replace(guided, terminal=terminal)
             return state, guided, None
@@ -3828,7 +3828,7 @@ async def _dispatch_guided_respond(
             actor=user_id,
         )
         if decision.outcome is SignoffOutcome.COMPLETE:
-            yaml_text = generate_yaml(state)
+            yaml_text = generate_public_yaml(state)
             terminal = TerminalState(kind=TerminalKind.COMPLETED, reason=None, pipeline_yaml=yaml_text)
             guided = _replace(guided, terminal=terminal)
             return state, guided, None
@@ -4138,7 +4138,7 @@ __all__ = [
     "emit_turn_answered",
     "emit_turn_emitted",
     "execute_tool",
-    "generate_yaml",
+    "generate_public_yaml",
     "get_current_user",
     "get_rate_limiter",
     "handle_step_1_source",

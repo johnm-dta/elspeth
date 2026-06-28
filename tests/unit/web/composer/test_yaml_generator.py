@@ -13,7 +13,7 @@ from elspeth.web.composer.state import (
     PipelineMetadata,
     SourceSpec,
 )
-from elspeth.web.composer.yaml_generator import generate_pipeline_dict, generate_yaml
+from elspeth.web.composer.yaml_generator import generate_pipeline_dict, generate_public_pipeline_dict, generate_public_yaml, generate_yaml
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
 
 
@@ -506,6 +506,40 @@ class TestGenerateYaml:
         assert "mode" not in parsed["sources"]["source"]["options"]
         assert parsed["sources"]["source"]["options"]["path"] == "/data/input.txt"
         assert parsed["sources"]["source"]["options"]["column"] == "line"
+
+    def test_public_yaml_strips_blob_bound_source_storage_path(self) -> None:
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="text",
+                on_success="out",
+                options={
+                    "path": "/data/blobs/session/20b944e3_input.txt",
+                    "blob_ref": "20b944e3-fd46-434f-b9a2-4fb508db30f0",
+                    "mode": "bind_source",
+                    "column": "line",
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="discard",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(OutputSpec(name="out", plugin="csv", options={}, on_write_failure="discard"),),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        public_dict = generate_public_pipeline_dict(state)
+        public_yaml = generate_public_yaml(state)
+        public_options = public_dict["sources"]["source"]["options"]
+
+        assert public_dict == yaml.safe_load(public_yaml)
+        assert "path" not in public_options
+        assert "blob_ref" not in public_options
+        assert "mode" not in public_options
+        assert public_options["column"] == "line"
+        assert public_options["schema"] == {"mode": "observed"}
+        assert "/data/blobs/session/20b944e3_input.txt" not in public_yaml
+        assert generate_pipeline_dict(state)["sources"]["source"]["options"]["path"] == "/data/blobs/session/20b944e3_input.txt"
 
     def test_mode_retained_when_not_bind_source_marker(self) -> None:
         """A plugin-meaningful ``mode`` option (no blob-bind marker) is engine

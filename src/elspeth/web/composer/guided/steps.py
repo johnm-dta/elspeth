@@ -41,7 +41,7 @@ from elspeth.web.composer.tools import (
     _execute_set_source,
     _sync_get_blob_by_storage_path,
 )
-from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.composer.yaml_generator import generate_public_yaml
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,7 +400,7 @@ def handle_step_4_wire_confirm(
     if not validation.is_valid:
         return StepHandlerResult(state=state, session=session, tool_result=tool_result)
 
-    yaml_text = generate_yaml(state)
+    yaml_text = generate_public_yaml(state)
     terminal = TerminalState(
         kind=TerminalKind.COMPLETED,
         reason=None,

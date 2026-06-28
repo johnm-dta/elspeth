@@ -3,7 +3,7 @@
 Pure function. Same CompositionState always produces byte-identical YAML.
 Uses yaml.dump() with sort_keys=True for determinism.
 
-Layer: L3 (application). Imports from L3 (web/composer/state) only.
+Layer: L3 (application).
 
 Trust model: state_dict comes from CompositionState.to_dict() — our own
 serialization of our own frozen dataclasses. Fields are either always
@@ -15,6 +15,13 @@ Web-specific metadata keys (e.g., blob_ref for file provenance tracking)
 are filtered from options before YAML generation. These are UI-layer
 concerns that should not leak into engine configuration. Plugin configs
 use Pydantic with extra="forbid" — unknown keys cause validation failure.
+
+Public export/share/MCP YAML has one extra scrub: blob-bound source storage
+paths are omitted. HTTP export returns ``source_blob_ids`` so imports can
+re-bind an uploaded blob in the destination session; other public surfaces
+must not expose a server storage path as a path-only replay target. Runtime
+execution keeps the path because the engine still needs the local file path
+after blob ownership checks pass.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ import yaml
 
 from elspeth.web.composer.state import COMPOSER_NODE_TYPES, CompositionState
 from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
+from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS
 
 # Web-specific metadata keys that should NOT appear in engine YAML.
 # These are UI-layer concerns for provenance tracking, not plugin config.
@@ -32,23 +40,37 @@ from elspeth.web.interpretation_state import AUTHORING_METADATA_OPTION_KEYS
 _WEB_ONLY_OPTION_KEYS = frozenset({"blob_ref"}) | AUTHORING_METADATA_OPTION_KEYS
 
 
-def _strip_web_metadata(options: dict[str, Any]) -> dict[str, Any]:
+def _has_blob_binding(options: dict[str, Any]) -> bool:
+    return options.get("blob_ref") is not None
+
+
+def _has_bind_source_mode(options: dict[str, Any]) -> bool:
+    return options.get("mode") == "bind_source"
+
+
+def _strip_web_metadata(options: dict[str, Any], *, omit_blob_bound_source_paths: bool = False) -> dict[str, Any]:
     """Remove web-specific metadata keys from options dict.
 
     Returns a shallow copy with web-only keys removed.
     """
     stripped = {k: v for k, v in options.items() if k not in _WEB_ONLY_OPTION_KEYS}
-    if "blob_ref" in options and options["blob_ref"] is not None and "mode" in options and options["mode"] == "bind_source":
+    if _has_blob_binding(options) and _has_bind_source_mode(options):
         # The guard above proves ``mode`` is present in ``options``; ``mode`` is
         # not in _WEB_ONLY_OPTION_KEYS, so it survives into ``stripped`` — pop
         # it directly without a default (a missing key here would be a bug).
         stripped.pop("mode")
+    if omit_blob_bound_source_paths and _has_blob_binding(options):
+        for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+            stripped.pop(key, None)
     return stripped
 
 
-def _source_entry(source: dict[str, Any]) -> dict[str, Any]:
+def _source_entry(source: dict[str, Any], *, omit_blob_bound_source_paths: bool) -> dict[str, Any]:
     """Convert a serialized SourceSpec dict into runtime YAML shape."""
-    source_options = _strip_web_metadata(dict(source["options"]))
+    source_options = _strip_web_metadata(
+        dict(source["options"]),
+        omit_blob_bound_source_paths=omit_blob_bound_source_paths,
+    )
     source_options["on_validation_failure"] = source["on_validation_failure"]
     return {
         "plugin": source["plugin"],
@@ -57,7 +79,7 @@ def _source_entry(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
+def _generate_pipeline_dict(state: CompositionState, *, omit_blob_bound_source_paths: bool) -> dict[str, Any]:
     """Convert a CompositionState to ELSPETH's canonical pipeline dict.
 
     Maps CompositionState fields to the YAML structure expected by
@@ -88,7 +110,9 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
 
     sources = state_dict["sources"]
     if sources:
-        doc["sources"] = {name: _source_entry(source) for name, source in sources.items()}
+        doc["sources"] = {
+            name: _source_entry(source, omit_blob_bound_source_paths=omit_blob_bound_source_paths) for name, source in sources.items()
+        }
 
     # Transforms — filter nodes by type, access always-present fields directly.
     transforms = [n for n in state_dict["nodes"] if n["node_type"] == "transform"]
@@ -195,6 +219,16 @@ def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
     return doc
 
 
+def generate_pipeline_dict(state: CompositionState) -> dict[str, Any]:
+    """Convert a CompositionState to the runtime pipeline dict."""
+    return _generate_pipeline_dict(state, omit_blob_bound_source_paths=False)
+
+
+def generate_public_pipeline_dict(state: CompositionState) -> dict[str, Any]:
+    """Convert a CompositionState to public export/share/MCP pipeline dict."""
+    return _generate_pipeline_dict(state, omit_blob_bound_source_paths=True)
+
+
 def generate_yaml(state: CompositionState) -> str:
     """Convert a CompositionState to deterministic ELSPETH pipeline YAML.
 
@@ -212,4 +246,10 @@ def generate_yaml(state: CompositionState) -> str:
 
     # sort_keys=False preserves insertion order: source → transforms →
     # gates → aggregations → coalesce → sinks (the natural pipeline flow).
+    return yaml.dump(doc, default_flow_style=False, sort_keys=False)
+
+
+def generate_public_yaml(state: CompositionState) -> str:
+    """Convert a CompositionState to deterministic public export/share/MCP YAML."""
+    doc = generate_public_pipeline_dict(state)
     return yaml.dump(doc, default_flow_style=False, sort_keys=False)

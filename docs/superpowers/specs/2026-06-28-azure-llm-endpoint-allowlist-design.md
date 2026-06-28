@@ -148,9 +148,13 @@ or hostless endpoint fails closed with an endpoint-policy attribution.
   immediately after the `llm_base_url_policy` loop, mirroring its structure exactly
   (failed `ValidationCheck` + `_append_skipped_checks` + early `ValidationResult(
   is_valid=False, ...)` with `error_code="azure_llm_endpoint_not_allowed"`, else a
-  passed check). Read the allowlist defensively:
-  `getattr(settings, "allowed_azure_llm_endpoints", ("*.openai.azure.com",))` so
-  minimal/stub settings objects in tests still resolve a safe default.
+  passed check). Read the allowlist directly off settings —
+  `settings.allowed_azure_llm_endpoints` — exactly as `settings.data_dir` is read
+  elsewhere in `validate_pipeline`. The `ValidationSettings` Protocol declares the
+  attribute, so a conforming settings object always provides it; a
+  `getattr`-with-default would be a dead implicit default (no test or prod path hits
+  it, since tests build a real `WebSettings`), which the null-correctness doctrine
+  forbids.
 
 ### 4. Enforcement coverage
 

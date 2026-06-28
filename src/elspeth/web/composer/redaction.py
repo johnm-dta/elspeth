@@ -3120,6 +3120,38 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
 )
 
 
+def _is_declarative_response_repair_arguments_path(path: tuple[str, ...]) -> bool:
+    if not path or path[-1] != "arguments":
+        return False
+    if path[0] == "validation" and "graph_repair_suggestions" in path and "tool_sequence" in path:
+        return True
+    return len(path) >= 3 and path[0] == "data" and path[1] == "repair"
+
+
+def _redact_declarative_known_response_value(value: Any, *, path: tuple[str, ...]) -> Any:
+    """Scrub nested repair-argument payloads inside declarative ToolResult keys.
+
+    Declarative response policies close only the top-level ToolResult envelope
+    (``success`` / ``validation`` / ``data`` / etc.). Some known envelopes carry
+    nested, open repair-tool-call argument mappings. Those are structurally
+    useful audit metadata, but the values can contain credential/config payload,
+    so they reuse the same structural ``<repair-args:...>`` summarizer as the
+    type-driven validation shadow model.
+    """
+    if _is_declarative_response_repair_arguments_path(path):
+        if isinstance(value, Mapping):
+            argument_keys: dict[str, object] = {str(key): child for key, child in value.items()}
+            return _summarize_repair_arguments(argument_keys)
+        return REDACTED_SENSITIVE_NO_SUMMARIZER
+    if isinstance(value, Mapping):
+        return {key: _redact_declarative_known_response_value(child, path=(*path, str(key))) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_redact_declarative_known_response_value(item, path=(*path, "*")) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_declarative_known_response_value(item, path=(*path, "*")) for item in value)
+    return value
+
+
 def redact_tool_call_response(
     tool_name: str,
     response: dict[str, Any],
@@ -3145,7 +3177,8 @@ def redact_tool_call_response(
         - In ``policy.sensitive_response_keys`` → ``REDACTED_SENSITIVE_NO_SUMMARIZER``
           (declarative entries have no response_summarizers; the argument_summarizers
           mapping covers only argument keys).
-        - In ``policy.known_response_keys`` but not sensitive → passthrough.
+        - In ``policy.known_response_keys`` but not sensitive → passthrough after
+          bounded repair-guidance scrubbing.
         - In neither → ``REDACTED_UNKNOWN_RESPONSE_KEY`` (fail-closed; counter fires).
 
     **Failure modes (all raise AuditIntegrityError):**
@@ -3200,8 +3233,9 @@ def redact_tool_call_response(
             # the no-summarizer sentinel.
             redacted[key] = REDACTED_SENSITIVE_NO_SUMMARIZER
         elif key in policy.known_response_keys:
-            # Known, non-sensitive: passthrough.
-            redacted[key] = value
+            # Known, non-sensitive: preserve the declared ToolResult envelope
+            # while scrubbing nested repair-tool-call arguments.
+            redacted[key] = _redact_declarative_known_response_value(value, path=(key,))
         else:
             # Unknown key: fail-closed sentinel + telemetry counter (W6).
             redacted[key] = REDACTED_UNKNOWN_RESPONSE_KEY

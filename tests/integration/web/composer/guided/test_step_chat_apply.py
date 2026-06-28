@@ -251,6 +251,105 @@ def test_step_2_chat_handler_rejection_falls_back_to_advisory_no_mutation(compos
     assert before["composition_state"]["outputs"] == after["composition_state"]["outputs"]
 
 
+def _fake_resolve_source_response(*, options: dict, assistant_message: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content=None,
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="resolve_source",
+                                arguments=json.dumps(
+                                    {
+                                        "resolution": "source",
+                                        "plugin": "json",
+                                        "filename": "urls.json",
+                                        "mime_type": "application/json",
+                                        "content": '[{"url": "https://example.test/a"}]',
+                                        "options": options,
+                                        "observed_columns": ["url"],
+                                        "sample_rows": [{"url": "https://example.test/a"}],
+                                        "assistant_message": assistant_message,
+                                    }
+                                ),
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
+def test_step_1_chat_resend_strips_server_owned_keys_and_recommits(composer_test_client: TestClient) -> None:
+    """Regression: a SECOND Send on step_1 (without accepting the decision) must
+    SUCCEED, not 400.
+
+    After the first build the committed source is stamped with server-owned
+    option keys (``blob_ref``; ``source_authoring`` for blob-backed sources). On
+    re-Send the resolver sees that source and parrots those keys back into
+    ``resolve_source``. ``set_source`` REJECTS caller-supplied
+    blob_ref/source_authoring, so the re-commit used to 400 "Step 1 source commit
+    failed". The Tier-3 parser now strips the class, so the second commit
+    succeeds end-to-end (real parser -> route's ``{schema, **options, path}``
+    spread -> real ``handle_step_1_source``).
+    """
+    client = composer_test_client
+    session_id = _create_session(client)
+    # Persist state (so guided turns are recorded) and pick the json source so
+    # the chat-apply branch has an existing step_1 record to resolve against.
+    _seed_blob(client, session_id)
+    _get_guided(client, session_id)
+    _respond(client, session_id, chosen=["json"])
+
+    # First Send: clean resolution -> real commit -> step_1_result enriched with
+    # the server-owned blob_ref by handle_step_1_source.
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=AsyncMock(
+            return_value=_fake_resolve_source_response(
+                options={"schema": {"mode": "observed"}},
+                assistant_message="Built the URL source.",
+            )
+        ),
+    ):
+        status1, body1 = _post_chat(client, session_id, message="ten urls please", step_index="step_1_source")
+    assert status1 == 200, body1
+    assert body1["guided_session"]["step"] == "step_1_source"
+    assert body1["next_turn"]["type"] == "schema_form"
+
+    # Second Send: the model parrots the server-owned keys it now sees in the
+    # committed current_source. Pre-fix this 400'd; post-fix the parser strips them.
+    echoed = "Rebuilt the URL source."
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=AsyncMock(
+            return_value=_fake_resolve_source_response(
+                options={
+                    "schema": {"mode": "observed"},
+                    "blob_ref": "deadbeefdeadbeefdeadbeefdeadbeef",
+                    "source_authoring": {"creation_modality": "verbatim", "content_hash": "0" * 64},
+                },
+                assistant_message=echoed,
+            )
+        ),
+    ):
+        status2, body2 = _post_chat(client, session_id, message="same again", step_index="step_1_source")
+
+    # The re-commit SUCCEEDS. Discriminator vs the advisory-degradation path —
+    # which ALSO returns 200: success re-renders the schema_form and echoes the
+    # resolver's message; degradation returns next_turn=None + the synthetic
+    # unavailable message. Asserting status==200 alone would NOT distinguish them.
+    assert status2 == 200, body2
+    assert body2["assistant_message"] != _SYNTHETIC_UNAVAILABLE_MESSAGE
+    assert body2["assistant_message"] == echoed
+    assert body2["next_turn"] is not None
+    assert body2["next_turn"]["type"] == "schema_form"
+    assert body2["guided_session"]["step"] == "step_1_source"
+
+
 def test_step_3_chat_reproposes_in_place_without_committing(composer_test_client: TestClient) -> None:
     client = composer_test_client
     session_id = _create_session(client)

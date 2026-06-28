@@ -58,12 +58,15 @@ two lenses; `resume.py` only 0.88M. What caches well is (a) the large, file-inde
 block (`CLAUDE.md` + `AGENTS.md` + 4 skill files, inlined by `load_context`) and (b) intra-call
 turn-over-turn reuse. Both are present **regardless of execution ordering**.
 
-**Cross-lens `[source]` warming is real but secondary.** Run-order is `solution` (lens 1, cold) →
-`security` (lens 2, warm). In 4 of 5 files lens 2's cache % exceeds lens 1's, and `resume.py` shows
-it unmistakably: **38.9% → 87.4%** once lens 1 had warmed the `[context][source]` prefix. But the
-magnitude is small next to the `[context]`-level reuse that file-parallel execution gets for free,
-and it is easily masked by investigation-depth differences (`sink.py`: lens 2 did *less* reading, so
-its cache % is marginally lower despite the warm prefix).
+**Cross-lens warming is real but secondary.** Run-order is `solution` (lens 1, cold) → `security`
+(lens 2, warm). In 4 of 5 files lens 2's cache % exceeds lens 1's, and `resume.py` shows it
+unmistakably: **38.9% → 87.4%** once lens 1 ran first. *Attribution hedge:* this warming is **not
+purely the static `[source]` prefix** — much of it is the agentic cache (lens 2 re-reading the same
+neighbouring files lens 1 already pulled in during its investigation). Either way the benefit
+accrues from running a file's lenses in sequence, but it should not be read as a clean `[source]`
+measurement. The magnitude is small next to the `[context]`-level reuse that file-parallel execution
+gets for free, and it is easily masked by investigation-depth differences (`sink.py`: lens 2 did
+*less* reading, so its cache % is marginally lower despite the warm prefix).
 
 > **Measurement caveat (honest):** the clean `[source]`-marginal number the plan asked for is **not
 > cleanly extractable** from this run — agentic investigation confounds `input_tokens`. The

@@ -849,6 +849,7 @@ _APPLY_PIPELINE_RECIPE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["recipe_name", "slots"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -1081,6 +1082,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["nodes", "edges", "outputs"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -1151,6 +1153,7 @@ _GET_PIPELINE_STATE_DECLARATION = ToolDeclaration(
             },
         },
         "required": [],
+        "additionalProperties": False,
     },
     cacheable=False,
 )

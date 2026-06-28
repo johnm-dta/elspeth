@@ -93,6 +93,7 @@ _SET_OUTPUT_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["sink_name", "plugin", "options"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -117,6 +118,7 @@ _REMOVE_OUTPUT_DECLARATION = ToolDeclaration(
             "sink_name": {"type": "string", "description": "Sink name to remove."},
         },
         "required": ["sink_name"],
+        "additionalProperties": False,
     },
 )
 
@@ -305,6 +307,7 @@ _PATCH_OUTPUT_OPTIONS_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["sink_name", "patch"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )

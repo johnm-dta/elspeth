@@ -3045,12 +3045,16 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_LIST_SECRET_REFS_REASON,
+                known_argument_keys=(),
+                redact_unknown_argument_keys=True,
             )
         ),
         "validate_secret_ref": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_VALIDATE_SECRET_REF_REASON,
+                known_argument_keys=("name",),
+                redact_unknown_argument_keys=True,
             )
         ),
         # _SECRET_MUTATION_TOOLS, 1 entry.
@@ -3058,6 +3062,8 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_WIRE_SECRET_REF_REASON,
+                known_argument_keys=("name", "target", "target_id", "option_key"),
+                redact_unknown_argument_keys=True,
             )
         ),
         # request_interpretation_review (session-aware async tool).

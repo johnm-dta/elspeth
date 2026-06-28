@@ -83,7 +83,7 @@ _LIST_SOURCES_DECLARATION = ToolDeclaration(
     handler=_handle_list_sources,
     kind=ToolKind.DISCOVERY,
     description="List available source plugins with name and summary.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -141,6 +141,7 @@ _SET_SOURCE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["plugin", "on_success", "options", "on_validation_failure"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -628,6 +629,7 @@ _SET_SOURCE_FROM_BLOB_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id", "on_success"],
+        "additionalProperties": False,
     },
     blob_store_only=False,
     augments_on_failure=True,
@@ -916,6 +918,7 @@ _PATCH_SOURCE_OPTIONS_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["patch"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -970,6 +973,7 @@ _CLEAR_SOURCE_DECLARATION = ToolDeclaration(
             },
         },
         "required": [],
+        "additionalProperties": False,
     },
 )
 

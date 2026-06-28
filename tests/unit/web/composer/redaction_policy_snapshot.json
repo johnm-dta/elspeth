@@ -90,7 +90,7 @@
     "shape": "declarative"
   },
   "list_secret_refs": {
-    "hash": "cc9fc8773cbd375c6ac2387b48326bf2388233c1f597b505ec1d5f3fcb4e7796",
+    "hash": "5ad6cfc1307b4f1b115f25622a5f732a154a4a178b13c8076f5855b73d3fe6f1",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
@@ -195,7 +195,7 @@
     "shape": "declarative"
   },
   "validate_secret_ref": {
-    "hash": "2d863c05bea8111f5bbabcf8e78cd03936843e9ee83af01173344b356ea45191",
+    "hash": "7920d5ad1c265d746080d8b9f36cf0e0f1d29ff7f8c52bc9d26cffdc337c2186",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
@@ -205,7 +205,7 @@
     "shape": "declarative"
   },
   "wire_secret_ref": {
-    "hash": "4c4729df3511c3cbbf5e95eaef3d435a1ed50c79108fa9d8d9d12f963ae13dcb",
+    "hash": "53f3dfe09f52395edb30f8c272a352bf8dfa1a326949810d56cae1a45adb5d16",
     "sensitive_path_count": 0,
     "shape": "declarative"
   }

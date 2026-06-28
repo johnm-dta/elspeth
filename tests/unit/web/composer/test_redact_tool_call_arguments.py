@@ -506,6 +506,30 @@ def test_blob_mutation_unknown_argument_keys_are_sentinelised(
         assert result[key] == value
 
 
+def test_wire_secret_ref_unknown_argument_keys_are_sentinelised() -> None:
+    """Secret mutation arguments are persisted before handler validation; unknown keys must fail closed."""
+    tel = NoopRedactionTelemetry()
+    raw_payload = "RAW_EXTRA_SECRET_PAYLOAD: sk-should-not-persist"
+
+    result = redact_tool_call_arguments(
+        "wire_secret_ref",
+        {
+            "name": "OPENROUTER_API_KEY",
+            "target": "source",
+            "option_key": "api_key",
+            "secret_value": raw_payload,
+        },
+        telemetry=tel,
+    )
+
+    assert "secret_value" not in result
+    assert result[REDACTED_UNKNOWN_ARGUMENTS_FIELD] == REDACTED_UNKNOWN_ARGUMENT_KEY
+    assert raw_payload not in str(result)
+    assert result["name"] == "OPENROUTER_API_KEY"
+    assert result["target"] == "source"
+    assert result["option_key"] == "api_key"
+
+
 @pytest.mark.parametrize(
     ("tool_name", "arguments", "passthrough_keys", "summarized_keys"),
     [

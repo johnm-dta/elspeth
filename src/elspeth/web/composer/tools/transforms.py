@@ -116,7 +116,7 @@ _LIST_TRANSFORMS_DECLARATION = ToolDeclaration(
     handler=_handle_list_transforms,
     kind=ToolKind.DISCOVERY,
     description="List available transform plugins with name and summary.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -134,7 +134,7 @@ _LIST_SINKS_DECLARATION = ToolDeclaration(
     handler=_handle_list_sinks,
     kind=ToolKind.DISCOVERY,
     description="List available sink plugins with name and summary.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -231,6 +231,7 @@ _UPSERT_NODE_DECLARATION_JSON_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["id", "node_type", "input"],
+    "additionalProperties": False,
 }
 
 
@@ -314,6 +315,7 @@ _UPSERT_EDGE_DECLARATION = ToolDeclaration(
             "label": {"type": ["string", "null"], "description": "Display label."},
         },
         "required": ["id", "from_node", "to_node", "edge_type"],
+        "additionalProperties": False,
         "examples": [
             {
                 "id": "e_judge_layers_error",
@@ -346,6 +348,7 @@ _REMOVE_NODE_DECLARATION = ToolDeclaration(
             "id": {"type": "string", "description": "Node ID to remove."},
         },
         "required": ["id"],
+        "additionalProperties": False,
     },
 )
 
@@ -369,6 +372,7 @@ _REMOVE_EDGE_DECLARATION = ToolDeclaration(
             "id": {"type": "string", "description": "Edge ID to remove."},
         },
         "required": ["id"],
+        "additionalProperties": False,
     },
 )
 
@@ -399,6 +403,7 @@ _SET_METADATA_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["patch"],
+        "additionalProperties": False,
     },
 )
 
@@ -874,6 +879,7 @@ _PATCH_NODE_OPTIONS_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["node_id", "patch"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )

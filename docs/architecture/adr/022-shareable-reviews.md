@@ -170,8 +170,8 @@ The signing key is per-deployment, MUST be ≥32 bytes (HMAC-SHA256's digest siz
 
 ## References
 
-* Plan: [docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md](../../composer/ux-redesign-2026-05/19a-phase-6a-backend.md)
-* Sibling plan: [docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md](../../composer/ux-redesign-2026-05/19b-phase-6b-frontend.md)
-* Design: [docs/composer/ux-redesign-2026-05/09-completion-gestures.md](../../composer/ux-redesign-2026-05/09-completion-gestures.md)
-* Precedent: [docs/composer/ux-redesign-2026-05/18-phase-5b-surface-llm-interpretation.md](../../composer/ux-redesign-2026-05/18-phase-5b-surface-llm-interpretation.md) (interpretation_events_table)
+* Plan: [docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/19a-phase-6a-backend.md)
+* Sibling plan: [docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/19b-phase-6b-frontend.md)
+* Design: [docs/composer/ux-redesign-2026-05/09-completion-gestures.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/09-completion-gestures.md)
+* Precedent: [docs/composer/ux-redesign-2026-05/18-phase-5b-surface-llm-interpretation.md](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/18-phase-5b-surface-llm-interpretation.md) (interpretation_events_table)
 * Runbook: [docs/guides/sharing-pipelines.md](../../guides/sharing-pipelines.md)

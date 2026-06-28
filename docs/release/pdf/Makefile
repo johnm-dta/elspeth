@@ -5,11 +5,9 @@
 # edit-rebuild loops where you want only the changed PDF to recompile.
 #
 # Targets:
-#   make             — build all seven PDFs (incremental).
+#   make             — build all five PDFs (incremental).
 #   make all         — same as `make`.
 #   make exec        — build the executive-summary PDF only.
-#   make progress    — build the progress PDF only.
-#   make velocity    — build the velocity PDF only.
 #   make architecture — build the architecture reference PDF only.
 #   make composer    — build the composer reference PDF only.
 #   make guarantees  — build the assurance guarantees PDF only.
@@ -38,20 +36,16 @@ COMMON_DEPS  := tokens.typ theme.typ data.typ
 
 PDFS := \
   $(OUT)/elspeth-executive-summary.pdf \
-  $(OUT)/elspeth-progress-rc1-to-rc5.pdf \
-  $(OUT)/elspeth-velocity-rc1-to-rc5.pdf \
   $(OUT)/elspeth-architecture.pdf \
   $(OUT)/elspeth-composer.pdf \
   $(OUT)/elspeth-guarantees.pdf \
   $(OUT)/elspeth-data-trust.pdf
 
-.PHONY: all exec progress velocity architecture composer guarantees data-trust verify clean distclean
+.PHONY: all exec architecture composer guarantees data-trust verify clean distclean
 
 all: $(PDFS)
 
 exec: $(OUT)/elspeth-executive-summary.pdf
-progress: $(OUT)/elspeth-progress-rc1-to-rc5.pdf
-velocity: $(OUT)/elspeth-velocity-rc1-to-rc5.pdf
 architecture: $(OUT)/elspeth-architecture.pdf
 composer: $(OUT)/elspeth-composer.pdf
 guarantees: $(OUT)/elspeth-guarantees.pdf
@@ -67,12 +61,6 @@ $(OUT):
 # Per-document rules. Keep them explicit (rather than a pattern rule)
 # so the stem-to-output-name mapping stays auditable in one place.
 $(OUT)/elspeth-executive-summary.pdf: executive-summary.typ $(COMMON_DEPS) | $(OUT)
-	$(TYPST) compile $(TYPST_FLAGS) $< $@
-
-$(OUT)/elspeth-progress-rc1-to-rc5.pdf: progress.typ $(COMMON_DEPS) | $(OUT)
-	$(TYPST) compile $(TYPST_FLAGS) $< $@
-
-$(OUT)/elspeth-velocity-rc1-to-rc5.pdf: velocity.typ $(COMMON_DEPS) | $(OUT)
 	$(TYPST) compile $(TYPST_FLAGS) $< $@
 
 $(OUT)/elspeth-architecture.pdf: architecture.typ $(COMMON_DEPS) | $(OUT)

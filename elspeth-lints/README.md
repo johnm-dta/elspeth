@@ -14,7 +14,7 @@ For the rule taxonomy and lifecycle rationale, see
 [the elspeth-lints rationale](../docs/elspeth-lints/rationale.md).
 
 For the implementation order, see
-[the elspeth-lints master implementation order](../docs/plans/2026-05-19-elspeth-lints-master-implementation-order.md).
+[the elspeth-lints master implementation order](../docs-archive/2026-06-28-docs-cleanout/docs/plans/2026-05-19-elspeth-lints-master-implementation-order.md).
 
 For rule authorship and protocol details, see
 [the rule author guide](../docs/elspeth-lints/rule-author-guide.md) and

@@ -698,8 +698,11 @@ class TestI2ChainSolverTransientFailure:
         assert validation_result["is_valid"] is False
         errors = validation_result["errors"]
         assert isinstance(errors, list) and len(errors) == 1
-        # The error message names the exception class only — no str(exc).
-        assert errors[0]["message"] == "Chain solver failed: APIError", errors
+        # The wrapper records the exception class only, in the structured
+        # ``error_class`` field — no str(exc), and no free-form ``message``
+        # (the guided audit emitter drops ``message`` by allowlist).
+        assert errors[0]["error_class"] == "APIError", errors
+        assert "message" not in errors[0], errors
 
     @pytest.mark.parametrize(
         ("exc_factory", "exc_name"),
@@ -769,7 +772,8 @@ class TestI2ChainSolverTransientFailure:
         assert isinstance(validation_result, dict)
         errors = validation_result["errors"]
         assert isinstance(errors, list) and len(errors) == 1
-        assert errors[0]["message"] == f"Chain solver failed: {exc_name}", errors
+        assert errors[0]["error_class"] == exc_name, errors
+        assert "message" not in errors[0], errors
 
     def test_step_3_repair_solve_malformed_response_auto_drops(self, composer_test_client: TestClient) -> None:
         """Site 3: an IndexError (empty choices) on the repair re-solve auto-drops.
@@ -815,7 +819,8 @@ class TestI2ChainSolverTransientFailure:
             f"through the downstream repair-failure path); got {len(drop_invocations)}"
         )
         errors = drop_invocations[0]["validation_result"]["errors"]
-        assert errors[0]["message"] == "Chain solver failed: IndexError", errors
+        assert errors[0]["error_class"] == "IndexError", errors
+        assert "message" not in errors[0], errors
 
     def test_chain_solver_wrong_tool_name_auto_drops(self, composer_test_client: TestClient) -> None:
         """LLM-shape failure: a tool_call name other than ``emit_turn`` is an
@@ -868,11 +873,13 @@ class TestI2ChainSolverTransientFailure:
         assert terminal["reason"] == "solver_exhausted"
 
         # The drop event must carry the exc_class in validation_result.errors
-        # (per the wrapper contract) — no exc str leakage.
+        # via the structured ``error_class`` field (per the wrapper contract) —
+        # no exc str leakage, and no free-form ``message``.
         drop_invocations = _extract_guided_drop_invocations(composer_test_client, session_id)
         assert len(drop_invocations) == 1, drop_invocations
         errors = drop_invocations[0]["validation_result"]["errors"]
-        assert errors[0]["message"] == "Chain solver failed: ChainSolverResponseShapeError", errors
+        assert errors[0]["error_class"] == "ChainSolverResponseShapeError", errors
+        assert "message" not in errors[0], errors
 
     def test_chain_solver_wrong_turn_type_auto_drops(self, composer_test_client: TestClient) -> None:
         """LLM-shape failure: a turn_type other than ``propose_chain`` is an

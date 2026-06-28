@@ -202,10 +202,16 @@ async def solve_chain_with_auto_drop(
             exc_class=type(exc).__name__,
             frames=_safe_frame_strings(exc),
         )
+        # Record the wrapper class name in the structured ``error_class`` field
+        # (NOT free-form ``message``): the guided audit emitter sanitises
+        # validation_result by allowlist and drops ``message``, because that
+        # channel also carries repair-validation text that can leak paths /
+        # raw exception strings. ``type(exc).__name__`` is a safe class name and
+        # survives the allowlist, so the auto-drop reason stays auditable.
         validation_result_payload: Mapping[str, Any] = {
             "is_valid": False,
             "errors": [
-                {"message": f"Chain solver failed: {type(exc).__name__}"},
+                {"error_class": type(exc).__name__},
             ],
         }
         new_session, _terminal, directives = mark_solver_exhausted(

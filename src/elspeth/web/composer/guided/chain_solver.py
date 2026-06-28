@@ -14,7 +14,10 @@ from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
-from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError
+
+# Redundant alias marks this an explicit re-export (mypy no_implicit_reexport):
+# back-compat call sites still do ``from ...chain_solver import ChainSolverResponseShapeError``.
+from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError as ChainSolverResponseShapeError
 from elspeth.web.composer.guided.prompts import (
     build_repair_addendum,
     build_revise_addendum,

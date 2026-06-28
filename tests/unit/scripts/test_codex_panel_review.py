@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from scripts import codex_panel_review as cpr
@@ -255,3 +256,64 @@ def test_gate_rewrites_sidecar_last_so_not_stale(tmp_path):
     cpr.apply_panel_evidence_gate(sidecar, lens="security-architect")  # rewrites sidecar last
     findings = _structured_findings(md)
     assert findings is not None and findings[0]["priority"] == "P1"
+
+
+def test_run_file_lenses_loops_gates_and_aggregates(tmp_path, monkeypatch):
+    import json
+
+    try:
+        from codex_audit_common import structured_output_path_for_report
+    except ModuleNotFoundError:
+        from scripts.codex_audit_common import structured_output_path_for_report
+
+    # run_file_lenses reads the target's source, so z.py must exist on disk.
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "z.py").write_text("def z(): ...", encoding="utf-8")
+
+    calls = []
+
+    async def fake_run_codex_once(**kwargs):
+        # Simulate codex: write the structured sidecar then the .md (engine order).
+        calls.append(kwargs["output_path"])
+        out = kwargs["output_path"]
+        sidecar = structured_output_path_for_report(out)
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "markdown_report": "n",
+                    "findings": [
+                        {
+                            "priority": "P1",
+                            "lens": "x",
+                            "category": "security",
+                            "summary": "s",
+                            "evidence": [{"path": "src/z.py", "line": 1, "claim": "c"}],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        out.write_text("narration\n", encoding="utf-8")
+        return {"input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 10, "total_tokens": 110}
+
+    monkeypatch.setattr(cpr, "run_codex_once", fake_run_codex_once)
+
+    stats = asyncio.run(
+        cpr.run_file_lenses(
+            file_path=tmp_path / "src" / "z.py",
+            lenses=["security-architect", "solution-architect"],
+            output_dir=tmp_path / "out",
+            repo_root=tmp_path,
+            context="CTX",
+            model=None,
+            reasoning_effort=None,
+            rate_limiter=None,
+            log_path=tmp_path / "log.md",
+            log_lock=asyncio.Lock(),
+        )
+    )
+    assert len(calls) == 2  # one call per lens, serial
+    assert stats["cached_input_tokens"] == 120  # 60 * 2 aggregated
+    assert stats["failed"] == 0

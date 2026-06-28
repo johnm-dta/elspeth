@@ -12,7 +12,27 @@ dual-import shim, so this module runs both as a script (``scripts/`` on
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
+
+# Dual-import shim: bare import works when run as a script (scripts/ on sys.path);
+# the package form works when pytest imports this as scripts.codex_panel_review.
+# Helpers are pulled in at their first use-site (runner below) so an unused-import
+# autofix never strips them. See docs/superpowers/plans/2026-06-28-codex-panel-review-foundation.md.
+try:
+    from codex_audit_common import (  # type: ignore[import-not-found]
+        append_log,
+        run_codex_once,
+        structured_output_path_for_report,
+        utc_now,
+    )
+except ModuleNotFoundError:  # pragma: no cover
+    from scripts.codex_audit_common import (
+        append_log,
+        run_codex_once,
+        structured_output_path_for_report,
+        utc_now,
+    )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LENSES_DIR = Path(__file__).resolve().parent / "codex_lenses"
@@ -138,3 +158,79 @@ def apply_panel_evidence_gate(sidecar_path: Path, *, lens: str) -> int:
     # Unconditional rewrite (last) — see docstring.
     sidecar_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return downgraded
+
+
+async def run_file_lenses(
+    *,
+    file_path: Path,
+    lenses: list[str],
+    output_dir: Path,
+    repo_root: Path,
+    context: str,
+    model: str | None,
+    reasoning_effort: str | None,
+    rate_limiter,
+    log_path: Path,
+    log_lock,
+) -> dict[str, int]:
+    """Run a file's lenses SERIALLY (file-major), so lens 2..N reuse lens 1's
+    warm [context][source] prompt-cache prefix. Stock run_codex_once; the panel
+    gate runs after each lens."""
+    file_source = file_path.read_text(encoding="utf-8")
+    relative = file_path.relative_to(repo_root)
+    agg = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "gated": 0, "failed": 0}
+
+    for lens in lenses:
+        output_path = (output_dir / relative).with_suffix((output_dir / relative).suffix + f".{lens}.md")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        persona = load_persona(lens)
+        prompt = build_layered_prompt(
+            context=context,
+            file_source=file_source,
+            file_path=str(relative.as_posix()),
+            persona=persona,
+            lens=lens,
+        )
+        start = time.monotonic()
+        status, note = "ok", ""
+        try:
+            if rate_limiter is not None:
+                # public method on AsyncRequestRateLimiter (codex_audit_common.py:274);
+                # avoids importing the private _await_rate_limiter, which has no
+                # dual-import shim and would ModuleNotFoundError under pytest.
+                await rate_limiter.acquire()
+            usage = await run_codex_once(
+                file_path=file_path,
+                output_path=output_path,
+                model=model,
+                prompt=prompt,
+                repo_root=repo_root,
+                file_display=str(relative.as_posix()),
+                output_display=str(output_path.relative_to(repo_root).as_posix())
+                if output_path.is_relative_to(repo_root)
+                else str(output_path),
+                output_schema=PANEL_FINDING_SCHEMA,
+                structured_markdown_field="markdown_report",
+                reasoning_effort=reasoning_effort,
+            )
+            gated = apply_panel_evidence_gate(structured_output_path_for_report(output_path), lens=lens)
+            agg["gated"] += gated
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens"):
+                agg[key] += int(usage.get(key, 0))
+            note = f"gated={gated}; cached={usage.get('cached_input_tokens', 0)}"
+        except Exception as exc:  # capture-and-continue so the pilot completes
+            status, note = "failed", str(exc)[:200]
+            agg["failed"] += 1
+        finally:
+            await append_log(
+                log_path=log_path,
+                log_lock=log_lock,
+                timestamp=utc_now(),
+                status=status,
+                file_display=str(relative.as_posix()),
+                output_display=f"lens={lens}",
+                model=model or "default",
+                duration_s=time.monotonic() - start,
+                note=note,
+            )
+    return agg

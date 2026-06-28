@@ -574,6 +574,7 @@ _WIRE_BLOB_INLINE_REF_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["field_path", "blob_id"],
+        "additionalProperties": False,
     },
 )
 
@@ -1057,6 +1058,7 @@ _CREATE_BLOB_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["filename", "mime_type", "content"],
+        "additionalProperties": False,
     },
     blob_store_only=True,
 )
@@ -1537,6 +1539,7 @@ _UPDATE_BLOB_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id", "content"],
+        "additionalProperties": False,
     },
     blob_store_only=True,
 )
@@ -1664,6 +1667,7 @@ _DELETE_BLOB_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
     blob_store_only=True,
 )
@@ -1811,6 +1815,7 @@ _GET_BLOB_CONTENT_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
 )
 

@@ -1645,6 +1645,151 @@ class TestRemoveEdge:
         assert r2.success is True
         assert len(r2.updated_state.edges) == 0
 
+    @pytest.mark.parametrize(
+        ("edge_type", "field_name"),
+        [
+            ("on_success", "on_success"),
+            ("on_error", "on_error"),
+        ],
+    )
+    def test_remove_sink_edge_clears_node_runtime_route(self, edge_type: str, field_name: str) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with_node = execute_tool(
+            "upsert_node",
+            {
+                "id": "t1",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "input": "in",
+                "on_success": "normal_rows",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}},
+            },
+            state,
+            catalog,
+        )
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            with_node.updated_state,
+            catalog,
+        )
+        routed = execute_tool(
+            "upsert_edge",
+            {"id": "e1", "from_node": "t1", "to_node": "main", "edge_type": edge_type},
+            with_output.updated_state,
+            catalog,
+        )
+        assert routed.success is True
+        assert getattr(next(n for n in routed.updated_state.nodes if n.id == "t1"), field_name) == "main"
+
+        result = execute_tool("remove_edge", {"id": "e1"}, routed.updated_state, catalog)
+
+        assert result.success is True
+        assert len(result.updated_state.edges) == 0
+        assert getattr(next(n for n in result.updated_state.nodes if n.id == "t1"), field_name) is None
+
+    def test_remove_sink_edge_clears_source_runtime_route(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with_source = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            with_source.updated_state,
+            catalog,
+        )
+        routed = execute_tool(
+            "upsert_edge",
+            {"id": "e1", "from_node": "source", "to_node": "main", "edge_type": "on_success"},
+            with_output.updated_state,
+            catalog,
+        )
+        assert routed.success is True
+        assert _default_source(routed.updated_state).on_success == "main"
+
+        result = execute_tool("remove_edge", {"id": "e1"}, routed.updated_state, catalog)
+
+        assert result.success is True
+        assert len(result.updated_state.edges) == 0
+        assert _default_source(result.updated_state).on_success == "discard"
+
+    def test_remove_gate_sink_edges_clears_route_and_fork_runtime_routes(self) -> None:
+        state = _empty_state().with_node(
+            NodeSpec(
+                id="g1",
+                node_type="gate",
+                plugin=None,
+                input="in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="row['flag']",
+                routes={"true": "old_true", "false": "old_false"},
+                fork_to=("existing",),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        catalog = _mock_catalog()
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        with_route = execute_tool(
+            "upsert_edge",
+            {"id": "route_edge", "from_node": "g1", "to_node": "main", "edge_type": "route_true"},
+            with_output.updated_state,
+            catalog,
+        )
+        with_fork = execute_tool(
+            "upsert_edge",
+            {"id": "fork_edge", "from_node": "g1", "to_node": "main", "edge_type": "fork"},
+            with_route.updated_state,
+            catalog,
+        )
+        gate = next(n for n in with_fork.updated_state.nodes if n.id == "g1")
+        assert dict(gate.routes or {}) == {"true": "main", "false": "old_false"}
+        assert gate.fork_to == ("existing", "main")
+
+        without_route = execute_tool("remove_edge", {"id": "route_edge"}, with_fork.updated_state, catalog)
+        without_fork = execute_tool("remove_edge", {"id": "fork_edge"}, without_route.updated_state, catalog)
+
+        assert without_fork.success is True
+        assert len(without_fork.updated_state.edges) == 0
+        gate = next(n for n in without_fork.updated_state.nodes if n.id == "g1")
+        assert dict(gate.routes or {}) == {"false": "old_false"}
+        assert gate.fork_to == ("existing",)
+
     def test_remove_nonexistent_fails(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -1887,6 +2032,34 @@ class TestSetOutput:
         assert "path" in result.data["error"]
         assert "ANY_SECRET" in result.data["error"]
         assert "only credential-bearing fields" in result.data["error"]
+
+    def test_set_output_rejects_literal_database_url_credentials(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        literal_url = "postgresql://db.example.invalid/elspeth"
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "database",
+                "options": {
+                    "url": literal_url,
+                    "table": "events",
+                    "schema": {"mode": "observed"},
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert "main:url" in result.data["credential_fields"]
+        assert literal_url not in repr(result.to_dict())
+        assert "secret_ref" in result.data["error"]
 
 
 class TestRemoveOutput:
@@ -12260,6 +12433,100 @@ class TestPreviewProofStep:
                     node_type="transform",
                     plugin="value_transform",
                     input="rows",
+                    on_success="classified_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "operations": [{"target": "financial_only", "expression": "row['financial_barrier']"}],
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="summarize",
+                    node_type="aggregation",
+                    plugin="batch_stats",
+                    input="classified_rows",
+                    on_success="out",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "value_field": "financial_barrier",
+                        "group_by": "community",
+                        "compute_mean": True,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        mismatch = [d for d in diagnostics if d["code"] == "aggregation_numeric_value_field_type_mismatch_against_source_schema"]
+        assert mismatch, diagnostics
+        assert mismatch[0]["severity"] == "blocking"
+        assert mismatch[0]["evidence_locator"]["node_id"] == "summarize"
+        assert mismatch[0]["evidence_locator"]["field"] == "financial_barrier"
+        assert mismatch[0]["evidence_locator"]["observed_type"] == "str"
+        assert result.data["is_valid"] is False
+
+    def test_observed_named_csv_batch_stats_string_value_field_blocks_through_transform(self) -> None:
+        """Named CSV sources must participate in source-field proof walk-back."""
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        csv_content = b"respondent_id,community,financial_barrier\nR-1,Community-A,yes\nR-2,Community-B,no\n"
+        self.csv_storage_path.write_bytes(csv_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                )
+            )
+
+        base_state = self._state_with_csv_source(schema_mode="observed")
+        named_csv_source = SourceSpec(
+            plugin="csv",
+            on_success="survey_rows",
+            options={
+                "blob_ref": self.csv_blob_id,
+                "schema": {"mode": "observed"},
+            },
+            on_validation_failure="discard",
+        )
+        state = (
+            base_state.without_source()
+            .with_named_source("survey_csv", named_csv_source)
+            .with_node(
+                NodeSpec(
+                    id="classify",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="survey_rows",
                     on_success="classified_rows",
                     on_error="discard",
                     options={

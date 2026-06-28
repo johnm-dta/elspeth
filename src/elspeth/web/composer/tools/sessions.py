@@ -295,6 +295,8 @@ def _execute_set_pipeline(
                 state,
                 component_id=_source_component_id(source_name),
                 component_type="source",
+                plugin_type="source",
+                plugin_name=src_plugin,
                 options=src_options,
             )
             if credential_error is not None:
@@ -344,6 +346,8 @@ def _execute_set_pipeline(
             state,
             component_id="source",
             component_type="source",
+            plugin_type="source",
+            plugin_name=src_plugin,
             options=legacy_src_options,
         )
         if credential_error is not None:
@@ -462,6 +466,8 @@ def _execute_set_pipeline(
             state,
             component_id=node_id,
             component_type="node",
+            plugin_type="transform" if node_plugin is not None else None,
+            plugin_name=node_plugin,
             options=node_options,
         )
         if credential_error is not None:
@@ -558,6 +564,8 @@ def _execute_set_pipeline(
             state,
             component_id=out_name,
             component_type="output",
+            plugin_type="sink",
+            plugin_name=out_plugin,
             options=out_options,
         )
         if credential_error is not None:
@@ -841,6 +849,7 @@ _APPLY_PIPELINE_RECIPE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["recipe_name", "slots"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -1073,6 +1082,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["nodes", "edges", "outputs"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -1143,6 +1153,7 @@ _GET_PIPELINE_STATE_DECLARATION = ToolDeclaration(
             },
         },
         "required": [],
+        "additionalProperties": False,
     },
     cacheable=False,
 )
@@ -1620,8 +1631,8 @@ async def _check_interpretation_rate_limits(
             argument="user_term",
             expected=f"at most {per_term_cap} interpretation requests per term in this composition",
             actual_type=(
-                f"the requested term would be surfaced {per_term_count + 1} times — use a direct "
-                f"interpretation in the prompt template instead"
+                f"per-term cap would be exceeded on request {per_term_count + 1}; use a direct interpretation "
+                "in the prompt template instead"
             ),
             # Compose-loop discriminant (F-6): the rate-cap branch is the
             # trigger for the

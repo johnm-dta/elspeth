@@ -49,6 +49,7 @@ _TUTORIAL_RUN_TIMEOUT_SECONDS = 120.0
 _TUTORIAL_RUN_POLL_SECONDS = 0.25
 _TUTORIAL_SESSION_TITLE_PREFIX = "hello-world ("
 _ABANDONED_SESSION_TITLE_PREFIX = "abandoned-"
+_TUTORIAL_RUN_FAILED_PUBLIC_DETAIL = "The tutorial run did not complete successfully."
 
 
 class TutorialRunIntegrityError(RuntimeError):
@@ -134,7 +135,7 @@ async def _run_live_tutorial(
             detail={
                 "error_type": "tutorial_live_run_failed",
                 "status": run_record.status,
-                "detail": run_record.error or "The tutorial run did not complete successfully.",
+                "detail": _TUTORIAL_RUN_FAILED_PUBLIC_DETAIL,
             },
         )
     if run_record.landscape_run_id is None:

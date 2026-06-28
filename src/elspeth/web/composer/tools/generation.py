@@ -28,7 +28,7 @@ from elspeth.plugins.transforms.llm.model_catalog import (
     read_litellm_model_list,
 )
 from elspeth.web.catalog.protocol import PluginKind
-from elspeth.web.composer._producer_resolver import ProducerResolver
+from elspeth.web.composer._producer_resolver import ProducerResolver, is_source_producer_id
 from elspeth.web.composer.source_inspection import (
     SourceInspectionFacts,
     derive_extra_column_risk,
@@ -265,6 +265,7 @@ _GET_PLUGIN_SCHEMA_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["plugin_type", "name"],
+        "additionalProperties": False,
     },
     cacheable=True,
 )
@@ -284,7 +285,7 @@ _GET_EXPRESSION_GRAMMAR_DECLARATION = ToolDeclaration(
     handler=_handle_get_expression_grammar,
     kind=ToolKind.DISCOVERY,
     description="Get the gate expression syntax reference.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -487,6 +488,7 @@ _EXPLAIN_VALIDATION_ERROR_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["error_text"],
+        "additionalProperties": False,
     },
     cacheable=True,
 )
@@ -633,6 +635,7 @@ _GET_PLUGIN_ASSISTANCE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["plugin_type", "plugin_name"],
+        "additionalProperties": False,
     },
     cacheable=True,
 )
@@ -700,7 +703,7 @@ _GET_AUDIT_INFO_DECLARATION = ToolDeclaration(
         "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
         "that is operator-internal and intentionally not surfaced to the LLM."
     ),
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 
@@ -829,6 +832,7 @@ _LIST_MODELS_DECLARATION = ToolDeclaration(
             },
         },
         "required": [],
+        "additionalProperties": False,
     },
     cacheable=True,
 )
@@ -1142,7 +1146,7 @@ def _source_field_reaches_connection_without_type_change(
         producer = resolver.find_producer_for(current)
         if producer is None:
             return False
-        if producer.producer_id == "source":
+        if is_source_producer_id(producer.producer_id):
             return True
 
         node = resolver.get_node(producer.producer_id)
@@ -1755,7 +1759,7 @@ _PREVIEW_PIPELINE_DECLARATION = ToolDeclaration(
     "validation status, source summary, and node/output overview "
     "without executing. Use this to confirm the pipeline is set up "
     "correctly before running.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=False,
 )
 
@@ -1798,7 +1802,7 @@ _DIFF_PIPELINE_DECLARATION = ToolDeclaration(
     description="Show what changed since the session was loaded or created. "
     "Returns added, removed, and modified nodes/edges/outputs, "
     "plus warnings introduced or resolved.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=False,
 )
 

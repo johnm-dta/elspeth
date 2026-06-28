@@ -2811,6 +2811,28 @@ def _summarize_advisor_schema_excerpt(value: str) -> str:
     return f"<advisor-schema-excerpt:{len(value)}-chars>"
 
 
+_TOOL_RESULT_REQUIRED_RESPONSE_KEYS: tuple[str, ...] = (
+    "success",
+    "validation",
+    "affected_nodes",
+    "version",
+)
+_TOOL_RESULT_OPTIONAL_RESPONSE_KEYS: tuple[str, ...] = (
+    "runtime_preflight",
+    "validation_delta",
+    "post_call_hints",
+    "plugin_schemas",
+)
+
+
+def _tool_result_response_keys(*, data: bool) -> tuple[str, ...]:
+    """Return the shared top-level ``ToolResult.to_dict`` response envelope."""
+    keys = _TOOL_RESULT_REQUIRED_RESPONSE_KEYS
+    if data:
+        keys = (*keys, "data")
+    return (*keys, *_TOOL_RESULT_OPTIONAL_RESPONSE_KEYS)
+
+
 # Manifest entries are grouped by tool family. The binding is rebuilt as a
 # new ``MappingProxyType`` per the spec §4.2.1
 # rule "subsequent task waves extend the manifest by building a new
@@ -2939,20 +2961,13 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 },
                 redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
-                # and the failure branches reachable from _execute_upsert_node:
+                # Shared ToolResult.to_dict() envelope plus the data key emitted
+                # by failure branches reachable from _execute_upsert_node:
                 # _mutation_result → always emits success/validation/affected_nodes/version;
                 # _failure_result → adds data={"error": ...};
                 # _credential_wiring_contract_failure → adds data={error, credential_fields,
-                #   components, repair}.  runtime_preflight and validation_delta are not set
-                # by any reachable code path for this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                    "data",
-                ),
+                #   components, repair}.
+                known_response_keys=_tool_result_response_keys(data=True),
             )
         ),
         "upsert_edge": ToolRedaction(
@@ -3008,16 +3023,11 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 argument_summarizers={"patch": _summarize_set_metadata_patch},
                 redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428).
-                # _execute_set_metadata always calls _mutation_result with no data and no
-                # prior_validation, so the response always has exactly these four keys.
-                # runtime_preflight and validation_delta are unreachable from this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                ),
+                # Shared ToolResult.to_dict() envelope. _execute_set_metadata
+                # currently calls _mutation_result without data, so data remains
+                # excluded while optional ToolResult augmentation keys stay
+                # centrally covered.
+                known_response_keys=_tool_result_response_keys(data=False),
             )
         ),
         "set_output": ToolRedaction(
@@ -3032,20 +3042,13 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
                 argument_summarizers={"options": _summarize_set_source_options},
                 redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=False,
-                # known_response_keys derived from ToolResult.to_dict() (tools.py:399-428)
-                # and the failure branches reachable from _execute_set_output:
+                # Shared ToolResult.to_dict() envelope plus the data key emitted
+                # by failure branches reachable from _execute_set_output:
                 # _mutation_result → success/validation/affected_nodes/version;
                 # _failure_result → adds data={"error": ...};
                 # _credential_wiring_contract_failure → adds data={error, credential_fields,
-                #   components, repair}.  runtime_preflight and validation_delta are not set
-                # by any reachable code path for this handler.
-                known_response_keys=(
-                    "success",
-                    "validation",
-                    "affected_nodes",
-                    "version",
-                    "data",
-                ),
+                #   components, repair}.
+                known_response_keys=_tool_result_response_keys(data=True),
             )
         ),
         # _BLOB_DISCOVERY_TOOLS, 5 entries (4 declarative + 1 type-driven).
@@ -3086,12 +3089,16 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
         # _BLOB_MUTATION_TOOLS remaining, 2 entries.
         "delete_blob": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("blob_id",),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_DELETE_BLOB_REASON,
             )
         ),
         "wire_blob_inline_ref": ToolRedaction(
             policy=ToolRedactionPolicy(
+                known_argument_keys=("field_path", "blob_id", "encoding"),
+                redact_unknown_argument_keys=True,
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_WIRE_BLOB_INLINE_REF_REASON,
             )
@@ -3101,12 +3108,16 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_LIST_SECRET_REFS_REASON,
+                known_argument_keys=(),
+                redact_unknown_argument_keys=True,
             )
         ),
         "validate_secret_ref": ToolRedaction(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_VALIDATE_SECRET_REF_REASON,
+                known_argument_keys=("name",),
+                redact_unknown_argument_keys=True,
             )
         ),
         # _SECRET_MUTATION_TOOLS, 1 entry.
@@ -3114,6 +3125,8 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             policy=ToolRedactionPolicy(
                 handles_no_sensitive_data=True,
                 handles_no_sensitive_data_reason_struct=_WIRE_SECRET_REF_REASON,
+                known_argument_keys=("name", "target", "target_id", "option_key"),
+                redact_unknown_argument_keys=True,
             )
         ),
         # request_interpretation_review (session-aware async tool).
@@ -3184,6 +3197,38 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
 )
 
 
+def _is_declarative_response_repair_arguments_path(path: tuple[str, ...]) -> bool:
+    if not path or path[-1] != "arguments":
+        return False
+    if path[0] == "validation" and "graph_repair_suggestions" in path and "tool_sequence" in path:
+        return True
+    return len(path) >= 3 and path[0] == "data" and path[1] == "repair"
+
+
+def _redact_declarative_known_response_value(value: Any, *, path: tuple[str, ...]) -> Any:
+    """Scrub nested repair-argument payloads inside declarative ToolResult keys.
+
+    Declarative response policies close only the top-level ToolResult envelope
+    (``success`` / ``validation`` / ``data`` / etc.). Some known envelopes carry
+    nested, open repair-tool-call argument mappings. Those are structurally
+    useful audit metadata, but the values can contain credential/config payload,
+    so they reuse the same structural ``<repair-args:...>`` summarizer as the
+    type-driven validation shadow model.
+    """
+    if _is_declarative_response_repair_arguments_path(path):
+        if isinstance(value, Mapping):
+            argument_keys: dict[str, object] = {str(key): child for key, child in value.items()}
+            return _summarize_repair_arguments(argument_keys)
+        return REDACTED_SENSITIVE_NO_SUMMARIZER
+    if isinstance(value, Mapping):
+        return {key: _redact_declarative_known_response_value(child, path=(*path, str(key))) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_redact_declarative_known_response_value(item, path=(*path, "*")) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_declarative_known_response_value(item, path=(*path, "*")) for item in value)
+    return value
+
+
 def redact_tool_call_response(
     tool_name: str,
     response: dict[str, Any],
@@ -3209,7 +3254,8 @@ def redact_tool_call_response(
         - In ``policy.sensitive_response_keys`` → ``REDACTED_SENSITIVE_NO_SUMMARIZER``
           (declarative entries have no response_summarizers; the argument_summarizers
           mapping covers only argument keys).
-        - In ``policy.known_response_keys`` but not sensitive → passthrough.
+        - In ``policy.known_response_keys`` but not sensitive → passthrough after
+          bounded repair-guidance scrubbing.
         - In neither → ``REDACTED_UNKNOWN_RESPONSE_KEY`` (fail-closed; counter fires).
 
     **Failure modes (all raise AuditIntegrityError):**
@@ -3264,8 +3310,9 @@ def redact_tool_call_response(
             # the no-summarizer sentinel.
             redacted[key] = REDACTED_SENSITIVE_NO_SUMMARIZER
         elif key in policy.known_response_keys:
-            # Known, non-sensitive: passthrough.
-            redacted[key] = value
+            # Known, non-sensitive: preserve the declared ToolResult envelope
+            # while scrubbing nested repair-tool-call arguments.
+            redacted[key] = _redact_declarative_known_response_value(value, path=(key,))
         else:
             # Unknown key: fail-closed sentinel + telemetry counter (W6).
             redacted[key] = REDACTED_UNKNOWN_RESPONSE_KEY

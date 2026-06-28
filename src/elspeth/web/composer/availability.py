@@ -15,6 +15,12 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from elspeth.web.composer.provider_config import (
+    PROVIDER_REQUIRED_ENV_KEYS,
+    infer_provider_from_model_name,
+    infer_provider_from_unprefixed_model_name,
+)
+
 if TYPE_CHECKING:
     from elspeth.web.composer.service import ComposerServiceImpl
 
@@ -54,13 +60,7 @@ def compute_availability(service: ComposerServiceImpl) -> ComposerAvailability:
     startup side effects in web lifespans, while the actual composer call
     path still validates provider requests through LiteLLM.
     """
-    from elspeth.web.composer.service import (
-        _PROVIDER_REQUIRED_ENV_KEYS,
-        _infer_provider_from_model_name,
-        _infer_provider_from_unprefixed_model_name,
-    )
-
-    provider = _infer_provider_from_model_name(service._model) or _infer_provider_from_unprefixed_model_name(service._model)
+    provider = infer_provider_from_model_name(service._model) or infer_provider_from_unprefixed_model_name(service._model)
     if provider is None:
         return ComposerAvailability(
             available=False,
@@ -72,14 +72,14 @@ def compute_availability(service: ComposerServiceImpl) -> ComposerAvailability:
             ),
         )
 
-    if provider not in _PROVIDER_REQUIRED_ENV_KEYS:
+    if provider not in PROVIDER_REQUIRED_ENV_KEYS:
         return ComposerAvailability(
             available=False,
             model=service._model,
             provider=provider,
             reason=f"Composer model {service._model} is unavailable: provider {provider!r} has no configured environment contract.",
         )
-    required_keys = _PROVIDER_REQUIRED_ENV_KEYS[provider]
+    required_keys = PROVIDER_REQUIRED_ENV_KEYS[provider]
 
     missing_keys = tuple(key for key in required_keys if key not in os.environ or not os.environ[key])
     if not missing_keys:

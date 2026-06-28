@@ -18,7 +18,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID
 
 from elspeth.contracts.composer_progress import ComposerProgressEvent, ComposerProgressSink
@@ -43,6 +43,27 @@ from elspeth.web.composer.audit import (
     finish_plugin_crash,
     finish_success,
 )
+from elspeth.web.composer.discovery_cache import (
+    CachedDiscoveryPayload as _CachedDiscoveryPayload,
+)
+from elspeth.web.composer.discovery_cache import (
+    RuntimePreflightCache as _RuntimePreflightCache,
+)
+from elspeth.web.composer.discovery_cache import (
+    cached_discovery_payload as _cached_discovery_payload,
+)
+from elspeth.web.composer.discovery_cache import (
+    make_cache_key as _make_cache_key,
+)
+from elspeth.web.composer.discovery_cache import (
+    result_from_cached_discovery_payload as _result_from_cached_discovery_payload,
+)
+from elspeth.web.composer.discovery_cache import (
+    serialize_tool_result as _serialize_tool_result,
+)
+from elspeth.web.composer.discovery_cache import (
+    tool_result_mutated_composition_state as _tool_result_mutated_composition_state,
+)
 from elspeth.web.composer.llm_response_parsing import safe_response_model
 from elspeth.web.composer.progress import (
     emit_progress,
@@ -58,16 +79,8 @@ from elspeth.web.composer.protocol import (
     ComposerServiceError,
     ToolArgumentError,
 )
-from elspeth.web.composer.service import (
-    _MAX_PENDING_PROPOSALS_PER_TURN,
-    _arg_error_payload,
-    _cached_discovery_payload,
-    _make_cache_key,
-    _result_from_cached_discovery_payload,
-    _serialize_tool_result,
-    _tool_result_mutated_composition_state,
-)
 from elspeth.web.composer.state import CompositionState, ValidationSummary
+from elspeth.web.composer.tool_error_payloads import arg_error_payload as _arg_error_payload
 from elspeth.web.composer.tools import (
     RuntimePreflight,
     ToolResult,
@@ -82,15 +95,14 @@ from elspeth.web.composer.tools import (
 from elspeth.web.execution.schemas import ValidationResult
 
 if TYPE_CHECKING:
-    from elspeth.web.composer.service import (
-        ComposerServiceImpl,
-        _CachedDiscoveryPayload,
-        _RuntimePreflightCache,
-    )
+    from elspeth.web.composer.service import ComposerServiceImpl
     from elspeth.web.sessions.protocol import (
         ComposerSessionPreferencesRecord,
         SessionServiceProtocol,
     )
+
+
+_MAX_PENDING_PROPOSALS_PER_TURN: Final[int] = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -1273,7 +1285,7 @@ async def run_tool_batch(
             _append_tool_outcome(
                 response=None,
                 error_class=type(tool_exc).__name__,
-                error_message=str(tool_exc),
+                error_message=type(tool_exc).__name__,
                 post_version=state.version,
             )
             plugin_crash = ComposerPluginCrashError.capture(

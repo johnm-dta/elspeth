@@ -80,17 +80,16 @@ class WorkflowProfile:
 
 EMPTY_PROFILE = WorkflowProfile(
     coaching=False,
-    advisor_checkpoints=False,
+    advisor_checkpoints=True,
     recipe_match=True,
     bookends=False,
 )
 
 TUTORIAL_PROFILE = WorkflowProfile(
     coaching=True,
-    # Match live guided (EMPTY_PROFILE.advisor_checkpoints=False): the tutorial is
-    # the normal guided flow, not a divergent variant. The terminal advisor
-    # sign-off is a nondeterministic frontier-model gate that re-flags a passive
-    # demo of a known-good pipeline (e.g. the web->LLM prompt-injection-shield
+    # Tutorial is the explicit demo bypass. The terminal advisor sign-off is a
+    # nondeterministic frontier-model gate that re-flags a passive demo of a
+    # known-good pipeline (e.g. the web->LLM prompt-injection-shield
     # recommendation), blocking wire completion with no harness-reachable escape.
     advisor_checkpoints=False,
     recipe_match=True,

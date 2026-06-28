@@ -15,7 +15,7 @@
     "shape": "type_driven"
   },
   "delete_blob": {
-    "hash": "f8fc60d599d435c05c7de139a3aeb28f163201a32215639b66e20451a5e59b8b",
+    "hash": "64aecb1a7ac479a05ce1478612d026e699f53bae8bf65287841c93a047897b3a",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
@@ -90,7 +90,7 @@
     "shape": "declarative"
   },
   "list_secret_refs": {
-    "hash": "cc9fc8773cbd375c6ac2387b48326bf2388233c1f597b505ec1d5f3fcb4e7796",
+    "hash": "5ad6cfc1307b4f1b115f25622a5f732a154a4a178b13c8076f5855b73d3fe6f1",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
@@ -155,12 +155,12 @@
     "shape": "type_driven"
   },
   "set_metadata": {
-    "hash": "28aa93a2593840ab824c881447b4901e2ebd4ddbf23b3b6d3ec02a844b700004",
+    "hash": "8449060c98b7f2ef4833198e649a0ce7589f81e0e7c86d446d974ff654cb1268",
     "sensitive_path_count": 1,
     "shape": "declarative"
   },
   "set_output": {
-    "hash": "fe46d596b97de4ad8db629af2c3c59dbcdf1c4a4b1d8bf3b35709d202076430d",
+    "hash": "050be0ce234b0e9fb2a7614aafd5afdf5af32b66cf4b2306bd71a8f448d81b53",
     "sensitive_path_count": 1,
     "shape": "declarative"
   },
@@ -190,22 +190,22 @@
     "shape": "declarative"
   },
   "upsert_node": {
-    "hash": "2acc230cdb103a527779804999c13c54a1eca2d3d5421b5085208fa0b920811b",
+    "hash": "746323ef6312eee717ae9476ad4cd62330163b1f876a84d508c0045591a83874",
     "sensitive_path_count": 3,
     "shape": "declarative"
   },
   "validate_secret_ref": {
-    "hash": "2d863c05bea8111f5bbabcf8e78cd03936843e9ee83af01173344b356ea45191",
+    "hash": "7920d5ad1c265d746080d8b9f36cf0e0f1d29ff7f8c52bc9d26cffdc337c2186",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
   "wire_blob_inline_ref": {
-    "hash": "8eebedf2cdfff2202f6f9f16db56c3c9215530d8be593302cc5eaa7531fcd5ad",
+    "hash": "6764beb5df85d19755283e9c5ecd87662e067b2d1066a494e80cf4bf19822443",
     "sensitive_path_count": 0,
     "shape": "declarative"
   },
   "wire_secret_ref": {
-    "hash": "4c4729df3511c3cbbf5e95eaef3d435a1ed50c79108fa9d8d9d12f963ae13dcb",
+    "hash": "53f3dfe09f52395edb30f8c272a352bf8dfa1a326949810d56cae1a45adb5d16",
     "sensitive_path_count": 0,
     "shape": "declarative"
   }

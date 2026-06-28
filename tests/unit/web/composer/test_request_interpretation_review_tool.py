@@ -1214,9 +1214,10 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
     for legitimate per-site churn.
     """
     session_id = uuid4()
+    sensitive_term = "private_health_condition"
 
     # Seed a composition state with 4 LLM nodes, all carrying placeholders for
-    # ``"cool"``. The writer-boundary check at create_pending_interpretation_event
+    # the same sensitive term. The writer-boundary check at create_pending_interpretation_event
     # reads composition_states.nodes inside its locked transaction and validates
     # each affected_node_id; all four must be present from the outset because
     # ``composition_state_id`` is fixed across the iterations.
@@ -1233,7 +1234,7 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
         )
     multi_node_state = CompositionState(
         source=None,
-        nodes=tuple(_llm_node(node_id=f"rate_node_{i}") for i in range(4)),
+        nodes=tuple(_llm_node(node_id=f"rate_node_{i}", term=sensitive_term) for i in range(4)),
         edges=(),
         outputs=(),
         metadata=PipelineMetadata(),
@@ -1256,7 +1257,7 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
             arguments={
                 "affected_node_id": f"rate_node_{i}",
                 "kind": "vague_term",
-                "user_term": "cool",
+                "user_term": sensitive_term,
                 "llm_draft": f"Draft {i}",
             },
             state=multi_node_state,
@@ -1275,12 +1276,12 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
 
     # 4th surfacing — distinct affected_node_id so dedup does not catch it.
     # The per-term cap is the structural bound that fires.
-    with pytest.raises(ToolArgumentError, match=r"per term|user_term"):
+    with pytest.raises(ToolArgumentError, match=r"per term|user_term") as exc_info:
         await _handle_request_interpretation_review(
             arguments={
                 "affected_node_id": "rate_node_3",
                 "kind": "vague_term",
-                "user_term": "cool",
+                "user_term": sensitive_term,
                 "llm_draft": "Draft 4",
             },
             state=multi_node_state,
@@ -1294,6 +1295,8 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
             list_interpretation_events=service.list_interpretation_events,
             **_provenance_kwargs(),
         )
+    assert sensitive_term not in str(exc_info.value)
+    assert sensitive_term not in exc_info.value.actual_type
 
 
 @pytest.mark.asyncio

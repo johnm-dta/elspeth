@@ -13,6 +13,7 @@ Plan task: Phase 2 / Task 7
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any
 
 import pytest
@@ -424,6 +425,108 @@ def test_get_blob_content_populated_validation_envelope_redacts_only_repair_argu
     # affected_consumers descriptor — a non-sensitive structural field — may
     # legitimately echo the new input name).
     assert "'input': 'shared_to_t1'" not in str(result)
+
+
+def test_declarative_tool_result_redacts_nested_repair_arguments() -> None:
+    """Declarative response policies must still descend into repair guidance.
+
+    ``upsert_node`` keeps the ToolResult envelope declarative: top-level
+    ``validation`` and ``data`` are known response keys, but both can carry
+    nested credential-repair tool calls with open ``arguments`` mappings.
+    Those mappings must be structurally summarized before persistence, not
+    copied through with credential material intact.
+    """
+    sentinel = "sk-test-declarative-nested-secret"
+    response = {
+        "success": False,
+        "validation": {
+            "is_valid": False,
+            "errors": [],
+            "warnings": [],
+            "suggestions": [],
+            "semantic_contracts": [],
+            "graph_repair_suggestions": [
+                {
+                    "code": "credential_wiring_required",
+                    "connection": "source_to_enrich",
+                    "strategy": "wire_secret_ref",
+                    "reason": "Credential field must be wired by reference.",
+                    "affected_consumers": [
+                        {"id": "enrich", "current_input": "source", "new_input": "source_to_enrich"},
+                    ],
+                    "tool_sequence": [
+                        {
+                            "tool": "upsert_node",
+                            "arguments": {
+                                "id": "enrich",
+                                "options": {"api_key": sentinel},
+                            },
+                        },
+                    ],
+                },
+            ],
+        },
+        "affected_nodes": ["enrich"],
+        "version": 4,
+        "data": {
+            "error": "credential wiring required",
+            "repair": {
+                "tool_sequence": [
+                    {
+                        "tool": "wire_secret_ref",
+                        "arguments": {
+                            "name": "OPENAI_API_KEY",
+                            "target": "node",
+                            "target_id": "enrich",
+                            "option_key": "api_key",
+                            "proof": sentinel,
+                        },
+                    },
+                ],
+                "arguments": {"api_key": sentinel},
+            },
+        },
+    }
+
+    result = redact_tool_call_response("upsert_node", response, telemetry=NoopRedactionTelemetry())
+
+    assert result["validation"]["graph_repair_suggestions"][0]["tool_sequence"][0]["arguments"] == "<repair-args:id,options>"
+    repair = result["data"]["repair"]
+    assert repair["tool_sequence"][0]["arguments"] == "<repair-args:name,option_key,proof,target,target_id>"
+    assert repair["arguments"] == "<repair-args:api_key>"
+    assert sentinel not in json.dumps(result, sort_keys=True)
+
+
+def test_declarative_tool_result_preserves_shared_optional_envelope_keys() -> None:
+    """Declarative ToolResult policies share the full ``ToolResult.to_dict`` envelope."""
+    response = {
+        "success": False,
+        "validation": {
+            "is_valid": False,
+            "errors": [],
+            "warnings": [],
+            "suggestions": [],
+            "semantic_contracts": [],
+            "graph_repair_suggestions": [],
+        },
+        "affected_nodes": [],
+        "version": 7,
+        "data": {"error": "invalid options"},
+        "post_call_hints": ["Call get_plugin_schema for source/csv before retrying."],
+        "plugin_schemas": {
+            "source/csv": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        },
+    }
+
+    result = redact_tool_call_response("upsert_node", response, telemetry=NoopRedactionTelemetry())
+
+    assert result["post_call_hints"] == response["post_call_hints"]
+    assert result["plugin_schemas"] == response["plugin_schemas"]
+    assert REDACTED_UNKNOWN_RESPONSE_KEY not in json.dumps(result, sort_keys=True)
 
 
 # ---------------------------------------------------------------------------

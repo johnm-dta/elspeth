@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, cast
 from elspeth.contracts.errors import AuditIntegrityError, FailedTurnMetadata
 from elspeth.web.composer._compose_loop_carriers import _PersistOutcome, _ToolOutcome
 from elspeth.web.composer.protocol import ComposerPluginCrashError
-from elspeth.web.composer.service import _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS
+from elspeth.web.composer.tool_error_payloads import INVALID_TOOL_ARGUMENTS_REDACTION_STATUS
 from elspeth.web.sessions._persist_payload import RedactedToolRow
 
 if TYPE_CHECKING:
@@ -83,7 +83,7 @@ async def persist_turn_audit(
             decoded_args = deep_thaw(decoded_args_by_call_id[tc.id])
         elif tool_outcome.error_class is not None:
             decoded_args = {
-                "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+                "_redaction_status": INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
                 "error_class": tool_outcome.error_class,
             }
         else:
@@ -99,7 +99,7 @@ async def persist_turn_audit(
                 if tool_outcome.error_class is None:
                     raise
                 persisted_arguments = {
-                    "_redaction_status": _INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
+                    "_redaction_status": INVALID_TOOL_ARGUMENTS_REDACTION_STATUS,
                     "error_class": tool_outcome.error_class,
                 }
         else:

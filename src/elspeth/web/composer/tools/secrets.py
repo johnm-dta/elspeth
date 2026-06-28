@@ -129,7 +129,7 @@ _LIST_SECRET_REFS_DECLARATION = ToolDeclaration(
     handler=_handle_list_secret_refs,
     kind=ToolKind.SECRET_DISCOVERY,
     description="List available secret references (API keys, credentials). Shows names and scopes, never values.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 )
 
 
@@ -175,6 +175,7 @@ _VALIDATE_SECRET_REF_DECLARATION = ToolDeclaration(
             "name": {"type": "string", "description": "Secret reference name (e.g. 'OPENROUTER_API_KEY')."},
         },
         "required": ["name"],
+        "additionalProperties": False,
     },
 )
 
@@ -287,6 +288,7 @@ _WIRE_SECRET_REF_DECLARATION = ToolDeclaration(
             "option_key": {"type": "string", "description": "Config option key to set (e.g. 'api_key')."},
         },
         "required": ["name", "target", "option_key"],
+        "additionalProperties": False,
     },
 )
 

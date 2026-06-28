@@ -27,6 +27,7 @@ content-addressing covers the readiness fingerprint.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,6 +37,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
+import yaml
 from sqlalchemy import select, text
 
 from elspeth.contracts.payload_store import PayloadNotFoundError
@@ -378,6 +380,59 @@ async def test_mark_ready_for_review_happy_path(
     payload = signer.verify(response.token)
     assert payload.session_id == session_record.id
     assert payload.payload_digest == response.payload_digest
+
+
+@pytest.mark.asyncio
+async def test_mark_ready_for_review_yaml_strips_blob_bound_source_storage_path(
+    session_engine_with_row,
+    payload_store,
+    signer,
+    session_record,
+    state_record,
+):
+    storage_path = "/data/blobs/session/98b1357d_contact_form_submissions.csv"
+    blob_id = "98b1357d-5aab-4fb3-85b4-5ad643912e84"
+    blob_state_record = replace(
+        state_record,
+        source={
+            "plugin": "csv",
+            "on_success": "main",
+            "options": {
+                "path": storage_path,
+                "blob_ref": blob_id,
+                "mode": "bind_source",
+                "schema": {"mode": "observed"},
+            },
+            "on_validation_failure": "quarantine",
+        },
+        outputs=[
+            {
+                "name": "main",
+                "plugin": "csv",
+                "options": {"path": "outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            }
+        ],
+    )
+    service, *_ = _build_service(
+        engine=session_engine_with_row,
+        payload_store=payload_store,
+        signer=signer,
+        session_record=session_record,
+        state_record=blob_state_record,
+        validation=_ok_validation(),
+        readiness=_readiness_snapshot(session_record.id),
+    )
+
+    response = await service.mark_ready_for_review(session_id=session_record.id, user_id=session_record.user_id)
+
+    payload = json.loads(payload_store.retrieve(response.payload_digest.removeprefix("sha256:")).decode("utf-8"))
+    assert storage_path not in payload["yaml"]
+    options = yaml.safe_load(payload["yaml"])["sources"]["source"]["options"]
+    assert "path" not in options
+    assert "blob_ref" not in options
+    assert "mode" not in options
+    assert options["schema"] == {"mode": "observed"}
 
 
 @pytest.mark.asyncio

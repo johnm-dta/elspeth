@@ -29,6 +29,7 @@ from ``service.py`` — that would create a cycle.
 from __future__ import annotations
 
 import math
+import re
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -55,6 +56,32 @@ __all__ = [
     "supports_anthropic_prompt_cache_markers",
     "token_usage_from_response",
 ]
+
+_LLM_ERROR_MESSAGE_MAX_CHARS = 512
+_LLM_ERROR_HASH_CHARS = 16
+_LLM_ERROR_REDACTED_DETAIL = "provider error detail redacted"
+_LLM_ERROR_HASH_LABEL = "raw_error_hash"
+
+_LLM_ERROR_SENSITIVE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("authorization_header", re.compile(r"\bAuthorization\s*[:=]\s*[^\s,;}]+(?:\s+[^\s,;}]+)?", re.IGNORECASE)),
+    ("bearer_token", re.compile(r"Bearer\s+[A-Za-z0-9._\-]{20,}", re.IGNORECASE)),
+    ("aws_access_key", re.compile(r"AKIA[0-9A-Z]{16}")),
+    ("github_pat", re.compile(r"ghp_[A-Za-z0-9]{36}")),
+    ("anthropic_key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{40,}")),
+    ("openai_key", re.compile(r"sk-[A-Za-z0-9]{40,}")),
+    ("jwt", re.compile(r"\b[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\.[A-Za-z0-9_\-]{4,}\b")),
+    ("url", re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)),
+    ("email", re.compile(r"\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b")),
+    ("ssn", re.compile(r"\b\d{3}[-\s]\d{2}[-\s]\d{4}\b")),
+)
+
+_LLM_ERROR_HIGH_RISK_FIELD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:headers?|authorization|api[_-]?key|access[_-]?token|prompt(?:_template)?|messages|sample_rows?|rows?)"
+        r"['\"]?\s*[:=]",
+        re.IGNORECASE,
+    ),
+)
 
 
 class _ReasoningMetadata(TypedDict):
@@ -258,6 +285,51 @@ def _reasoning_metadata_from_response(response: Any | None) -> _ReasoningMetadat
     }
 
 
+def _llm_error_hash(raw_message: str) -> str:
+    return stable_hash({"error_message": raw_message})[:_LLM_ERROR_HASH_CHARS]
+
+
+def _append_llm_error_hash(message: str, *, raw_message: str) -> str:
+    suffix = f" [{_LLM_ERROR_HASH_LABEL}={_llm_error_hash(raw_message)}]"
+    if len(message) + len(suffix) <= _LLM_ERROR_MESSAGE_MAX_CHARS:
+        return f"{message}{suffix}"
+
+    ellipsis = "..."
+    budget = _LLM_ERROR_MESSAGE_MAX_CHARS - len(suffix) - len(ellipsis)
+    if budget <= 0:
+        return suffix.strip()[:_LLM_ERROR_MESSAGE_MAX_CHARS]
+    return f"{message[:budget].rstrip()}{ellipsis}{suffix}"
+
+
+def _safe_llm_error_message(error_message: str | None) -> str | None:
+    """Return the audit-safe provider error detail for ``ComposerLLMCall``.
+
+    Provider SDK exception strings can embed request bodies, prompts, headers,
+    URLs, and credentials. The durable audit row keeps class-level detail in
+    ``error_class``; free-form provider text is stored only after redaction and
+    length capping, with a short stable hash for operator correlation.
+    """
+
+    if error_message is None:
+        return None
+
+    raw_message = error_message.strip()
+    if not raw_message:
+        return error_message
+
+    redacted_message = raw_message
+    for name, pattern in _LLM_ERROR_SENSITIVE_PATTERNS:
+        redacted_message = pattern.sub(f"<redacted-sensitive:{name}>", redacted_message)
+
+    if any(pattern.search(raw_message) for pattern in _LLM_ERROR_HIGH_RISK_FIELD_PATTERNS):
+        return _append_llm_error_hash(_LLM_ERROR_REDACTED_DETAIL, raw_message=raw_message)
+
+    if redacted_message != raw_message or len(redacted_message) > _LLM_ERROR_MESSAGE_MAX_CHARS:
+        return _append_llm_error_hash(redacted_message, raw_message=raw_message)
+
+    return raw_message
+
+
 def build_llm_call_record(
     *,
     model_requested: str,
@@ -298,7 +370,7 @@ def build_llm_call_record(
         started_at=started_at,
         finished_at=datetime.now(UTC),
         error_class=error_class,
-        error_message=error_message,
+        error_message=_safe_llm_error_message(error_message),
         temperature=temperature,
         seed=seed,
     )

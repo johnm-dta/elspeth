@@ -45,7 +45,7 @@ from .._helpers import (
     _verify_session_ownership,
     composer_completion_events_table,
     datetime,
-    generate_yaml,
+    generate_public_yaml,
     get_current_user,
     insert,
     record_session_completed,
@@ -372,8 +372,8 @@ async def get_state_yaml(
     """Get YAML representation of the current composition state (M1).
 
     Runs runtime preflight on the exact CompositionState reconstructed
-    from the persisted record, then generates deterministic YAML via
-    generate_yaml() against that same snapshot. YAML export preflight
+    from the persisted record, then generates deterministic public YAML via
+    generate_public_yaml() against that same snapshot. YAML export preflight
     deliberately does not receive the scoped secret resolver: export
     serializes secret_ref markers, and a rejected preflight response must
     not expose resolved secret values through plugin validation prose.
@@ -442,7 +442,7 @@ async def get_state_yaml(
     if not runtime_validation.is_valid:
         detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
         raise HTTPException(status_code=409, detail=detail)
-    yaml_str = generate_yaml(state)
+    yaml_str = generate_public_yaml(state)
 
     # Phase 6A B3 — sessions-DB audit event for YAML export.
     #

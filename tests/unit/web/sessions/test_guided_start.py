@@ -97,8 +97,8 @@ async def test_guided_start_seeds_tutorial_profile_and_persists(tmp_path) -> Non
     )
     assert resp.status_code == 200
     body = resp.json()
-    # Wire carries the tutorial profile (advisor_checkpoints OFF — matches live
-    # guided; bookends on).
+    # Wire carries the tutorial profile (advisor_checkpoints OFF as the demo
+    # bypass; bookends on).
     assert body["guided_session"]["profile"] is not None
     assert body["guided_session"]["profile"]["advisor_checkpoints"] is False
     assert body["guided_session"]["profile"]["bookends"] is True

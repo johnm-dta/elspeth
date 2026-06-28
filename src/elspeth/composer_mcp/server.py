@@ -49,7 +49,7 @@ from elspeth.web.composer.tools import (
     get_tool_definitions,
     validate_composer_file_sink_collision_policy,
 )
-from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.composer.yaml_generator import generate_public_yaml
 from elspeth.web.execution.runtime_preflight import (
     RuntimePreflightCoordinator,
     RuntimePreflightFailure,
@@ -551,7 +551,7 @@ def _dispatch_session_tool(
                 "validation": _validation_to_dict(validation),
                 "state": state.to_dict(),
             }
-        yaml_str = generate_yaml(state)
+        yaml_str = generate_public_yaml(state)
         return {
             "success": True,
             "data": yaml_str,

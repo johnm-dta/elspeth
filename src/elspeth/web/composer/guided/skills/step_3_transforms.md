@@ -141,6 +141,6 @@ Naming an output "cleaned" or "final" does not clean it — only a real
 ### Sample-value eyeballing
 
 When you wire a column into a value-shape-sensitive field (`web_scrape.url_field`,
-arithmetic in a compute step), check the sample values in the GUIDED CONTEXT
-block actually look like that shape. If not, add an upstream step to normalise
-rather than assuming the strings will be valid at run time.
+arithmetic in a compute step), check the sample value-shape markers in the
+GUIDED CONTEXT block actually look like that shape. If not, add an upstream step
+to normalise rather than assuming the strings will be valid at run time.

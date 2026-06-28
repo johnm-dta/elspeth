@@ -4774,6 +4774,7 @@ sinks:
                     "options": {
                         "path": "/data/blobs/session/contact_form_submissions.csv",
                         "blob_ref": blob_id,
+                        "mode": "bind_source",
                         "schema": {"mode": "observed"},
                     },
                     "on_validation_failure": "quarantine",
@@ -4802,6 +4803,11 @@ sinks:
         body = resp.json()
         assert body["source_blob_ids"] == {"source": blob_id}
         assert blob_id not in body["yaml"]
+        assert "/data/blobs/session/contact_form_submissions.csv" not in body["yaml"]
+        exported_source_options = yaml.safe_load(body["yaml"])["sources"]["source"]["options"]
+        assert "path" not in exported_source_options
+        assert "mode" not in exported_source_options
+        assert exported_source_options["schema"] == {"mode": "observed"}
 
     @pytest.mark.asyncio
     async def test_yaml_allows_connection_valid_state_without_ui_edges(self, tmp_path) -> None:

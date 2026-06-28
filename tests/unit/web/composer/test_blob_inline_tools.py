@@ -501,3 +501,5 @@ def test_tool_definitions_include_inline_blob_authoring_tools() -> None:
     }
     assert "wire_blob_inline_ref" in definitions
     assert definitions["wire_blob_inline_ref"]["parameters"]["required"] == ["field_path", "blob_id"]
+    assert definitions["wire_blob_inline_ref"]["parameters"]["additionalProperties"] is False
+    assert definitions["delete_blob"]["parameters"]["additionalProperties"] is False

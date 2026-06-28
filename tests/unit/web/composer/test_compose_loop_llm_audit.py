@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -17,6 +19,7 @@ from elspeth.contracts.composer_llm_audit import ComposerLLMCall, ComposerLLMCal
 from elspeth.core.canonical import stable_hash
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSchemaInfo, PluginSummary
+from elspeth.web.composer.llm_response_parsing import build_llm_call_record
 from elspeth.web.composer.protocol import ComposerConvergenceError, ComposerServiceError
 from elspeth.web.composer.service import ComposerAvailability, ComposerServiceImpl
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationSummary
@@ -167,6 +170,49 @@ def _captured_llm_calls(exc: BaseException) -> Sequence[ComposerLLMCall]:
     calls = exc.__dict__["llm_calls"]
     assert isinstance(calls, tuple)
     return cast(tuple[ComposerLLMCall, ...], calls)
+
+
+def test_llm_call_record_redacts_raw_provider_error_detail() -> None:
+    openai_key = "sk-" + ("A" * 48)
+    bearer_token = "Bearer " + ("x" * 32)
+    raw_error = (
+        "ProviderError headers={'Authorization': '"
+        + bearer_token
+        + "'} api_key="
+        + openai_key
+        + " prompt_template='classify {email}' "
+        + "sample_rows=[{'email':'person@example.com','ssn':'123-45-6789'}] "
+        + ("row detail " * 80)
+    )
+
+    call = build_llm_call_record(
+        model_requested="provider/model",
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        status=ComposerLLMCallStatus.API_ERROR,
+        started_at=datetime.now(UTC),
+        started_ns=time.monotonic_ns(),
+        temperature=None,
+        seed=None,
+        response=None,
+        error_class="ProviderError",
+        error_message=raw_error,
+    )
+
+    stored = call.error_message
+    assert stored is not None
+    assert stored.startswith("provider error detail redacted")
+    assert "raw_error_hash=" in stored
+    assert len(stored) <= 512
+    for leaked in (
+        openai_key,
+        bearer_token,
+        "person@example.com",
+        "123-45-6789",
+        "classify {email}",
+        "row detail",
+    ):
+        assert leaked not in stored
 
 
 @pytest.fixture(autouse=True)

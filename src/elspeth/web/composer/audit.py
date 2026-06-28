@@ -46,7 +46,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 import rfc8785
 from pydantic import BaseModel, ValidationError
@@ -274,9 +274,47 @@ def audit_envelope(invocation: ComposerToolInvocation) -> dict[str, object]:
     return {"_kind": "audit", "invocation": invocation.to_dict()}
 
 
+_LLM_CALL_PUBLIC_AUDIT_FIELDS: Final[tuple[str, ...]] = (
+    "model_requested",
+    "model_returned",
+    "status",
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    "cached_prompt_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "reasoning_tokens",
+    "latency_ms",
+    "provider_request_id",
+    "messages_hash",
+    "tools_spec_hash",
+    "started_at",
+    "finished_at",
+    "error_class",
+    "error_message",
+    "temperature",
+    "seed",
+    "provider_cost",
+    "provider_cost_source",
+)
+
+
+def _public_llm_call_audit_payload(call: ComposerLLMCall) -> dict[str, Any]:
+    raw = call.to_dict()
+    return {field: raw[field] for field in _LLM_CALL_PUBLIC_AUDIT_FIELDS}
+
+
 def llm_call_audit_envelope(call: ComposerLLMCall) -> dict[str, object]:
-    """Wrap an LLM call in the canonical ``tool_calls`` JSON envelope."""
-    return {"_kind": "llm_call_audit", "call": call.to_dict()}
+    """Wrap a public-safe LLM call projection in the ``tool_calls`` envelope.
+
+    Provider reasoning artifacts (``reasoning_content``, ``reasoning_details``,
+    ``thinking_blocks``) can contain hidden prompt or tool context, so the
+    session-visible sidecar exposes only metadata, hashes, usage, cost, and
+    bounded error fields.
+    """
+
+    return {"_kind": "llm_call_audit", "call": _public_llm_call_audit_payload(call)}
 
 
 def chat_turn_audit_envelope(turn: ComposerChatTurn) -> dict[str, object]:

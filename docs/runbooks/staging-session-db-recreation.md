@@ -4,7 +4,7 @@ Use this runbook when a web session schema-bootstrap change requires deleting or
 
 ## Current Cutover: 0.7.0 (single-DB reset)
 
-0.7.0 advances **only** `SESSION_SCHEMA_EPOCH` (23→24); it does **not**
+0.7.0 advances **only** `SESSION_SCHEMA_EPOCH` (now 25); it does **not**
 change the Landscape audit DB `SQLITE_SCHEMA_EPOCH`. The run/audit
 Landscape schema is unchanged, so this is a **single-DB** session-only
 cutover: follow the [Staging Reset](#staging-reset-for-elspethfoundrysidedev)
@@ -13,17 +13,24 @@ procedure (or [Local Or Dev Reset](#local-or-dev-reset) off-host) on its
 [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure — there is no
 matching Landscape schema change for 0.7.0.
 
-The 24 bump rides in lockstep with `GUIDED_SESSION_SCHEMA_VERSION` 5→6:
-the new guided fields (`profile`, `advisor_checkpoint_passes_used`,
-`advisor_signoff_escape_offered`) live in the
-`composition_states.composer_meta` JSON blob, so there is no new SQL
-column. The epoch bump converts what the `GUIDED_SESSION_SCHEMA_VERSION`
-5→6 change would otherwise be — a lazy per-row HTTP 500 raised by
-`GuidedSession.from_dict` the first time a stale guided session is opened
-— into a loud, early boot fail-close. 0.7.0 boot fails closed on a stale
+Both epoch bumps in 0.7.0 ride in lockstep with `GUIDED_SESSION_SCHEMA_VERSION`
+changes to the `composition_states.composer_meta` JSON blob, so neither adds a
+SQL column:
+
+- **23→24 / `GUIDED_SESSION_SCHEMA_VERSION` 5→6** added the guided fields
+  (`profile`, `advisor_checkpoint_passes_used`, `advisor_signoff_escape_offered`).
+- **24→25 / `GUIDED_SESSION_SCHEMA_VERSION` 6→7** dropped the vestigial
+  `profile.entry_seed` key. Without the lockstep epoch bump a stale
+  `entry_seed`-bearing blob would slip past both version gates and
+  lazy-500 deep inside `WorkflowProfile.from_dict`'s closed-key-set check.
+
+Each epoch bump converts what the `GUIDED_SESSION_SCHEMA_VERSION` change would
+otherwise be — a lazy per-row HTTP 500 raised by `GuidedSession.from_dict` the
+first time a stale guided session is opened — into a loud, early boot
+fail-close over the **whole** session DB. 0.7.0 boot fails closed on a stale
 session DB via the `_assert_schema_sentinels` guard with
-`SessionSchemaError: Session DB schema version 23 does not match
-SESSION_SCHEMA_EPOCH=24. Pre-release ELSPETH does not migrate session
+`SessionSchemaError: Session DB schema version 24 does not match
+SESSION_SCHEMA_EPOCH=25. Pre-release ELSPETH does not migrate session
 databases. Delete the session DB file and restart.` `auth.db` and the
 Landscape `runs/audit.db` are separate files and are NOT reset — local
 user accounts and run/audit history survive this cutover.

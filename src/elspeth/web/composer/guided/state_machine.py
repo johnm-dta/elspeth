@@ -37,9 +37,11 @@ from elspeth.web.composer.guided.resolved import (
 )
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-# Pre-v6 persisted sessions are intentionally incompatible with v6: the
+# Pre-v7 persisted sessions are intentionally incompatible with v7: the
 # operator must delete the guided sessions DB before deploying this change.
-GUIDED_SESSION_SCHEMA_VERSION = 6
+# (v6->v7 dropped the vestigial ``entry_seed`` key from the nested
+# WorkflowProfile sub-shape; bumped in lockstep with SESSION_SCHEMA_EPOCH.)
+GUIDED_SESSION_SCHEMA_VERSION = 7
 
 
 class TerminalKind(StrEnum):

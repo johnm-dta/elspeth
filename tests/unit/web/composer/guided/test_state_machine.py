@@ -338,12 +338,12 @@ class TestGuidedSession:
         restored = facts_from_dict(d)
         assert restored.observed_headers == ("name", "age")
 
-    def test_guided_session_schema_version_bumped_for_inspection_facts(self) -> None:
-        assert GUIDED_SESSION_SCHEMA_VERSION == 6
+    def test_guided_session_schema_version_is_7(self) -> None:
+        assert GUIDED_SESSION_SCHEMA_VERSION == 7
 
     def test_guided_session_to_dict_includes_schema_version(self) -> None:
         sess = GuidedSession.initial()
-        assert sess.to_dict()["schema_version"] == 6
+        assert sess.to_dict()["schema_version"] == 7
 
     def test_guided_session_requires_schema_version(self) -> None:
         current = GuidedSession.initial().to_dict()
@@ -357,6 +357,21 @@ class TestGuidedSession:
         old["schema_version"] = 4
 
         with pytest.raises(InvariantError, match="unsupported schema_version 4"):
+            GuidedSession.from_dict(old)
+
+    def test_guided_session_rejects_prior_v6_record_carrying_entry_seed(self) -> None:
+        # Regression for the v6->v7 migration hazard: a session persisted by the
+        # pre-entry_seed-removal build carries schema_version=6 and a now-dropped
+        # ``entry_seed`` key in its nested profile sub-dict. The schema_version
+        # gate must reject it cleanly *before* the profile parse, so the operator
+        # sees the actionable "unsupported schema_version" signal rather than the
+        # deep, misleading "malformed profile" error the orphaned key would raise
+        # in WorkflowProfile.from_dict's closed-key-set check.
+        old = GuidedSession.initial().to_dict()
+        old["schema_version"] = 6
+        old["profile"] = {**old["profile"], "entry_seed": "legacy framing prompt"}
+
+        with pytest.raises(InvariantError, match="unsupported schema_version 6"):
             GuidedSession.from_dict(old)
 
     def test_guided_session_current_history_requires_summary(self) -> None:

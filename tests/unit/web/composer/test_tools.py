@@ -3331,6 +3331,65 @@ class TestBlobTools:
         assert result.success is True
         assert "storage_path" not in result.data
 
+    def test_get_blob_metadata_uses_allowlist_response_contract(self) -> None:
+        """Metadata response must not default-expose prose or provenance fields."""
+        from elspeth.web.sessions.models import blobs_table
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.update().where(blobs_table.c.id == self.blob_id).values(source_description="customer export sk-test-secret")
+            )
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        assert set(result.data) == {"id", "filename", "mime_type", "size_bytes", "content_hash", "status"}
+        assert "source_description" not in result.data
+        assert "creation_modality" not in result.data
+        assert "created_from_message_id" not in result.data
+        assert "sk-test-secret" not in str(result.data)
+
+    def test_get_blob_metadata_rejects_invalid_blob_id_without_echoing_value(self) -> None:
+        sentinel = "sk-test-secret-not-a-uuid"
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": sentinel},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert "not a valid UUID" in result.data["error"]
+        assert sentinel not in result.data["error"]
+
+    def test_get_blob_metadata_not_found_does_not_echo_blob_id(self) -> None:
+        from uuid import uuid4
+
+        missing_blob_id = str(uuid4())
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": missing_blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert "not found" in result.data["error"].lower()
+        assert missing_blob_id not in result.data["error"]
+
     def test_get_blob_metadata_wrong_session_returns_failure(self) -> None:
         """IDOR at tool layer: blob belongs to session A, caller is session B."""
         state = _empty_state()
@@ -10243,6 +10302,42 @@ class TestUpdateBlobTypeGuard:
             )
         # __cause__ chain MUST preserve the structured Pydantic detail.
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_unpaired_surrogate_content_raises_tool_argument_error(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        catalog = _mock_catalog()
+        state = _empty_state()
+
+        create_result = execute_tool(
+            "create_blob",
+            {"filename": "a.txt", "mime_type": "text/plain", "content": "initial"},
+            state,
+            catalog,
+            data_dir=str(self.data_dir),
+            session_engine=self.engine,
+            session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "initial"),
+        )
+        blob_id = create_result.data["blob_id"]
+        user_message_id = _insert_user_message(self.engine, self.session_id, "Please update the blob.")
+
+        with pytest.raises(ToolArgumentError, match="valid UTF-8"):
+            execute_tool(
+                "update_blob",
+                {"blob_id": blob_id, "content": "bad\ud800"},
+                create_result.updated_state,
+                catalog,
+                data_dir=str(self.data_dir),
+                session_engine=self.engine,
+                session_id=self.session_id,
+                user_message_id=user_message_id,
+                composer_model_identifier="test-model",
+                composer_model_version="test-model-2026-06-28",
+                composer_provider="test-provider",
+                composer_skill_hash="a" * 64,
+                tool_arguments_hash="b" * 64,
+            )
 
 
 # ---------------------------------------------------------------------------

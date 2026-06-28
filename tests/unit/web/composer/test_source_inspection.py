@@ -258,6 +258,24 @@ class TestCsvInspection:
         assert "reset-password" not in blob  # path segment
         assert "alice@corp.example" not in blob  # PII in path
 
+    def test_url_candidates_malformed_port_does_not_raise(self) -> None:
+        """A malformed/out-of-range port must not break the never-raise contract.
+
+        ``urlsplit(...).port`` raises ``ValueError`` for ``h:99999`` / ``h:abc``
+        and ``_URL_PATTERN`` matches those. Inspection runs over arbitrary blob
+        bytes, so the candidate must degrade gracefully (host kept, bad port
+        dropped) rather than propagate a ValueError up through
+        ``compute_proof_diagnostics``.
+        """
+        f = inspect_blob_content(
+            content=(b"name,site\nA,http://host.example:99999/p\nB,http://other.example:abc/q\n"),
+            filename="x.csv",
+            mime_type="text/csv",
+        )
+        serialized = facts_to_dict(f)
+        # No crash; out-of-range / non-numeric ports dropped, hosts kept, paths gone.
+        assert serialized["url_candidates"] == ["http://host.example", "http://other.example"]
+
     def test_headerless_warning(self) -> None:
         f = inspect_blob_content(
             content=b"1,2,3\n4,5,6\n",

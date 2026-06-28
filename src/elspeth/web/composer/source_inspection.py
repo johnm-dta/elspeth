@@ -315,12 +315,22 @@ def _redact_url_candidate(raw_url: str) -> str:
     ``parts.hostname`` (userinfo-stripped, port-less) plus the explicit port.
     ``urlsplit`` keeps userinfo inside ``netloc``, so reusing ``netloc`` —
     as the prior implementation did — left credentials intact.
+
+    Never-raise contract (this runs over arbitrary blob cell content, same as
+    ``_decode_csv_sample``): ``parts.port`` RAISES ``ValueError`` on a
+    malformed or out-of-range port (``h:99999``, ``h:abc``) — and ``_URL_PATTERN``
+    matches those — so the port access is guarded and a bad port is simply
+    dropped (host hint preserved) rather than propagated up through inspection.
     """
     parts = urlsplit(raw_url)
     host = parts.hostname
     if not parts.scheme or not host:
         return _REDACTED_URL_PART
-    netloc = f"{host}:{parts.port}" if parts.port is not None else host
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = f"{host}:{port}" if port is not None else host
     return urlunsplit((parts.scheme, netloc, "", "", ""))
 
 

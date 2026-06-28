@@ -76,8 +76,10 @@ def build_layered_prompt(
     per-call tail (file_path, lens) is the only variable content and comes last."""
     return (
         f"{context}\n\n"
-        "=== TARGET FILE SOURCE (inlined; you MAY read any other repo file via the "
-        "read-only sandbox for investigation) ===\n"
+        "=== TARGET FILE SOURCE (inlined; you MAY read other repo SOURCE/config "
+        "files via the read-only sandbox to trace references and definitions — but "
+        "do NOT read, open, or quote secrets, credentials, .env files, or anything "
+        "under data/; review code, not data) ===\n"
         f"```\n{file_source}\n```\n\n"
         "=== REVIEW LENS ===\n"
         f"{persona}\n\n"

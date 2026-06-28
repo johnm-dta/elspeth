@@ -47,7 +47,8 @@ replace):
 | `cli.py: rotate` / `rules/trust_tier/tier_model/rotate.py` | mechanical fingerprint re-binding | none |
 | `cli.py: audit-verdict` | attach post-hoc human verdict | none |
 | `core/judge.py` | the judge (`TRANSPORT_OPENROUTER`, `TRANSPORT_AGENT`) | LLM |
-| `core/allowlist.py` | entry schema, `JudgeVerdict`, HMAC payload (`_build_yaml_entry_text`) | — |
+| `core/allowlist.py` | entry schema, `JudgeVerdict`, HMAC signature (`compute_judge_metadata_signature`) | — |
+| `core/cli.py: _build_yaml_entry_text` | the signed-entry payload writer (`cli.py:2221`, **not** `allowlist.py`) | — |
 
 **Security constraints that shape the architecture (not optional):**
 
@@ -74,8 +75,8 @@ replace):
                                            │   elspeth-lints sign-bundle <bundle>
                                            │   elspeth-lints rekey --in <bundle>
                                            │      1. re-verify every binding FROM THE TREE
-                                           │      2. new findings → REAL judge + sign
-                                           │         re-signs       → carry verdict forward + sign
+                                           │      2. new findings + drift_repair → REAL judge + sign
+                                           │         rotation / stale_delete     → mechanical, no judge
                                            │      3. summary → confirm → atomic write → regen baseline
 ```
 
@@ -99,7 +100,7 @@ A bundle records the plan and *nothing signable*. Conceptual shape:
   "actions": [
     {
       "lane": "new_judgment",           // new_judgment | resign
-      "kind": "justify",                // justify | drift_repair | rotation | migrate_v2 | stale_delete
+      "kind": "justify",                // justify | drift_repair | rotation | stale_delete
       "key": "<canonical allowlist key>",
       "file_path": "...", "symbol": "...",
       "fingerprint": "...", "scope_fingerprint": "...", "ast_path": "...",
@@ -139,9 +140,12 @@ A new `elspeth-judge` MCP server — `python -m elspeth_lints.mcp` (mirroring `l
   agent fixes code/rationale *before* the operator is involved. Re-runnable as rationale is refined.
 - **`stage_status`** — read a bundle back: per-lane counts, preview outcomes, exactly what `sign-bundle`
   will do, and the paste-ready operator command.
-- **`verify_signatures`** — standalone read-only diagnosis. Shape-only without the key; authoritative when
-  the key is present. Satisfies the elspeth-281582acc9 read-only requirement and is usable outside the
-  staging flow.
+- **`verify_signatures`** — standalone read-only diagnosis. **Always shape-only** on the MCP surface: the
+  agent surface is structurally key-free and *fails closed* if the HMAC key is present, so it can never
+  perform an authoritative recompute. The authoritative recompute path is the CLI
+  `diagnose-judge-signatures` / library `diagnose_judge_signatures` surface, not this tool. The report's
+  `verification_mode` field labels it. Satisfies the elspeth-281582acc9 read-only requirement and is
+  usable outside the staging flow.
 - **`stage_rekey`** — produce a rekey plan: enumerate every entry currently valid under the active key,
   and flag any already-broken entries that must be repaired before a rekey (no laundering).
 
@@ -165,19 +169,37 @@ elspeth-lints sign-bundle <bundle.json> [--dry-run] [--yes] [--operator-override
    an expected per-action outcome, not a staleness signal. **Staging asserts; firing verifies.** Previews
    are discarded for authority.
 3. **Execute by lane (dry phase first, then write):**
-   - `new_judgment` → run the **real** judge (authoritative) and sign, reusing the `justify` retry
-     wrapper. If the real judge BLOCKS something that previewed ACCEPTED, it is reported and *not*
-     signed (the agent re-stages, or the operator supplies `--operator-override KEY` with the existing
-     override token).
-   - `resign` (`drift_repair` / `rotation` / `migrate_v2`) → re-sign carrying the existing verdict
-     forward, reusing `sign-judge-signatures` / `rotate` / `migrate-judge-scope` internals. No judge.
+   - `new_judgment` → run the **real** judge (authoritative) and sign, reusing the `_run_justify`
+     handler (`cli.py:1443`). If the real judge BLOCKS something that previewed ACCEPTED, it is reported
+     and *not* signed (the agent re-stages, or the operator supplies `--operator-override KEY` with the
+     existing override token).
+   - `resign` / `drift_repair` (missing/invalid/AST-path/scope/binding drift) → **re-judge** through the
+     `_run_justify` ceremony, reusing the `_run_sign_judge_signatures` handler (`cli.py:3142`, which the
+     §3 table classes "HMAC + LLM"). Re-judging — *not* a no-judge carry-forward — is the security property: an honest
+     `SCOPE_BINDING_DRIFT` means the enclosing scope content actually changed, so carrying a stale verdict
+     forward would stamp it onto code the judge never inspected (the [O1] forgery). BLOCK-not-signed and
+     override-token gating are inherited from `justify`.
+   - `resign` / `rotation` → mechanical key re-bind of **non-judge-gated** entries via `rotate` /
+     `apply_plan` (which refuses any judge-gated entry). No verdict, no judge.
    - `stale_delete` → remove the orphaned entry.
+
+   (v1→v2 migration stays on the standalone `migrate-judge-scope` CLI; there is **no** `migrate_v2`
+   bundle kind — a per-entry bundle action cannot reuse that whole-allowlist command without
+   reimplementing it.)
+
+   **Verify is atomic; execute is per-action.** Step 2 is the all-or-nothing gate — "abort before any
+   write" is a *verify-phase* property. Step 3, reusing the `_run_sign_judge_signatures`
+   continue-on-failure ceremony, is **per-action non-transactional**: the real judge first runs *after*
+   the confirm gate, so a mid-bundle BLOCK leaves earlier-accepted actions written, restores/skips the
+   blocked one, and returns non-zero with an "M succeeded / K failed" report. This is safe — every
+   committed write was judge-authorized and the run is re-runnable — but the operator must know a
+   blocked 10-action run is partially applied, not rolled back.
 4. **Summary + confirmation.** Print what will be judged, re-signed, deleted, and the override-rate
    impact; require confirmation (`--yes` to skip, `--dry-run` to stop here). Operator-gates a destructive,
    shared-state write.
 5. **Atomic write** per allowlist file (reuse `atomic_update_text`), guarding against the known dup-key
    dataloss in the rotate path; regenerate the fingerprint baseline; report post-state diagnosis
-   (expected all-OK).
+   (expected all-OK **for the bundle's keys** — any out-of-bundle tree drift remains and is reported).
 6. **Fail closed** without the HMAC key.
 
 ### 4.4 `elspeth-lints rekey --in <bundle>` (operator CLI)
@@ -186,10 +208,17 @@ elspeth-lints sign-bundle <bundle.json> [--dry-run] [--yes] [--operator-override
 elspeth-lints rekey --in <bundle.json> --old-key-env OLD --new-key-env NEW [--dry-run] [--yes]
 ```
 
-Verify each planned entry under the **old** key, recompute the HMAC under the **new** key, atomic write.
-Refuses to rekey any entry that does not currently verify under the old key — broken entries are not
-laundered into the new key; they must be repaired (via `sign-bundle`) first. Generalizes
-`migrate-judge-scope` from "v1→v2 re-sign" to "re-sign-all-under-new-key".
+Re-derive the **full judge-gated entry set from the tree** at fire time (the bundle's `RekeyPlan` and
+the env-var names it records are advisory provenance; the CLI flags and the live allowlist are
+authoritative), verify **every** such entry under the **old** key, recompute the HMAC under the **new**
+key, and atomic-write. An entry present in the tree but absent from the staged plan is still re-keyed
+(self-healing — never silently left under the retired old key). Refuses to rekey any entry that does not
+currently verify under the old key — broken entries are not laundered into the new key; they must be
+repaired (via `sign-bundle`) first. Because the canonical corpus is all-v2 (binding unchanged on
+rekey), the write is a **scheme-preserving signature-only swap** — only the `judge_metadata_signature`
+line changes; binding and audit lines stay byte-identical. This *generalizes* `migrate-judge-scope`'s
+integrity-first two-pass *structure* to "re-sign-all-under-new-key"; it does **not** reuse that command's
+v1→v2 binding converter (which only rewrites `file_fingerprint`-bound v1 entries).
 
 ### 4.5 CI integration
 
@@ -208,22 +237,29 @@ signable; that re-enable is tracked but out of this spec's write scope.
 3. **Authoritative judge runs only inside the keyed step** for new findings; previews are always
    `authoritative: false`.
 4. **Signing never runs in CI** — `sign-bundle`/`rekey` are operator-shell only.
-5. **No broken-entry laundering** — `resign`/`rekey` only carry forward entries that currently verify.
+5. **No broken-entry laundering** — `rekey` only re-keys entries that currently verify under the old key;
+   `drift_repair` *re-judges* (it never stamps a stale verdict onto changed content); `rotation` refuses
+   judge-gated entries. No stale or broken verdict is ever carried into a freshly-signed state.
 
 ## 6. What this obsoletes
 
-The one-off `notes/060-*sign*.{md,sh}` runbooks, `scripts/cicd/sign_accept_backlog.py`, and the
-`scripts/codex_tier_model_rejudge.py` driver collapse into `stage_scan` → review → `sign-bundle`.
-Deleted once the flow demonstrably replaces them (prerelease-no-tech-debt; the DB/runbook artifacts are
-removed, not nulled around).
+The one-off `notes/060-*` signing runbooks and `scripts/cicd/sign_accept_backlog.py` collapse into
+`stage_scan` → review → `sign-bundle`, and are deleted once the flow demonstrably replaces them
+(prerelease-no-tech-debt; removed, not nulled around). The `scripts/codex_tier_model_rejudge.py` driver
+is *functionally* superseded too, **but its deletion is deferred**: the sibling active plan
+`2026-06-28-codex-panel-review-foundation.md` (committed `b3909d73c`) declares it do-not-modify, so
+retiring it requires explicit cross-plan reconciliation with that plan's owner before removal.
 
 ## 7. Testing
 
-- `verify_signatures` works with no key (shape-only) and labels shape-only vs authoritative.
+- `verify_signatures` works with no key (shape-only) and labels its `verification_mode`; on the MCP
+  surface it is *always* shape-only (authoritative recompute is the CLI/library `diagnose` surface).
 - Every MCP tool **fails closed** when the HMAC key is present in its environment.
 - `sign-bundle` **refuses on tree-drift mismatch**: a bundle that claims "positional drift only" for an
   entry whose scope content actually changed is rejected, not signed.
-- `sign-bundle` re-runs the real judge for `new_judgment`; carries the verdict forward for `resign`.
+- `sign-bundle` re-runs the real judge for `new_judgment` **and `drift_repair`** (re-judge, not a
+  no-judge carry-forward — a contradicting BLOCK on `drift_repair` is reported and not signed);
+  `rotation`/`stale_delete` touch no judge.
 - A real-judge BLOCK that contradicts an ACCEPTED preview is reported and not signed (no override).
 - `rekey` refuses to carry a non-verifying entry into the new key.
 - Atomic write / dup-key safety on the allowlist file.
@@ -234,7 +270,7 @@ removed, not nulled around).
 
 1. **Bundle + re-verify core** — bundle schema, writer/reader, and the from-tree re-verification used by
    `sign-bundle` (the linchpin), reusing `diagnose-judge-signatures` internals.
-2. **`sign-bundle` CLI** — lanes, judge-on-new, carry-forward-on-resign, summary/confirm, atomic write,
+2. **`sign-bundle` CLI** — lanes, judge-on-new + re-judge-on-drift_repair, mechanical rotation/stale_delete, summary/confirm, atomic write,
    baseline regen.
 3. **MCP server** — `stage_scan`, `stage_status`, `verify_signatures`, then `stage_preview`; fail-closed
    on key presence; `.mcp.json` registration.

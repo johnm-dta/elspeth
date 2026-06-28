@@ -19,7 +19,7 @@ from collections.abc import Callable, Iterator, Mapping
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from types import MappingProxyType, UnionType
-from typing import Annotated, Any, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
@@ -2492,6 +2492,69 @@ class GetBlobContentValidationModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class _RequestInterpretationReviewPendingDataModel(BaseModel):
+    """Correlation-only response payload for a pending interpretation review."""
+
+    kind_marker: Literal["interpretation_review_pending", "interpretation_review_pending_idempotent"] = Field(alias="_kind")
+    event_id: str
+    affected_node_id: str
+    kind: InterpretationKind
+    interpretation_source: str
+    message: str
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+
+class _RequestInterpretationReviewPendingTextDataModel(BaseModel):
+    """Legacy/drift response payload that accidentally carries review text.
+
+    The live handler omits ``user_term`` and ``llm_draft`` entirely; this model
+    exists as a persistence-boundary backstop if a future response shape adds
+    them back. Because the raw fields are present, ``message`` is sensitive too:
+    past versions interpolated the term into that string.
+    """
+
+    kind_marker: Literal["interpretation_review_pending", "interpretation_review_pending_idempotent"] = Field(alias="_kind")
+    event_id: str
+    affected_node_id: str
+    kind: InterpretationKind
+    user_term: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+    llm_draft: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+    interpretation_source: str
+    message: Annotated[str, Sensitive(summarizer=_summarize_interpretation_term)]
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+
+class _RequestInterpretationReviewSuppressedDataModel(BaseModel):
+    """Correlation-only response payload for session opt-out suppression."""
+
+    kind_marker: Literal["interpretation_review_suppressed_by_opt_out"] = Field(alias="_kind")
+    event_id: str
+    kind: InterpretationKind
+    interpretation_source: str
+    interpretation_review_disabled: bool
+    message: str
+
+    model_config = ConfigDict(extra="forbid", serialize_by_alias=True)
+
+
+class _RequestInterpretationReviewResponseModel(BaseModel):
+    """Redaction-bearing ``ToolResult`` envelope for interpretation reviews."""
+
+    success: bool
+    validation: GetBlobContentValidationModel
+    affected_nodes: list[str]
+    version: int
+    data: (
+        _RequestInterpretationReviewPendingDataModel
+        | _RequestInterpretationReviewPendingTextDataModel
+        | _RequestInterpretationReviewSuppressedDataModel
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class GetBlobContentArgumentsModel(BaseModel):
     """Redaction-bearing argument model for the ``get_blob_content`` tool.
 
@@ -3054,10 +3117,15 @@ MANIFEST: Mapping[str, ToolRedaction] = MappingProxyType(
             )
         ),
         # request_interpretation_review (session-aware async tool).
-        # Type-driven entry; both LLM-supplied content fields carry a 64-char
-        # truncation summariser so the persistence-boundary row in
-        # chat_messages.tool_calls cannot leak unbounded user/LLM text.
-        "request_interpretation_review": ToolRedaction(argument_model=_RequestInterpretationReviewRedactionModel),
+        # Type-driven entry; both argument and response-side review text fields
+        # carry a fixed-form summariser so chat_messages.tool_calls cannot leak
+        # unbounded user/LLM text. The live handler returns correlation-only
+        # response data, while the response_model keeps a redaction backstop for
+        # future drift that accidentally reintroduces user_term / llm_draft.
+        "request_interpretation_review": ToolRedaction(
+            argument_model=_RequestInterpretationReviewRedactionModel,
+            response_model=_RequestInterpretationReviewResponseModel,
+        ),
         # request_advisor_hint (intercepted at service.py:2103).
         "request_advisor_hint": ToolRedaction(
             policy=ToolRedactionPolicy(

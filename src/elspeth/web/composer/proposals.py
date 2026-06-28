@@ -109,9 +109,8 @@ def build_tool_proposal_summary(
         # surface listing affected subsystems can disambiguate this row.
         # The frontend type ``affects: string[]`` (web/frontend/src/types/index.ts)
         # is intentionally open — no closed literal to extend.
-        term = _string_argument(arguments, "user_term") or "term"
         return ToolProposalSummary(
-            summary=f'Surface the interpretation of "{term}" for user review.',
+            summary="Surface an interpretation draft for user review.",
             rationale=(
                 "The term is subjective or underspecified; the user should "
                 "review the LLM's draft interpretation before the prompt "

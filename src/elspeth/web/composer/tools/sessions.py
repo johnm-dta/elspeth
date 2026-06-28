@@ -1243,14 +1243,14 @@ def _assert_affected_component(
         if INTERPRETATION_REQUIREMENTS_KEY not in source.options:
             raise ToolArgumentError(
                 argument="affected_node_id",
-                expected=f"source to contain a pending {kind.value} requirement for {user_term!r}",
+                expected=f"source to contain a pending {kind.value} requirement for the requested term",
                 actual_type=f"missing pending {kind.value} review site",
             )
         matched_terms = _matching_interpretation_sites(state, affected_node_id, kind, user_term)
         if not matched_terms:
             raise ToolArgumentError(
                 argument="affected_node_id",
-                expected=f"source to contain a pending {kind.value} requirement for {user_term!r}",
+                expected=f"source to contain a pending {kind.value} requirement for the requested term",
                 actual_type=f"missing pending {kind.value} review site",
             )
         if llm_draft is not None:
@@ -1287,7 +1287,7 @@ def _assert_affected_component(
         if not matched_terms:
             raise ToolArgumentError(
                 argument="affected_node_id",
-                expected=f"node {affected_node_id!r} to contain a pending {kind.value} requirement for {user_term!r}",
+                expected=f"node {affected_node_id!r} to contain a pending {kind.value} requirement for the requested term",
                 actual_type=f"missing pending {kind.value} review site",
             )
         requirements = node.options.get(INTERPRETATION_REQUIREMENTS_KEY)
@@ -1315,7 +1315,7 @@ def _assert_affected_component(
             raise ToolArgumentError(
                 argument="affected_node_id",
                 expected=str(exc),
-                actual_type="pipeline_decision node that does not implement the reviewed decision",
+                actual_type="pipeline_decision node that failed semantic review",
             ) from exc
         return
 
@@ -1348,7 +1348,7 @@ def _assert_affected_component(
         expected_kind = kind.value
         raise ToolArgumentError(
             argument="affected_node_id",
-            expected=(f"node {affected_node_id!r} to contain a pending {expected_kind} requirement or placeholder for {user_term!r}"),
+            expected=(f"node {affected_node_id!r} to contain a pending {expected_kind} requirement or placeholder for the requested term"),
             actual_type=f"missing pending {expected_kind} review site",
         )
     # A pending vague_term requirement is only a *resolvable* handoff when the
@@ -1363,15 +1363,12 @@ def _assert_affected_component(
         raise ToolArgumentError(
             argument="affected_node_id",
             expected=(
-                f"node {affected_node_id!r} to wire the {user_term!r} interpretation into the prompt — "
+                f"node {affected_node_id!r} to wire the requested interpretation into the prompt — "
                 "exactly one prompt_template_parts entry "
                 '{"kind": "interpretation_ref", "requirement_id": "<the pending requirement id>"} '
-                f"referencing the requirement, or exactly one legacy {{{{interpretation:{user_term}}}}} "
-                "placeholder in options.prompt_template"
+                "referencing the requirement, or exactly one legacy interpretation placeholder in options.prompt_template"
             ),
-            actual_type=(
-                f"pending vague_term requirement for {user_term!r} with no resolvable prompt wiring (the operator's resolve would dead-end)"
-            ),
+            actual_type=("pending vague_term requirement with no resolvable prompt wiring (the operator's resolve would dead-end)"),
         )
     if kind is InterpretationKind.LLM_PROMPT_TEMPLATE and llm_draft is not None and llm_draft != prompt_template:
         raise ToolArgumentError(
@@ -1553,10 +1550,8 @@ async def _check_duplicate_interpretation(
                 "event_id": str(original.id),
                 "affected_node_id": affected_node_id,
                 "kind": kind.value,
-                "user_term": user_term,
-                "llm_draft": original.llm_draft,
                 "interpretation_source": original.interpretation_source.value,
-                "message": (f"Interpretation review for '{user_term}' is already pending; reusing the existing event."),
+                "message": "Interpretation review is already pending; reusing the existing event.",
             },
         )
     # Resolved — re-staging an already-decided review is forbidden.
@@ -1625,7 +1620,7 @@ async def _check_interpretation_rate_limits(
             argument="user_term",
             expected=f"at most {per_term_cap} interpretation requests per term in this composition",
             actual_type=(
-                f"term {user_term!r} would be surfaced {per_term_count + 1} times — use a direct "
+                f"the requested term would be surfaced {per_term_count + 1} times — use a direct "
                 f"interpretation in the prompt template instead"
             ),
             # Compose-loop discriminant (F-6): the rate-cap branch is the
@@ -1828,12 +1823,9 @@ async def _handle_request_interpretation_review(
             "event_id": str(event.id),
             "affected_node_id": parsed.affected_node_id,
             "kind": parsed.kind.value,
-            "user_term": parsed.user_term,
-            "llm_draft": parsed.llm_draft,
             "interpretation_source": event.interpretation_source.value,
             "message": (
-                f"Interpretation review staged for '{parsed.user_term}'. "
-                f"Waiting for user acceptance/amendment before the pipeline can finalise."
+                "Interpretation review staged for user review. Waiting for user acceptance/amendment before the pipeline can finalise."
             ),
         },
     )

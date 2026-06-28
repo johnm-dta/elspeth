@@ -17,8 +17,10 @@ import pytest
 from elspeth.web.composer.redaction import (
     MANIFEST,
     _RequestInterpretationReviewRedactionModel,
+    _RequestInterpretationReviewResponseModel,
     _summarize_interpretation_term,
     redact_tool_call_arguments,
+    redact_tool_call_response,
 )
 from elspeth.web.composer.redaction_telemetry import RedactionTelemetry
 
@@ -110,4 +112,54 @@ def test_manifest_entry_is_type_driven() -> None:
     Pydantic schema rather than relying on a declarative policy."""
     entry = MANIFEST["request_interpretation_review"]
     assert entry.argument_model is _RequestInterpretationReviewRedactionModel
+    assert entry.response_model is _RequestInterpretationReviewResponseModel
     assert entry.policy is None
+
+
+def test_response_redaction_summarizes_review_text_if_present() -> None:
+    """The response manifest is a backstop for future handler drift.
+
+    The current handler avoids echoing raw review text in ToolResult.data. If a
+    future response shape accidentally reintroduces these fields, the
+    persistence-boundary redactor must summarize them before the payload reaches
+    chat-message audit rows.
+    """
+    long_term = "personally identifying user criterion " * 4
+    long_draft = "draft text quoting a user's private business context " * 4
+    raw_response = {
+        "success": True,
+        "validation": {
+            "is_valid": True,
+            "errors": [],
+            "warnings": [],
+            "suggestions": [],
+            "semantic_contracts": [],
+            "graph_repair_suggestions": [],
+        },
+        "affected_nodes": ["rate_node"],
+        "version": 1,
+        "data": {
+            "_kind": "interpretation_review_pending",
+            "event_id": "8b255fb7-71d1-4b06-8848-8af5463e86a5",
+            "affected_node_id": "rate_node",
+            "kind": "vague_term",
+            "user_term": long_term,
+            "llm_draft": long_draft,
+            "interpretation_source": "user_approved",
+            "message": "Interpretation review staged for user review.",
+        },
+    }
+
+    redacted = redact_tool_call_response(
+        "request_interpretation_review",
+        raw_response,
+        telemetry=_NullTelemetry(),
+    )
+
+    data = redacted["data"]
+    assert data["user_term"] == f"<interpretation-term:{len(long_term)}-chars:truncated>"
+    assert data["llm_draft"] == f"<interpretation-term:{len(long_draft)}-chars:truncated>"
+    assert long_term not in data["user_term"]
+    assert long_draft not in data["llm_draft"]
+    assert data["event_id"] == raw_response["data"]["event_id"]
+    assert data["affected_node_id"] == "rate_node"

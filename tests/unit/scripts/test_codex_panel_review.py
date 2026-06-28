@@ -55,3 +55,20 @@ def test_layered_prompt_orders_stable_content_first():
     assert i_ctx < i_src < i_persona < i_path
     # the focus path must NOT appear in the cacheable head (before persona)
     assert prompt[:i_persona].count("src/elspeth/web/foo.py") == 0
+
+
+def test_load_persona_reads_and_errors(tmp_path):
+    (tmp_path / "demo.md").write_text("PERSONA BODY", encoding="utf-8")
+    assert cpr.load_persona("demo", lenses_dir=tmp_path) == "PERSONA BODY"
+    import pytest
+
+    with pytest.raises(FileNotFoundError):
+        cpr.load_persona("missing", lenses_dir=tmp_path)
+
+
+def test_route_lenses_default_and_override():
+    py = Path("src/elspeth/web/foo.py")
+    routed = cpr.route_lenses(py)
+    assert "solution-architect" in routed and "security-architect" in routed
+    # explicit override is returned verbatim
+    assert cpr.route_lenses(py, override=["security-architect"]) == ["security-architect"]

@@ -59,3 +59,23 @@ def build_layered_prompt(
         "return an empty findings array and say so in markdown_report.\n"
         f"--- review target: {file_path} · lens: {lens} ---\n"
     )
+
+
+# Plan 1 roster (file-predicate pairs). Full routing table is Plan 2.
+_EVERY_FILE = ("solution-architect", "security-architect")
+
+
+def load_persona(lens: str, *, lenses_dir: Path = LENSES_DIR) -> str:
+    path = lenses_dir / f"{lens}.md"
+    if not path.exists():
+        raise FileNotFoundError(f"persona prompt not found: {path}")
+    return path.read_text(encoding="utf-8")
+
+
+def route_lenses(file_path: Path, *, override: list[str] | None = None) -> list[str]:
+    if override:
+        return list(override)
+    lenses = list(_EVERY_FILE)
+    if file_path.suffix == ".py" and (LENSES_DIR / "python-engineer.md").exists():
+        lenses.append("python-engineer")
+    return lenses

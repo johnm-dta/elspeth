@@ -31,7 +31,7 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
 from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError, InvariantError
-from elspeth.web.composer.guided.prompts import load_step_chat_skill
+from elspeth.web.composer.guided.prompts import _summarize_sample_row, load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
 from elspeth.web.composer.llm_response_parsing import attach_llm_calls, build_llm_call_record
@@ -191,7 +191,7 @@ def _build_step_1_source_tool_prompt(
             "A source has already been applied to this phase. The user's message "
             "is a REVISION instruction against it — re-emit the COMPLETE updated "
             "source (not a diff). Current source:\n"
-            f"{json.dumps(current_source.to_dict(), sort_keys=True)}\n"
+            f"{json.dumps(_source_revision_context_for_llm(current_source), sort_keys=True)}\n"
         )
     return (
         f"{load_step_chat_skill(GuidedStep.STEP_1_SOURCE).rstrip()}\n\n"
@@ -226,6 +226,53 @@ def _build_step_1_source_tool_prompt(
         "rows must be kept for inspection. If the message is only a "
         "question or lacks enough source detail, reply in prose and do not call a tool.\n"
     )
+
+
+def _llm_safe_schema_option(schema: Any) -> dict[str, Any] | None:
+    if not isinstance(schema, Mapping):
+        return None
+    safe: dict[str, Any] = {}
+    mode = schema.get("mode")
+    if isinstance(mode, str):
+        safe["mode"] = mode
+    guaranteed_fields = schema.get("guaranteed_fields")
+    if isinstance(guaranteed_fields, (list, tuple)):
+        safe_guaranteed_fields = [field for field in guaranteed_fields if isinstance(field, str)]
+        if safe_guaranteed_fields:
+            safe["guaranteed_fields"] = safe_guaranteed_fields
+    return safe or {"shape": "object"}
+
+
+def _source_revision_context_for_llm(current_source: SourceResolved) -> dict[str, Any]:
+    options = current_source.options if isinstance(current_source.options, Mapping) else {}
+    payload: dict[str, Any] = {
+        "plugin": current_source.plugin,
+        "observed_columns": list(current_source.observed_columns),
+        "sample_rows": [_summarize_sample_row(row) for row in current_source.sample_rows if isinstance(row, Mapping)],
+        "on_validation_failure": current_source.on_validation_failure,
+        "option_count": len(options),
+    }
+    schema = _llm_safe_schema_option(options.get("schema"))
+    if schema is not None:
+        payload["schema"] = schema
+    if "blob_ref" in options:
+        payload["server_storage_bound"] = True
+    return payload
+
+
+def _sink_revision_context_for_llm(current_sink: SinkResolved) -> dict[str, Any]:
+    outputs: list[dict[str, Any]] = []
+    for output in current_sink.outputs:
+        options = output.options if isinstance(output.options, Mapping) else {}
+        outputs.append(
+            {
+                "plugin": output.plugin,
+                "required_fields": list(output.required_fields),
+                "schema_mode": output.schema_mode,
+                "option_count": len(options),
+            }
+        )
+    return {"outputs": outputs}
 
 
 def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | None) -> Step1SourceChatResolution:
@@ -505,7 +552,7 @@ def _build_step_2_sink_tool_prompt(*, current_sink: SinkResolved | None) -> str:
             "A sink has already been applied. The user's message is a REVISION "
             "instruction against it — re-emit the COMPLETE updated outputs (not a "
             "diff). Current sink:\n"
-            f"{json.dumps(current_sink.to_dict(), sort_keys=True)}\n"
+            f"{json.dumps(_sink_revision_context_for_llm(current_sink), sort_keys=True)}\n"
         )
     return (
         f"{load_step_chat_skill(GuidedStep.STEP_2_SINK).rstrip()}\n\n"

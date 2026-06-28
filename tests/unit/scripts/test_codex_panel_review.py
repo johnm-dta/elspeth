@@ -317,3 +317,15 @@ def test_run_file_lenses_loops_gates_and_aggregates(tmp_path, monkeypatch):
     assert len(calls) == 2  # one call per lens, serial
     assert stats["cached_input_tokens"] == 120  # 60 * 2 aggregated
     assert stats["failed"] == 0
+
+
+def test_dry_run_prints_lens_plan(tmp_path, capsys, monkeypatch):
+    target = tmp_path / "src" / "elspeth" / "web" / "foo.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def foo(): ...", encoding="utf-8")
+    monkeypatch.setattr(cpr, "REPO_ROOT", tmp_path)
+    rc = cpr.main(["--file", str(target), "--dry-run"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "security-architect" in out and "solution-architect" in out
+    assert "foo.py" in out

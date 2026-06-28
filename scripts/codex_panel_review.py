@@ -11,17 +11,26 @@ dual-import shim, so this module runs both as a script (``scripts/`` on
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import json
+import shutil
+import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Dual-import shim: bare import works when run as a script (scripts/ on sys.path);
 # the package form works when pytest imports this as scripts.codex_panel_review.
-# Helpers are pulled in at their first use-site (runner below) so an unused-import
-# autofix never strips them. See docs/superpowers/plans/2026-06-28-codex-panel-review-foundation.md.
+# Helpers are pulled in at their first use-site (runner + CLI below) so an
+# unused-import autofix never strips them. See
+# docs/superpowers/plans/2026-06-28-codex-panel-review-foundation.md.
 try:
     from codex_audit_common import (  # type: ignore[import-not-found]
         append_log,
+        ensure_log_file,
+        load_context,
+        make_codex_rate_limiter,
         run_codex_once,
         structured_output_path_for_report,
         utc_now,
@@ -29,6 +38,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     from scripts.codex_audit_common import (
         append_log,
+        ensure_log_file,
+        load_context,
+        make_codex_rate_limiter,
         run_codex_once,
         structured_output_path_for_report,
         utc_now,
@@ -102,14 +114,14 @@ def route_lenses(file_path: Path, *, override: list[str] | None = None) -> list[
     return lenses
 
 
-def _has_line_anchor(finding: dict) -> bool:
+def _has_line_anchor(finding: dict[str, Any]) -> bool:
     evidence = finding.get("evidence")
     if not isinstance(evidence, list):
         return False
     return any(isinstance(e, dict) and isinstance(e.get("line"), int) and bool(e.get("path")) for e in evidence)
 
 
-def _has_impact(finding: dict) -> bool:
+def _has_impact(finding: dict[str, Any]) -> bool:
     # `impact` is nullable in the strict schema, so finding.get("impact") may be
     # None. Coerce with `or ""` BEFORE strip() — str(None) == "None" reads truthy,
     # which would silently defeat the relaxed/fail-closed downgrade.
@@ -169,9 +181,9 @@ async def run_file_lenses(
     context: str,
     model: str | None,
     reasoning_effort: str | None,
-    rate_limiter,
+    rate_limiter: Any | None,
     log_path: Path,
-    log_lock,
+    log_lock: asyncio.Lock,
 ) -> dict[str, int]:
     """Run a file's lenses SERIALLY (file-major), so lens 2..N reuse lens 1's
     warm [context][source] prompt-cache prefix. Stock run_codex_once; the panel
@@ -234,3 +246,65 @@ async def run_file_lenses(
                 note=note,
             )
     return agg
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Codex panel review (foundation: single file).")
+    p.add_argument("--file", required=True, help="Source file to review.")
+    p.add_argument("--lenses", default=None, help="Comma-separated lens override.")
+    p.add_argument("--model", default=None)
+    p.add_argument("--reasoning-effort", default=None)
+    p.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    p.add_argument("--context-files", nargs="+", default=None)
+    p.add_argument("--rate-limit", type=int, default=None)
+    p.add_argument("--dry-run", action="store_true")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_arg_parser().parse_args(argv)
+    file_path = Path(args.file).resolve()
+    if not file_path.exists():
+        print(f"file not found: {file_path}", file=sys.stderr)
+        return 1
+    override = [s.strip() for s in args.lenses.split(",")] if args.lenses else None
+    lenses = route_lenses(file_path, override=override)
+
+    if args.dry_run:
+        print(f"Would review {file_path.name} through {len(lenses)} lenses:")
+        for lens in lenses:
+            print(f"  - {lens}")
+        return 0
+
+    if shutil.which("codex") is None:
+        raise RuntimeError("codex CLI not found on PATH")
+    output_dir = (REPO_ROOT / args.output_dir).resolve()
+    log_path = output_dir / "PANEL_LOG.md"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ensure_log_file(log_path, header_title="Codex Panel Review Log")
+    context = load_context(REPO_ROOT, extra_files=args.context_files, include_skills=True)
+    rate_limiter = make_codex_rate_limiter(args.rate_limit)
+
+    stats = asyncio.run(
+        run_file_lenses(
+            file_path=file_path,
+            lenses=lenses,
+            output_dir=output_dir,
+            repo_root=REPO_ROOT,
+            context=context,
+            model=args.model,
+            reasoning_effort=args.reasoning_effort,
+            rate_limiter=rate_limiter,
+            log_path=log_path,
+            log_lock=asyncio.Lock(),
+        )
+    )
+    cached = stats["cached_input_tokens"]
+    total_in = stats["input_tokens"]
+    rate = (cached / total_in * 100) if total_in else 0.0
+    print(f"lenses={len(lenses)} gated={stats['gated']} failed={stats['failed']} cache_hit={rate:.1f}% (cached_input={cached}/{total_in})")
+    return 1 if stats["failed"] else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -425,6 +425,8 @@ def _execute_upsert_node(
         state,
         component_id=node_id,
         component_type="node",
+        plugin_type="transform" if plugin is not None else None,
+        plugin_name=plugin,
         options=node_options,
     )
     if credential_error is not None:
@@ -743,6 +745,8 @@ def _execute_patch_node_options(
         state,
         component_id=node_id,
         component_type="node",
+        plugin_type="transform" if current.plugin is not None else None,
+        plugin_name=current.plugin,
         options=new_options,
     )
     if credential_error is not None:

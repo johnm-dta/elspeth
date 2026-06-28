@@ -1075,6 +1075,8 @@ def _credential_wiring_contract_failure(
     *,
     component_id: str,
     component_type: str,
+    plugin_type: PluginKind | None = None,
+    plugin_name: str | None = None,
     options: Any,
 ) -> ToolResult | None:
     """Reject literal credentials before a mutation writes them into state.
@@ -1094,7 +1096,17 @@ def _credential_wiring_contract_failure(
     The post-hoc ``wire_secret_ref`` sequence is still documented as
     the secondary path for nodes that already exist in state.
     """
-    fields = tuple(dict.fromkeys(collect_credential_field_violations(options)))
+    plugin_specific_fields = (
+        allowed_secret_ref_fields(plugin_type, plugin_name) if plugin_type is not None and plugin_name is not None else frozenset()
+    )
+    fields = tuple(
+        dict.fromkeys(
+            collect_credential_field_violations(
+                options,
+                additional_credential_fields=plugin_specific_fields,
+            )
+        )
+    )
     if not fields:
         return None
 

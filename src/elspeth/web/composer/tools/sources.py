@@ -478,6 +478,8 @@ def _execute_set_source(
         state,
         component_id=_source_component_id(source_name),
         component_type="source",
+        plugin_type="source",
+        plugin_name=plugin,
         options=options,
     )
     if credential_error is not None:
@@ -846,6 +848,8 @@ def _execute_patch_source_options(
         state,
         component_id=_source_component_id(source_name),
         component_type="source",
+        plugin_type="source",
+        plugin_name=current_source.plugin,
         options=new_options,
     )
     if credential_error is not None:

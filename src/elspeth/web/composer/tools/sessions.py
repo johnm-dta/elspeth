@@ -295,6 +295,8 @@ def _execute_set_pipeline(
                 state,
                 component_id=_source_component_id(source_name),
                 component_type="source",
+                plugin_type="source",
+                plugin_name=src_plugin,
                 options=src_options,
             )
             if credential_error is not None:
@@ -344,6 +346,8 @@ def _execute_set_pipeline(
             state,
             component_id="source",
             component_type="source",
+            plugin_type="source",
+            plugin_name=src_plugin,
             options=legacy_src_options,
         )
         if credential_error is not None:
@@ -462,6 +466,8 @@ def _execute_set_pipeline(
             state,
             component_id=node_id,
             component_type="node",
+            plugin_type="transform" if node_plugin is not None else None,
+            plugin_name=node_plugin,
             options=node_options,
         )
         if credential_error is not None:
@@ -558,6 +564,8 @@ def _execute_set_pipeline(
             state,
             component_id=out_name,
             component_type="output",
+            plugin_type="sink",
+            plugin_name=out_plugin,
             options=out_options,
         )
         if credential_error is not None:

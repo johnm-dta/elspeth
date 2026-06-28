@@ -140,6 +140,8 @@ def _execute_set_output(
         state,
         component_id=validated.sink_name,
         component_type="output",
+        plugin_type="sink",
+        plugin_name=plugin,
         options=sink_options,
     )
     if credential_error is not None:
@@ -221,6 +223,8 @@ def _execute_patch_output_options(
         state,
         component_id=sink_name,
         component_type="output",
+        plugin_type="sink",
+        plugin_name=current.plugin,
         options=new_options,
     )
     if credential_error is not None:

@@ -138,6 +138,8 @@ def is_wired_secret_value(value: Any, env_ref_names: Collection[str] = frozenset
 def collect_credential_field_violations(
     options: Any,
     env_ref_names: Collection[str] = frozenset(),
+    *,
+    additional_credential_fields: Collection[str] = frozenset(),
 ) -> list[str]:
     """Return credential-bearing field names that contain literal strings.
 
@@ -145,13 +147,28 @@ def collect_credential_field_violations(
     the same field-name predicate as runtime fingerprinting, and treats only
     deferred-secret markers as provisioned. Missing, empty, ``None``, and
     non-string values are left for plugin config validation to classify.
+    Callers may pass plugin-specific exact field names, such as the database
+    sink's whole-DSN ``url`` field.
     """
+    credential_exact = frozenset(field.lower() for field in additional_credential_fields)
+    return _collect_credential_field_violations(
+        options,
+        env_ref_names,
+        credential_exact,
+    )
+
+
+def _collect_credential_field_violations(
+    options: Any,
+    env_ref_names: Collection[str],
+    additional_credential_fields: Collection[str],
+) -> list[str]:
     violations: list[str] = []
     if isinstance(options, Mapping):
         if is_secret_ref_marker(options):
             return violations
         for key, value in options.items():
-            if isinstance(key, str) and is_secret_field(key):
+            if isinstance(key, str) and _field_allows_secret_ref(key, additional_credential_fields):
                 if is_wired_secret_value(value, env_ref_names):
                     continue
                 if value is None or value == "":
@@ -160,10 +177,10 @@ def collect_credential_field_violations(
                     violations.append(key)
                     continue
                 continue
-            violations.extend(collect_credential_field_violations(value, env_ref_names))
+            violations.extend(_collect_credential_field_violations(value, env_ref_names, additional_credential_fields))
     elif isinstance(options, (list, tuple)):
         for item in options:
-            violations.extend(collect_credential_field_violations(item, env_ref_names))
+            violations.extend(_collect_credential_field_violations(item, env_ref_names, additional_credential_fields))
     return violations
 
 

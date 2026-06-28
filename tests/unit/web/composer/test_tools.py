@@ -1888,6 +1888,34 @@ class TestSetOutput:
         assert "ANY_SECRET" in result.data["error"]
         assert "only credential-bearing fields" in result.data["error"]
 
+    def test_set_output_rejects_literal_database_url_credentials(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        literal_url = "postgresql://db.example.invalid/elspeth"
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "database",
+                "options": {
+                    "url": literal_url,
+                    "table": "events",
+                    "schema": {"mode": "observed"},
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert "main:url" in result.data["credential_fields"]
+        assert literal_url not in repr(result.to_dict())
+        assert "secret_ref" in result.data["error"]
+
 
 class TestRemoveOutput:
     def test_removes_output(self) -> None:

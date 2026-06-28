@@ -88,7 +88,7 @@ export function ComposerPreferencesForm(): JSX.Element | null {
           className="composer-preferences-error"
           style={{
             marginTop: 8,
-            color: "var(--color-danger, #b00020)",
+            color: "var(--color-error)",
             fontSize: 13,
           }}
         >

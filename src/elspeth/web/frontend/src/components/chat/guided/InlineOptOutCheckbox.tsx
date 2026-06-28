@@ -71,7 +71,7 @@ export function InlineOptOutCheckbox(): JSX.Element | null {
         <span>Always start new sessions in freeform mode</span>
       </label>
       {writeError !== null && (
-        <div role="alert" className="inline-opt-out-error" style={{ color: "var(--color-danger, #b00020)", fontSize: 12 }}>
+        <div role="alert" className="inline-opt-out-error" style={{ color: "var(--color-error)", fontSize: 12 }}>
           {writeError}
         </div>
       )}

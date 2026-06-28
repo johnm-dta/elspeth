@@ -754,7 +754,7 @@
   padding: var(--space-sm) var(--space-md);
   background-color: var(--color-surface-elevated);
   color: var(--color-text);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-input-border);
   border-radius: var(--radius-md);
   font-size: var(--font-size-base);
   font-family: inherit;

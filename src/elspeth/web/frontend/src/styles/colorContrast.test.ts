@@ -416,3 +416,121 @@ describe("forced-colors accessibility fallbacks", () => {
     expect(forcedColorsBlock).toContain(".tutorial-progress-bar");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Design-review remediation (2026-06-29) — lock in the M02/M03/M04 contrast
+// fixes so the deepened semantic/status tokens, the muted→secondary switch on
+// elevated surfaces, and the new --color-input-border cannot silently regress.
+// These pairings were previously UNGATED by this file (see the design-review
+// epic elspeth-ea551cca69).
+// ---------------------------------------------------------------------------
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } {
+  const m = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(hex);
+  if (!m) {
+    throw new Error(`Expected six-digit hex, got ${hex}`);
+  }
+  return {
+    r: Number.parseInt(m[1], 16),
+    g: Number.parseInt(m[2], 16),
+    b: Number.parseInt(m[3], 16),
+  };
+}
+
+function rgbToHex({ r, g, b }: { r: number; g: number; b: number }): string {
+  const c = (n: number) => Math.max(0, Math.min(255, Math.round(n))).toString(16).padStart(2, "0");
+  return `#${c(r)}${c(g)}${c(b)}`;
+}
+
+function extractRootRawToken(tokenName: string): string {
+  const blockMatch = /^:root\s*\{([\s\S]*?)\n\}/m.exec(appCss);
+  if (!blockMatch) {
+    throw new Error("Could not find root token block");
+  }
+  return extractRawTokenFromBlock(tokenName, blockMatch[1], "root");
+}
+
+// Resolve a token to a flat hex for a theme, compositing rgba() tints over the
+// theme's --color-bg so a tinted alert/banner background can be contrast-tested.
+function resolveHex(theme: "dark" | "light", tokenName: string): string {
+  const rawOf = theme === "dark" ? extractRootRawToken : extractLightThemeRawToken;
+  const hexOf = theme === "dark" ? extractRootToken : extractLightThemeToken;
+  const raw = rawOf(tokenName);
+  if (raw.startsWith("#")) {
+    return raw;
+  }
+  const rgba = parseRgba(raw);
+  const base = hexToRgb(hexOf("--color-bg"));
+  return rgbToHex({
+    r: rgba.red * rgba.alpha + base.r * (1 - rgba.alpha),
+    g: rgba.green * rgba.alpha + base.g * (1 - rgba.alpha),
+    b: rgba.blue * rgba.alpha + base.b * (1 - rgba.alpha),
+  });
+}
+
+describe("design-review contrast remediation (2026-06-29)", () => {
+  const themes: Array<"dark" | "light"> = ["dark", "light"];
+
+  it("keeps semantic banner text at AA on its own tinted background (M02)", () => {
+    // .alert-banner / .validation-banner render color:var(--color-X) on
+    // var(--color-X-bg). The semantic tokens were deepened so this clears AA.
+    for (const theme of themes) {
+      for (const kind of ["error", "warning", "success"] as const) {
+        const fg = resolveHex(theme, `--color-${kind}`);
+        const bg = resolveHex(theme, `--color-${kind}-bg`);
+        expect(
+          contrastRatio(fg, bg),
+          `${kind} text on ${kind}-bg (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps semantic + status text at AA on the elevated surface (M02)", () => {
+    const tokens = [
+      "--color-error",
+      "--color-warning",
+      "--color-success",
+      "--color-status-failed",
+      "--color-status-completed",
+      "--color-status-cancelled",
+      "--color-status-running",
+      "--color-status-empty",
+    ];
+    for (const theme of themes) {
+      const elevated = resolveHex(theme, "--color-surface-elevated");
+      for (const token of tokens) {
+        expect(
+          contrastRatio(resolveHex(theme, token), elevated),
+          `${token} on elevated (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps secondary text (not muted) at AA on elevated + paper surfaces (M03)", () => {
+    // Components that previously used --color-text-muted on elevated/paper
+    // (audit-icon 10px label, catalog-reference-meta) were switched to
+    // --color-text-secondary because muted is only ~3.84:1 there.
+    for (const theme of themes) {
+      const secondary = resolveHex(theme, "--color-text-secondary");
+      for (const surface of ["--color-surface-elevated", "--color-surface-paper"]) {
+        expect(
+          contrastRatio(secondary, resolveHex(theme, surface)),
+          `secondary on ${surface} (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("gives form inputs a resting boundary clearing WCAG 1.4.11 (3:1) (M04)", () => {
+    // --color-input-border replaces the 1px --color-border-strong (~1.7:1)
+    // boundary on .input/.textarea/.select/.guided-schema-input.
+    for (const theme of themes) {
+      expect(
+        contrastRatio(resolveHex(theme, "--color-input-border"), resolveHex(theme, "--color-surface-elevated")),
+        `input-border on elevated (${theme})`,
+      ).toBeGreaterThanOrEqual(3);
+    }
+  });
+});

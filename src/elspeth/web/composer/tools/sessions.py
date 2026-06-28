@@ -60,6 +60,7 @@ from elspeth.web.composer.tools._common import (
     _prevalidate_sink,
     _prevalidate_source,
     _prevalidate_transform,
+    _resolver_owned_interpretation_requirement_error,
     _runtime_owned_llm_option_error,
     _semantic_contracts_payload,
     _serialize_full_pipeline_state,
@@ -287,6 +288,9 @@ def _execute_set_pipeline(
             manual_authoring_error = _reject_manual_source_authoring(src_options, tool_name="set_pipeline")
             if manual_authoring_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {manual_authoring_error}")
+            review_metadata_error = _resolver_owned_interpretation_requirement_error(src_options, tool_name="set_pipeline")
+            if review_metadata_error is not None:
+                return _failure_result(state, f"Source '{source_name}': {review_metadata_error}")
             credential_error = _credential_wiring_contract_failure(
                 state,
                 component_id=_source_component_id(source_name),
@@ -333,6 +337,9 @@ def _execute_set_pipeline(
         manual_authoring_error = _reject_manual_source_authoring(legacy_src_options, tool_name="set_pipeline")
         if manual_authoring_error is not None:
             return _failure_result(state, manual_authoring_error)
+        review_metadata_error = _resolver_owned_interpretation_requirement_error(legacy_src_options, tool_name="set_pipeline")
+        if review_metadata_error is not None:
+            return _failure_result(state, review_metadata_error)
         credential_error = _credential_wiring_contract_failure(
             state,
             component_id="source",

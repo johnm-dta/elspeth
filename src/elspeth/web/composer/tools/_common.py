@@ -1421,24 +1421,31 @@ def _mask_pending_interpretation_placeholders_for_authoring_validation(
     )
 
 
-def _runtime_owned_llm_option_error(
-    plugin_name: str | None,
+def _resolver_owned_interpretation_requirement_error(
     options: Mapping[str, Any],
     *,
     tool_name: str,
 ) -> str | None:
-    """Reject composer-authored writes to runtime-owned LLM audit fields."""
-    if plugin_name != "llm":
-        return None
-    supplied = sorted(key for key in _RUNTIME_OWNED_LLM_OPTION_KEYS if key in options)
-    if supplied:
-        field_names = ", ".join(supplied)
-        return (
-            f"{tool_name} options include runtime-owned LLM option(s): {field_names}. "
-            "These audit-link fields may only be written by resolve_interpretation_event, "
-            "not by composer tool input."
-        )
+    """Reject LLM-supplied ``interpretation_requirements`` carrying resolver-owned review metadata.
 
+    Composer tool input may stage only PENDING review requirements; a resolved
+    ``status`` or any resolver-owned field (``event_id`` / ``accepted_value`` /
+    ``accepted_artifact_hash`` / ``resolved_prompt_template_hash``) may be written
+    ONLY by ``resolve_interpretation_event``, which records a real human
+    resolution in the interpretation-events audit DB.
+
+    This check is PLUGIN-AGNOSTIC and must guard every write path to a spec's
+    ``options`` — both LLM-node options (``vague_term`` / ``llm_prompt_template``
+    / ``llm_model_choice`` requirements) and SOURCE options
+    (``invented_source`` requirements). The read side that decides whether an
+    LLM-authored ("invented") source still needs human review
+    (``interpretation_state._pending_source_sites``) trusts a self-reported
+    ``status == "resolved"`` + ``accepted_artifact_hash`` match without
+    consulting the events DB, so this write-boundary guard is the only real
+    defence against a forged "resolved" requirement. Apply it to the
+    LLM-SUPPLIED delta (full options on a create, the ``patch`` on a merge) so a
+    legitimately-resolved requirement already in stored state is not re-flagged.
+    """
     requirements_value = options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None
     if not isinstance(requirements_value, (list, tuple)):
         return None
@@ -1466,6 +1473,35 @@ def _runtime_owned_llm_option_error(
                 "written by resolve_interpretation_event."
             )
     return None
+
+
+def _runtime_owned_llm_option_error(
+    plugin_name: str | None,
+    options: Mapping[str, Any],
+    *,
+    tool_name: str,
+) -> str | None:
+    """Reject composer-authored writes to runtime-owned LLM audit fields.
+
+    Two checks: (1) the LLM-only runtime-owned option keys
+    (``_RUNTIME_OWNED_LLM_OPTION_KEYS``, e.g. ``resolved_prompt_template_hash``
+    at the top level), gated on ``plugin_name == "llm"``; and (2) the
+    plugin-agnostic resolver-owned interpretation-requirement check, which also
+    guards source write paths via
+    :func:`_resolver_owned_interpretation_requirement_error`.
+    """
+    if plugin_name != "llm":
+        return None
+    supplied = sorted(key for key in _RUNTIME_OWNED_LLM_OPTION_KEYS if key in options)
+    if supplied:
+        field_names = ", ".join(supplied)
+        return (
+            f"{tool_name} options include runtime-owned LLM option(s): {field_names}. "
+            "These audit-link fields may only be written by resolve_interpretation_event, "
+            "not by composer tool input."
+        )
+
+    return _resolver_owned_interpretation_requirement_error(options, tool_name=tool_name)
 
 
 def _secret_ref_placement_error(

@@ -370,6 +370,17 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
             if source_name == "source":
                 raise ValueError("Cannot wire source ref: no source has been set")
             raise ValueError(f"Source {source_name!r} not found in composition state")
+        # Symmetric with the node arm below: never let a wire write land inside a
+        # source's interpretation_requirements. Source review metadata
+        # (INVENTED_SOURCE) may only be staged as a pending composer requirement
+        # and resolved by resolve_interpretation_event — a wired ref here would
+        # corrupt that structure outside the review boundary.
+        if keys[0] == INTERPRETATION_REQUIREMENTS_KEY:
+            raise ValueError(
+                "wire_blob_inline_ref cannot write source interpretation_requirements; "
+                "review metadata may only be staged as pending composer input and "
+                "resolved by resolve_interpretation_event."
+            )
         patched_options = _set_nested_option(dict(deep_thaw(source.options)), keys, marker)
         return state.with_named_source(source_name, replace(source, options=patched_options))
 

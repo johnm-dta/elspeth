@@ -6,13 +6,13 @@
 
 **Architecture:** A new, self-contained `scripts/codex_panel_review.py` that reuses the small, pure helpers from `codex_audit_common.py` (`run_codex_once`, rate limiter, usage parsing, `load_context`, log helpers, `has_file_line_evidence`, `structured_output_path_for_report`, `_structured_findings`) but adds its own prompt builder, finding schema, and a new structured-first gate `apply_panel_evidence_gate`. Plan 1 deliberately runs lenses **serially over a single file** — no streaming runner, no worker pool, no merge/synthesis (those are Plan 2). Serial-on-one-file is exactly what the pilot needs to measure cross-lens prompt-cache reuse.
 
-**Tech Stack:** Python 3.13, `asyncio`, the `codex` CLI (`codex exec --json --output-schema`), `pytest`. No new third-party deps.
+**Tech Stack:** Python 3.12 (`.venv` = 3.12.3), `asyncio`, the `codex` CLI (`codex exec --json --output-schema`), `pytest`. No new third-party deps.
 
 ## Global Constraints
 
 [Every task's requirements implicitly include this section. Values copied from the spec `docs/superpowers/specs/2026-06-28-codex-panel-review-design.md`.]
 
-- **Python interpreter:** the repo's main `.venv` is **Python 3.13** — run all tests with `.venv/bin/python -m pytest`.
+- **Python interpreter:** the repo's main `.venv` is **Python 3.12** (`.venv/bin/python` reports 3.12.3; verify live before assuming) — run all tests with `.venv/bin/python -m pytest`.
 - **Do not modify** `run_codex_once`, `run_codex_with_retry_and_logging`, or `apply_evidence_gate` in `codex_audit_common.py`, nor any of the four sibling scripts (`codex_test_defect_hunt.py`, `codex_integration_seam_hunt.py`, `codex_exemption_validator.py`, `codex_tier_model_rejudge.py`). New code is additive only.
 - **Finding schema keeps `priority`** (values exactly `P0|P1|P2|P3`) — it is the field every shared writer reads (`_priority_from_structured_finding`). Never put a P-level in a field named `severity`.
 - **`--output-schema` JSON must include a non-empty `markdown_report` string field** — `run_codex_once` calls `_extract_structured_markdown(..., "markdown_report")` whenever `output_schema` is set and raises if that field is absent (`codex_audit_common.py:365`).
@@ -75,7 +75,7 @@ def test_module_constants_present_and_typed():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/unit/scripts/test_codex_panel_review.py::test_module_constants_present_and_typed -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'scripts.codex_panel_review'`
+Expected: FAIL — import/collection error: `ImportError: cannot import name 'codex_panel_review' from 'scripts'` (`scripts/__init__.py` exists, so a missing submodule raises a plain `ImportError`, not `ModuleNotFoundError`)
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -118,7 +118,13 @@ except ModuleNotFoundError:  # pragma: no cover
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LENSES_DIR = Path(__file__).resolve().parent / "codex_lenses"
 PANEL_FINDING_SCHEMA = LENSES_DIR / "panel_finding.schema.json"
-DEFAULT_OUTPUT_DIR = "docs/quality-audit/findings-panel"
+# Per-lens output goes in the *-raw sibling, NOT the counted `findings-panel/`
+# tree. iter_report_files (codex_audit_common.py:792) only skips `by-priority/`
+# + the metadata filenames — it does NOT skip an arbitrary subdir — so per-lens
+# `.md` files written under the counted tree would be double-counted by Plan 2's
+# generate_summary. Keeping raw detail in its own sibling from day one matches
+# the spec's output layout and avoids seeding that double-count.
+DEFAULT_OUTPUT_DIR = "docs/quality-audit/findings-panel-raw"
 
 STRICT_CATEGORIES = frozenset({"bug", "correctness", "security", "smell"})
 RELAXED_CATEGORIES = frozenset({"improvement", "efficiency"})
@@ -166,6 +172,12 @@ def test_panel_schema_shape():
     assert "severity" not in finding["properties"]
     for req in ("priority", "lens", "category", "summary", "evidence"):
         assert req in finding["required"]
+    # strict structured-outputs contract: under additionalProperties:false the API
+    # rejects any optional property, so EVERY declared property must be required
+    # (genuinely-optional fields are nullable union types, never absent from required).
+    assert set(finding["required"]) == set(finding["properties"])
+    evidence_item = finding["properties"]["evidence"]["items"]
+    assert set(evidence_item["required"]) == set(evidence_item["properties"])
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -174,6 +186,8 @@ Run: `.venv/bin/python -m pytest tests/unit/scripts/test_codex_panel_review.py::
 Expected: FAIL — `FileNotFoundError` (schema file does not exist yet)
 
 - [ ] **Step 3: Write minimal implementation**
+
+> **OpenAI strict structured-outputs constraint (verified against `codex` 0.142.3):** with `additionalProperties: false`, the API requires **every** key in `properties` to also appear in `required` — a schema with optional properties is rejected with `HTTP 400 invalid_json_schema`, which `run_codex_once` turns into a `RuntimeError` (`codex_audit_common.py:658`) on the *first* pilot call (Tasks 1–8 never catch it because the Step-1 test is `json.loads` + key-membership only). Genuinely-optional fields are therefore declared as **nullable union types**, and the Task 3 prompt instructs the model to emit `null` (not omit). `markdown_report`, `priority`, `lens`, `category`, `summary`, `evidence`, `path`, and `claim` stay non-nullable; everything else is nullable. `gate_note` is declared here because the Task 6 gate writes it back into this same sidecar (and would otherwise re-violate `additionalProperties: false`).
 
 ```json
 {
@@ -190,7 +204,7 @@ Expected: FAIL — `FileNotFoundError` (schema file does not exist yet)
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["priority", "lens", "category", "summary", "evidence"],
+        "required": ["priority", "lens", "category", "confidence", "effort", "impact", "summary", "evidence", "suggested_fix", "target_file", "gate_note"],
         "properties": {
           "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
           "lens": {"type": "string"},
@@ -198,25 +212,26 @@ Expected: FAIL — `FileNotFoundError` (schema file does not exist yet)
             "type": "string",
             "enum": ["bug", "correctness", "smell", "efficiency", "improvement", "easy-win", "security", "design"]
           },
-          "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-          "effort": {"type": "string", "enum": ["trivial", "small", "medium", "large"]},
-          "impact": {"type": "string"},
+          "confidence": {"type": ["string", "null"], "enum": ["high", "medium", "low", null]},
+          "effort": {"type": ["string", "null"], "enum": ["trivial", "small", "medium", "large", null]},
+          "impact": {"type": ["string", "null"]},
           "summary": {"type": "string"},
           "evidence": {
             "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["path", "claim"],
+              "required": ["path", "line", "claim"],
               "properties": {
                 "path": {"type": "string"},
-                "line": {"type": "integer"},
+                "line": {"type": ["integer", "null"]},
                 "claim": {"type": "string"}
               }
             }
           },
-          "suggested_fix": {"type": "string"},
-          "target_file": {"type": "string"}
+          "suggested_fix": {"type": ["string", "null"]},
+          "target_file": {"type": ["string", "null"]},
+          "gate_note": {"type": ["string", "null"]}
         }
       }
     }
@@ -238,7 +253,7 @@ git commit --no-verify -m "feat(panel): add panel finding output-schema (markdow
 
 ---
 
-### Task 3: `build_layered_prompt` — stable-prefix-first ordering (the caching fix)
+### Task 3: `build_layered_prompt` — stable-prefix-first ordering (the caching prerequisite)
 
 **Files:**
 - Modify: `scripts/codex_panel_review.py`
@@ -285,9 +300,10 @@ def build_layered_prompt(
     persona: str,
     lens: str,
 ) -> str:
-    """Layer the prompt most-shared -> least-shared so the codex prompt cache
-    keys on [context][source] across every lens of a file. The per-call tail
-    (file_path, lens) is the only variable content and comes last."""
+    """Layer the prompt most-shared -> least-shared to ENABLE the codex prompt
+    cache to key on [context][source] across every lens of a file (necessary, not
+    sufficient — actual cross-process reuse is verified empirically in Task 9). The
+    per-call tail (file_path, lens) is the only variable content and comes last."""
     return (
         f"{context}\n\n"
         "=== TARGET FILE SOURCE (inlined; you MAY read any other repo file via the "
@@ -299,8 +315,11 @@ def build_layered_prompt(
         "`markdown_report` narration string and a `findings` array. Every finding "
         f'MUST set `lens` to "{lens}" and `priority` to one of P0|P1|P2|P3. For '
         "categories bug/correctness/security/smell/easy-win, `evidence` MUST cite a "
-        "real path and integer line. If you find nothing, return an empty findings "
-        "array and say so in markdown_report.\n"
+        "real path and integer line. The schema is STRICT: every finding MUST "
+        "include ALL fields — for any field you have no value for (confidence, "
+        "effort, impact, suggested_fix, target_file, gate_note, or an evidence "
+        "`line`), emit JSON `null`; do NOT omit the key. If you find nothing, "
+        "return an empty findings array and say so in markdown_report.\n"
         f"--- review target: {file_path} · lens: {lens} ---\n"
     )
 ```
@@ -463,8 +482,8 @@ git commit --no-verify -m "feat(panel): security-architect + solution-architect 
 - Test: `tests/unit/scripts/test_codex_panel_review.py`
 
 **Interfaces:**
-- Consumes: `has_file_line_evidence` (unused here — anchor is checked structurally via `evidence[].line`), `STRICT_CATEGORIES`, `RELAXED_CATEGORIES`, `ANCHOR_REQUIRED_CATEGORIES`.
-- Produces: `apply_panel_evidence_gate(sidecar_path: Path) -> int` — returns the number of findings downgraded. Mutates the sidecar JSON in place and **always rewrites it** (so its mtime exceeds the per-lens `.md`).
+- Consumes: `RELAXED_CATEGORIES`, `ANCHOR_REQUIRED_CATEGORIES` (the gate body dispatches on these two; `STRICT_CATEGORIES` is consumed only transitively, at `ANCHOR_REQUIRED_CATEGORIES`'s definition in Task 1).
+- Produces: `apply_panel_evidence_gate(sidecar_path: Path, *, lens: str) -> int` — returns the number of findings downgraded. Stamps each finding's `lens` from the (known-correct) caller value rather than trusting the model's self-report; is **fail-closed** (any priority-bearing category not covered by the anchor/relaxed arms — e.g. `design` or a future enum value — is downgraded unless it carries a non-empty `impact` rationale); mutates the sidecar JSON in place; and **always rewrites it** (so its mtime exceeds the per-lens `.md`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -484,7 +503,7 @@ def test_gate_strict_downgrades_without_line(tmp_path):
         {"priority": "P1", "lens": "security-architect", "category": "security",
          "summary": "s", "evidence": [{"path": "src/x.py", "claim": "no line"}]},
     ])
-    n = cpr.apply_panel_evidence_gate(sidecar)
+    n = cpr.apply_panel_evidence_gate(sidecar, lens="security-architect")
     assert n == 1
     assert json.loads(sidecar.read_text())["findings"][0]["priority"] == "P3"
 
@@ -496,7 +515,7 @@ def test_gate_relaxed_keeps_lineless_improvement(tmp_path):
          "impact": "removes a whole retry class", "summary": "add retry abstraction",
          "evidence": []},
     ])
-    n = cpr.apply_panel_evidence_gate(sidecar)
+    n = cpr.apply_panel_evidence_gate(sidecar, lens="solution-architect")
     assert n == 0
     assert json.loads(sidecar.read_text())["findings"][0]["priority"] == "P2"
 
@@ -507,8 +526,58 @@ def test_gate_easy_win_requires_anchor(tmp_path):
         {"priority": "P2", "lens": "solution-architect", "category": "easy-win",
          "impact": "tiny", "summary": "rename for clarity", "evidence": []},
     ])
-    assert cpr.apply_panel_evidence_gate(sidecar) == 1
+    assert cpr.apply_panel_evidence_gate(sidecar, lens="solution-architect") == 1
     assert json.loads(sidecar.read_text())["findings"][0]["priority"] == "P3"
+
+
+def test_gate_design_without_impact_downgrades(tmp_path):
+    # fail-closed: `design` is in no category set, so an unsubstantiated design
+    # finding (no anchor, no impact) is downgraded rather than riding through.
+    import json
+    _, sidecar = _write_sidecar(tmp_path, [
+        {"priority": "P0", "lens": "solution-architect", "category": "design",
+         "summary": "module splits two responsibilities", "evidence": []},
+    ])
+    assert cpr.apply_panel_evidence_gate(sidecar, lens="solution-architect") == 1
+    assert json.loads(sidecar.read_text())["findings"][0]["priority"] == "P3"
+
+
+def test_gate_design_with_impact_kept(tmp_path):
+    import json
+    _, sidecar = _write_sidecar(tmp_path, [
+        {"priority": "P1", "lens": "solution-architect", "category": "design",
+         "impact": "two responsibilities inflate every change's blast radius",
+         "summary": "split module", "evidence": []},
+    ])
+    assert cpr.apply_panel_evidence_gate(sidecar, lens="solution-architect") == 0
+    assert json.loads(sidecar.read_text())["findings"][0]["priority"] == "P1"
+
+
+def test_gate_stamps_lens_over_model_value(tmp_path):
+    # the gate trusts the caller's lens, never the model-supplied field.
+    import json
+    _, sidecar = _write_sidecar(tmp_path, [
+        {"priority": "P2", "lens": "WRONG-model-value", "category": "improvement",
+         "impact": "real", "summary": "s", "evidence": []},
+    ])
+    cpr.apply_panel_evidence_gate(sidecar, lens="solution-architect")
+    assert json.loads(sidecar.read_text())["findings"][0]["lens"] == "solution-architect"
+
+
+def test_gate_no_category_rides_through_ungated(tmp_path):
+    # drift guard: with neither a file:line anchor nor an impact rationale, NO
+    # category in the schema enum survives at its original priority — a future
+    # enum value with no gate handling would fail here.
+    import json
+    schema = json.loads(cpr.PANEL_FINDING_SCHEMA.read_text(encoding="utf-8"))
+    enum = schema["properties"]["findings"]["items"]["properties"]["category"]["enum"]
+    for category in [c for c in enum if c is not None]:
+        _, sidecar = _write_sidecar(tmp_path, [
+            {"priority": "P0", "lens": "solution-architect", "category": category,
+             "summary": "s", "evidence": []},
+        ])
+        assert cpr.apply_panel_evidence_gate(sidecar, lens="solution-architect") == 1, category
+        assert json.loads(sidecar.read_text())["findings"][0]["priority"] == "P3"
 
 
 def test_gate_rewrites_sidecar_last_so_not_stale(tmp_path):
@@ -529,7 +598,7 @@ def test_gate_rewrites_sidecar_last_so_not_stale(tmp_path):
     time.sleep(0.02)
     md.write_text("narration\n", encoding="utf-8")  # .md now newer -> sidecar looks stale
     assert _structured_findings(md) is None  # trap confirmed
-    cpr.apply_panel_evidence_gate(sidecar)     # rewrites sidecar last
+    cpr.apply_panel_evidence_gate(sidecar, lens="security-architect")  # rewrites sidecar last
     findings = _structured_findings(md)
     assert findings is not None and findings[0]["priority"] == "P1"
 ```
@@ -555,11 +624,22 @@ def _has_line_anchor(finding: dict) -> bool:
     )
 
 
-def apply_panel_evidence_gate(sidecar_path: Path) -> int:
-    """Category-aware structured gate. Downgrades anchor-required findings that
-    lack a path+line, and relaxed findings that lack a rationale. Always rewrites
-    the sidecar so its mtime exceeds the per-lens .md (defeats the staleness guard
-    at codex_audit_common.py:820). Returns the downgrade count."""
+def _has_impact(finding: dict) -> bool:
+    # `impact` is nullable in the strict schema, so finding.get("impact") may be
+    # None. Coerce with `or ""` BEFORE strip() — str(None) == "None" reads truthy,
+    # which would silently defeat the relaxed/fail-closed downgrade.
+    return bool(str(finding.get("impact") or "").strip())
+
+
+def apply_panel_evidence_gate(sidecar_path: Path, *, lens: str) -> int:
+    """Category-aware, fail-CLOSED structured gate. Downgrades anchor-required
+    findings lacking a path+line, and any other priority-bearing finding lacking
+    an `impact` rationale (relaxed AND uncovered categories like `design` or a
+    typo'd/future enum value — nothing rides through ungated). Stamps each
+    finding's `lens` from the known-correct caller value (never trusts the model's
+    self-reported lens). Always rewrites the sidecar so its mtime exceeds the
+    per-lens .md (defeats the staleness guard at codex_audit_common.py:820).
+    Returns the downgrade count."""
     raw = json.loads(sidecar_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise RuntimeError(f"panel sidecar must be a JSON object: {sidecar_path}")
@@ -571,15 +651,27 @@ def apply_panel_evidence_gate(sidecar_path: Path) -> int:
     for finding in findings:
         if not isinstance(finding, dict):
             raise RuntimeError(f"panel finding must be an object: {sidecar_path}")
+        finding["lens"] = lens  # deterministic stamp; do not trust the model's value
         category = finding.get("category")
         if category in ANCHOR_REQUIRED_CATEGORIES and not _has_line_anchor(finding):
             finding["priority"] = "P3"
             finding["confidence"] = "low"
             finding["gate_note"] = "needs verification: no file:line anchor"
             downgraded += 1
-        elif category in RELAXED_CATEGORIES and not str(finding.get("impact", "")).strip():
+        elif category in RELAXED_CATEGORIES and not _has_impact(finding):
             finding["priority"] = "P3"
             finding["gate_note"] = "needs rationale: empty impact"
+            downgraded += 1
+        elif (
+            category not in ANCHOR_REQUIRED_CATEGORIES
+            and category not in RELAXED_CATEGORIES
+            and not _has_impact(finding)
+        ):
+            # Fail-closed: `design` and any unknown/typo/future category need at
+            # least an `impact` rationale, or they are downgraded — no silent
+            # pass-through of an unsubstantiated high-priority claim.
+            finding["priority"] = "P3"
+            finding["gate_note"] = f"uncovered category {category!r}: needs impact rationale"
             downgraded += 1
 
     # Unconditional rewrite (last) — see docstring.
@@ -590,7 +682,7 @@ def apply_panel_evidence_gate(sidecar_path: Path) -> int:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `.venv/bin/python -m pytest tests/unit/scripts/test_codex_panel_review.py -k gate -v`
-Expected: PASS (4 tests)
+Expected: PASS (8 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -624,6 +716,11 @@ def test_run_file_lenses_loops_gates_and_aggregates(tmp_path, monkeypatch):
     except ModuleNotFoundError:
         from scripts.codex_audit_common import structured_output_path_for_report
 
+    # run_file_lenses reads the target's source, so z.py must exist on disk.
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "z.py").write_text("def z(): ...", encoding="utf-8")
+
     calls = []
 
     async def fake_run_codex_once(**kwargs):
@@ -655,8 +752,6 @@ def test_run_file_lenses_loops_gates_and_aggregates(tmp_path, monkeypatch):
     assert stats["cached_input_tokens"] == 120   # 60 * 2 aggregated
     assert stats["failed"] == 0
 ```
-
-(Note: create `tmp_path/src/z.py` in the test before running, or have `run_file_lenses` read source defensively. The implementation below reads the source, so add `(_p := tmp_path/'src'); _p.mkdir(); (_p/'z.py').write_text('def z(): ...')` at the top of the test.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -701,8 +796,10 @@ async def run_file_lenses(
         status, note = "ok", ""
         try:
             if rate_limiter is not None:
-                from codex_audit_common import _await_rate_limiter  # type: ignore[import-not-found]
-                await _await_rate_limiter(rate_limiter)
+                # public method on AsyncRequestRateLimiter (codex_audit_common.py:274);
+                # avoids importing the private _await_rate_limiter, which has no
+                # dual-import shim and would ModuleNotFoundError under pytest.
+                await rate_limiter.acquire()
             usage = await run_codex_once(
                 file_path=file_path,
                 output_path=output_path,
@@ -715,7 +812,7 @@ async def run_file_lenses(
                 structured_markdown_field="markdown_report",
                 reasoning_effort=reasoning_effort,
             )
-            gated = apply_panel_evidence_gate(structured_output_path_for_report(output_path))
+            gated = apply_panel_evidence_gate(structured_output_path_for_report(output_path), lens=lens)
             agg["gated"] += gated
             for key in ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens"):
                 agg[key] += int(usage.get(key, 0))
@@ -866,28 +963,42 @@ git commit --no-verify -m "feat(panel): single-file CLI with --dry-run + cache-h
 
 **Interfaces:** none. This task **calls the real `codex` CLI** and records numbers; it is a measurement task, not TDD. It needs the codex CLI on PATH and a working account.
 
-- [ ] **Step 1: One-file pilot (warm-cache check)**
+- [ ] **Step 1: Schema-acceptance smoke (one cheap call — fail fast on strict-mode rejection)**
+
+Before any measurement, confirm `codex` actually *accepts* `panel_finding.schema.json`. Strict structured-outputs (`additionalProperties:false`) rejects any schema with optional properties; a rejection is an `HTTP 400 invalid_json_schema` that `run_codex_once` turns into a `RuntimeError` (`codex_audit_common.py:658`), which `run_file_lenses` then swallows via capture-and-continue — so a non-compliant schema fails *every* lens silently.
+Run on a small file, one lens: `.venv/bin/python scripts/codex_panel_review.py --file scripts/codex_panel_review.py --lenses security-architect`
+Expected: `failed=0`, with a non-empty per-lens `.md` + `.structured.json` sidecar under `findings-panel-raw/`. If you see `failed=1` with `codex exec failed ... code 1` / `invalid_json_schema` in `PANEL_LOG.md`, the schema is not strict-compliant — fix Task 2 before going further.
+
+- [ ] **Step 2: One-file pilot (warm-cache check)**
 
 Pick one representative file from the driving subsystem (the web UX rewrite):
 Run: `.venv/bin/python scripts/codex_panel_review.py --file src/elspeth/web/composer/recipes.py`
-Observe the printed `cache_hit=…%`. Read `docs/quality-audit/findings-panel/PANEL_LOG.md` for per-lens durations and `cached=` notes.
+Observe the printed `cache_hit=…%`. Read `docs/quality-audit/findings-panel-raw/PANEL_LOG.md` for per-lens durations and `cached=` notes, and the per-lens `…<lens>.md.usage.json` sidecars for each lens's exact `input_tokens` + `cached_input_tokens` (the aggregate stdout blends the cold lens 1 with the warm lens 2..N, so the clean per-lens hit-rate lives only in those sidecars).
 
-- [ ] **Step 2: Record the numbers in `docs/quality-audit/PANEL_PILOT.md`**
+- [ ] **Step 3: Record the numbers in `docs/quality-audit/PANEL_PILOT.md`**
 
 Capture, with the actual observed values:
 - per-lens call durations (min/median/max) vs the ~5–10 min cache TTL;
 - `cached_input_tokens` / `input_tokens` hit-rate for lens 2..N of the file (lens 1 is the cold warm-up);
 - whether the second lens actually hit the `[context][source]` prefix.
 
-- [ ] **Step 3: ~5-file pilot + workers ceiling**
+- [ ] **Step 4: Isolate the marginal `[source]` cache layer (what uniquely justifies file-major-serial)**
+
+`load_context` inlines the same `AGENTS.md`+`CLAUDE.md`+skills for every file, so the `[context]` prefix is file-*independent* — it would be cached even under file-parallel execution. Only `[source]` is reused *because* a file's lenses run serially. Measure its marginal contribution: run one extra single-lens call on the same file as a **separate** invocation and record its `cached_input_tokens` as the `[context]`-only baseline; then `[source]` marginal ≈ (lens-2 combined cached − context-only baseline). Record both — they decide whether file-major-serial earns its keep (Step 6).
+
+- [ ] **Step 5: ~5-file pilot + workers ceiling**
 
 Run the single-file command across ~5 files (a quick shell loop is fine) and, separately, probe the concurrency ceiling by launching a few concurrent single-file runs; the first sustained 429s mark the `--workers` cap. Record both.
 
-- [ ] **Step 4: Write the decision branch into `PANEL_PILOT.md`**
+- [ ] **Step 6: Write the decision branches into `PANEL_PILOT.md`**
 
-Per the spec's decision branch: if median per-call duration exceeds the TTL, compute the no-cache one-time cost projection for a full tree (~1,800 calls) and a subsection (e.g. `src/elspeth/web`), and state go/no-go against budget. These numbers become Plan 2's `--workers` default and cost prose.
+Per the spec's decision branch:
+1. **TTL / cost:** if median per-call duration exceeds the ~5–10 min cache TTL, compute the no-cache one-time cost projection for a full tree (~1,800 calls) and a subsection (e.g. `src/elspeth/web`), and state go/no-go against budget.
+2. **`[source]` marginal (from Step 4):** if `[source]` marginal savings are small relative to total cache savings, record that Plan 2's file-major-serial ordering is **not** justified by caching and that file-parallel should be the Plan 2 default (still harvesting `[context]`-level caching); if `[source]` is a large share, file-major-serial is confirmed.
 
-- [ ] **Step 5: Commit**
+These numbers become Plan 2's `--workers` default, execution-ordering choice, and cost prose.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add docs/quality-audit/PANEL_PILOT.md
@@ -900,19 +1011,19 @@ git commit --no-verify -m "docs(panel): caching/cost/throughput pilot results + 
 
 **1. Spec coverage (foundation slice only — streaming/worker-pool/merge/synthesis/outputs/dashboard are Plan 2):**
 - Layered stable-prefix-first prompt + inlined source → Task 3. ✅
-- Finding schema as a true superset (keeps `priority`; `markdown_report` for the engine) → Task 2. ✅
-- Category-aware structured gate (strict/relaxed/easy-win) reusing only the evidence primitive; markdown gate untouched → Task 6. ✅
+- Finding schema as a true superset (keeps `priority`; `markdown_report` for the engine; **OpenAI strict-mode compliant** — every prop in `required`, optionals as nullable unions) → Task 2. ✅
+- Category-aware, **fail-closed** structured gate (anchor/relaxed/uncovered + deterministic `lens` stamp) reusing only the evidence primitive; markdown gate untouched → Task 6. ✅
 - Per-lens isolation (own sidecar; no by-index coupling) → Tasks 6–7. ✅
 - Serial file-major execution for cache reuse → Task 7. ✅
 - `--lenses` override + minimal routing → Tasks 4, 8. ✅
-- Caching verified empirically + decision branch + one-time cost → Task 9. ✅
+- Caching verified empirically (schema-acceptance smoke + `[source]`-layer isolation + decision branches + one-time cost) → Task 9. ✅
 - Persona files validated by running, not tests → Task 5. ✅
 - Existing-scripts-unaffected check → Task 8 Step 5. ✅
 - **Deferred to Plan 2 (intentional):** streaming runner, worker pool, completion-sentinel resume, commit pinning, `--path`/`--since`/`--files` scope selection, cross-lens merge, synthesis, counted/raw output layout, `write_panel_findings_index`, global rollup, dashboard, full retry. Listed in "Plan 2 boundary notes."
 
 **2. Placeholder scan:** every code step contains runnable code; every command has expected output. Task 9 is explicitly a measurement task (no code), which is legitimate (it records empirical numbers the spec mandates before a full run).
 
-**3. Type consistency:** `apply_panel_evidence_gate(sidecar_path: Path) -> int` used consistently (Tasks 6, 7). `run_file_lenses(...) -> dict[str,int]` returns the keys Task 8 reads (`cached_input_tokens`, `input_tokens`, `gated`, `failed`). `route_lenses`/`load_persona` signatures match across Tasks 4, 7, 8. `build_layered_prompt` keyword args match between Tasks 3 and 7. Schema field names (`priority`, `markdown_report`, `evidence[].line`) consistent across Tasks 2, 6, 7.
+**3. Type consistency:** `apply_panel_evidence_gate(sidecar_path: Path, *, lens: str) -> int` defined in Task 6, called by the runner in Task 7 with `lens=lens`. `run_file_lenses(...) -> dict[str,int]` returns the keys Task 8 reads (`cached_input_tokens`, `input_tokens`, `gated`, `failed`). `route_lenses`/`load_persona` signatures match across Tasks 4, 7, 8. `build_layered_prompt` keyword args match between Tasks 3 and 7. Schema field names (`priority`, `markdown_report`, `evidence[].line`) consistent across Tasks 2, 6, 7.
 
 ---
 

@@ -138,3 +138,46 @@ class TestStep3ContextBlock:
         assert "price" in ctx
         assert "avg_price" in ctx
         assert "recipe_match" not in ctx
+
+    def test_step_3_context_redacts_sample_row_values(self) -> None:
+        from elspeth.web.composer.guided.prompts import build_step_3_context_block
+        from elspeth.web.composer.guided.state_machine import (
+            SinkOutputResolved,
+            SinkResolved,
+            SourceResolved,
+        )
+
+        ctx = build_step_3_context_block(
+            source=SourceResolved(
+                plugin="csv",
+                options={},
+                observed_columns=("email", "api_key", "profile_url", "note"),
+                sample_rows=(
+                    {
+                        "email": "person@example.test",
+                        "api_key": "sk-test-secret-row-value",
+                        "profile_url": "https://example.test/private?token=secret",
+                        "note": "customer asked for refunds",
+                    },
+                ),
+            ),
+            sink=SinkResolved(
+                outputs=(
+                    SinkOutputResolved(
+                        plugin="json",
+                        options={},
+                        required_fields=("email_hash",),
+                        schema_mode="fixed",
+                    ),
+                )
+            ),
+        )
+
+        assert "person@example.test" not in ctx
+        assert "sk-test-secret-row-value" not in ctx
+        assert "https://example.test/private" not in ctx
+        assert "customer asked for refunds" not in ctx
+        assert "<sample:email-like>" in ctx
+        assert "<sample:secret-like>" in ctx
+        assert "<sample:url>" in ctx
+        assert "<sample:string:" in ctx

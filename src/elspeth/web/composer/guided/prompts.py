@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from elspeth.web.composer.guided.protocol import GuidedStep
 
@@ -177,6 +178,52 @@ def build_revise_addendum(*, revise_instruction: str) -> str:
     )
 
 
+def _looks_secret_like_sample(value: str) -> bool:
+    lowered = value.lower()
+    secret_markers = (
+        "api_key",
+        "apikey",
+        "access_token",
+        "auth_token",
+        "bearer ",
+        "client_secret",
+        "password",
+        "secret",
+        "token",
+    )
+    return lowered.startswith(("sk-", "pk_", "rk_", "xoxb-")) or any(marker in lowered for marker in secret_markers)
+
+
+def _summarize_sample_value(value: Any) -> str:
+    if value is None:
+        return "<sample:null>"
+    if isinstance(value, bool):
+        return "<sample:boolean>"
+    if isinstance(value, int | float):
+        return "<sample:number>"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "<sample:empty-string>"
+        lowered = stripped.lower()
+        if lowered.startswith(("http://", "https://")):
+            return "<sample:url>"
+        if "@" in stripped and "." in stripped.rsplit("@", 1)[-1]:
+            return "<sample:email-like>"
+        if _looks_secret_like_sample(stripped):
+            return "<sample:secret-like>"
+        return f"<sample:string:{len(stripped)}-chars>"
+    if isinstance(value, Mapping):
+        return f"<sample:object:{len(value)}-keys>"
+    if isinstance(value, (list, tuple)):
+        return f"<sample:array:{len(value)}-items>"
+    return f"<sample:{type(value).__name__}>"
+
+
+def _summarize_sample_row(row: Mapping[str, Any]) -> dict[str, str]:
+    return {str(key): _summarize_sample_value(value) for key, value in row.items()}
+
+
 def build_step_3_context_block(
     *,
     source: SourceResolved,
@@ -186,7 +233,7 @@ def build_step_3_context_block(
     src_payload = {
         "plugin": source.plugin,
         "columns": list(source.observed_columns),
-        "sample": [dict(r) for r in source.sample_rows[:3]],
+        "sample": [_summarize_sample_row(r) for r in source.sample_rows[:3]],
     }
     sink_payload = {
         "outputs": [

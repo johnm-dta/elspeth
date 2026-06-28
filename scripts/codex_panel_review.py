@@ -275,6 +275,13 @@ def main(argv: list[str] | None = None) -> int:
         # ValueError. Fail fast with a clean message instead.
         print(f"file is outside the repo ({REPO_ROOT}): {file_path}", file=sys.stderr)
         return 1
+    for context_file in args.context_files or []:
+        # load_context joins REPO_ROOT / filename WITHOUT resolving, so a `..` entry
+        # would traverse out and inline an arbitrary file into the egressed prompt.
+        # Resolve + contain here (same boundary as --file) before that read happens.
+        if not (REPO_ROOT / context_file).resolve().is_relative_to(REPO_ROOT):
+            print(f"--context-files entry is outside the repo ({REPO_ROOT}): {context_file}", file=sys.stderr)
+            return 1
     override = [s.strip() for s in args.lenses.split(",")] if args.lenses else None
     lenses = route_lenses(file_path, override=override)
     missing = [lens for lens in lenses if not (LENSES_DIR / f"{lens}.md").exists()]

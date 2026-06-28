@@ -446,6 +446,17 @@ def test_main_rejects_unknown_lens_before_spend(tmp_path, monkeypatch, capsys):
     assert "unknown lens" in capsys.readouterr().err
 
 
+def test_main_rejects_context_file_traversal(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "src" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("def x(): ...", encoding="utf-8")
+    monkeypatch.setattr(cpr, "REPO_ROOT", tmp_path)
+    # a --context-files entry that traverses outside the repo is rejected before any
+    # codex call, so it can never be inlined into the egressed prompt.
+    assert cpr.main(["--file", str(target), "--context-files", "../../../etc/passwd"]) == 1
+    assert "context-files" in capsys.readouterr().err
+
+
 def test_dry_run_prints_lens_plan(tmp_path, capsys, monkeypatch):
     target = tmp_path / "src" / "elspeth" / "web" / "foo.py"
     target.parent.mkdir(parents=True)

@@ -82,11 +82,11 @@ that produce *distributable artifacts*. A helper that emits a deliverable PDF is
 tool; a helper that lints, tests, deploys, or generates fixtures is a script.
 
 ### PDF pipelines: tools/pdf/ vs docs/release/pdf/
-⚠ Overlap. `docs/release/pdf/` builds the **release assurance set**
-(executive-summary, architecture, composer, guarantees, data-trust).
-`tools/pdf/` builds **one-off briefing / walkthrough / arch-pack** PDFs, several
-tied to the now-archived 2026-05-03 composer evidence. Boundary is real but
-fuzzy and `tools/pdf/` is partly stale — see Findings.
+✓ Distinct by *output*: `docs/release/pdf/` builds the **release assurance set**
+(executive-summary, architecture, composer, guarantees, data-trust); `tools/pdf/`
+builds the **architecture presentation pack** (`build-arch-pack.sh`). The stale
+2026-05-03 composer briefing/walkthrough builders were archived 2026-06-28, so the
+two pipelines no longer overlap.
 
 ### Deployment spread
 ✓ Distinct by *target*: `deploy/` = host service (systemd unit + env); root
@@ -94,15 +94,17 @@ fuzzy and `tools/pdf/` is partly stale — see Findings.
 + `validate_deployment.py` = the automation that drives a deploy.
 
 ### Working-state: where runtime data lives
-⚠ `data/` (sessions / working data, skill examples) vs `state/` (the `audit.db`
-landscape database) — both are gitignored runtime roots and the split is not
-self-evident. Plus `.scratch/` (a tracked, empty `.gitkeep` placeholder) duplicates
-`scratch/` (the gitignored working dir), and `.elspeth/rotations.log` is a
-tier-model rotation log under version control. See Findings.
+✓ Distinct by *role*: `data/` = app/session working data (sessions DB, skill
+examples); `state/` = the `audit.db` landscape database (its path is hardcoded in
+`core/config.py`). Scratch is settled by `.gitignore`: `.scratch/` is the canonical
+composer-MCP scratch dir (kept via `.gitkeep`), `scratch/` is the ignored
+duplicate. `.elspeth/rotations.log` is deliberately force-tracked as a tier-model
+rotation audit trail.
 
 ### prompts overlap
-⚠ Root `prompts/` (one implementation prompt) overlaps the just-archived
-`docs/prompts/`. See Findings.
+✓ Resolved — the root `prompts/` one-off was archived 2026-06-28; agent prompts
+that must live in-tree belong under a single, named home, not a second top-level
+`prompts/`.
 
 ## Findings & recommended actions
 
@@ -110,15 +112,15 @@ Genuine *purpose* problems only — overlap, cruft, or ambiguity. Folders that a
 merely internal (e.g. `evals/`, `notes/`) are **not** flagged: "internal eval
 harness" and "engineering notes" are clear, distinct purposes.
 
-| # | Issue | Recommendation | Risk |
-| --- | --- | --- | --- |
-| 1 | Root `prompts/` (1 file) overlaps the archived `docs/prompts/` | Relocate to `docs-archive/2026-06-28-docs-cleanout/docs/prompts/` (it's an internal agent prompt) or delete if superseded | Low — check inbound refs first |
-| 2 | `.scratch/` (tracked `.gitkeep`) duplicates `scratch/` (gitignored) | Standardise on gitignored `scratch/`; delete the `.scratch/` placeholder | Trivial |
-| 3 | `.benchmarks/` (root) is empty and **not** gitignored | Delete; add `/.benchmarks/` to `.gitignore` (same stray removed from the frontend) | Trivial |
-| 4 | `.elspeth/rotations.log` is a rotation log under version control | Gitignore the log (keep the dir), unless it is deliberately a tracked audit artifact | Low — confirm intent |
-| 5 | `tools/pdf/` briefing/walkthrough builds reference archived 2026-05-03 evidence | Confirm still needed; mark legacy or archive the stale builders | Low |
-| 6 | `data/` vs `state/` runtime split is not self-evident | Document the split (done here); optionally add a short `state/README` / `data/README` | Trivial |
+| # | Issue | Resolution (2026-06-28) |
+| --- | --- | --- |
+| 1 | Root `prompts/` (1 file) overlaps the archived `docs/prompts/` | **Done** — relocated to `docs-archive/2026-06-28-docs-cleanout/prompts/` (no inbound refs) |
+| 2 | `.scratch/` vs `scratch/` looked duplicated | **No change** — `.gitignore` documents `.scratch/` as the canonical composer-MCP scratch dir and `scratch/` as the ignored duplicate; already resolved |
+| 3 | `.benchmarks/` (root) empty and **not** gitignored | **Done** — deleted and added `/.benchmarks/` to `.gitignore` |
+| 4 | `.elspeth/rotations.log` under version control | **No change** — deliberately force-tracked (`!.elspeth/rotations.log`) as a tier-model rotation audit trail |
+| 5 | `tools/pdf/` briefing/walkthrough builders tied to archived 2026-05-03 evidence | **Done** — archived the two builders + their metadata; `build-arch-pack.sh` and shared infra retained |
+| 6 | `data/` vs `state/` runtime split not self-evident | **Documented** here (`state/audit.db` path is hardcoded in `core/config.py`, so it stays put) |
 
 Not flagged (clear, distinct purpose): `src/`, `tests/`, `docs/`, `docs-archive/`,
-`examples/`, `scripts/`, `tools/` (modulo PDF overlap), `config/`, `.github/`,
-`.githooks/`, `deploy/`, `evals/`, `notes/`, `elspeth-lints/`, `website/`.
+`examples/`, `scripts/`, `tools/`, `config/`, `.github/`, `.githooks/`, `deploy/`,
+`evals/`, `notes/`, `elspeth-lints/`, `website/`.

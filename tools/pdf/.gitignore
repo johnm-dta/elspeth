@@ -1,8 +1,7 @@
-# Generated PDF intermediates (rebuilt by build-*.sh on demand)
+# Generated PDF intermediate (rebuilt by build-arch-pack.sh on demand).
+# The composer briefing/walkthrough builders were archived 2026-06-28
+# (docs-archive/2026-06-28-docs-cleanout/tools/pdf/) — only arch-pack remains.
 elspeth-arch-pack.typ
-composer-briefing-*.typ
-composer-walkthrough-*.typ
-composer-evaluation-briefing-*.typ
 
 # Mermaid render scratch directory (cleaned by the EXIT trap on success;
 # may persist on partial failures and is regenerated each build).

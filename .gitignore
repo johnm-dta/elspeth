@@ -38,6 +38,9 @@ notes/
 # scratch/ (no dot) is a duplicate of .scratch/ — never track; use .scratch/.
 scratch/
 
+# pytest-benchmark output dir — never tracked (recreated on demand).
+/.benchmarks/
+
 # Generated bug analysis docs (can be regenerated)
 docs/bugs/generated/
 

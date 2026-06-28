@@ -33,6 +33,8 @@ markdown links in retained docs were repointed here.
 | `docs/release/elspeth-progress-rc1-to-rc5.md` | Per-period "what shipped" cumulative-output report — internal work product, not evaluator-facing | `/CHANGELOG.md` for release history |
 | `docs/release/elspeth-velocity-rc1-to-rc5.md` | Per-day commit volume / tempo — maintainer time accounting | `/CHANGELOG.md`; git history |
 | `docs/release/pdf/progress.typ`, `velocity.typ` | Typst sources for the two reports above; their PDF build targets were removed from `docs/release/pdf/Makefile` and `build.sh` | Re-add the targets here if the reports are ever republished |
+| `prompts/implement-llm-primary-guided-creation.md` (repo root) | One-off agent implementation prompt; overlapped the already-archived `docs/prompts/` (directory-strategy cleanup) | Live composer/guided code; Filigree |
+| `tools/pdf/` composer builders (`build-briefing.sh`, `build-walkthrough.sh`, `briefing-metadata.yaml`, `walkthrough-metadata.yaml`) | Legacy one-off PDF builders whose default source is the now-archived `docs/composer/evidence/composer-*-2026-05-03.md`; frozen as-is | `docs/release/pdf/` for the current PDF set; `tools/pdf/build-arch-pack.sh` (retained) for the arch pack |
 
 ## Deleted, Not Archived
 
@@ -46,6 +48,8 @@ except where noted):
 | `docs/release/pdf/fonts/public-sans/sources/` | Upstream Public Sans `.ufo` design sources (~13 MB, gitignored); the build only needs the bundled `fonts/ttf/` |
 | `docs/release/pdf/fonts/public-sans/__MACOSX/` | macOS zip-extraction cruft |
 | `docs/research/` | Empty directory |
+| `tools/pdf/composer-{briefing,evaluation-briefing,walkthrough}-2026-05-03.typ` | Gitignored generated intermediates orphaned by archiving their builders |
+| `.benchmarks/` (repo root) | Empty pytest-benchmark stray; now gitignored |
 
 ## Not Moved (retained in active `docs/`)
 

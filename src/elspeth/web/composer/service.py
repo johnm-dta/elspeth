@@ -524,6 +524,15 @@ class _SessionAwareDispatchOutcome:
     post_version: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _TerminalNoToolAdvisorGateOutcome:
+    """Shared END advisor-gate outcome before caller-specific carrier wrapping."""
+
+    action: Literal["fall_through", "continue", "return"]
+    result: ComposerResult | None = None
+    advisor_passes_delta: int = 0
+
+
 # The per-dispatch audit envelope (DispatchAudit, begin_dispatch, finish_*)
 # and the structural enforcement helper (dispatch_with_audit) live in
 # web/composer/audit.py next to the BufferingRecorder. Hoisting them out of
@@ -2196,85 +2205,27 @@ class ComposerServiceImpl:
                 )
                 assistant_message = response.choices[0].message
                 if not assistant_message.tool_calls:
-                    # END authoritative advisor gate — P5 last-chance variant
-                    # (elspeth-dac6602a2b). This finalize path is reached only on
-                    # composition-budget exhaustion, so repair is IMPOSSIBLE: any
-                    # non-clean verdict (unavailable OR flagged) fails closed.
-                    # The cheap orphan pre-check runs first (mirrors P2) so the
-                    # frontier advisor is never spent on a pipeline the tail's
-                    # orphan gate would block. A clean verdict falls through to
-                    # the shared finalize tail below. The structurally-empty
-                    # guard mirrors the P2 branch (and the early pass): no
-                    # sign-off on a pipeline with nothing to authorize.
-                    max_passes = self._settings.composer_advisor_checkpoint_max_passes
-                    if not _state_is_structurally_empty(state) and advisor_checkpoint_passes_used < max_passes:
-                        orphaned_precheck = await self._missing_pending_interpretation_review_sites(
-                            state,
-                            session_id=session_id,
+                    advisor_gate = await self._evaluate_terminal_no_tool_advisor_gate(
+                        state=state,
+                        session_id=session_id,
+                        current_state_id=persist.current_state_id,
+                        assistant_message=assistant_message,
+                        llm_messages=llm_messages,
+                        recorder=recorder,
+                        progress=progress,
+                        advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
+                        repair_turns_used=0,
+                        persisted_assistant_message_id=persisted_assistant_message_id,
+                        persisted_tool_call_turn=persisted_tool_call_turn,
+                        allow_repair_continue=False,
+                    )
+                    if advisor_gate.action == "return":
+                        return _ClassifyOutcome(
+                            action="return",
+                            result=advisor_gate.result,
+                            composition_turns_delta=1,
+                            advisor_passes_delta=advisor_gate.advisor_passes_delta,
                         )
-                        # Exclude AUTO-SURFACEABLE llm_prompt_template sites — same
-                        # filter as the P2 pre-check above. Both the shared finalize
-                        # tail AND the advisor-blocked terminal return below now run
-                        # the surface+UNFILTERED-gate pair, so a PT site is not a
-                        # genuine orphan that would be left eventless; only non-PT
-                        # orphans suppress the advisor. The final orphan gate stays
-                        # unfiltered (fail-closed).
-                        genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
-                        if not genuine_orphans:
-                            verdict = await self._run_advisor_checkpoint(
-                                phase="end",
-                                state=state,
-                                session_id=session_id,
-                                recorder=recorder,
-                                progress=progress,
-                            )
-                            if (not verdict.ok) or verdict.blocking:
-                                # Advisor-blocked TERMINAL return on the P5
-                                # budget-exhaustion path — same fix as the P2
-                                # blocked returns: run the surface+unfiltered-gate
-                                # pair here (this branch returns instead of falling
-                                # through to the shared finalize tail below), so a
-                                # node with a pending PT requirement but no pending
-                                # event is made resolvable (or returned fail-closed
-                                # as an orphan) rather than reaching RUN as an
-                                # eventless placeholder. ``state`` matches
-                                # ``persist.current_state_id`` here (the mutation
-                                # was persisted before classify), satisfying the
-                                # create_pending gate.
-                                orphan_result = await self._surface_pt_and_gate_orphans_or_none(
-                                    state=state,
-                                    session_id=session_id,
-                                    current_state_id=persist.current_state_id,
-                                    assistant_message=assistant_message,
-                                    recorder=recorder,
-                                    progress=progress,
-                                )
-                                if orphan_result is not None:
-                                    return _ClassifyOutcome(
-                                        action="return",
-                                        result=replace(
-                                            orphan_result,
-                                            persisted_assistant_message_id=persisted_assistant_message_id,
-                                            persisted_tool_call_turn=persisted_tool_call_turn,
-                                        ),
-                                        composition_turns_delta=1,
-                                        advisor_passes_delta=1,
-                                    )
-                                return _ClassifyOutcome(
-                                    action="return",
-                                    result=self._advisor_blocked_result(
-                                        reason="unavailable" if not verdict.ok else "exhausted",
-                                        verdict=verdict,
-                                        state=state,
-                                        assistant_message=assistant_message,
-                                        recorder=recorder,
-                                        repair_turns_used=0,
-                                        persisted_assistant_message_id=persisted_assistant_message_id,
-                                        persisted_tool_call_turn=persisted_tool_call_turn,
-                                    ),
-                                    composition_turns_delta=1,
-                                    advisor_passes_delta=1,
-                                )
                     # B-4D-3 budget-exhaustion last-chance finalize is a SECOND
                     # no-tool finalize path. Route it through the SHARED
                     # ``_surface_and_finalize_no_tools`` (Task 7 HIGH-1) so the
@@ -2479,106 +2430,28 @@ class ComposerServiceImpl:
         ):
             return _TerminateOutcome(action="continue", repair_turns_delta=1)
 
-        # END authoritative advisor gate (elspeth-dac6602a2b). Runs AFTER the
-        # cheap deterministic gates (the proof gate above; the orphan pre-check
-        # here mirrors the tail's gate) so the frontier advisor only reviews a
-        # mechanically valid pipeline — a flagged advisor call is never spent on
-        # a pipeline the orphan gate would block anyway. The advisor budget is
-        # SEPARATE from ``_MAX_REPAIR_TURNS``: a flagged repair-continue
-        # increments ``advisor_passes_delta``, never ``repair_turns``. On the
-        # LAST budgeted pass a still-flagged gate FAILS CLOSED (no repair — it
-        # cannot re-review); an unavailable advisor (after bounded retry) FAILS
-        # CLOSED — the advisor is the mandatory final authority (D-5/D-7/D-8).
-        #
-        # Structurally-empty guard (mirrors ``_maybe_run_early_checkpoint``,
-        # service.py): a conversational no-tool finalize on a pipeline with no
-        # source/nodes/sinks has nothing to sign off on. Firing the authority
-        # gate there would (a) spend a frontier advisor call on pure chat and
-        # (b) let a "you have no source/sink" FLAGGED verdict drive an
-        # advisor-repair loop on a conversational turn. The early pass already
-        # skips empty state for the same reason; the end gate is symmetric.
-        max_passes = self._settings.composer_advisor_checkpoint_max_passes
-        if not _state_is_structurally_empty(state) and advisor_checkpoint_passes_used < max_passes:
-            orphaned_precheck = await self._missing_pending_interpretation_review_sites(
-                state,
-                session_id=session_id,
+        advisor_gate = await self._evaluate_terminal_no_tool_advisor_gate(
+            state=state,
+            session_id=session_id,
+            current_state_id=current_state_id,
+            assistant_message=assistant_message,
+            llm_messages=llm_messages,
+            recorder=recorder,
+            progress=progress,
+            advisor_checkpoint_passes_used=advisor_checkpoint_passes_used,
+            repair_turns_used=repair_turns_used,
+            persisted_assistant_message_id=persisted_assistant_message_id,
+            persisted_tool_call_turn=persisted_tool_call_turn,
+            allow_repair_continue=True,
+        )
+        if advisor_gate.action == "return":
+            return _TerminateOutcome(
+                action="return",
+                result=advisor_gate.result,
+                advisor_passes_delta=advisor_gate.advisor_passes_delta,
             )
-            # llm_prompt_template sites are AUTO-SURFACEABLE pseudo-orphans: the
-            # surface+unfiltered-gate pair (``_surface_pt_and_gate_orphans_or_none``)
-            # runs on EVERY terminal no-tool path now — the CLEAN fall-through tail
-            # AND each advisor-blocked terminal return below — so a PT site here is
-            # not a genuine orphan that would be left eventless; it is one those
-            # paths will resolve (or fail-close via the unfiltered gate). Only
-            # GENUINE (non-PT) orphans suppress the advisor, mirroring the
-            # model_repairable filter above. This makes the advisor review the SAME
-            # pipeline that will finalize; the final orphan gate stays UNFILTERED,
-            # so a still-missing PT after auto-surface remains fail-closed.
-            genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
-            if not genuine_orphans:
-                verdict = await self._run_advisor_checkpoint(
-                    phase="end",
-                    state=state,
-                    session_id=session_id,
-                    recorder=recorder,
-                    progress=progress,
-                )
-                is_last_pass = (advisor_checkpoint_passes_used + 1) >= max_passes
-                if (not verdict.ok) or (verdict.blocking and is_last_pass):
-                    # Advisor-blocked TERMINAL return. This bypasses the CLEAN
-                    # fall-through to the shared finalize tail, so it must run the
-                    # SAME surface+unfiltered-orphan-gate pair here (else a node
-                    # with a pending llm_prompt_template requirement but no pending
-                    # EVENT becomes the runnable max-version pointer and RUN raises
-                    # UnresolvedInterpretationPlaceholderError with a zero frontend
-                    # pending-event count — the staging 500). If an orphan survives
-                    # auto-surfacing, return it fail-closed (it is the more
-                    # fundamental block than the advisor verdict; both yield a
-                    # non-runnable result). Otherwise the PT event is now surfaced
-                    # and the runnable state is resolvable, so proceed to the
-                    # advisor-blocked result as before.
-                    orphan_result = await self._surface_pt_and_gate_orphans_or_none(
-                        state=state,
-                        session_id=session_id,
-                        current_state_id=current_state_id,
-                        assistant_message=assistant_message,
-                        recorder=recorder,
-                        progress=progress,
-                    )
-                    if orphan_result is not None:
-                        return _TerminateOutcome(
-                            action="return",
-                            result=replace(
-                                orphan_result,
-                                repair_turns_used=repair_turns_used,
-                                persisted_assistant_message_id=persisted_assistant_message_id,
-                                persisted_tool_call_turn=persisted_tool_call_turn,
-                            ),
-                            advisor_passes_delta=1,
-                        )
-                    return _TerminateOutcome(
-                        action="return",
-                        result=self._advisor_blocked_result(
-                            reason="unavailable" if not verdict.ok else "exhausted",
-                            verdict=verdict,
-                            state=state,
-                            assistant_message=assistant_message,
-                            recorder=recorder,
-                            repair_turns_used=repair_turns_used,
-                            persisted_assistant_message_id=persisted_assistant_message_id,
-                            persisted_tool_call_turn=persisted_tool_call_turn,
-                        ),
-                        advisor_passes_delta=1,
-                    )
-                if verdict.blocking:
-                    llm_messages.append(
-                        {
-                            "role": "user",
-                            "content": ("[Advisor sign-off — BLOCKING. Resolve before completing.]\n" + verdict.findings_text),
-                        }
-                    )
-                    return _TerminateOutcome(action="continue", advisor_passes_delta=1)
-                # CLEAN -> fall through to the shared tail (auto-surface +
-                # final orphan gate + finalize).
+        if advisor_gate.action == "continue":
+            return _TerminateOutcome(action="continue", advisor_passes_delta=advisor_gate.advisor_passes_delta)
 
         # Fail-closed orphaned-interpretation gate. The repair budget is now
         # exhausted (every repair-injection branch above is gated on
@@ -2806,6 +2679,93 @@ class ComposerServiceImpl:
             tool_invocations=recorder.invocations,
             llm_calls=recorder.llm_calls,
         )
+
+    async def _evaluate_terminal_no_tool_advisor_gate(
+        self,
+        *,
+        state: CompositionState,
+        session_id: str | None,
+        current_state_id: str | None,
+        assistant_message: Any,
+        llm_messages: list[dict[str, Any]],
+        recorder: BufferingRecorder,
+        progress: ComposerProgressSink | None,
+        advisor_checkpoint_passes_used: int,
+        repair_turns_used: int,
+        persisted_assistant_message_id: str | None,
+        persisted_tool_call_turn: bool,
+        allow_repair_continue: bool,
+    ) -> _TerminalNoToolAdvisorGateOutcome:
+        """Run the shared terminal no-tool END advisor gate for P2 and P5."""
+        max_passes = self._settings.composer_advisor_checkpoint_max_passes
+        if _state_is_structurally_empty(state) or advisor_checkpoint_passes_used >= max_passes:
+            return _TerminalNoToolAdvisorGateOutcome(action="fall_through")
+
+        orphaned_precheck = await self._missing_pending_interpretation_review_sites(
+            state,
+            session_id=session_id,
+        )
+        # llm_prompt_template sites are AUTO-SURFACEABLE pseudo-orphans: the
+        # surface+unfiltered-gate pair runs on EVERY terminal no-tool return, so
+        # they must not suppress the advisor. Genuine non-PT orphans still do.
+        genuine_orphans = tuple(s for s in orphaned_precheck if s[2] is not InterpretationKind.LLM_PROMPT_TEMPLATE)
+        if genuine_orphans:
+            return _TerminalNoToolAdvisorGateOutcome(action="fall_through")
+
+        verdict = await self._run_advisor_checkpoint(
+            phase="end",
+            state=state,
+            session_id=session_id,
+            recorder=recorder,
+            progress=progress,
+        )
+        is_last_pass = (advisor_checkpoint_passes_used + 1) >= max_passes
+        terminal_block = (not verdict.ok) or (verdict.blocking and (is_last_pass or not allow_repair_continue))
+        if terminal_block:
+            orphan_result = await self._surface_pt_and_gate_orphans_or_none(
+                state=state,
+                session_id=session_id,
+                current_state_id=current_state_id,
+                assistant_message=assistant_message,
+                recorder=recorder,
+                progress=progress,
+            )
+            if orphan_result is not None:
+                return _TerminalNoToolAdvisorGateOutcome(
+                    action="return",
+                    result=replace(
+                        orphan_result,
+                        repair_turns_used=repair_turns_used,
+                        persisted_assistant_message_id=persisted_assistant_message_id,
+                        persisted_tool_call_turn=persisted_tool_call_turn,
+                    ),
+                    advisor_passes_delta=1,
+                )
+            return _TerminalNoToolAdvisorGateOutcome(
+                action="return",
+                result=self._advisor_blocked_result(
+                    reason="unavailable" if not verdict.ok else "exhausted",
+                    verdict=verdict,
+                    state=state,
+                    assistant_message=assistant_message,
+                    recorder=recorder,
+                    repair_turns_used=repair_turns_used,
+                    persisted_assistant_message_id=persisted_assistant_message_id,
+                    persisted_tool_call_turn=persisted_tool_call_turn,
+                ),
+                advisor_passes_delta=1,
+            )
+
+        if verdict.blocking:
+            llm_messages.append(
+                {
+                    "role": "user",
+                    "content": ("[Advisor sign-off — BLOCKING. Resolve before completing.]\n" + verdict.findings_text),
+                }
+            )
+            return _TerminalNoToolAdvisorGateOutcome(action="continue", advisor_passes_delta=1)
+
+        return _TerminalNoToolAdvisorGateOutcome(action="fall_through")
 
     async def _compose_loop(
         self,

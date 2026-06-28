@@ -14,6 +14,7 @@ and ``_summarize_pipeline_for_advisor`` run for real against ``simple_state``.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -36,6 +37,33 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.schemas import ValidationReadiness, ValidationResult
+
+_ROOT = Path(__file__).resolve().parents[4]
+
+
+def _composer_service_method(name: str) -> ast.AsyncFunctionDef | ast.FunctionDef:
+    tree = ast.parse((_ROOT / "src/elspeth/web/composer/service.py").read_text(encoding="utf-8"))
+    service_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ComposerServiceImpl")
+    return next(node for node in service_class.body if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name)
+
+
+def _self_method_calls(method_name: str, called_name: str) -> int:
+    method = _composer_service_method(method_name)
+    count = 0
+    for node in ast.walk(method):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == called_name and isinstance(func.value, ast.Name) and func.value.id == "self":
+            count += 1
+    return count
+
+
+def test_terminal_no_tool_paths_delegate_end_advisor_policy() -> None:
+    """P2 and P5 must share one terminal no-tool advisor-gate policy."""
+    assert _self_method_calls("_try_terminate_no_tools", "_run_advisor_checkpoint") == 0
+    assert _self_method_calls("_classify_and_budget_turn", "_run_advisor_checkpoint") == 0
+    assert _self_method_calls("_evaluate_terminal_no_tool_advisor_gate", "_run_advisor_checkpoint") == 1
 
 
 def _mock_catalog() -> MagicMock:

@@ -178,6 +178,8 @@ async def test_step1_plugin_bug_captures_crash_breaks_loop(
     assert len(outcomes) == 2
     assert outcomes[0].error_class is None
     assert outcomes[1].error_class == "RuntimeError"
+    assert outcomes[1].error_message == "RuntimeError"
+    assert "phase3 synthetic runtime error" not in (outcomes[1].error_message or "")
 
 
 @pytest.mark.asyncio

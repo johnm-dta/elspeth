@@ -1272,7 +1272,7 @@ async def run_tool_batch(
             _append_tool_outcome(
                 response=None,
                 error_class=type(tool_exc).__name__,
-                error_message=str(tool_exc),
+                error_message=type(tool_exc).__name__,
                 post_version=state.version,
             )
             plugin_crash = ComposerPluginCrashError.capture(

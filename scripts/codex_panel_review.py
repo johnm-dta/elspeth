@@ -11,6 +11,7 @@ dual-import shim, so this module runs both as a script (``scripts/`` on
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -79,3 +80,61 @@ def route_lenses(file_path: Path, *, override: list[str] | None = None) -> list[
     if file_path.suffix == ".py" and (LENSES_DIR / "python-engineer.md").exists():
         lenses.append("python-engineer")
     return lenses
+
+
+def _has_line_anchor(finding: dict) -> bool:
+    evidence = finding.get("evidence")
+    if not isinstance(evidence, list):
+        return False
+    return any(isinstance(e, dict) and isinstance(e.get("line"), int) and bool(e.get("path")) for e in evidence)
+
+
+def _has_impact(finding: dict) -> bool:
+    # `impact` is nullable in the strict schema, so finding.get("impact") may be
+    # None. Coerce with `or ""` BEFORE strip() — str(None) == "None" reads truthy,
+    # which would silently defeat the relaxed/fail-closed downgrade.
+    return bool(str(finding.get("impact") or "").strip())
+
+
+def apply_panel_evidence_gate(sidecar_path: Path, *, lens: str) -> int:
+    """Category-aware, fail-CLOSED structured gate. Downgrades anchor-required
+    findings lacking a path+line, and any other priority-bearing finding lacking
+    an `impact` rationale (relaxed AND uncovered categories like `design` or a
+    typo'd/future enum value — nothing rides through ungated). Stamps each
+    finding's `lens` from the known-correct caller value (never trusts the model's
+    self-reported lens). Always rewrites the sidecar so its mtime exceeds the
+    per-lens .md (defeats the staleness guard at codex_audit_common.py:820).
+    Returns the downgrade count."""
+    raw = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise RuntimeError(f"panel sidecar must be a JSON object: {sidecar_path}")
+    findings = raw.get("findings")
+    if not isinstance(findings, list):
+        raise RuntimeError(f"panel sidecar missing findings array: {sidecar_path}")
+
+    downgraded = 0
+    for finding in findings:
+        if not isinstance(finding, dict):
+            raise RuntimeError(f"panel finding must be an object: {sidecar_path}")
+        finding["lens"] = lens  # deterministic stamp; do not trust the model's value
+        category = finding.get("category")
+        if category in ANCHOR_REQUIRED_CATEGORIES and not _has_line_anchor(finding):
+            finding["priority"] = "P3"
+            finding["confidence"] = "low"
+            finding["gate_note"] = "needs verification: no file:line anchor"
+            downgraded += 1
+        elif category in RELAXED_CATEGORIES and not _has_impact(finding):
+            finding["priority"] = "P3"
+            finding["gate_note"] = "needs rationale: empty impact"
+            downgraded += 1
+        elif category not in ANCHOR_REQUIRED_CATEGORIES and category not in RELAXED_CATEGORIES and not _has_impact(finding):
+            # Fail-closed: `design` and any unknown/typo/future category need at
+            # least an `impact` rationale, or they are downgraded — no silent
+            # pass-through of an unsubstantiated high-priority claim.
+            finding["priority"] = "P3"
+            finding["gate_note"] = f"uncovered category {category!r}: needs impact rationale"
+            downgraded += 1
+
+    # Unconditional rewrite (last) — see docstring.
+    sidecar_path.write_text(json.dumps(raw, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return downgraded

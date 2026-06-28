@@ -84,8 +84,14 @@ def _write_source(root: Path, rel: str, doc: str, *, active: bool = True) -> Pat
     return target
 
 
-def _build_allowlist_dir(tmp_path: Path) -> Path:
-    allowlist_dir = tmp_path / "allowlist"
+def _build_allowlist_dir(tmp_path: Path, *, name: str = "allowlist") -> Path:
+    # ``name`` is load-bearing for the override-rate audit trail: the judge
+    # lanes' decision-event + counter-snapshot side effects only fire inside the
+    # shipped ``enforce_*`` aggregation layout (override_rate.py guards on
+    # ``allowlist_dir.name.startswith("enforce_")``). The default keeps the
+    # no-judge / verify-gate tests on a neutral name; the override-rate
+    # regression below opts into the real ``enforce_`` layout.
+    allowlist_dir = tmp_path / name
     allowlist_dir.mkdir(parents=True)
     (allowlist_dir / "_defaults.yaml").write_text(
         "version: 1\ndefaults:\n  fail_on_stale: false\n  fail_on_expired: false\n",
@@ -453,6 +459,58 @@ def test_sign_bundle_drift_repair_block_not_laundered(tmp_path: Path) -> None:
     assert calls == ["plugins/widget.py"]  # judge ran and BLOCKed
     assert yaml_path.read_text(encoding="utf-8") == before  # restored intact -- NOT deleted, NOT re-signed
     assert "b" * 64 in before  # the original drifted scope binding is still on disk
+
+
+def test_sign_bundle_drift_repair_block_records_override_rate_event(tmp_path: Path) -> None:
+    """A BLOCKed drift_repair must leave its ``blocked_without_override`` record in
+    the override-rate decision-events trail -- the governance SIDE EFFECT, sibling
+    of the rotation-manifest pin.
+
+    This is the sole-provenance case: the lane restores the YAML byte-identically
+    after a block (the test above), so the live-YAML recompute path inside
+    ``compute_override_rate`` sees NO trace of the block. The decision-events JSONL
+    is the *only* record, and the gate reads it exclusively for
+    ``blocked_without_override_in_window`` (override_rate.py). A refactor that
+    dropped the ``_run_justify`` decision-event write would keep the
+    block_not_laundered pin GREEN while silently undercounting judge blocks in the
+    override-rate gate -- exactly the ``assert-the-write, ignore-the-side-effect``
+    class that let the rotation-manifest bug ship. The ``enforce_`` dir name is
+    load-bearing: ``append_judge_decision_event`` no-ops outside that layout.
+    """
+    from elspeth_lints.core.override_rate import judge_decision_events_path
+
+    root = _build_root(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path, name="enforce_tier_model")
+    _write_source(root, "plugins/widget.py", "widget")
+    finding = _live_finding(root, "plugins/widget.py")
+    key = _write_signed_entry_with_spare(allowlist_dir, "plugins.yaml", finding=finding, scope_fingerprint="b" * 64)
+    yaml_path = allowlist_dir / "plugins.yaml"
+    before = yaml_path.read_text(encoding="utf-8")
+    assert any(i.status == "SCOPE_BINDING_DRIFT" for i in _diagnose(root, allowlist_dir).items)
+    bundle = _bundle(
+        root, allowlist_dir, (BundleAction(lane="resign", kind="drift_repair", key=key, diagnosis_status="SCOPE_BINDING_DRIFT"),)
+    )
+    bundle_path = _write_bundle_file(tmp_path, bundle)
+
+    with _patch_judge(_block_all) as calls:
+        rc = main(_argv(bundle_path, root, allowlist_dir, extra=("--yes",)))
+
+    assert rc != 0
+    assert calls == ["plugins/widget.py"]  # judge ran and BLOCKed
+    assert yaml_path.read_text(encoding="utf-8") == before  # YAML restored -> live recompute sees no block
+
+    events_path = judge_decision_events_path(allowlist_dir)
+    assert events_path.exists(), (
+        "drift_repair BLOCKED but wrote no override-rate decision event -- "
+        "compute_override_rate's blocked_without_override counter will undercount the judge block"
+    )
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(
+        event["entry_key"] == key
+        and event["effective_verdict"] == JudgeVerdict.BLOCKED.value
+        and event["write_disposition"] == "blocked_without_override"
+        for event in events
+    ), f"no blocked_without_override decision event for {key!r} in {events!r}"
 
 
 def test_sign_bundle_rotation_no_judge(tmp_path: Path) -> None:

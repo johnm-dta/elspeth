@@ -1044,11 +1044,12 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'judge-agent'", specifier = ">=0.2.87" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.27,<2" },
     { name = "openai", marker = "extra == 'judge'", specifier = ">=1.0,<2" },
     { name = "python-dotenv", specifier = ">=1.2.2,<2" },
     { name = "pyyaml", specifier = ">=6.0,<7" },
 ]
-provides-extras = ["judge", "judge-agent"]
+provides-extras = ["judge", "judge-agent", "mcp"]
 
 [[package]]
 name = "errorworks"

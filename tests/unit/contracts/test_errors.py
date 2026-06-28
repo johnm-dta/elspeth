@@ -71,6 +71,29 @@ class TestExecutionError:
         assert "exception_type" not in payload
 
 
+class TestRuntimePreflightFailedError:
+    """Tests for runtime-preflight audit payloads."""
+
+    def test_to_audit_dict_scrubs_external_provider_exception_message(self) -> None:
+        from elspeth.contracts.errors import RuntimePreflightFailedError
+
+        secret = "sk-" + ("a" * 32)
+        err = RuntimePreflightFailedError(
+            plugin_name="llm_transform",
+            provider="openrouter",
+            cause=RuntimeError(f"provider rejected request with bearer {secret}"),
+        )
+
+        assert secret in str(err), "live exception text remains useful for local debugging"
+        audit = err.to_audit_dict()
+
+        assert audit["message"] == "<redacted-secret>"
+        assert secret not in audit["message"]
+        assert audit["plugin_name"] == "llm_transform"
+        assert audit["provider"] == "openrouter"
+        assert audit["cause_type"] == "RuntimeError"
+
+
 class TestRoutingReasonSchema:
     """Tests for RoutingReason union type schema introspection."""
 
@@ -290,7 +313,7 @@ class TestExecutionErrorPostInit:
             ExecutionError(
                 exception="boom",
                 exception_type="RuntimeError",
-                context={1: "bad"},  # type: ignore[arg-type]
+                context={1: "bad"},  # type: ignore[dict-item]
             )
 
 

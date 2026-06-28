@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required,
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.declaration_contracts import DeclarationContractViolation
 from elspeth.contracts.freeze import deep_freeze, freeze_fields
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 
 # Re-export FrameworkBugError which lives in tier_registry to break the import
 # cycle between the registry primitive and the public exception module. Apply
@@ -1259,7 +1260,7 @@ class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
             "provider": self.provider,
             "cause_type": self.cause_type,
             "retryable": self.retryable,
-            "message": str(self),
+            "message": scrub_text_for_audit(str(self)),
         }
 
 

@@ -255,6 +255,20 @@ class TestPurgeBasicFlow:
         # The exception propagates (not caught by CLI), but finally block runs
         mock_db.close.assert_called_once()
 
+    def test_purge_error_not_masked_by_db_close_failure(self, tmp_path: Path) -> None:
+        """A purge failure remains the reported error if database close also fails."""
+        refs = ["aabb" * 16]
+        mock_db, mock_ps, mock_pm = _make_purge_mocks(expired_refs=refs)
+        mock_pm.purge_payloads.side_effect = OSError("disk full")
+        mock_db.close.side_effect = RuntimeError("close failed")
+
+        result = _invoke_purge_with_mocks(tmp_path, mock_db, mock_ps, mock_pm)
+
+        assert isinstance(result.exception, OSError)
+        assert "disk full" in str(result.exception)
+        assert "close failed" not in str(result.exception)
+        mock_db.close.assert_called_once()
+
 
 class TestPurgeDryRun:
     """Tests for --dry-run mode."""

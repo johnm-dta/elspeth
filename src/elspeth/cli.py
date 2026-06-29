@@ -842,7 +842,9 @@ def explain(
 
     finally:
         if db is not None:
-            db.close()
+            import sys
+
+            _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 @dataclass(frozen=True, slots=True)
@@ -1709,7 +1711,9 @@ def purge(
             for run_id in result.grade_update_failures[:5]:
                 typer.echo(f"    {run_id}")
     finally:
-        db.close()
+        import sys
+
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 def _execute_resume_with_instances(
@@ -1981,7 +1985,7 @@ def resume(
         existing_tables = set(inspector.get_table_names())
     except Exception as e:
         typer.echo(f"Error inspecting database schema: {e}", err=True)
-        db.close()
+        _close_landscape_db(db, pending_exc=e)
         raise typer.Exit(1) from None
 
     required_tables = {"runs", "tokens", "node_states"}
@@ -1993,8 +1997,9 @@ def resume(
             f"Check the database path.",
             err=True,
         )
-        db.close()
-        raise typer.Exit(1) from None
+        exit_exc = typer.Exit(1)
+        _close_landscape_db(db, pending_exc=exit_exc)
+        raise exit_exc from None
 
     try:
         checkpoint_manager = CheckpointManager(db)
@@ -2335,7 +2340,9 @@ def resume(
         _emit_not_resumable_event(e, output_format)
         raise typer.Exit(1) from e
     finally:
-        db.close()
+        import sys
+
+        _close_landscape_db(db, pending_exc=sys.exc_info()[1])
 
 
 @app.command()

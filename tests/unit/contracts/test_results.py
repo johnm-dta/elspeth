@@ -716,6 +716,7 @@ class TestArtifactDescriptorAuditInvariants:
         [
             "webhook://https://user:" + "redacted" + "@example.com/hook",
             "webhook://https://api.example.com/hook?token=redacted",
+            "webhook://https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value",
             "db://results@postgresql://user:" + "redacted" + "@db/app",
             "file:///tmp/output.csv?api_key=redacted",
         ],
@@ -794,6 +795,23 @@ class TestArtifactDescriptorFactories:
         assert descriptor.content_hash == "abc789"
         assert descriptor.size_bytes == 512
         assert descriptor.metadata == {"response_code": 200}
+
+    def test_for_webhook_uses_redacted_slack_path_secret(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """for_webhook stores the known-pattern sanitized URL."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        sanitized_url = SanitizedWebhookUrl.from_raw_url("https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value")
+
+        descriptor = ArtifactDescriptor.for_webhook(
+            url=sanitized_url,
+            content_hash="abc789",
+            request_size=512,
+            response_code=200,
+        )
+
+        assert descriptor.path_or_uri == "webhook://https://hooks.slack.com/services/T00000000/B00000000/REDACTED"
+        assert "opaque_path_segment_value" not in descriptor.path_or_uri
+        assert descriptor.metadata is not None
+        assert "url_fingerprint" in descriptor.metadata
 
     def test_for_webhook_with_error_response(self) -> None:
         """for_webhook captures error response codes."""

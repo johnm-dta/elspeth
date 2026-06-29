@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import parse_qs, quote, urlparse
 
 from elspeth.contracts.freeze import freeze_fields, require_int
-from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl
+from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl, _extract_known_webhook_path_secret
 
 if TYPE_CHECKING:
     from elspeth.contracts.errors import MaxRetriesExceeded
@@ -120,6 +120,8 @@ def _require_no_artifact_uri_credentials(path_or_uri: str) -> None:
             ]
             if sensitive_keys:
                 raise ValueError(f"path_or_uri must not contain sensitive {section_name} parameters: {sensitive_keys}")
+        if _extract_known_webhook_path_secret(parsed) is not None:
+            raise ValueError("path_or_uri must not contain known webhook path secrets")
 
 
 def _require_artifact_hash(content_hash: object) -> None:
@@ -637,7 +639,10 @@ class ArtifactDescriptor:
         """Create descriptor for webhook artifacts.
 
         URL must be pre-sanitized using SanitizedWebhookUrl.from_raw_url().
-        This ensures tokens are never stored in the audit trail.
+        This removes supported token forms before storing the URL in the audit
+        trail: userinfo, sensitive query/fragment parameters, and known Slack
+        incoming-webhook path tokens. Other path-borne secrets are not
+        generically redacted.
         """
         # Type safety: enforce SanitizedWebhookUrl, not duck-typed objects
         if not isinstance(url, SanitizedWebhookUrl):

@@ -101,6 +101,21 @@
   background-color: var(--color-surface);
 }
 
+/* Operator request: stop the guided surface stretching full-bleed on wide
+   viewports — cap each panel to a centred "sheet" (~A5 landscape). max-width
+   caps the stretched flex column item; margin-inline:auto centres it once
+   capped (and collapses to a flush fill below the cap, so narrow screens are
+   unaffected). 50rem keeps the 5-step stepper above its 640px 2-column
+   breakpoint. */
+.chat-panel--guided > .guided-workflow,
+.chat-panel--guided > .guided-chat-history,
+.chat-panel--guided > .guided-step-chat,
+.chat-panel--guided > .guided-current-decision,
+.chat-panel--guided > .inline-run-results {
+  max-width: 50rem;
+  margin-inline: auto;
+}
+
 .guided-current-decision-copy {
   margin-bottom: var(--space-md);
 }

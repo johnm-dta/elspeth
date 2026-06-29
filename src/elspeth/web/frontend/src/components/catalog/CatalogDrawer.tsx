@@ -509,7 +509,13 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
           )}
 
           {fetchError ? (
-            <div className="catalog-status-message catalog-status-message--error">
+            // role="alert" so the load failure is announced assertively the
+            // moment it appears (WCAG 4.1.3) — the loading branch below is
+            // polite, but an error the user did not initiate is urgent.
+            <div
+              role="alert"
+              className="catalog-status-message catalog-status-message--error"
+            >
               <span>Failed to load plugin catalog.</span>
               <button
                 type="button"
@@ -529,27 +535,48 @@ export function CatalogDrawer({ isOpen, onClose }: CatalogDrawerProps) {
               Loading...
             </div>
           ) : pluginList.length === 0 ? (
-            <div className="catalog-status-message catalog-status-message--center">
+            // Polite live region: a screen-reader user hears the empty state
+            // when search/filter eliminates every plugin (WCAG 4.1.3).
+            <div
+              role="status"
+              aria-live="polite"
+              className="catalog-status-message catalog-status-message--center"
+            >
               {hasActiveFilters(filters)
                 ? "No plugins match the active filters."
                 : "No plugins available."}
             </div>
           ) : (
-            pluginList.map((plugin) => {
-              const cacheKey = `${plugin.plugin_type}:${plugin.name}`;
-              const schema = schemaCache.get(cacheKey) ?? null;
-              const hasSchemaError = schemaErrors.has(cacheKey);
-              return (
-                <PluginCard
-                  key={cacheKey}
-                  plugin={plugin}
-                  schema={schema}
-                  schemaError={hasSchemaError}
-                  onExpand={() => handleExpand(plugin)}
-                  onRetrySchema={() => handleExpand(plugin)}
-                />
-              );
-            })
+            <>
+              {/* Polite live region announcing the result COUNT so the
+                  number of plugins surviving the search/filter pass is
+                  spoken (WCAG 4.1.3). Sits OUTSIDE the role="list" below so
+                  the list's only direct children are role="listitem". */}
+              <div role="status" aria-live="polite" className="sr-only">
+                {`${pluginList.length} ${pluginList.length === 1 ? "plugin" : "plugins"}`}
+              </div>
+              {/* List semantics (WCAG 1.3.1): each plugin card is a listitem
+                  so assistive tech announces "list, N items" and per-item
+                  position instead of a flat run of unrelated regions. */}
+              <div role="list" className="catalog-plugin-list">
+                {pluginList.map((plugin) => {
+                  const cacheKey = `${plugin.plugin_type}:${plugin.name}`;
+                  const schema = schemaCache.get(cacheKey) ?? null;
+                  const hasSchemaError = schemaErrors.has(cacheKey);
+                  return (
+                    <div role="listitem" key={cacheKey}>
+                      <PluginCard
+                        plugin={plugin}
+                        schema={schema}
+                        schemaError={hasSchemaError}
+                        onExpand={() => handleExpand(plugin)}
+                        onRetrySchema={() => handleExpand(plugin)}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </>
           )}
         </div>
       </div>

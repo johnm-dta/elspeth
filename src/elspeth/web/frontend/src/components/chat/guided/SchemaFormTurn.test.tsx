@@ -153,7 +153,9 @@ describe("SchemaFormTurn", () => {
     );
 
     await user.type(screen.getByRole("textbox", { name: "Deployment" }), "gpt-4");
-    await user.selectOptions(screen.getByRole("combobox", { name: "Provider" }), "openrouter");
+    // `Provider` is required, so its accessible name now carries the "(required)"
+    // cue — match on the base label.
+    await user.selectOptions(screen.getByRole("combobox", { name: /Provider/ }), "openrouter");
     expect(screen.queryByRole("textbox", { name: "Deployment" })).not.toBeInTheDocument();
     await user.type(screen.getByRole("textbox", { name: "Base URL" }), "https://openrouter.ai/api/v1");
     await user.click(screen.getByRole("button", { name: "Continue" }));
@@ -182,7 +184,9 @@ describe("SchemaFormTurn", () => {
       />,
     );
 
-    const input = screen.getByRole("textbox", { name: "Template" });
+    // `Template` is required, so its accessible name now carries the "(required)"
+    // cue — match on the base label.
+    const input = screen.getByRole("textbox", { name: /Template/ });
     await user.clear(input);
     const button = screen.getByRole("button", { name: "Continue" });
     expect(button).toBeDisabled();
@@ -298,7 +302,9 @@ describe("SchemaFormTurn", () => {
     );
 
     expect(screen.getByRole("heading", { level: 3, name: "split-by-score" })).toBeInTheDocument();
-    await user.type(screen.getByRole("spinbutton", { name: "Threshold" }), "0.9");
+    // `Threshold` is required, so its accessible name now carries the
+    // "(required)" cue — match on the base label.
+    await user.type(screen.getByRole("spinbutton", { name: /Threshold/ }), "0.9");
     await user.click(screen.getByRole("button", { name: "Apply recipe" }));
 
     expect(onSubmit).toHaveBeenCalledWith(
@@ -340,6 +346,125 @@ describe("SchemaFormTurn", () => {
       accepted_step_index: null,
       edit_step_index: null,
       control_signal: null,
+    });
+  });
+
+  // M14 (WCAG 3.3.1 / 3.3.2): required fields must announce themselves
+  // visibly + programmatically, and the cases the form already knows are bad
+  // (broken JSON, non-numeric numbers) must surface an inline error instead of
+  // only disabling Continue.
+  describe("required marking and inline validation", () => {
+    it("marks required non-checkbox fields visibly and programmatically", () => {
+      const { container } = render(
+        <SchemaFormTurn
+          payload={pluginPayload([
+            field({ name: "token", label: "Token", kind: "text", required: true }),
+            field({ name: "provider", label: "Provider", kind: "enum", enum: ["a", "b"], required: true }),
+            // A checkbox always carries a boolean value, so the form never gates
+            // it as required (canSubmit skips it) — it must NOT be marked.
+            field({ name: "flag", label: "Flag", kind: "checkbox", required: true }),
+          ])}
+          onSubmit={vi.fn()}
+        />,
+      );
+
+      const token = screen.getByRole("textbox", { name: /Token/ });
+      expect(token).toBeRequired();
+      expect(token).toHaveAttribute("aria-required", "true");
+      expect(token).toHaveAccessibleName(/\(required\)/);
+
+      const provider = screen.getByRole("combobox", { name: /Provider/ });
+      expect(provider).toBeRequired();
+      expect(provider).toHaveAttribute("aria-required", "true");
+      expect(provider).toHaveAccessibleName(/\(required\)/);
+
+      const flag = screen.getByRole("checkbox", { name: "Flag" });
+      expect(flag).not.toBeRequired();
+      expect(flag).not.toHaveAttribute("aria-required");
+      expect(flag).toHaveAccessibleName("Flag");
+
+      // One visible (aria-hidden) asterisk per marked field — and none for the
+      // checkbox.
+      const markers = container.querySelectorAll(".guided-schema-required-marker");
+      expect(markers).toHaveLength(2);
+      markers.forEach((marker) => {
+        expect(marker).toHaveTextContent("*");
+        expect(marker).toHaveAttribute("aria-hidden", "true");
+      });
+    });
+
+    it("does not mark optional fields as required", () => {
+      const { container } = render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "note", label: "Note", kind: "text" })])}
+          onSubmit={vi.fn()}
+        />,
+      );
+
+      const note = screen.getByRole("textbox", { name: "Note" });
+      expect(note).not.toBeRequired();
+      expect(note).not.toHaveAttribute("aria-required");
+      expect(note).toHaveAccessibleName("Note");
+      expect(container.querySelector(".guided-schema-required-marker")).toBeNull();
+    });
+
+    it("flags invalid JSON inline and blocks Continue until it parses", () => {
+      const onSubmit = vi.fn();
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "cfg", label: "Config", kind: "json-object" })])}
+          onSubmit={onSubmit}
+        />,
+      );
+
+      const textarea = screen.getByRole("textbox", { name: "Config" });
+      fireEvent.change(textarea, { target: { value: "{not valid" } });
+
+      expect(textarea).toHaveAttribute("aria-invalid", "true");
+      const error = screen.getByRole("alert");
+      expect(error).toHaveTextContent(/invalid json/i);
+      expect(textarea).toHaveAttribute("aria-describedby", error.id);
+      expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+
+      // Correcting the text clears the error and re-enables submit.
+      fireEvent.change(textarea, { target: { value: '{"ok":true}' } });
+      expect(textarea).not.toHaveAttribute("aria-invalid");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    it("flags a non-integer in an integer field inline and blocks Continue, then submits the corrected number", () => {
+      const onSubmit = vi.fn();
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "n", label: "Count", kind: "number-int" })])}
+          onSubmit={onSubmit}
+        />,
+      );
+
+      const input = screen.getByRole("spinbutton", { name: "Count" });
+      // "1.5" was silently truncated to 1 before this fix — now it's surfaced.
+      fireEvent.change(input, { target: { value: "1.5" } });
+
+      expect(input).toHaveAttribute("aria-invalid", "true");
+      const error = screen.getByRole("alert");
+      expect(error).toHaveTextContent(/whole number/i);
+      expect(input).toHaveAttribute("aria-describedby", error.id);
+      expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+
+      // A valid integer clears the error and submits the real number (proving
+      // the raw-text-on-invalid path does not corrupt a subsequent good value).
+      fireEvent.change(input, { target: { value: "2" } });
+      expect(input).not.toHaveAttribute("aria-invalid");
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      const submit = screen.getByRole("button", { name: "Continue" });
+      expect(submit).toBeEnabled();
+      fireEvent.click(submit);
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          edited_values: expect.objectContaining({ options: { n: 2 } }),
+        }),
+      );
     });
   });
 
@@ -391,7 +516,9 @@ describe("SchemaFormTurn", () => {
           isTutorial
         />,
       );
-      const input = screen.getByLabelText("path") as HTMLInputElement;
+      // `path` is required, so its label now carries the "(required)" cue —
+      // match on the base label.
+      const input = screen.getByLabelText(/path/) as HTMLInputElement;
       expect(input.value).toBe("project_pages.json");
       expect(input).toHaveAttribute("readonly");
     });
@@ -405,7 +532,9 @@ describe("SchemaFormTurn", () => {
           onSubmit={vi.fn()}
         />,
       );
-      const input = screen.getByLabelText("path") as HTMLInputElement;
+      // `path` is required, so its label now carries the "(required)" cue —
+      // match on the base label.
+      const input = screen.getByLabelText(/path/) as HTMLInputElement;
       expect(input.value).toBe(
         "/home/john/elspeth/data/blobs/sess/cb7f1f46-b724-4472-9acb-1680cefef45e_project_pages.json",
       );

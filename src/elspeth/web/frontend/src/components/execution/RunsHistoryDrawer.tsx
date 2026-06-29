@@ -9,6 +9,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
+import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
 import type { Run, RunDiagnostics, RunDiagnosticsWorkingView } from "@/types/index";
 
@@ -16,9 +17,6 @@ interface RunsHistoryDrawerProps {
   onClose: () => void;
   runsOverride?: ReadonlyArray<Run>;
 }
-
-const FOCUSABLE_SELECTOR =
-  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 function counted(label: string, count: number): string {
   return count === 1 ? `1 ${label}` : `${count.toLocaleString()} ${label}s`;
@@ -75,40 +73,17 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
-  const closeBtnRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    closeBtnRef.current?.focus();
-  }, []);
+  // M08 (WCAG 2.4.3): the shared focus trap moves focus to the Close button on
+  // open, wraps Tab/Shift+Tab, and — unlike the previous bespoke trap —
+  // restores focus to the opener when the drawer unmounts.
+  useFocusTrap(drawerRef, true, ".runs-history-drawer-header button");
 
+  // useFocusTrap does not own Escape; keep the drawer's own close-on-Escape.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         onClose();
-        return;
-      }
-      if (e.key !== "Tab") {
-        return;
-      }
-
-      const drawer = drawerRef.current;
-      if (!drawer) {
-        return;
-      }
-      const focusables = drawer.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
-      if (focusables.length === 0) {
-        return;
-      }
-
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = document.activeElement as HTMLElement | null;
-      if (e.shiftKey && (active === first || !drawer.contains(active))) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && (active === last || !drawer.contains(active))) {
-        e.preventDefault();
-        first.focus();
       }
     }
 
@@ -127,7 +102,6 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
       <header className="runs-history-drawer-header">
         <h2>Past runs</h2>
         <button
-          ref={closeBtnRef}
           type="button"
           aria-label="Close past runs"
           onClick={onClose}

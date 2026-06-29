@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useSecretsStore } from "@/stores/secretsStore";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import type { SecretInventoryItem } from "@/types/api";
 
 interface SecretsPanelProps {
@@ -113,6 +114,8 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
   const [name, setName] = useState("");
   const [value, setValue] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  // Name of the secret awaiting a delete confirmation (null = no pending delete).
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const modalRef = useRef<HTMLDivElement>(null);
   const formErrorTargets = secretFormErrorTargets(error);
   const hasFormErrorTarget = formErrorTargets.name || formErrorTargets.value;
@@ -122,42 +125,56 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
     loadSecrets();
   }, [loadSecrets]);
 
-  // Close on Escape key
+  // Close on Escape key. While the delete-confirm dialog is open it owns Escape
+  // (it cancels the pending delete); don't also tear down the whole panel.
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && pendingDelete === null) onClose();
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [onClose, pendingDelete]);
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!name.trim() || !value) return;
       setIsSubmitting(true);
+      let succeeded = false;
       try {
         await createSecret(name.trim(), value);
+        // createSecret does not re-throw — it reports failure via state.error
+        // (and clears it at the start of each attempt). Treat the save as
+        // successful only when no error was recorded.
+        succeeded = !useSecretsStore.getState().error;
       } catch {
-        // createSecret does not re-throw — the store catches and sets state.error.
-        // This catch is defensive in case that contract changes; it never fires today.
+        // Defensive: if the store contract changes to re-throw, fall through
+        // with succeeded=false so the name is preserved for retry.
       } finally {
         // SECURITY: clear value immediately — it must never linger in component
         // state regardless of whether the API call succeeded or failed.
         setValue("");
-        setName("");
+        // WCAG 3.3.7: keep the name on failure so the user can correct and retry
+        // without re-typing, and so the inline error (which targets the name
+        // field) keeps describing a populated input. Clear it only on success.
+        if (succeeded) {
+          setName("");
+        }
         setIsSubmitting(false);
       }
     },
     [name, value, createSecret],
   );
 
-  const handleDelete = useCallback(
-    (secretName: string) => {
-      deleteSecret(secretName);
-    },
-    [deleteSecret],
-  );
+  // WCAG 3.3.4: deleting a credential is irreversible and breaks every pipeline
+  // referencing it, so it goes through a danger confirmation rather than firing
+  // straight from the "×" button.
+  const confirmDelete = useCallback(() => {
+    if (pendingDelete !== null) {
+      deleteSecret(pendingDelete);
+    }
+    setPendingDelete(null);
+  }, [pendingDelete, deleteSecret]);
 
   return (
     <>
@@ -349,7 +366,7 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
                       {/* Server-scoped and org-scoped secrets are read-only — no delete */}
                       {secret.scope === "user" && (
                         <button
-                          onClick={() => handleDelete(secret.name)}
+                          onClick={() => setPendingDelete(secret.name)}
                           aria-label={`Delete secret ${secret.name}`}
                           title="Delete"
                           className="secrets-delete-btn"
@@ -371,6 +388,19 @@ export function SecretsPanel({ onClose }: SecretsPanelProps) {
           </p>
         </div>
       </div>
+
+      {/* WCAG 3.3.4: irreversible delete is gated behind a danger confirmation. */}
+      {pendingDelete !== null && (
+        <ConfirmDialog
+          title="Delete this secret?"
+          message={`Delete secret "${pendingDelete}"? Pipelines that reference it will fail.`}
+          confirmLabel="Delete secret"
+          cancelLabel="Cancel"
+          variant="danger"
+          onConfirm={confirmDelete}
+          onCancel={() => setPendingDelete(null)}
+        />
+      )}
     </>
   );
 }

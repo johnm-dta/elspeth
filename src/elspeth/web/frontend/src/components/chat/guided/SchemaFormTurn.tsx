@@ -46,8 +46,13 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
 
   function canSubmit(): boolean {
     for (const field of visibleFields()) {
-      if (!field.required) continue;
       const value = values[field.name];
+      // Block on any field the form already knows holds an invalid value
+      // (broken JSON / non-numeric number), required or not. Previously such a
+      // value rode silently through to submit because canSubmit only inspected
+      // required fields and never checked validity.
+      if (fieldHasError(field, value)) return false;
+      if (!field.required) continue;
       if (field.kind === "checkbox") continue;
       if (value === undefined || value === null || value === "") return false;
       if (Array.isArray(value) && value.length === 0) return false;
@@ -204,6 +209,65 @@ function submittedValue(field: KnobField, value: unknown): unknown {
   return value;
 }
 
+// Whether a field participates in the required-marker / aria-required treatment.
+// Mirrors canSubmit's required predicate: a checkbox always carries a boolean
+// value, so the form never treats one as unmet — marking it required (visibly or
+// programmatically) would contradict that, so the marker tracks exactly the
+// predicate the gate enforces.
+function isRequiredField(field: KnobField): boolean {
+  return field.required && field.kind !== "checkbox";
+}
+
+// True when the field's current value is in a state the form already knows is
+// invalid: a JSON object/array whose text failed to parse, or a number field
+// holding raw text that isn't a usable number. The onChange handlers keep that
+// raw text (instead of silently blanking/coercing it) precisely so it can be
+// surfaced here — both to gate Continue and to render the inline error.
+//
+// json-value is excluded by design: its parse is lossy (a bare `x` and a parsed
+// `"x"` both end up as the string "x"), so the form genuinely cannot tell a
+// valid scalar from a broken one and must not guess.
+function fieldHasError(field: KnobField, value: unknown): boolean {
+  switch (field.kind) {
+    case "number-int":
+    case "number-float":
+      return typeof value === "string" && value.trim() !== "";
+    case "json-object":
+    case "json-array":
+      return typeof value === "string" && value.trim() !== "";
+    default:
+      return false;
+  }
+}
+
+// Join the description / error ids into a single aria-describedby token list,
+// dropping the undefined ones. Returns undefined when nothing is described so
+// the attribute is omitted rather than rendered empty.
+function describedBy(...ids: Array<string | undefined>): string | undefined {
+  const joined = ids.filter((id): id is string => Boolean(id)).join(" ");
+  return joined === "" ? undefined : joined;
+}
+
+// Field label with the required marker. The asterisk is aria-hidden (so AT does
+// not read "star") while the screen-reader-only "(required)" carries the cue in
+// the accessible name; aria-required on the control (set per branch) conveys the
+// state programmatically. Non-required fields render the label alone.
+function FieldLabel({ field, htmlFor }: { field: KnobField; htmlFor: string }) {
+  return (
+    <label htmlFor={htmlFor} className="guided-schema-label">
+      {field.label}
+      {isRequiredField(field) && (
+        <>
+          <span className="guided-schema-required-marker" aria-hidden="true">
+            {" *"}
+          </span>
+          <span className="visually-hidden">{" (required)"}</span>
+        </>
+      )}
+    </label>
+  );
+}
+
 function KnobFieldRenderer({
   field,
   value,
@@ -221,6 +285,7 @@ function KnobFieldRenderer({
 }) {
   const id = `${idPrefix}-${field.name}`;
   const descriptionId = field.description ? `${id}-description` : undefined;
+  const required = isRequiredField(field);
 
   switch (field.kind) {
     case "text":
@@ -240,15 +305,15 @@ function KnobFieldRenderer({
       const displayString = maskPathLeak ? friendlyBlobRef(rawString) : rawString;
       return (
         <div className="guided-schema-field-row">
-          <label htmlFor={id} className="guided-schema-label">
-            {field.label}
-          </label>
+          <FieldLabel field={field} htmlFor={id} />
           <input
             id={id}
             type="text"
             className="guided-schema-input"
             value={displayString}
             placeholder={field.kind === "blob-ref" ? "blob UUID" : undefined}
+            required={required}
+            aria-required={required || undefined}
             aria-describedby={descriptionId}
             onChange={(event) => onChange(event.target.value)}
             disabled={disabled}
@@ -273,19 +338,22 @@ function KnobFieldRenderer({
       );
     }
     case "number-int":
-    case "number-float":
+    case "number-float": {
+      const hasError = fieldHasError(field, value);
+      const errorId = hasError ? `${id}-error` : undefined;
       return (
         <div className="guided-schema-field-row">
-          <label htmlFor={id} className="guided-schema-label">
-            {field.label}
-          </label>
+          <FieldLabel field={field} htmlFor={id} />
           <input
             id={id}
             type="number"
-            className="guided-schema-input"
+            className={`guided-schema-input${hasError ? " guided-schema-input--error" : ""}`}
             step={field.kind === "number-int" ? "1" : "any"}
             value={value === null ? "" : String(value ?? "")}
-            aria-describedby={descriptionId}
+            required={required}
+            aria-required={required || undefined}
+            aria-invalid={hasError || undefined}
+            aria-describedby={describedBy(descriptionId, errorId)}
             onChange={(event) => {
               const raw = event.target.value;
               if (raw === "") {
@@ -293,7 +361,14 @@ function KnobFieldRenderer({
                 return;
               }
               const parsed = field.kind === "number-int" ? parseInt(raw, 10) : parseFloat(raw);
-              onChange(Number.isNaN(parsed) ? "" : parsed);
+              // Keep the raw text (instead of silently blanking it) when it
+              // isn't a usable number, so fieldHasError can flag it inline. For
+              // an integer field a fractional entry is surfaced too (parseInt
+              // truncates "1.5" → 1) rather than quietly dropping the decimal.
+              const usable =
+                !Number.isNaN(parsed) &&
+                (field.kind === "number-float" || Number(raw) === parsed);
+              onChange(usable ? parsed : raw);
             }}
             disabled={disabled}
           />
@@ -302,8 +377,14 @@ function KnobFieldRenderer({
               {field.description}
             </p>
           )}
+          {hasError && (
+            <p id={errorId} className="guided-schema-error" role="alert">
+              {field.kind === "number-int" ? "Enter a whole number." : "Enter a valid number."}
+            </p>
+          )}
         </div>
       );
+    }
     case "checkbox":
       return (
         <div className="guided-schema-field-row guided-schema-checkbox-row">
@@ -316,9 +397,7 @@ function KnobFieldRenderer({
             onChange={(event) => onChange(event.target.checked)}
             disabled={disabled}
           />
-          <label htmlFor={id} className="guided-schema-label">
-            {field.label}
-          </label>
+          <FieldLabel field={field} htmlFor={id} />
           {field.description && (
             <p id={descriptionId} className="guided-schema-hint">
               {field.description}
@@ -329,13 +408,13 @@ function KnobFieldRenderer({
     case "enum":
       return (
         <div className="guided-schema-field-row">
-          <label htmlFor={id} className="guided-schema-label">
-            {field.label}
-          </label>
+          <FieldLabel field={field} htmlFor={id} />
           <select
             id={id}
             className="guided-schema-select"
             value={String(value ?? "")}
+            required={required}
+            aria-required={required || undefined}
             aria-describedby={descriptionId}
             onChange={(event) => onChange(event.target.value)}
             disabled={disabled}
@@ -359,13 +438,13 @@ function KnobFieldRenderer({
     case "string-list":
       return (
         <div className="guided-schema-field-row">
-          <label htmlFor={id} className="guided-schema-label">
-            {field.label}
-          </label>
+          <FieldLabel field={field} htmlFor={id} />
           <textarea
             id={id}
             className="guided-schema-textarea"
             value={typeof value === "string" ? value : Array.isArray(value) ? value.join("\n") : ""}
+            required={required}
+            aria-required={required || undefined}
             aria-describedby={descriptionId}
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={(event) => {
@@ -385,17 +464,20 @@ function KnobFieldRenderer({
       );
     case "json-object":
     case "json-array":
-    case "json-value":
+    case "json-value": {
+      const hasError = fieldHasError(field, value);
+      const errorId = hasError ? `${id}-error` : undefined;
       return (
         <div className="guided-schema-field-row">
-          <label htmlFor={id} className="guided-schema-label">
-            {field.label}
-          </label>
+          <FieldLabel field={field} htmlFor={id} />
           <textarea
             id={id}
-            className="guided-schema-textarea"
+            className={`guided-schema-textarea${hasError ? " guided-schema-textarea--error" : ""}`}
             value={jsonText(value, field.kind)}
-            aria-describedby={descriptionId}
+            required={required}
+            aria-required={required || undefined}
+            aria-invalid={hasError || undefined}
+            aria-describedby={describedBy(descriptionId, errorId)}
             onChange={(event) => {
               try {
                 onChange(JSON.parse(event.target.value));
@@ -414,8 +496,14 @@ function KnobFieldRenderer({
               {field.description}
             </p>
           )}
+          {hasError && (
+            <p id={errorId} className="guided-schema-error" role="alert">
+              Invalid JSON — check brackets, quotes, and commas.
+            </p>
+          )}
         </div>
       );
+    }
   }
   const _exhaustive: never = field.kind;
   return _exhaustive;

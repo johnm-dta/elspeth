@@ -376,6 +376,23 @@ describe("PluginCard — Phase 7B reshape", () => {
     expect(screen.getByText(/Read rows from a CSV file/i)).toBeInTheDocument();
   });
 
+  it("exposes the card as an article named by the plugin name (WCAG 1.3.1)", () => {
+    // The visually-heading name span must convey programmatic structure:
+    // role="article" + aria-labelledby points the accessible name at the
+    // name element rather than leaving it an undifferentiated bold span.
+    render(
+      <PluginCard
+        plugin={makePlugin({ name: "csv", plugin_type: "source" })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+    const article = screen.getByRole("article", { name: "csv" });
+    const name = screen.getByText("csv");
+    expect(name.id).toBe("plugin-card-name-source-csv");
+    expect(article).toHaveAttribute("aria-labelledby", name.id);
+  });
+
   it("renders one audit-characteristic icon per flag", () => {
     render(
       <PluginCard

@@ -182,4 +182,23 @@ describe("RunsHistoryDrawer", () => {
     await userEvent.tab({ shift: true });
     expect(closeBtn).toHaveFocus();
   });
+
+  // M08 (WCAG 2.4.3): closing the drawer must return focus to the control that
+  // opened it, so keyboard users are not dumped at the top of the document.
+  it("restores focus to the opener when the drawer unmounts", () => {
+    const opener = document.createElement("button");
+    opener.textContent = "Open past runs";
+    document.body.appendChild(opener);
+    opener.focus();
+    expect(opener).toHaveFocus();
+
+    const { unmount } = render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    // Focus moved into the drawer (the Close button) while open.
+    expect(screen.getByRole("button", { name: /close/i })).toHaveFocus();
+
+    unmount();
+    expect(opener).toHaveFocus();
+
+    opener.remove();
+  });
 });

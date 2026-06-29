@@ -749,6 +749,14 @@
   color: var(--color-text-secondary);
 }
 
+/* Required-field asterisk (WCAG 3.3.2). aria-hidden in the markup — the
+   accessible cue rides the visually-hidden "(required)" + aria-required; this
+   is the sighted-only signal, tinted with the error colour to stand out. */
+.guided-schema-required-marker {
+  color: var(--color-error, var(--color-accent));
+  font-weight: 700;
+}
+
 /* Text / number input */
 .guided-schema-input {
   padding: var(--space-sm) var(--space-md);
@@ -765,6 +773,12 @@
 .guided-schema-input:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+/* Error-state border for the number input (mirrors .guided-schema-textarea--error
+   used by the JSON branch) — set when aria-invalid is true. */
+.guided-schema-input--error {
+  border-color: var(--color-error, var(--color-accent));
 }
 
 /* Select dropdown */

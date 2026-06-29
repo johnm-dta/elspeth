@@ -39,16 +39,20 @@ function creatorBadge(createdBy: string): string {
   }
 }
 
-function statusIndicator(status: string): { color: string; label: string } {
+// Each status carries a distinct *shape* glyph alongside its hue, so the
+// ready/pending/error distinction survives colour-vision deficiency
+// (WCAG 1.4.1): filled disc, hollow ring, and warning triangle are
+// unmistakable regardless of colour.
+function statusIndicator(status: string): { color: string; label: string; glyph: string } {
   switch (status) {
     case "ready":
-      return { color: "var(--color-success)", label: "Ready" };
+      return { color: "var(--color-success)", label: "Ready", glyph: "●" };
     case "pending":
-      return { color: "var(--color-warning)", label: "Pending" };
+      return { color: "var(--color-warning)", label: "Pending", glyph: "○" };
     case "error":
-      return { color: "var(--color-error)", label: "Error" };
+      return { color: "var(--color-error)", label: "Error", glyph: "▲" };
     default:
-      return { color: "var(--color-text-muted)", label: status };
+      return { color: "var(--color-text-muted)", label: status, glyph: "◌" };
   }
 }
 
@@ -107,14 +111,18 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
           borderBottom: previewOpen ? "none" : "1px solid var(--color-border)",
         }}
       >
-        {/* Status dot */}
+        {/* Status indicator — shape glyph (non-colour cue) + accessible name */}
         <span
           className="blob-row-status-dot"
+          role="img"
+          aria-label={status.label}
           title={status.label}
           style={{
-            backgroundColor: status.color,
+            color: status.color,
           }}
-        />
+        >
+          {status.glyph}
+        </span>
 
         {/* Creator badge */}
         <span className="blob-row-creator" title={`Created by ${blob.created_by}`}>

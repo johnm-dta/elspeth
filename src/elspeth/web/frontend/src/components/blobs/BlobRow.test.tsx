@@ -69,3 +69,47 @@ describe("BlobRow preview", () => {
     expect(screen.getByText("preview text")).toBeInTheDocument();
   });
 });
+
+describe("BlobRow status indicator (WCAG 1.4.1 non-colour cue)", () => {
+  it("exposes the status as an accessible image with a visible glyph, not colour alone", () => {
+    render(
+      <BlobRow
+        blob={makeBlob({ status: "ready" })}
+        sessionId="session-1"
+        onDownload={vi.fn()}
+        onDelete={vi.fn()}
+        onUseAsInput={vi.fn()}
+      />,
+    );
+
+    const dot = screen.getByRole("img", { name: "Ready" });
+    // A shape glyph carries the cue, so the status survives colour-vision
+    // deficiency rather than relying on hue.
+    expect(dot.textContent).not.toBe("");
+  });
+
+  it("renders a distinct glyph per status so ready/pending/error differ by shape", () => {
+    const glyphFor = (status: BlobMetadata["status"]): string => {
+      const { unmount } = render(
+        <BlobRow
+          blob={makeBlob({ status })}
+          sessionId="session-1"
+          onDownload={vi.fn()}
+          onDelete={vi.fn()}
+          onUseAsInput={vi.fn()}
+        />,
+      );
+      const label = status.charAt(0).toUpperCase() + status.slice(1);
+      const glyph = screen.getByRole("img", { name: label }).textContent ?? "";
+      unmount();
+      return glyph;
+    };
+
+    const glyphs = ["ready", "pending", "error"].map((s) =>
+      glyphFor(s as BlobMetadata["status"]),
+    );
+    // All three glyphs must be distinct shapes (a colour-blind user can tell
+    // them apart without seeing the hue).
+    expect(new Set(glyphs).size).toBe(3);
+  });
+});

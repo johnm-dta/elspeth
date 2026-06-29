@@ -997,6 +997,31 @@ def test_http_config_rejects_operator_required_placeholders(field_name: str, val
         WebScrapeTransform(_base_config(http=http))
 
 
+@pytest.mark.parametrize("field_name", ["abuse_contact", "scraping_reason"])
+def test_http_config_rejects_non_ascii_header_values(field_name: str) -> None:
+    """Wire-visible HTTP identity fields must be ASCII-encodable.
+
+    ``abuse_contact`` and ``scraping_reason`` are sent verbatim as the
+    ``X-Abuse-Contact`` / ``X-Scraping-Reason`` request headers. HTTP header
+    values must be ASCII-encodable; a typographic em dash (U+2014) — exactly
+    what the guided LLM composer routinely emits — otherwise raises
+    ``UnicodeEncodeError`` deep inside the HTTP client mid-request, escaping
+    ``on_error`` row handling and aborting the entire run. Reject it at config
+    validation so it surfaces as a PluginConfigError before any fetch starts.
+    """
+    http = {
+        "abuse_contact": "ops@somecompany.gov.au",
+        "scraping_reason": "User-authorised page colour lookup",
+    }
+    http[field_name] = "Demo pipeline — fetching own demo pages"
+
+    with pytest.raises(PluginConfigError) as exc_info:
+        WebScrapeTransform(_base_config(http=http))
+    message = str(exc_info.value)
+    assert field_name in message
+    assert "ASCII" in message
+
+
 def test_http_config_extra_field_raises() -> None:
     """Unknown fields in http config must be rejected (extra=forbid)."""
     with pytest.raises(PluginConfigError, match="extra_field"):

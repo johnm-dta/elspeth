@@ -260,6 +260,75 @@ def _options_with_default_model_choice_review(
     )
 
 
+# Typographic punctuation an LLM routinely emits, mapped to its ASCII equivalent.
+# web_scrape's ``http.scraping_reason`` / ``http.abuse_contact`` are sent verbatim
+# as the X-Scraping-Reason / X-Abuse-Contact request headers, which must be
+# ASCII-encodable (WebScrapeHTTPConfig). Folding the common typographic cases here
+# lets composer-built pipelines (the first-run tutorial) round-trip; characters
+# with no ASCII mapping are left untouched so the WebScrapeHTTPConfig validator
+# still rejects them as a configuration error on hand-authored / YAML configs.
+_TYPOGRAPHIC_TO_ASCII = {
+    "\u2010": "-",  # hyphen
+    "\u2011": "-",  # non-breaking hyphen
+    "\u2012": "-",  # figure dash
+    "\u2013": "-",  # en dash
+    "\u2014": "-",  # em dash
+    "\u2015": "-",  # horizontal bar
+    "\u2018": "'",  # left single quotation mark
+    "\u2019": "'",  # right single quotation mark / apostrophe
+    "\u201a": "'",  # single low-9 quotation mark
+    "\u201b": "'",  # single high-reversed-9 quotation mark
+    "\u201c": '"',  # left double quotation mark
+    "\u201d": '"',  # right double quotation mark
+    "\u201e": '"',  # double low-9 quotation mark
+    "\u201f": '"',  # double high-reversed-9 quotation mark
+    "\u2032": "'",  # prime
+    "\u2033": '"',  # double prime
+    "\u2026": "...",  # horizontal ellipsis
+    "\u00a0": " ",  # no-break space
+    "\u2009": " ",  # thin space
+    "\u202f": " ",  # narrow no-break space
+}
+_TYPOGRAPHIC_TRANSLATION = str.maketrans(_TYPOGRAPHIC_TO_ASCII)
+
+_WIRE_VISIBLE_SCRAPE_HEADER_FIELDS = ("scraping_reason", "abuse_contact")
+
+
+def _options_with_ascii_safe_scrape_headers(
+    *,
+    plugin: str | None,
+    options: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Fold common typographic punctuation to ASCII in web_scrape header fields.
+
+    No-op unless ``plugin == "web_scrape"`` and a header value actually changes,
+    so it is safe to compose for every node. Only the wire-visible header fields
+    are touched (a scrape node's prompt-like fields, and every other plugin's
+    body text, are left alone). Characters with no ASCII mapping are preserved —
+    the ``WebScrapeHTTPConfig`` validator rejects those as a configuration error.
+    """
+    if plugin != "web_scrape":
+        return options
+    http = options.get("http")
+    if not isinstance(http, Mapping):
+        return options
+    folded_http: dict[str, Any] | None = None
+    for field in _WIRE_VISIBLE_SCRAPE_HEADER_FIELDS:
+        value = http.get(field)
+        if not isinstance(value, str):
+            continue
+        folded = value.translate(_TYPOGRAPHIC_TRANSLATION)
+        if folded != value:
+            if folded_http is None:
+                folded_http = dict(http)
+            folded_http[field] = folded
+    if folded_http is None:
+        return options
+    new_options = dict(options)
+    new_options["http"] = folded_http
+    return new_options
+
+
 def _options_with_default_llm_reviews(
     *,
     node_id: str,
@@ -268,17 +337,18 @@ def _options_with_default_llm_reviews(
 ) -> Mapping[str, Any]:
     """Apply every default review auto-stager for an LLM node, in order.
 
-    Composes the per-field auto-stagers (prompt template, model choice)
-    so call sites do not have to remember the full set. Each individual
-    helper is a no-op when its trigger condition doesn't hold (non-llm
-    plugin, missing field), so the composition is safe for non-llm nodes
-    and for partial LLM-node options.
+    Composes the per-field auto-stagers (prompt template, model choice) plus the
+    web_scrape wire-visible-header ASCII fold, so call sites do not have to
+    remember the full set. Each individual helper is a no-op when its trigger
+    condition doesn't hold (non-llm plugin, missing field, non-scrape plugin), so
+    the composition is safe for non-llm nodes and for partial node options.
 
-    Adding a new default review here is the canonical extension point —
+    Adding a new default auto-stager here is the canonical extension point —
     callers stay on the composite and acquire the new gate automatically.
     """
     staged = _options_with_default_prompt_template_review(node_id=node_id, plugin=plugin, options=options)
     staged = _options_with_default_model_choice_review(node_id=node_id, plugin=plugin, options=staged)
+    staged = _options_with_ascii_safe_scrape_headers(plugin=plugin, options=staged)
     return staged
 
 

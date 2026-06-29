@@ -132,13 +132,30 @@ class WebScrapeHTTPConfig(BaseModel):
 
     @field_validator("abuse_contact", "scraping_reason")
     @classmethod
-    def _reject_empty(cls, v: str, info: Any) -> str:
+    def _validate_wire_visible_header(cls, v: str, info: Any) -> str:
         if not v.strip():
             raise ValueError(f"{info.field_name} must not be empty")
         if is_wire_visible_placeholder(v):
             raise ValueError(
                 f"{info.field_name} must be supplied by the operator or deployment identity; "
                 "placeholder values are not valid for wire-visible HTTP headers"
+            )
+        # This value is sent verbatim as an X-Abuse-Contact / X-Scraping-Reason
+        # request header. HTTP header values must be ASCII-encodable, so a
+        # typographic character (em dash, curly quote, ellipsis) — the kind an
+        # LLM composer routinely emits — would otherwise raise UnicodeEncodeError
+        # deep inside the HTTP client mid-request, escape on_error row handling,
+        # and abort the whole run. Reject it here so it surfaces as a clean
+        # configuration error at validate() preflight, before any fetch.
+        if not v.isascii():
+            bad_index = next(i for i, ch in enumerate(v) if not ch.isascii())
+            bad_char = v[bad_index]
+            raise ValueError(
+                f"{info.field_name} contains a non-ASCII character {bad_char!r} "
+                f"(U+{ord(bad_char):04X}) at position {bad_index}; this value is sent "
+                f"verbatim as an HTTP request header and must be ASCII-encodable. "
+                f"Replace typographic punctuation (em dashes, curly quotes, ellipses) "
+                f"with plain ASCII equivalents."
             )
         return v
 

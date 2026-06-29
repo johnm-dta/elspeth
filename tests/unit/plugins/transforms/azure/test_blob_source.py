@@ -10,6 +10,7 @@ from elspeth.contracts import SourceRow
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.sources.azure_blob_source import AzureBlobSource
+from elspeth.plugins.sources.field_normalization import NORMALIZATION_ALGORITHM_VERSION
 from tests.fixtures.factories import make_operation_context
 
 # Dynamic schema config for tests - DataPluginConfig requires schema
@@ -299,7 +300,7 @@ class TestAzureBlobSourceCSV:
         assert mapping["User ID"] == "user_id"
         assert mapping["Amount $"] == "amount"
         assert mapping["Email Address"] == "email_address"
-        assert version == "1.0.0"
+        assert version == NORMALIZATION_ALGORITHM_VERSION
 
     def test_csv_field_mapping_applies(self, mock_blob_client: MagicMock, ctx: PluginContext) -> None:
         """field_mapping applies to normalized header names."""

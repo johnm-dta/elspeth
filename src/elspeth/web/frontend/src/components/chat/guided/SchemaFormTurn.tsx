@@ -150,7 +150,31 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
           {TUTORIAL_VALIDATION_FAILURE_CAVEAT}
         </p>
       )}
+      {!isTutorial && view === "summary" && !canSubmit() && (
+        <p className="guided-schema-summary-needs-edit" role="status">
+          Some values need attention — click Edit to review.
+        </p>
+      )}
       <div className="guided-schema-actions">
+        {!isTutorial && view === "summary" && (
+          <button
+            type="button"
+            className="guided-turn-secondary guided-schema-edit-toggle"
+            onClick={() => setView("edit")}
+          >
+            Edit
+          </button>
+        )}
+        {!isTutorial && view === "edit" && (
+          <button
+            type="button"
+            className="guided-turn-secondary guided-schema-edit-toggle"
+            onClick={() => setView("summary")}
+            disabled={visibleFields().some((f) => fieldHasError(f, values[f.name]))}
+          >
+            Done editing
+          </button>
+        )}
         <button
           type="button"
           className="guided-turn-primary"

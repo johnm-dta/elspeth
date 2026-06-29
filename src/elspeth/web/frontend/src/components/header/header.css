@@ -99,18 +99,12 @@
   gap: 12px;
 }
 
-.app-header-brand {
-  /* Use the mono face with wider tracking for the wordmark. The body of the
-     app stays Inter (DTA Foundation typeface) — this is a 1-element exception
-     that gives the brand mark a distinct register without breaking AGDS
-     register elsewhere. JetBrains Mono reads as "audit/forensic" which
-     matches the product positioning. */
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: var(--font-size-sm);
-  letter-spacing: var(--tracking-wordmark);
-  text-transform: uppercase;
-}
+/* The header brand mark is rendered by the canonical <WordMark> primitive
+   (components/ui/WordMark.tsx), which owns the mono/uppercase/tracking
+   treatment — the rationale (JetBrains Mono = "audit/forensic" register, a
+   1-element exception to the Inter body) lives there. The former
+   .app-header-brand class duplicated those declarations; it was removed so the
+   wordmark has a single source of truth. */
 
 .app-header-separator {
   width: 1px;

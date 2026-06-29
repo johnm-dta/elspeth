@@ -11,6 +11,7 @@
 import { HeaderSessionSwitcher } from "@/components/sessions/HeaderSessionSwitcher";
 import { HeaderVersionSelector } from "@/components/header/HeaderVersionSelector";
 import { UserMenu } from "@/components/common/UserMenu";
+import { WordMark } from "@/components/ui";
 
 interface AppHeaderProps {
   onOpenSettings: () => void;
@@ -24,7 +25,7 @@ export function AppHeader({
   return (
     <header className="app-header" role="banner">
       <div className="app-header-left">
-        <span className="app-header-brand">ELSPETH</span>
+        <WordMark as="span" />
         <HeaderSessionSwitcher />
         <span className="app-header-separator" aria-hidden="true" />
         <HeaderVersionSelector />

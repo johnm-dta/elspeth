@@ -2,7 +2,7 @@ import { useState, useEffect, type FormEvent } from "react";
 import { useAuth } from "../../hooks/useAuth";
 import * as api from "../../api/client";
 import type { AuthConfig } from "../../types/index";
-import { Button, Input, AlertBanner } from "../ui";
+import { Button, Input, AlertBanner, WordMark } from "../ui";
 
 /**
  * Login page that adapts to the configured auth provider.
@@ -145,16 +145,22 @@ export function LoginPage() {
           boxShadow: "0 2px 8px rgba(10, 40, 50, 0.4)",
         }}
       >
-        <h1
-          style={{
-            fontSize: 24,
-            marginBottom: 24,
-            textAlign: "center",
-            color: "var(--color-text)",
-          }}
-        >
-          Sign in to ELSPETH
-        </h1>
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          {/* The brand mark is the canonical <WordMark> (mono/uppercase/
+              tracked). The positioning line below states what ELSPETH is —
+              derived from the product's own "auditable outputs" thesis, in the
+              public-service register. Copy is operator/UX-tunable. */}
+          <WordMark as="h1" size={22} style={{ margin: 0 }} />
+          <p
+            style={{
+              margin: "var(--space-sm) 0 0",
+              fontSize: "var(--font-size-sm)",
+              color: "var(--color-text-secondary)",
+            }}
+          >
+            Build and run auditable data pipelines.
+          </p>
+        </div>
 
         {loginError && <AlertBanner tone="error">{loginError}</AlertBanner>}
 

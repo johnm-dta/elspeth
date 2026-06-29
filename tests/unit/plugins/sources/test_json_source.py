@@ -1720,8 +1720,8 @@ class TestJSONSourceKeyNormalization:
         causes check_mapping_collisions to raise a plain ValueError.  Before the fix,
         the broad 'except ValueError' in _validate_and_yield masked it as a per-row
         quarantine; after the fix only ExternalHeaderError (data faults) is caught.
-        Mirrors test_json_field_mapping_collision_crashes_not_quarantines in the azure
-        test suite.
+        Azure Blob JSON differs because blob row field sets are external source
+        data and are quarantined per row.
         """
         from elspeth.plugins.sources.json_source import JSONSource
 

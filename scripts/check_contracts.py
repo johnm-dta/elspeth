@@ -486,6 +486,10 @@ class ImportIndex:
                 if isinstance(node, ast.ImportFrom) and node.module:
                     for alias in node.names:
                         index._record_import(node.module, alias.name, py_file)
+                        if alias.name == "*":
+                            continue
+                        local_name = alias.asname or alias.name
+                        import_aliases[local_name] = f"{node.module}.{alias.name}"
                 elif isinstance(node, ast.Import):
                     for alias in node.names:
                         if alias.asname:

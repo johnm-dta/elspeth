@@ -321,6 +321,29 @@ value: foo.Foo
     assert index.find_cross_boundary_usages(tmp_path, "Foo", defining_file) == [using_file]
 
 
+def test_import_index_finds_from_import_module_attribute_usage(tmp_path: Path) -> None:
+    defining_file = tmp_path / "core" / "foo.py"
+    defining_file.parent.mkdir(parents=True)
+    defining_file.write_text("""
+from dataclasses import dataclass
+
+@dataclass
+class Foo:
+    value: str
+""")
+    using_file = tmp_path / "plugins" / "use.py"
+    using_file.parent.mkdir(parents=True)
+    using_file.write_text("""
+from elspeth.core import foo
+
+value: foo.Foo
+""")
+
+    index = ImportIndex.build(tmp_path)
+
+    assert index.find_cross_boundary_usages(tmp_path, "Foo", defining_file) == [using_file]
+
+
 # =============================================================================
 # Settings Alignment Tests
 # =============================================================================

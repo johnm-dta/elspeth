@@ -439,18 +439,17 @@ class CSVSink(BaseSink):
 
         Each row is trial-encoded INDIVIDUALLY into a throwaway in-memory buffer
         so a row that csv.DictWriter cannot serialize never leaves partial bytes
-        in the staging buffer handed to the file. A row that fails staging with a
-        CSV serialization error — a ``ValueError`` from DictWriter's
-        ``extrasaction='raise'`` default (a field outside the established column
-        lock), or a ``csv.Error`` from the underlying writer — is a per-row
+        in the staging buffer handed to the file. A row whose shape is outside
+        the established column lock, whose encoded text is not representable in
+        the configured codec, or that triggers a ``csv.Error`` is a per-row
         Tier-2 data fault attributable to that single row. Such a row is diverted
         (recorded + routed per on_write_failure) and the surrounding good rows
         are still staged, rather than aborting the batch.
 
-        The catch is deliberately narrow, mirroring the json_sink reference: only
-        serialization-shaped errors are diverted. A value whose ``str()`` itself
-        raises an arbitrary exception is a broken object (an upstream bug), not
-        operation-unsafe data — it propagates and crashes (Plugin Ownership).
+        The catch is deliberately narrow, mirroring the json_sink reference:
+        only serialization-shaped errors are diverted. A value whose ``str()``
+        itself raises is a broken object (an upstream bug), not operation-unsafe
+        data — it propagates and crashes (Plugin Ownership).
 
         The trial-encode targets an in-memory StringIO only — it touches no file,
         no shared state, and no external system. (Batch-integrity failures — file
@@ -466,7 +465,18 @@ class CSVSink(BaseSink):
             The staged CSV text for the rows that encoded successfully (no header).
         """
         staging_buffer = io.StringIO()
+        locked_fields = set(fieldnames)
         for row_index, row in enumerate(rows):
+            extra_fields = set(row) - locked_fields
+            if extra_fields:
+                extra_fields_display = ", ".join(sorted(str(field) for field in extra_fields))
+                self._divert_row(
+                    row,
+                    row_index=row_index,
+                    reason=f"CSV row contains fields outside the established columns: {extra_fields_display}",
+                )
+                continue
+
             row_buffer = io.StringIO()
             row_writer = csv.DictWriter(
                 row_buffer,
@@ -479,11 +489,13 @@ class CSVSink(BaseSink):
                 # character that is unencodable in the target charset (e.g. an
                 # emoji when encoding='cp1252') is caught HERE as a per-row fault
                 # rather than later at file.write(), which would abort the whole
-                # batch. UnicodeEncodeError is a subclass of ValueError so the
-                # except clause below already classifies it correctly.
+                # batch.
                 row_buffer.getvalue().encode(self._encoding)
-            except (ValueError, csv.Error) as exc:
+            except UnicodeEncodeError as exc:
                 self._divert_row(row, row_index=row_index, reason=f"CSV encoding ({self._encoding}) failed: {exc}")
+                continue
+            except csv.Error as exc:
+                self._divert_row(row, row_index=row_index, reason=f"CSV serialization failed: {exc}")
                 continue
             staging_buffer.write(row_buffer.getvalue())
         return staging_buffer.getvalue()

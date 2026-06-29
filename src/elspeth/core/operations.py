@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Literal
 
 import elspeth.contracts.errors as contract_errors
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 
 if TYPE_CHECKING:
     from elspeth.contracts import Operation
@@ -32,9 +33,24 @@ logger = logging.getLogger(__name__)
 
 
 def _render_exception(exc: BaseException) -> str:
-    """Render an exception to a non-empty audit message."""
+    """Render an exception to a non-empty, secret-scrubbed audit message.
+
+    The returned string is persisted verbatim as ``operations.error_message``
+    (``track_operation`` -> ``complete_operation``), a Tier-1 audit record. This
+    is the single chokepoint through which *every* operation error is rendered,
+    so the scrub here guarantees no operation error message reaches the audit
+    trail unscrubbed — regardless of which exception type failed. Provider and
+    runtime exceptions can interpolate bearer tokens / API keys into their
+    message text (e.g. ``RuntimePreflightFailedError`` embeds the underlying
+    client error), and ``str(exc)`` would otherwise persist that secret raw.
+
+    Best-effort: ``scrub_text_for_audit`` is pattern-based, so a novel secret
+    format absent from its rule set can still slip through — mitigation, not a
+    guarantee. If rendering *or* scrubbing fails, fall back to the (secret-free)
+    exception type name rather than risk leaking an unscrubbed string.
+    """
     try:
-        message = str(exc)
+        message = scrub_text_for_audit(str(exc))
     except BaseException:
         return type(exc).__name__
     return message if message else type(exc).__name__

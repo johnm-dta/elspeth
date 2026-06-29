@@ -257,16 +257,21 @@ class SanitizedDatabaseUrl:
         sanitized_query = _strip_sensitive_param_parts(parsed.query)
         sanitized_fragment = _strip_sensitive_param_parts(parsed.fragment)
 
-        sanitized = urlunparse(
-            (
-                parsed.scheme,
-                netloc,
-                parsed.path,
-                parsed.params,
-                sanitized_query,
-                sanitized_fragment,
-            )
-        )
+        # ``urlunparse`` drops the ``//`` authority introducer for schemes
+        # outside urllib's ``uses_netloc`` set (sqlite, postgresql, ...) whenever
+        # the netloc is empty — collapsing no-host DSNs like
+        # ``sqlite:///:memory:`` to ``sqlite:/:memory:`` and even the absolute
+        # ``sqlite:////abs.db`` to the relative ``sqlite://abs.db``. ``urlparse``
+        # cannot distinguish an empty authority (``//``) from no authority, so we
+        # detect the introducer from the raw URL and rebuild the authority
+        # explicitly when it was present, preserving the exact DSN shape for the
+        # audit record. ``url.partition(":")`` isolates everything after the
+        # scheme and handles compound schemes (``postgresql+psycopg2://...``).
+        if url.partition(":")[2].startswith("//"):
+            tail = urlunparse(("", "", parsed.path, parsed.params, sanitized_query, sanitized_fragment))
+            sanitized = f"{parsed.scheme}://{netloc}{tail}"
+        else:
+            sanitized = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, sanitized_query, sanitized_fragment))
 
         return cls(sanitized_url=sanitized, fingerprint=fingerprint)
 

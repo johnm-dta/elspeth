@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import ClassVar, TypedDict
 
 import pytest
 
 import elspeth.engine.executors.declared_output_fields as declared_output_fields_module
 from elspeth.contracts.declaration_contracts import (
     DeclarationContract,
+    DeclarationContractViolation,
     DispatchSite,
     ExampleBundle,
     PostEmissionInputs,
@@ -19,6 +21,18 @@ from elspeth.contracts.errors import FrameworkBugError
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.engine.executors.pass_through import PassThroughDeclarationContract
 from elspeth.engine.orchestrator import prepare_for_run
+
+
+class _RuntimeValManifestIndirectPayload(TypedDict):
+    value: str
+
+
+class _RuntimeValManifestIndirectViolation(DeclarationContractViolation):
+    payload_schema: ClassVar[type] = _RuntimeValManifestIndirectPayload
+
+
+def _runtime_val_manifest_indirect_module_helper() -> str:
+    return "before"
 
 
 @pytest.fixture()
@@ -167,6 +181,72 @@ def test_manifest_records_delegated_declaration_helper_implementation_hash(
         declared_output_fields_module.verify_declared_output_fields.__code__ = original_code
 
     mutated_entry = next(entry for entry in mutated["declaration_contracts"] if entry["name"] == "declared_output_fields")
+
+    assert baseline_entry["name"] == mutated_entry["name"]
+    assert baseline_entry["class_name"] == mutated_entry["class_name"]
+    assert baseline_entry["class_module"] == mutated_entry["class_module"]
+    assert baseline_entry["dispatch_sites"] == mutated_entry["dispatch_sites"]
+    assert baseline_entry["implementation_hash"] != mutated_entry["implementation_hash"]
+
+
+def test_manifest_records_indirect_method_helper_implementation_hash(
+    _isolate_runtime_val_registries: None,
+) -> None:
+    import elspeth.contracts.declaration_contracts as dc
+    import elspeth.contracts.tier_registry as tr
+
+    dc._FROZEN = False
+    tr._FROZEN = False
+
+    class _IndirectHelperContract(DeclarationContract):
+        name: ClassVar[str] = "indirect_method_helper"
+        payload_schema: ClassVar[type] = _RuntimeValManifestIndirectPayload
+        violation_class: ClassVar[type[DeclarationContractViolation]] = _RuntimeValManifestIndirectViolation
+
+        def applies_to(self, plugin: object) -> bool:
+            return bool(plugin)
+
+        @implements_dispatch_site("post_emission_check")
+        def post_emission_check(
+            self,
+            inputs: PostEmissionInputs,
+            outputs: PostEmissionOutputs,
+        ) -> None:
+            del inputs, outputs
+            self._validate_indirectly()
+
+        def _validate_indirectly(self) -> None:
+            _runtime_val_manifest_indirect_module_helper()
+
+        @classmethod
+        def negative_example(cls) -> ExampleBundle:
+            raise NotImplementedError
+
+        @classmethod
+        def positive_example_does_not_apply(cls) -> ExampleBundle:
+            raise NotImplementedError
+
+    contract = _IndirectHelperContract()
+    dc._REGISTRY.append(contract)
+    dc._REGISTRY_BY_SITE[DispatchSite.POST_EMISSION].append(contract)
+    dc._FROZEN = True
+    tr._FROZEN = True
+
+    baseline = build_runtime_val_manifest()
+    baseline_entry = next(entry for entry in baseline["declaration_contracts"] if entry["name"] == "indirect_method_helper")
+
+    original_code = _runtime_val_manifest_indirect_module_helper.__code__
+
+    def replacement() -> str:
+        return "after"
+
+    _runtime_val_manifest_indirect_module_helper.__code__ = replacement.__code__
+    try:
+        mutated = build_runtime_val_manifest()
+    finally:
+        _runtime_val_manifest_indirect_module_helper.__code__ = original_code
+
+    mutated_entry = next(entry for entry in mutated["declaration_contracts"] if entry["name"] == "indirect_method_helper")
 
     assert baseline_entry["name"] == mutated_entry["name"]
     assert baseline_entry["class_name"] == mutated_entry["class_name"]

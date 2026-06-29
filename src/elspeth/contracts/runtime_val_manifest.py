@@ -186,7 +186,39 @@ def _is_runtime_val_helper_dependency(candidate: object, *, owner_module: str | 
     return module_name == owner_module or module_name.startswith("elspeth.")
 
 
-def _callable_dependency_hashes(func: object, *, seen: frozenset[str] = frozenset()) -> dict[str, object]:
+def _class_method_dependency(cls: type[object], name: str) -> object | None:
+    attribute = inspect.getattr_static(cls, name, None)
+    callable_obj = _unwrap_callable(attribute)
+    if callable_obj is None:
+        return None
+    module_name = getattr(callable_obj, "__module__", None)
+    if module_name == "builtins":
+        return None
+    return callable_obj
+
+
+def _add_callable_dependency(
+    dependencies: dict[str, object],
+    candidate: object,
+    *,
+    seen: frozenset[str],
+    owner_cls: type[object] | None,
+) -> None:
+    dependency_key = _callable_dependency_key(candidate)
+    if dependency_key in seen or dependency_key in dependencies:
+        return
+    dependencies[dependency_key] = {
+        "implementation_hash": _callable_implementation_hash(candidate),
+        "dependencies": _callable_dependency_hashes(candidate, seen=seen, owner_cls=owner_cls),
+    }
+
+
+def _callable_dependency_hashes(
+    func: object,
+    *,
+    seen: frozenset[str] = frozenset(),
+    owner_cls: type[object] | None = None,
+) -> dict[str, object]:
     code = getattr(func, "__code__", None)
     globals_table = getattr(func, "__globals__", None)
     if not isinstance(code, CodeType) or not isinstance(globals_table, dict):
@@ -202,13 +234,13 @@ def _callable_dependency_hashes(func: object, *, seen: frozenset[str] = frozense
         candidate = globals_table[name]
         if not _is_runtime_val_helper_dependency(candidate, owner_module=owner_module):
             continue
-        dependency_key = _callable_dependency_key(candidate)
-        if dependency_key in next_seen:
-            continue
-        dependencies[dependency_key] = {
-            "implementation_hash": _callable_implementation_hash(candidate),
-            "dependencies": _callable_dependency_hashes(candidate, seen=next_seen),
-        }
+        _add_callable_dependency(dependencies, candidate, seen=next_seen, owner_cls=owner_cls)
+    if owner_cls is not None:
+        for name in sorted(code.co_names):
+            candidate = _class_method_dependency(owner_cls, name)
+            if candidate is None:
+                continue
+            _add_callable_dependency(dependencies, candidate, seen=next_seen, owner_cls=owner_cls)
     return dependencies
 
 
@@ -242,7 +274,7 @@ def _iter_relevant_method_dependency_hashes(
         callable_obj = _unwrap_callable(attribute)
         if callable_obj is None:
             continue
-        dependencies = _callable_dependency_hashes(callable_obj)
+        dependencies = _callable_dependency_hashes(callable_obj, owner_cls=cls)
         if dependencies:
             dependency_hashes[name] = dependencies
     return dependency_hashes

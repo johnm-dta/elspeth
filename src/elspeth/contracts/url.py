@@ -27,7 +27,7 @@ Usage:
 
 import json as json_module
 from dataclasses import dataclass
-from urllib.parse import ParseResult, parse_qs, unquote, unquote_plus, urlencode, urlparse, urlunparse
+from urllib.parse import ParseResult, parse_qs, unquote, unquote_plus, urlparse, urlunparse
 
 from elspeth.contracts.security import (
     SecretFingerprintError,
@@ -464,11 +464,8 @@ class SanitizedWebhookUrl:
             # else: dev mode - sanitize without fingerprint
         # else: only empty values (e.g., ?token=) - no fingerprint needed
 
-        # Remove sensitive query params
-        sanitized_params = {k: v for k, v in query_params.items() if _base_param_name(k.lower()) not in SENSITIVE_PARAMS}
-
-        # Remove sensitive fragment params
-        sanitized_fragment_params = {k: v for k, v in fragment_params.items() if _base_param_name(k.lower()) not in SENSITIVE_PARAMS}
+        sanitized_query = _strip_sensitive_param_parts(parsed.query)
+        sanitized_fragment = _strip_sensitive_param_parts(parsed.fragment)
 
         # Reconstruct netloc without ANY Basic Auth credentials
         # SECURITY: Strip entire userinfo section when credentials present
@@ -483,9 +480,6 @@ class SanitizedWebhookUrl:
         else:
             netloc = parsed.netloc
 
-        # Reconstruct fragment from sanitized params
-        # Only include fragment if there are remaining params
-        sanitized_fragment = urlencode(sanitized_fragment_params, doseq=True) if sanitized_fragment_params else ""
         sanitized_path = _redact_known_webhook_path_secret(parsed) if known_path_secret is not None else parsed.path
 
         # Reconstruct URL without secrets
@@ -495,7 +489,7 @@ class SanitizedWebhookUrl:
                 netloc,
                 sanitized_path,
                 parsed.params,
-                urlencode(sanitized_params, doseq=True) if sanitized_params else "",
+                sanitized_query,
                 sanitized_fragment,
             )
         )

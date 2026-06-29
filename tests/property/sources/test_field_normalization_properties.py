@@ -21,6 +21,7 @@ from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
 from elspeth.plugins.sources.field_normalization import (
+    ExternalHeaderError,
     check_normalization_collisions,
     normalize_field_name,
     resolve_field_names,
@@ -44,7 +45,7 @@ class TestNormalizeFieldNameProperties:
         """
         try:
             normalized = normalize_field_name(raw)
-        except ValueError:
+        except ExternalHeaderError:
             # Skip inputs that normalize to empty string
             assume(False)
 
@@ -62,7 +63,7 @@ class TestNormalizeFieldNameProperties:
         """
         try:
             normalized = normalize_field_name(raw)
-        except ValueError:
+        except ExternalHeaderError:
             # Empty normalization is explicitly handled by the function
             return
 
@@ -78,7 +79,7 @@ class TestNormalizeFieldNameProperties:
         """
         try:
             normalized = normalize_field_name(raw)
-        except ValueError:
+        except ExternalHeaderError:
             return
 
         # If it looks like a keyword, it must have trailing underscore
@@ -124,7 +125,7 @@ class TestCollisionDetectionProperties:
         """
         try:
             normalized_map = {h: normalize_field_name(h) for h in headers}
-        except ValueError:
+        except ExternalHeaderError:
             assume(False)
 
         # Check if original order has collision
@@ -157,7 +158,7 @@ class TestCollisionDetectionProperties:
         """
         try:
             normalized = [normalize_field_name(h) for h in headers]
-        except ValueError:
+        except ExternalHeaderError:
             assume(False)
 
         # If normalized values are unique, should not raise

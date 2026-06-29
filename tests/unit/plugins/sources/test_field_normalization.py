@@ -8,7 +8,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from elspeth.plugins.sources.field_normalization import FieldResolution
+from elspeth.plugins.sources.field_normalization import ExternalHeaderError, FieldResolution
 
 
 class TestNormalizeFieldName:
@@ -32,6 +32,14 @@ class TestNormalizeFieldName:
 
         assert normalize_field_name("data.field") == "data_field"
         assert normalize_field_name("amount$$$") == "amount"
+
+    def test_unicode_numbers_that_are_not_identifier_continue_are_stripped(self) -> None:
+        """Unicode number symbols like superscript two are external header text."""
+        from elspeth.plugins.sources.field_normalization import normalize_field_name
+
+        assert normalize_field_name("Area (m\u00b2)") == "area_m"
+        assert normalize_field_name("persons/km\u00b2") == "persons_km"
+        assert normalize_field_name("ratio \u00bd") == "ratio"
 
     def test_leading_digit_prefixed(self) -> None:
         """Leading digits get underscore prefix."""
@@ -58,7 +66,7 @@ class TestNormalizeFieldName:
             NORMALIZATION_ALGORITHM_VERSION,
         )
 
-        assert NORMALIZATION_ALGORITHM_VERSION == "1.0.0"
+        assert NORMALIZATION_ALGORITHM_VERSION == "1.0.1"
 
     def test_unicode_bom_stripped(self) -> None:
         """BOM character at start is stripped."""
@@ -141,14 +149,10 @@ class TestNormalizationProperties:
             assert result.isidentifier(), f"'{result}' is not a valid identifier"
             # And not a keyword (keywords get suffix)
             assert not keyword.iskeyword(result), f"'{result}' is a keyword without suffix"
-        except ValueError as e:
-            # Accept expected error types:
-            # - "normalizes to empty" for inputs that become empty after normalization
-            # - "not a valid identifier" for defense-in-depth rejection (e.g., Unicode
-            #   chars like '¼' that pass regex but aren't valid identifiers)
-            error_msg = str(e)
-            valid_errors = "normalizes to empty" in error_msg or "not a valid identifier" in error_msg
-            assert valid_errors, f"Unexpected error: {e}"
+        except ExternalHeaderError as e:
+            # External headers may normalize away to nothing; any other
+            # non-identifier result should be treated as a test failure.
+            assert "normalizes to empty" in str(e), f"Unexpected error: {e}"
 
     @given(raw=st.text(min_size=1, max_size=100))
     def test_property_normalization_is_idempotent(self, raw: str) -> None:
@@ -159,7 +163,7 @@ class TestNormalizationProperties:
             once = normalize_field_name(raw)
             twice = normalize_field_name(once)
             assert once == twice, f"Not idempotent: '{once}' != '{twice}'"
-        except ValueError:
+        except ExternalHeaderError:
             pass  # Empty result expected for some inputs
 
 
@@ -289,7 +293,23 @@ class TestResolveFieldNames:
             "User ID": "user_id",
             "Amount $": "amount",
         }
-        assert result.normalization_version == "1.0.0"
+        assert result.normalization_version == "1.0.1"
+
+    def test_resolution_handles_common_unit_superscript_headers(self) -> None:
+        """Real-world unit headers normalize instead of escaping as plain ValueError."""
+        from elspeth.plugins.sources.field_normalization import resolve_field_names
+
+        result = resolve_field_names(
+            raw_headers=["Area (m\u00b2)", "persons/km\u00b2"],
+            field_mapping=None,
+            columns=None,
+        )
+
+        assert result.final_headers == ("area_m", "persons_km")
+        assert result.resolution_mapping == {
+            "Area (m\u00b2)": "area_m",
+            "persons/km\u00b2": "persons_km",
+        }
 
     def test_normalize_with_mapping(self) -> None:
         """Resolution with normalize + mapping override."""

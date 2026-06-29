@@ -21,13 +21,12 @@ import unicodedata
 from dataclasses import dataclass
 from types import MappingProxyType
 
-# Algorithm version for audit trail - frozen per major version
-# Increment when algorithm changes affect output
-NORMALIZATION_ALGORITHM_VERSION = "1.0.0"
+# Algorithm version for audit trail - frozen per major version.
+# Increment when algorithm changes affect output.
+NORMALIZATION_ALGORITHM_VERSION = "1.0.1"
 
 
 # Pre-compiled regex patterns (module level for efficiency)
-_NON_IDENTIFIER_CHARS = re.compile(r"[^\w]+")
 _CONSECUTIVE_UNDERSCORES = re.compile(r"_+")
 
 
@@ -57,6 +56,16 @@ class FieldMappingCollisionError(ValueError):
     """
 
 
+def _is_identifier_continue(char: str) -> bool:
+    """Return whether char can appear after a valid Python identifier start."""
+    return f"_{char}".isidentifier()
+
+
+def _replace_non_identifier_chars(value: str) -> str:
+    """Replace characters outside Python's identifier alphabet with underscores."""
+    return "".join(char if _is_identifier_continue(char) else "_" for char in value)
+
+
 def normalize_field_name(raw: str) -> str:
     """Normalize messy header to valid Python identifier.
 
@@ -78,7 +87,8 @@ def normalize_field_name(raw: str) -> str:
         Valid Python identifier
 
     Raises:
-        ValueError: If header normalizes to empty string
+        ExternalHeaderError: If header normalizes to empty string.
+        ValueError: If the normalization algorithm produces an invalid identifier.
     """
     # Step 1: Unicode NFC normalization
     normalized = unicodedata.normalize("NFC", raw)
@@ -89,8 +99,9 @@ def normalize_field_name(raw: str) -> str:
     # Step 3: Lowercase
     normalized = normalized.lower()
 
-    # Step 4: Replace non-identifier chars with underscore
-    normalized = _NON_IDENTIFIER_CHARS.sub("_", normalized)
+    # Step 4: Replace non-identifier chars with underscore. Python's \w includes
+    # Unicode number symbols like superscript two that are not legal identifiers.
+    normalized = _replace_non_identifier_chars(normalized)
 
     # Step 5: Collapse consecutive underscores
     normalized = _CONSECUTIVE_UNDERSCORES.sub("_", normalized)
@@ -98,8 +109,8 @@ def normalize_field_name(raw: str) -> str:
     # Step 6: Strip leading/trailing underscores
     normalized = normalized.strip("_")
 
-    # Step 7: Prefix if starts with digit
-    if normalized and normalized[0].isdigit():
+    # Step 7: Prefix if the first remaining char cannot start an identifier.
+    if normalized and not normalized.isidentifier() and f"_{normalized}".isidentifier():
         normalized = f"_{normalized}"
 
     # Step 8: Handle Python keywords

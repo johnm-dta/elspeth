@@ -575,7 +575,7 @@ class TestAzureBlobSourceJSON:
             "Customer Name": "customer_name",
             "Order ID": "order_id",
         }
-        assert normalization_version == "1.0.0"
+        assert normalization_version == "1.0.1"
 
     def test_json_field_mapping_overrides_normalized_keys(self, ctx: PluginContext) -> None:
         """JSON field_mapping can override names after source-boundary normalization."""

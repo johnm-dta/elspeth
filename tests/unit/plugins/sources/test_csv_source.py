@@ -1037,6 +1037,32 @@ class TestCSVSourceFieldNormalization:
         assert results[0].quarantine_error is not None
         assert "collision" in results[0].quarantine_error.lower()
 
+    def test_unicode_unit_number_headers_normalize_at_load(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """Common unit headers with superscript number symbols do not crash the source."""
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "unit_headers.csv"
+        csv_file.write_text("Area (m\u00b2),persons/km\u00b2\n12,3\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        results = list(source.load(ctx))
+
+        assert len(results) == 1
+        assert results[0].is_quarantined is False
+        assert results[0].row == {"area_m": "12", "persons_km": "3"}
+        assert source._field_resolution is not None
+        assert source._field_resolution.resolution_mapping == {
+            "Area (m\u00b2)": "area_m",
+            "persons/km\u00b2": "persons_km",
+        }
+
     def test_field_resolution_stored_for_audit(self, tmp_path: Path, ctx: PluginContext) -> None:
         """field_resolution is stored on source for audit trail."""
         from elspeth.plugins.sources.csv_source import CSVSource
@@ -1060,7 +1086,7 @@ class TestCSVSourceFieldNormalization:
             "User ID": "uid",
             "Amount": "amount",
         }
-        assert source._field_resolution.normalization_version == "1.0.0"
+        assert source._field_resolution.normalization_version == "1.0.1"
 
     # P0 Tests - Added per review board requirements
 
@@ -1165,7 +1191,7 @@ class TestCSVSourceFieldNormalization:
         assert "CaSE Study1 !!!! xx!" in source._field_resolution.resolution_mapping
         assert source._field_resolution.resolution_mapping["CaSE Study1 !!!! xx!"] == "case_study1_xx"
         assert source._field_resolution.resolution_mapping["Amount $"] == "amount"
-        assert source._field_resolution.normalization_version == "1.0.0"
+        assert source._field_resolution.normalization_version == "1.0.1"
 
 
 class TestCSVSourceSkipRowsAudit:

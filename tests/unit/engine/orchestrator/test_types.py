@@ -41,7 +41,8 @@ class TestAggregationFlushResult:
             rows_forked=6,
             rows_expanded=7,
             rows_buffered=8,
-            routed_destinations={"sink_a": 9},
+            rows_diverted=9,
+            routed_destinations={"sink_a": 10},
         )
 
         # Each field must be accessible and have the correct value
@@ -54,7 +55,8 @@ class TestAggregationFlushResult:
         assert result.rows_forked == 6
         assert result.rows_expanded == 7
         assert result.rows_buffered == 8
-        assert result.routed_destinations == {"sink_a": 9}
+        assert result.rows_diverted == 9
+        assert result.routed_destinations == {"sink_a": 10}
 
     def test_frozen_dataclass_immutability(self) -> None:
         """Verify frozen=True prevents mutation."""
@@ -76,6 +78,7 @@ class TestAggregationFlushResult:
         assert result.rows_forked == 0
         assert result.rows_expanded == 0
         assert result.rows_buffered == 0
+        assert result.rows_diverted == 0
         assert result.routed_destinations == {}
 
     def test_addition_operator_sums_all_fields(self) -> None:
@@ -90,6 +93,7 @@ class TestAggregationFlushResult:
             rows_forked=6,
             rows_expanded=7,
             rows_buffered=8,
+            rows_diverted=9,
             routed_destinations={"sink_a": 10, "sink_b": 20},
         )
         result_b = AggregationFlushResult(
@@ -102,6 +106,7 @@ class TestAggregationFlushResult:
             rows_forked=60,
             rows_expanded=70,
             rows_buffered=80,
+            rows_diverted=90,
             routed_destinations={"sink_b": 30, "sink_c": 40},
         )
 
@@ -116,6 +121,7 @@ class TestAggregationFlushResult:
         assert combined.rows_forked == 66
         assert combined.rows_expanded == 77
         assert combined.rows_buffered == 88
+        assert combined.rows_diverted == 99
         assert combined.routed_destinations == {"sink_a": 10, "sink_b": 50, "sink_c": 40}
 
     def test_addition_operator_commutative(self) -> None:
@@ -130,6 +136,7 @@ class TestAggregationFlushResult:
             rows_forked=6,
             rows_expanded=7,
             rows_buffered=8,
+            rows_diverted=9,
             routed_destinations={"sink_a": 10},
         )
         result_b = AggregationFlushResult(
@@ -142,6 +149,7 @@ class TestAggregationFlushResult:
             rows_forked=60,
             rows_expanded=70,
             rows_buffered=80,
+            rows_diverted=90,
             routed_destinations={"sink_b": 20},
         )
 
@@ -159,6 +167,7 @@ class TestAggregationFlushResult:
             rows_forked=6,
             rows_expanded=7,
             rows_buffered=8,
+            rows_diverted=9,
             routed_destinations={"sink_a": 9},
         )
         zero = AggregationFlushResult()

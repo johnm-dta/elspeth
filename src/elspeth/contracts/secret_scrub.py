@@ -53,15 +53,22 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?i)(?:password|pwd)=[^;\s]+"),
     # URL-style DB connection strings with embedded credentials.
     re.compile(r"postgres(?:ql)?://[^:/\s]+:[^@/\s]+@"),
-    re.compile(r"mysql://[^:/\s]+:[^@/\s]+@"),
+    re.compile(r"mysql://[^:/\s]+:[^@/\s]+@"),  # secret-scan: allow-this-line
     re.compile(r"mongodb(?:\+srv)?://[^:/\s]+:[^@/\s]+@"),
     # Basic-auth HTTP(S) URLs — require the ``user:pass@`` discriminator so
     # credential-free endpoint URIs are NOT redacted.
     re.compile(r"https?://[^:/\s]+:[^@/\s]+@"),
+    # Low-entropy key/value secret disclosures in freeform violation messages.
+    re.compile(
+        r"(?i)\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?token|"
+        r"auth[_-]?token|id[_-]?token|bearer[_-]?token|client[_-]?secret|"
+        r"private[_-]?key|secret[_-]?key|connection[_-]?string|authorization|"
+        r"password|passwd|pwd|credentials?)\s*[:=]\s*['\"]?[^'\"\s,;)}\]]+"
+    ),
 )
 
-# Key-name match is case-insensitive (see ``_scrub_value``). Every entry must
-# be lowercase here; the lookup applies ``.lower()`` on the observed key.
+# Key-name match is case-insensitive and separator-insensitive (see
+# ``_is_secret_key_name``). Every entry must be lowercase here.
 #
 # ADR-010 §Payload-schema enforcement H5 Layer 2 additions: bearer/session tokens
 # carried under non-``authorization`` keys, and connection-string keys
@@ -77,17 +84,25 @@ _SECRET_KEY_NAMES: frozenset[str] = frozenset(
         "password",
         "passwd",
         "authorization",
+        "credentials",
         # H5 additions — bearer / session / refresh families.
         "access_token",
         "refresh_token",
         "session_token",
+        "auth_token",
+        "id_token",
+        "bearer_token",
         "auth_cookie",
+        "client_secret",
+        "secret_key",
+        "private_key",
         # H5 additions — connection / SAS families.
         "sas_token",
         "connection_string",
         "conn_string",
     }
 )
+_SECRET_KEY_NAMES_NORMALIZED: frozenset[str] = frozenset(name.replace("_", "").replace("-", "") for name in _SECRET_KEY_NAMES)
 
 
 def scrub_payload_for_audit(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -113,7 +128,7 @@ def scrub_text_for_audit(text: str) -> str:
 
 
 def _scrub_value(value: Any, *, parent_key: str | None) -> Any:
-    if parent_key is not None and parent_key.lower() in _SECRET_KEY_NAMES:
+    if parent_key is not None and _is_secret_key_name(parent_key):
         return _REDACTED
     if isinstance(value, Mapping):
         return {k: _scrub_value(v, parent_key=k) for k, v in value.items()}
@@ -133,6 +148,10 @@ def _scrub_value(value: Any, *, parent_key: str | None) -> Any:
             key=repr,
         )
     return value
+
+
+def _is_secret_key_name(key: str) -> bool:
+    return key.lower().replace("_", "").replace("-", "") in _SECRET_KEY_NAMES_NORMALIZED
 
 
 def _contains_sensitive_http_url(value: str) -> bool:

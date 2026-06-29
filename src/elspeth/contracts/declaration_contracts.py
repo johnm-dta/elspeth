@@ -557,16 +557,16 @@ class _EmptyPayload(TypedDict):
 def _resolve_typeddict_key_sets(schema: type) -> tuple[frozenset[str], frozenset[str]]:
     """Return ``(required, optional)`` frozensets for a TypedDict class.
 
-    Implemented via ``typing.get_type_hints(schema, include_extras=True)`` so
-    ``NotRequired[...]`` / ``Required[...]`` wrappers survive under
-    ``from __future__ import annotations``. The metaclass-populated
-    ``__required_keys__`` / ``__optional_keys__`` are unreliable in that
-    case because the class-body annotations are string literals the
-    metaclass cannot parse at class-definition time. ``get_type_hints``
-    resolves the strings at call time and ``typing.get_origin`` yields
-    the wrapper so author intent survives regardless of syntax.
+    ``typing.get_type_hints(schema, include_extras=True)`` is authoritative
+    for explicit ``NotRequired[...]`` / ``Required[...]`` wrappers under
+    ``from __future__ import annotations``. For bare inherited keys, the
+    TypedDict metaclass key sets preserve the defining class's totality.
+    Combine both signals so wrapper intent wins and inherited bare keys do
+    not get reclassified by the most-derived class's ``__total__``.
     """
     total_required_default: bool = schema.__total__  # type: ignore[attr-defined]
+    native_required = frozenset(getattr(schema, "__required_keys__", frozenset()))
+    native_optional = frozenset(getattr(schema, "__optional_keys__", frozenset()))
     hints = get_type_hints(schema, include_extras=True)
     required: set[str] = set()
     optional: set[str] = set()
@@ -575,6 +575,10 @@ def _resolve_typeddict_key_sets(schema: type) -> tuple[frozenset[str], frozenset
         if origin is Required:
             required.add(key)
         elif origin is NotRequired:
+            optional.add(key)
+        elif key in native_required:
+            required.add(key)
+        elif key in native_optional:
             optional.add(key)
         elif total_required_default:
             required.add(key)

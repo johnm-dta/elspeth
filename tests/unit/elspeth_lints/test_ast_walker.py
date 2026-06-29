@@ -84,6 +84,17 @@ def test_iter_python_files_skips_dependency_and_cache_directories(tmp_path: Path
     assert list(iter_python_files(tmp_path)) == [source]
 
 
+def test_iter_python_files_allows_roots_inside_hidden_worktree_parent(tmp_path: Path) -> None:
+    source = tmp_path / ".worktrees" / "feature" / "fixtures" / "case" / "good.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("value = 1\n", encoding="utf-8")
+    nested_ignored = source.parent / ".worktrees" / "ignored.py"
+    nested_ignored.parent.mkdir()
+    nested_ignored.write_text("value = 2\n", encoding="utf-8")
+
+    assert list(iter_python_files(source.parent)) == [source]
+
+
 def test_walk_function_own_scope_keeps_comprehension_nodes_visible() -> None:
     tree = ast.parse("""
 def handler(arguments):

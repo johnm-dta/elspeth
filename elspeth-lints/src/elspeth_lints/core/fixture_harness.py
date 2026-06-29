@@ -18,7 +18,6 @@ from elspeth_lints.core.ast_walker import (
     PythonFileReadError,
     PythonSyntaxError,
     parse_python_file,
-    walk_python_files,
 )
 from elspeth_lints.core.emitters.json import render_json
 from elspeth_lints.core.protocols import Finding, Rule, RuleContext, RuleScope
@@ -157,13 +156,21 @@ def _run_fixture_case_with_context(case: RuleFixtureCase, rule: Rule, root: Path
         findings.extend(rule.analyze(parsed.tree, parsed.path, context))
         return findings
 
-    for parsed in walk_python_files(case.fixture_path):
+    for parsed in _walk_fixture_python_files(case.fixture_path):
         if isinstance(parsed, PythonSyntaxError):
             raise AssertionError(f"{case.name}: fixture has syntax error: {parsed.message}")
         if isinstance(parsed, PythonFileReadError):
             raise AssertionError(f"{case.name}: fixture I/O error ({parsed.error_type}): {parsed.message}")
         findings.extend(_run_incremental_rule(rule, parsed, context))
     return findings
+
+
+def _walk_fixture_python_files(root: Path) -> Iterable[ParsedPythonFile | PythonSyntaxError | PythonFileReadError]:
+    """Parse fixture files even when the repository worktree path is hidden."""
+    for file_path in sorted(root.rglob("*.py")):
+        if "__pycache__" in file_path.parts or "node_modules" in file_path.parts:
+            continue
+        yield parse_python_file(file_path)
 
 
 def _fixture_allowlist_dir(root: Path) -> Path | None:

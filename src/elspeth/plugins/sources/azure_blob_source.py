@@ -26,7 +26,7 @@ from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLim
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
-from elspeth.contracts.wire_visible_identity import reject_placeholder_value
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.core.identifiers import validate_field_names
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
@@ -304,7 +304,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that container is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("container cannot be empty")
-        return reject_placeholder_value(v, field_name="container")
+        return reject_operator_required_placeholder_value(v, field_name="container")
 
     @field_validator("blob_path")
     @classmethod
@@ -312,7 +312,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that blob_path is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("blob_path cannot be empty")
-        return reject_placeholder_value(v, field_name="blob_path")
+        return reject_operator_required_placeholder_value(v, field_name="blob_path")
 
     @field_validator("on_validation_failure")
     @classmethod

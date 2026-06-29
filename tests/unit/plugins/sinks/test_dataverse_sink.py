@@ -126,10 +126,25 @@ class TestDataverseSinkConfig:
         with pytest.raises(PluginConfigError, match="placeholder"):
             DataverseSinkConfig.from_dict(_config(entity=entity))
 
+    @pytest.mark.parametrize("entity", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_entity_names(self, entity: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(_config(entity=entity))
+        assert cfg.entity == entity
+
     @pytest.mark.parametrize("alternate_key", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
     def test_alternate_key_placeholder_rejected(self, alternate_key: str) -> None:
         with pytest.raises(PluginConfigError, match="placeholder"):
             DataverseSinkConfig.from_dict(_config(alternate_key=alternate_key))
+
+    @pytest.mark.parametrize("alternate_key", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_alternate_keys(self, alternate_key: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(
+            _config(
+                alternate_key=alternate_key,
+                field_mapping={"email": alternate_key, "name": "fullname"},
+            )
+        )
+        assert cfg.alternate_key == alternate_key
 
     def test_field_mapping_required(self) -> None:
         c = _config()
@@ -140,6 +155,11 @@ class TestDataverseSinkConfig:
     def test_field_mapping_target_placeholder_rejected(self) -> None:
         with pytest.raises(PluginConfigError, match="placeholder"):
             DataverseSinkConfig.from_dict(_config(field_mapping={"email": "operator_required", "name": "fullname"}))
+
+    @pytest.mark.parametrize("target", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_field_mapping_targets(self, target: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(_config(alternate_key=target, field_mapping={"email": target}))
+        assert cfg.field_mapping == {"email": target}
 
     def test_https_enforcement(self) -> None:
         with pytest.raises(PluginConfigError, match="HTTPS"):
@@ -180,6 +200,21 @@ class TestDataverseSinkConfig:
                     }
                 )
             )
+
+    @pytest.mark.parametrize("target_entity", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_lookup_target_entities(self, target_entity: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(
+            _config(
+                lookups={
+                    "account_id": {
+                        "target_entity": target_entity,
+                        "target_field": "parentcustomerid",
+                    }
+                }
+            )
+        )
+        assert cfg.lookups is not None
+        assert cfg.lookups["account_id"].target_entity == target_entity
 
     def test_lookup_target_entity_required(self) -> None:
         with pytest.raises(PluginConfigError, match="target_entity"):
@@ -275,6 +310,21 @@ class TestDataverseSinkConfig:
                     }
                 )
             )
+
+    @pytest.mark.parametrize("target_field", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_lookup_target_fields(self, target_field: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(
+            _config(
+                lookups={
+                    "account_id": {
+                        "target_entity": "accounts",
+                        "target_field": target_field,
+                    }
+                }
+            )
+        )
+        assert cfg.lookups is not None
+        assert cfg.lookups["account_id"].target_field == target_field
 
     def test_lookup_config_rejects_extra_fields(self) -> None:
         with pytest.raises(PluginConfigError):

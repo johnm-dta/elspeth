@@ -24,7 +24,7 @@ from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLim
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
-from elspeth.contracts.wire_visible_identity import reject_placeholder_value
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.clients.dataverse import (
     DataverseAuthConfig,
@@ -141,7 +141,7 @@ class DataverseSourceConfig(DataPluginConfig):
         stripped = v.strip()
         if not stripped:
             raise ValueError("entity cannot be empty")
-        return reject_placeholder_value(stripped, field_name="entity")
+        return reject_operator_required_placeholder_value(stripped, field_name="entity")
 
     @field_validator("select")
     @classmethod
@@ -153,7 +153,7 @@ class DataverseSourceConfig(DataPluginConfig):
             if not select_name or not select_name.strip():
                 raise ValueError(f"select[{index}] cannot be empty")
             stripped = select_name.strip()
-            reject_placeholder_value(stripped, field_name=f"select[{index}]")
+            reject_operator_required_placeholder_value(stripped, field_name=f"select[{index}]")
             stripped_fields.append(stripped)
         return stripped_fields
 

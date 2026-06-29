@@ -150,6 +150,13 @@ class TestAzureBlobSourceConfig:
         with pytest.raises(PluginConfigError, match="placeholder"):
             _make_source(cfg)
 
+    @pytest.mark.parametrize("container", ["todo", "unknown", "unset", "required"])
+    def test_plain_placeholder_words_can_be_container_names(self, container: str) -> None:
+        from elspeth.plugins.sources.azure_blob_source import AzureBlobSourceConfig
+
+        cfg = AzureBlobSourceConfig.from_dict(_base_config(container=container))
+        assert cfg.container == container
+
     def test_empty_blob_path_raises(self) -> None:
         """Empty blob_path raises PluginConfigError."""
         cfg = _base_config(blob_path="")
@@ -161,6 +168,13 @@ class TestAzureBlobSourceConfig:
         cfg = _base_config(blob_path=blob_path)
         with pytest.raises(PluginConfigError, match="placeholder"):
             _make_source(cfg)
+
+    @pytest.mark.parametrize("blob_path", ["todo", "unknown", "unset", "required"])
+    def test_plain_placeholder_words_can_be_blob_paths(self, blob_path: str) -> None:
+        from elspeth.plugins.sources.azure_blob_source import AzureBlobSourceConfig
+
+        cfg = AzureBlobSourceConfig.from_dict(_base_config(blob_path=blob_path))
+        assert cfg.blob_path == blob_path
 
     def test_columns_rejected_for_json(self) -> None:
         """columns option rejected for JSON format."""

@@ -1652,6 +1652,19 @@ def test_cli_reaudit_invalid_since_exits_2(tmp_path: Path, capsys: pytest.Captur
     assert "ISO-8601" in captured.err
 
 
+@pytest.mark.parametrize("limit", ["0", "-5"])
+def test_cli_reaudit_rejects_non_positive_limit(tmp_path: Path, capsys: pytest.CaptureFixture[str], limit: str) -> None:
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([*_reaudit_argv(root, allowlist_dir), "--limit", limit])
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert f"expected a positive integer, got '{limit}'" in captured.err
+
+
 def test_cli_reaudit_unsupported_rule_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)

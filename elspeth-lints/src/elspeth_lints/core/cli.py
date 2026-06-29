@@ -578,7 +578,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     reaudit.add_argument(
         "--limit",
-        type=int,
+        type=_positive_int,
         default=None,
         help=(
             "Only reaudit the first N entries surviving the other filters. "

@@ -43,6 +43,9 @@ function buildStatusAnnouncement(progress: RunProgress, cancelRequested: boolean
     case "cancelled":
       return "Pipeline execution was cancelled.";
     case "pending":
+      // Distinct from "running" so the polite live region announces the
+      // pending→running transition (a queued run has not started yet).
+      return "Pipeline queued.";
     case "running":
       return "Pipeline running.";
   }

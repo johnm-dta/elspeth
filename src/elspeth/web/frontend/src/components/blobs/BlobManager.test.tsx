@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, within, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useBlobStore } from "@/stores/blobStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -121,6 +121,32 @@ describe("BlobManager delete confirmation (WCAG 3.3.4)", () => {
     expect(deleteBlob).not.toHaveBeenCalled();
 
     // Confirming fires the delete with the active session + blob id.
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    expect(deleteBlob).toHaveBeenCalledWith("session-1", "b1");
+  });
+
+  it("deletes from the session that opened the dialog, even after the active session changes", async () => {
+    // Regression: the confirmation captures the blob *and* the session it
+    // belonged to. Switching sessions (e.g. via the global Ctrl/Cmd+N shortcut)
+    // while the dialog is open must not retarget the delete at the new session,
+    // which would leave the original file undeleted.
+    const deleteBlob = vi.fn().mockResolvedValue(undefined);
+    setBlobState([makeBlob({ id: "b1", filename: "data.csv", created_by: "user" })]);
+    useBlobStore.setState({ deleteBlob });
+
+    const user = userEvent.setup();
+    render(<BlobManager onUseAsInput={vi.fn()} />);
+
+    // Request deletion while session-1 is active.
+    await user.click(screen.getByRole("button", { name: "Delete data.csv" }));
+
+    // The active session changes underneath the open confirmation dialog.
+    act(() => {
+      useSessionStore.setState({ activeSessionId: "session-2" });
+    });
+
+    // Confirming must target the ORIGINAL session (session-1), not session-2.
+    const dialog = screen.getByRole("alertdialog");
     await user.click(within(dialog).getByRole("button", { name: "Delete" }));
     expect(deleteBlob).toHaveBeenCalledWith("session-1", "b1");
   });

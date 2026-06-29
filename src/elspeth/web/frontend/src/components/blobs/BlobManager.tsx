@@ -41,8 +41,12 @@ export function BlobManager({ onUseAsInput }: BlobManagerProps) {
     useBlobStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Blob queued for deletion, awaiting confirmation. Blobs are pipeline
-  // inputs/outputs, so deletion is irreversible data loss (WCAG 3.3.4).
-  const [pendingDelete, setPendingDelete] = useState<BlobMetadata | null>(null);
+  // inputs/outputs, so deletion is irreversible data loss (WCAG 3.3.4). We
+  // capture the session the blob belongs to alongside the blob: if the active
+  // session changes while the dialog is open (e.g. via the global Ctrl/Cmd+N
+  // shortcut), the delete must still target the originating session, not
+  // whichever session happens to be active at confirmation time.
+  const [pendingDelete, setPendingDelete] = useState<{ blob: BlobMetadata; sessionId: string } | null>(null);
 
   useEffect(() => {
     if (activeSessionId) {
@@ -83,18 +87,21 @@ export function BlobManager({ onUseAsInput }: BlobManagerProps) {
   // confirmDelete once the user confirms in the dialog.
   const handleRequestDelete = useCallback(
     (blobId: string) => {
+      if (!activeSessionId) return;
       const blob = blobs.find((b) => b.id === blobId);
       if (!blob) return;
-      setPendingDelete(blob);
+      setPendingDelete({ blob, sessionId: activeSessionId });
     },
-    [blobs],
+    [blobs, activeSessionId],
   );
 
   const confirmDelete = useCallback(() => {
-    if (!activeSessionId || !pendingDelete) return;
-    deleteBlob(activeSessionId, pendingDelete.id);
+    if (!pendingDelete) return;
+    // Use the session captured when deletion was requested, not the current
+    // activeSessionId — they can differ if the session changed mid-dialog.
+    deleteBlob(pendingDelete.sessionId, pendingDelete.blob.id);
     setPendingDelete(null);
-  }, [activeSessionId, pendingDelete, deleteBlob]);
+  }, [pendingDelete, deleteBlob]);
 
   const handleDownload = useCallback(
     (blobId: string) => {
@@ -180,7 +187,7 @@ export function BlobManager({ onUseAsInput }: BlobManagerProps) {
       {pendingDelete && (
         <ConfirmDialog
           title="Delete file"
-          message={`Delete "${pendingDelete.filename}"? This cannot be undone.`}
+          message={`Delete "${pendingDelete.blob.filename}"? This cannot be undone.`}
           confirmLabel="Delete"
           variant="danger"
           onConfirm={confirmDelete}

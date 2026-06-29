@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RunsHistoryDrawer } from "./RunsHistoryDrawer";
 import { useExecutionStore } from "@/stores/executionStore";
@@ -181,6 +181,25 @@ describe("RunsHistoryDrawer", () => {
     expect(firstDetail).toHaveFocus();
     await userEvent.tab({ shift: true });
     expect(closeBtn).toHaveFocus();
+  });
+
+  // M08 (WCAG 2.4.3): the drawer is aria-modal with no backdrop/inerting, so
+  // focus can land on a control behind it (a click or a global shortcut). Tab
+  // must then pull focus back into the drawer rather than walk the page behind.
+  it("recaptures focus that has escaped the drawer on Tab", () => {
+    const outside = document.createElement("button");
+    outside.textContent = "underlying control";
+    document.body.appendChild(outside);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    outside.focus();
+    expect(outside).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Tab" });
+
+    expect(screen.getByRole("button", { name: /close/i })).toHaveFocus();
+
+    outside.remove();
   });
 
   // M08 (WCAG 2.4.3): closing the drawer must return focus to the control that

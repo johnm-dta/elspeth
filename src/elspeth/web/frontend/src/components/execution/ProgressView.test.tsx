@@ -151,6 +151,24 @@ describe("ProgressView", () => {
     expect(region).toHaveTextContent("Pipeline running.");
   });
 
+  // A pending (queued) run must announce DIFFERENTLY from running, otherwise the
+  // pending→running transition produces no DOM text change and the polite live
+  // region never tells a screen-reader user the run actually started.
+  it("announces a pending run distinctly from a running run", () => {
+    (useWebSocket as ReturnType<typeof vi.fn>).mockReturnValue({
+      activeRunId: "run-1",
+      wsDisconnected: false,
+      progress: progressFixture({ status: "pending" }),
+    });
+
+    render(<ProgressView />);
+
+    const region = screen.getByRole("status");
+    expect(region).toHaveAttribute("aria-live", "polite");
+    expect(region).toHaveTextContent("Pipeline queued.");
+    expect(region).not.toHaveTextContent("Pipeline running.");
+  });
+
   it("announces a completed terminal transition with totals via the live region", () => {
     (useWebSocket as ReturnType<typeof vi.fn>).mockReturnValue({
       activeRunId: "run-1",

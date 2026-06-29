@@ -168,11 +168,27 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   }
 
   let lastDrivenPhase: string | null = null;
+  // One-shot guard: the redesigned guided decision renders as a READ-ONLY
+  // summary (.guided-schema-summary), not an editable form. The first time a
+  // summary is visible, assert no editable schema input is shown alongside it.
+  let assertedSummary = false;
   const deadline = Date.now() + 600_000;
   while (Date.now() < deadline) {
     // Done once the guided surface is replaced by the run turn.
     if (await runHeading.isVisible().catch(() => false)) return;
     if (!(await guidedPanel.isVisible().catch(() => false))) return;
+
+    if (
+      !assertedSummary &&
+      (await page.locator(".guided-schema-summary").first().isVisible().catch(() => false))
+    ) {
+      assertedSummary = true;
+      if ((await page.locator(".guided-schema-input").count().catch(() => 0)) > 0) {
+        throw new Error(
+          "guided decision rendered an editable form, expected a read-only summary",
+        );
+      }
+    }
 
     await resolveVisibleReviews(page);
 

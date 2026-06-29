@@ -50,6 +50,7 @@ const AUDITED_COMPONENTS = [
   "TemplateCards",
   "ShortcutsHelp",
   "WireStageTurn",
+  "SchemaFormTurn",
 ] as const;
 
 const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
@@ -70,6 +71,7 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "InlineSourceFallbackPrompt",
   "PluginCard",
   "ReadinessRowDetail",
+  "SchemaFormTurn",
   "SideRail",
   "ShortcutsHelp",
   "TemplateCards",
@@ -138,6 +140,7 @@ import { FilterChipStrip, type CatalogFilters } from "@/components/catalog/Filte
 import { TemplateCards } from "@/components/chat/TemplateCards";
 import { ShortcutsHelp } from "@/components/common/ShortcutsHelp";
 import { WireStageTurn } from "@/components/chat/guided/WireStageTurn";
+import { SchemaFormTurn } from "@/components/chat/guided/SchemaFormTurn";
 
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -148,7 +151,7 @@ import { resetStore } from "@/test/store-helpers";
 import type { InlineSourceSummary } from "@/types/api";
 import type { PluginSummary } from "@/types/index";
 import type { ReadinessRow, AuditReadinessSnapshot } from "@/types/api";
-import type { WireStageData } from "@/types/guided";
+import type { WireStageData, SchemaFormPayload } from "@/types/guided";
 
 // --- Shared store reset ----------------------------------------------------
 
@@ -287,6 +290,42 @@ describe("WireStageTurn", () => {
         confirmDisabled={false}
       />,
     );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("SchemaFormTurn", () => {
+  // The guided decision surface now defaults to a read-only summary (<dl> rows +
+  // role=note caveat) with a non-tutorial Edit toggle that reveals the editable
+  // KnobFieldRenderer form. Audit all three states the redesign introduced: the
+  // default summary, the revealed edit form (newly axe-covered), and the
+  // tutorial summary (no Edit affordance).
+  const auditPayload: SchemaFormPayload = {
+    mode: "plugin_options",
+    plugin: "csv",
+    knobs: {
+      fields: [
+        { name: "encoding", label: "Encoding", kind: "text", required: false, nullable: false },
+        { name: "on_validation_failure", label: "On Validation Failure", kind: "text", required: true, nullable: false },
+        { name: "schema", label: "Schema", kind: "json-object", required: false, nullable: false },
+      ],
+    },
+    prefilled: { encoding: "utf-8", on_validation_failure: "discard", schema: { mode: "observed" } },
+  };
+
+  it("has no axe violations in the default summary view", async () => {
+    const { container } = render(<SchemaFormTurn payload={auditPayload} onSubmit={() => {}} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the revealed edit form", async () => {
+    const { container } = render(<SchemaFormTurn payload={auditPayload} onSubmit={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in tutorial summary mode", async () => {
+    const { container } = render(<SchemaFormTurn payload={auditPayload} onSubmit={() => {}} isTutorial />);
     expect(await axe(container)).toHaveNoViolations();
   });
 });

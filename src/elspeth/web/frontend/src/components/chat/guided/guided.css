@@ -105,7 +105,6 @@
   margin-bottom: var(--space-md);
 }
 
-.guided-current-decision-copy h2,
 .guided-step-chat-heading,
 .guided-history-heading {
   margin: 0 0 var(--space-xs) 0;
@@ -113,6 +112,30 @@
   line-height: 1.3;
   font-weight: 700;
   color: var(--color-text);
+}
+
+/* Decorative eyebrow above the decision heading ("Current decision"). The
+   prominent thing is now the dynamic build rationale (the <h2> below), so this
+   small uppercase label is aria-hidden and quiet. */
+.guided-current-decision-eyebrow {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+/* The dynamic build rationale, rendered AS the decision heading (h2). Specificity
+   0-2-0 so it owns the heading style now that the old .guided-current-decision-copy
+   h2 group rule is retired. font-weight is set explicitly (not inherited) so a
+   barrel-level heading reset can't flatten its prominence. */
+.guided-current-decision-copy .guided-current-decision-rationale {
+  margin: var(--space-xs) 0 var(--space-md);
+  font-size: var(--font-size-lg);
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--color-text);
+  text-transform: none;
 }
 
 .guided-current-decision-copy p,
@@ -128,9 +151,10 @@
 }
 
 /* Tutorial: the manual decision is optional (Send drives the build), so the
-   section heading reads as a quiet label and an explanatory note points the
-   learner back to Send. */
-.guided-current-decision--tutorial .guided-current-decision-copy h2 {
+   decorative eyebrow stays a quiet label and an explanatory note points the
+   learner back to Send. (Repointed off the retired h2 group rule — the h2 is
+   now the dynamic rationale, which stays readable.) */
+.guided-current-decision--tutorial .guided-current-decision-eyebrow {
   color: var(--color-text-secondary);
 }
 
@@ -733,6 +757,47 @@
    Classes prefixed guided-schema-*. No chip styles -- this widget owns a
    form-field-per-row layout, not a chip group.
    --------------------------------------------------------------------------- */
+
+/* Read-only decision summary (default view). A definition list of the visible
+   knobs — label : value — replacing the full-width editable form. Short scalars
+   inline; JSON via the shared CodeBlock; the Edit toggle reveals the form. */
+.guided-schema-summary {
+  display: grid;
+  gap: var(--space-sm);
+  margin: var(--space-sm) 0;
+}
+
+.guided-schema-summary-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) 1fr;
+  gap: var(--space-md);
+  align-items: baseline;
+}
+
+.guided-schema-summary-label {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.guided-schema-summary-value {
+  color: var(--color-text);
+  min-width: 0;
+}
+
+/* Validation-failure caveat, demoted to a small note beside its summary row
+   (role=note) instead of a full-width paragraph above Continue. */
+.guided-schema-summary-caveat {
+  margin: var(--space-xs) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Non-tutorial nudge shown when a prefilled value blocks Continue — points the
+   user at the Edit toggle to fix it. */
+.guided-schema-summary-needs-edit {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
 
 /* One property row: label + control + optional hint/error stacked vertically */
 .guided-schema-field-row {

@@ -587,6 +587,21 @@ describe("design-review contrast remediation (2026-06-29)", () => {
     }
   });
 
+  it("keeps secondary text at AA on the page background in both themes (guided decision summary)", () => {
+    // The guided read-only decision summary renders small secondary-coloured
+    // text directly over the page/section background: the
+    // .guided-current-decision-eyebrow ("Current decision" label), the
+    // .guided-schema-summary-caveat (validation-failure note), and the
+    // .guided-schema-summary-needs-edit banner. Gate --color-text-secondary on
+    // --color-bg so a palette rebalance can't drop these below AA.
+    for (const theme of themes) {
+      expect(
+        contrastRatio(resolveHex(theme, "--color-text-secondary"), resolveHex(theme, "--color-bg")),
+        `secondary on bg (${theme})`,
+      ).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   it("gives form inputs a resting boundary clearing WCAG 1.4.11 (3:1) (M04)", () => {
     // --color-input-border replaces the 1px --color-border-strong (~1.7:1)
     // boundary on .input/.textarea/.select/.guided-schema-input.

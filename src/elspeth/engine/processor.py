@@ -2954,14 +2954,14 @@ class RowProcessor:
         the bumped attempt and stamped with provenance (ADDENDUM 4 — carried on the token,
         NOT passed as params to process_token).
 
-        Dispatch cases (branch_name checked first to avoid confusing a fork→coalesce
-        before-barrier token with a post-coalesce merged token that also has join_group_id):
+        Dispatch cases (expand_group_id checked first because expanded children inherit
+        their parent's branch_name; their persisted step still identifies the expand node):
 
-        1. fork → sink terminal branch: branch_name in _branch_to_sink → current_node_id=None
+        1. expand child: expand_group_id set → re-drive from the node AFTER the expand node.
+        2. fork → sink terminal branch: branch_name in _branch_to_sink → current_node_id=None
            (process_token's None-path routes via branch_to_sink to the terminal sink).
-        2. fork → coalesce, crashed before barrier: branch_name in _branch_to_coalesce →
+        3. fork → coalesce, crashed before barrier: branch_name in _branch_to_coalesce →
            re-run the branch from its first processing node with coalesce context.
-        3. expand child: expand_group_id set → re-drive from the node AFTER the expand node.
         4. post-coalesce merged token, crashed after barrier (B1 review finding): join_group_id
            set AND fork_group_id None AND branch_name None →
            - Non-terminal coalesce (next node exists): process_token from node after coalesce.
@@ -2987,6 +2987,15 @@ class RowProcessor:
         )
         branch = spec.branch_name
 
+        if spec.expand_group_id is not None:
+            # expand child: re-drive from the node AFTER the expand node.
+            # Expanded children inherit branch_name from fork branches, including
+            # coalesce-bound branches, so this must run before branch dispatch.
+            # expand is never terminal; an `after` of None here is an audit/DAG inconsistency
+            # that process_token's None-enforcement raises on (no branch_to_sink / on_success_sink).
+            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
+            return self.process_token(token, ctx, current_node_id=after)
+
         if branch is not None and BranchName(branch) in self._branch_to_sink:
             # fork → sink terminal branch: straight to the sink via None-path routing.
             return self.process_token(token, ctx, current_node_id=None)
@@ -3002,13 +3011,6 @@ class RowProcessor:
                 current_node_id=first_node,
                 coalesce_name=coalesce_name,
             )
-
-        if spec.expand_group_id is not None:
-            # expand child: re-drive from the node AFTER the expand node.
-            # expand is never terminal; an `after` of None here is an audit/DAG inconsistency
-            # that process_token's None-enforcement raises on (no branch_to_sink / on_success_sink).
-            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
-            return self.process_token(token, ctx, current_node_id=after)
 
         if spec.join_group_id is not None and spec.fork_group_id is None and branch is None:
             # post-coalesce merged token, crashed AFTER the barrier (B1 review finding):

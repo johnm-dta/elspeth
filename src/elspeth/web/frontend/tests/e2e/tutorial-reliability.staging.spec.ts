@@ -36,21 +36,34 @@ import {
 const BATCH_ID = process.env.HARNESS_BATCH_ID ?? "skeleton";
 const BATCH_SIZE = Number(process.env.HARNESS_BATCH_SIZE ?? "1");
 
-// Resolve every pending guided interpretation card currently rendered, then
-// return how many were accepted this pass. Robust to the LLM-prompt-template
-// REVIEW GATE: that card's Accept button is `disabled` until its prompt region
-// (role="region" name="Prompt template review") is scrolled to the end
-// (InterpretationReviewTurn: requiresPromptTemplateScroll → hasScrolledToEnd).
-// Per-stage interpretation reviews replace the old big-bang "assumptions to
-// review" block; the same scroll-then-accept discipline applies.
+// Acknowledge every pending guided interpretation card currently rendered, then
+// return how many were acknowledged this pass.
+//
+// Post-redesign (acknowledge card-stack): the cards render in the pinned
+// AcknowledgementStack. The primary is "Acknowledge" (aria-label
+// "Acknowledge the …"), NOT the old "Accept …". The LLM-prompt-template REVIEW
+// GATE still applies but its surface moved BEHIND a "View" expander: the
+// Acknowledge button stays `disabled` until the prompt region
+// (role="region" name="Prompt template review", revealed by clicking "View")
+// is scrolled to the end (AcknowledgementCard: requiresPromptScroll + expanded
+// + hasScrolledToEnd). So each pass: open any collapsed "View" expanders,
+// scroll any revealed prompt regions to the end, then click an enabled
+// Acknowledge.
 async function resolveVisibleReviews(page: Page): Promise<number> {
-  const acceptButtons = page.getByRole("button", { name: /^Accept /i });
+  const ackButtons = page.getByRole("button", { name: /^Acknowledge/i });
+  const viewToggles = page.getByRole("button", { name: /^View$/ });
   const promptRegions = page.getByRole("region", {
     name: "Prompt template review",
   });
   let accepted = 0;
-  // Bounded inner loop: each accepted card unmounts, shrinking the list.
+  // Bounded inner loop: each acknowledged card unmounts, shrinking the list.
   for (let guard = 0; guard < 12; guard++) {
+    // Open any collapsed value expanders so the prompt scroll region (and its
+    // gate) exists. An opened toggle relabels to "Hide", so it is not reopened.
+    const toggleCount = await viewToggles.count().catch(() => 0);
+    for (let i = 0; i < toggleCount; i++) {
+      await viewToggles.nth(i).click().catch(() => {});
+    }
     const regionCount = await promptRegions.count().catch(() => 0);
     for (let i = 0; i < regionCount; i++) {
       await promptRegions
@@ -61,11 +74,11 @@ async function resolveVisibleReviews(page: Page): Promise<number> {
         })
         .catch(() => {});
     }
-    const total = await acceptButtons.count().catch(() => 0);
+    const total = await ackButtons.count().catch(() => 0);
     if (total === 0) break;
     let clicked = false;
     for (let i = 0; i < total; i++) {
-      const btn = acceptButtons.nth(i);
+      const btn = ackButtons.nth(i);
       if (await btn.isEnabled().catch(() => false)) {
         await btn.click().catch(() => {});
         accepted += 1;
@@ -125,6 +138,11 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   // gate (D12): it stays disabled until the stage's interpretation cards are
   // resolved, which resolveVisibleReviews handles each pass.
   const primaries = [
+    // Transforms chain proposal (ProposeChainTurn): the passive learner's only
+    // action is "Accept all steps" (Reject / Ask advisor / Edit are !isTutorial).
+    // Accepting applies the chain; the per-step interpretation cards then surface
+    // in the acknowledge stack and resolveVisibleReviews clears them.
+    page.getByRole("button", { name: "Accept all steps", exact: true }),
     page.getByRole("button", { name: "Apply recipe", exact: true }),
     page.getByRole("button", { name: "Confirm wiring", exact: true }),
     page.getByRole("button", { name: "Continue", exact: true }),
@@ -150,7 +168,7 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   }
 
   let lastDrivenPhase: string | null = null;
-  const deadline = Date.now() + 420_000;
+  const deadline = Date.now() + 600_000;
   while (Date.now() < deadline) {
     // Done once the guided surface is replaced by the run turn.
     if (await runHeading.isVisible().catch(() => false)) return;

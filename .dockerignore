@@ -29,6 +29,9 @@ venv/
 ENV/
 env/
 
+# JavaScript dependency trees are generated from package-lock.json inside Docker.
+**/node_modules/
+
 # IDE and editor files
 .idea/
 .vscode/

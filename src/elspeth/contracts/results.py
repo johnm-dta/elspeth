@@ -719,6 +719,7 @@ class SourceRow:
             require_int(self.source_row_index, "SourceRow.source_row_index", min_value=0)
             if self.quarantine_error is None:
                 raise ValueError("Quarantined SourceRow must have quarantine_error")
+            _require_non_empty_str(self.quarantine_error, "quarantine_error")
             if self.quarantine_destination is None:
                 raise ValueError("Quarantined SourceRow must have quarantine_destination")
         else:

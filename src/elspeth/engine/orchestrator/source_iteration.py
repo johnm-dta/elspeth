@@ -184,7 +184,15 @@ class SourceIterationDriver:
         # Record source node_state (step_index=0) for quarantine audit lineage.
         # Status is FAILED because the source validation rejected this row.
         quarantine_data = source_item.row if isinstance(source_item.row, dict) else {"_raw": source_item.row}
-        quarantine_error_msg = source_item.quarantine_error or "unknown_validation_error"
+        quarantine_error_msg = source_item.quarantine_error
+        if quarantine_error_msg is None or not quarantine_error_msg.strip():
+            raise RouteValidationError(
+                f"Source '{active_source.name}' yielded quarantined row "
+                f"(source_row_index={source_row_index}, ingest_sequence={ingest_sequence}) "
+                f"with missing quarantine_error. "
+                f"This is a plugin bug: quarantined rows MUST specify a non-empty validation error. "
+                f"Use SourceRow.quarantined(row, error, destination, source_row_index=...) factory method."
+            )
         source_state = factory.execution.begin_node_state(
             token_id=quarantine_token.token_id,
             node_id=source_id,

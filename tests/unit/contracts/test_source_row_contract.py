@@ -54,7 +54,7 @@ class TestSourceRowContractInvariant:
         to_pipeline_row().
         """
         with pytest.raises(TypeError, match="contract"):
-            SourceRow.valid({"id": 1})
+            SourceRow.valid({"id": 1})  # type: ignore[call-arg]
 
     def test_valid_with_contract(self, sample_contract: SchemaContract) -> None:
         """SourceRow.valid() with contract succeeds and carries the contract reference."""
@@ -77,6 +77,17 @@ class TestSourceRowContractInvariant:
         assert source_row.is_quarantined
         assert source_row.contract is None
 
+    @pytest.mark.parametrize("error", ["", "   "])
+    def test_quarantined_requires_non_empty_error(self, error: str) -> None:
+        """Quarantined rows must carry a real plugin-authored failure reason."""
+        with pytest.raises(ValueError, match="quarantine_error must be non-empty"):
+            SourceRow.quarantined(
+                row={"bad": "data"},
+                error=error,
+                destination="quarantine",
+                source_row_index=0,
+            )
+
     def test_quarantined_without_source_row_index_raises(self) -> None:
         """SourceRow.quarantined() without source_row_index raises TypeError."""
         with pytest.raises(TypeError, match="source_row_index"):
@@ -84,7 +95,7 @@ class TestSourceRowContractInvariant:
                 row={"bad": "data"},
                 error="validation failed",
                 destination="quarantine",
-            )
+            )  # type: ignore[call-arg]
 
     def test_to_pipeline_row(self, sample_contract: SchemaContract) -> None:
         """SourceRow can convert to PipelineRow."""

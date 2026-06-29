@@ -42,6 +42,17 @@ _HASH_LINE_PATTERN = re.compile(rb'(\s*source_file_hash\s*(?::[^=]+=\s*|=\s*))"s
 # The normalized placeholder value used during hashing.
 _NORMALIZED_HASH_VALUE = b'"sha256:0000000000000000"'
 
+_PLUGIN_BASE_CLASS_NAMES = frozenset(
+    {
+        "BaseSource",
+        "BaseSink",
+        "BaseTransform",
+        # Azure safety plugins share an abstract project base that inherits
+        # BaseTransform; runtime discovery accepts those concrete subclasses.
+        "BaseAzureSafetyTransform",
+    }
+)
+
 
 # =============================================================================
 # Data Structures
@@ -177,12 +188,26 @@ def _has_name_class_attribute(node: ast.ClassDef, module_string_constants: dict[
     return isinstance(value, str)
 
 
+def _base_class_name(base: ast.expr) -> str | None:
+    """Return the syntactic base class name for a class base expression."""
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    return None
+
+
+def _has_plugin_base_class(node: ast.ClassDef) -> bool:
+    """Return whether a class directly declares a runtime plugin base."""
+    return any(_base_class_name(base) in _PLUGIN_BASE_CLASS_NAMES for base in node.bases)
+
+
 def extract_plugin_attributes(file_path: Path) -> list[PluginAttributes]:
     """Extract plugin class attributes from a Python source file using AST.
 
-    Finds all classes that have a ``name = "..."`` class attribute (the pluggy
-    plugin identifier) and extracts ``plugin_version`` and ``source_file_hash``
-    from their class bodies.
+    Finds all classes that directly declare a known plugin base class and have a
+    ``name = "..."`` class attribute (the pluggy plugin identifier), then
+    extracts ``plugin_version`` and ``source_file_hash`` from their class bodies.
 
     Args:
         file_path: Path to the Python source file.
@@ -199,6 +224,8 @@ def extract_plugin_attributes(file_path: Path) -> list[PluginAttributes]:
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
+            continue
+        if not _has_plugin_base_class(node):
             continue
         if not _has_name_class_attribute(node, module_string_constants):
             continue

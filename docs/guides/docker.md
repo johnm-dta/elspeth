@@ -23,15 +23,20 @@ This guide covers running ELSPETH in Docker containers for development and produ
 ELSPETH containers follow a **CLI-first design** - arguments are passed directly to the `elspeth` CLI:
 
 ```bash
+IMAGE_TAG=v0.6.0
+
 # Show help
-docker run ghcr.io/johnm-dta/elspeth --help
+docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} --help
 
 # Check version
-docker run ghcr.io/johnm-dta/elspeth --version
+docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} --version
 
 # List available plugins
-docker run ghcr.io/johnm-dta/elspeth plugins list
+docker run ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} plugins list
 ```
+
+Replace `v0.6.0` with the exact release or immutable `sha-<commit>` tag that
+matches the deployment you are operating.
 
 ---
 
@@ -55,7 +60,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -74,7 +79,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -100,7 +105,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   run --settings /app/config/pipeline.yaml --execute
 ```
 
@@ -109,7 +114,7 @@ docker run --rm \
 ```bash
 docker run --rm \
   -v $(pwd)/config:/app/config:ro \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   validate --settings /app/config/pipeline.yaml
 ```
 
@@ -120,7 +125,7 @@ For interactive exploration, mount the state and use the TUI (requires `-it`):
 ```bash
 docker run -it --rm \
   -v $(pwd)/state:/app/state:ro \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   explain --run latest --row 42 --database /app/state/landscape.db
 ```
 
@@ -130,7 +135,7 @@ For non-interactive environments (CI/CD), query the audit database directly:
 docker run --rm \
   -v $(pwd)/state:/app/state:ro \
   --entrypoint sqlite3 \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   /app/state/landscape.db \
   "SELECT ns.node_id, ns.status FROM node_states ns
    JOIN tokens t ON ns.token_id = t.token_id
@@ -146,7 +151,7 @@ docker run --rm \
   -v $(pwd)/input:/app/input:ro \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
-  ghcr.io/johnm-dta/elspeth:v0.1.0 \
+  ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
   resume abc123
 ```
 
@@ -195,7 +200,7 @@ docker compose run -it --rm elspeth explain --run latest --row 42 --database /ap
 # docker-compose.prod.yaml
 services:
   elspeth:
-    image: ghcr.io/johnm-dta/elspeth:v0.1.0
+    image: ghcr.io/johnm-dta/elspeth:${IMAGE_TAG:?set IMAGE_TAG to sha-<commit> or v*}
     environment:
       - DATABASE_URL=postgresql://<user>:<password>@db:5432/elspeth  # secret-scan: allow-this-line
       - OPENROUTER_API_KEY
@@ -231,13 +236,13 @@ The `health` command verifies system readiness:
 
 ```bash
 # Basic health check
-docker run --rm ghcr.io/johnm-dta/elspeth health
+docker run --rm ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} health
 
 # Verbose output
-docker run --rm ghcr.io/johnm-dta/elspeth health --verbose
+docker run --rm ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} health --verbose
 
 # JSON output (for automation)
-docker run --rm ghcr.io/johnm-dta/elspeth health --json
+docker run --rm ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} health --json
 ```
 
 ### Example JSON Output
@@ -245,10 +250,10 @@ docker run --rm ghcr.io/johnm-dta/elspeth health --json
 ```json
 {
   "status": "healthy",
-  "version": "0.1.0",
+  "version": "0.6.0",
   "commit": "abc123f",
   "checks": {
-    "version": {"status": "ok", "value": "0.1.0"},
+    "version": {"status": "ok", "value": "0.6.0"},
     "python": {"status": "ok", "value": "3.11.9"},
     "database": {"status": "ok", "value": "connected"},
     "plugins": {"status": "ok", "value": "4 sources, 11 transforms, 4 sinks"}
@@ -273,7 +278,7 @@ livenessProbe:
 | Tag Pattern | Example | Use Case |
 |-------------|---------|----------|
 | `sha-<commit>` | `sha-abc123f` | CI/CD deployments (immutable, recommended) |
-| `v<version>` | `v0.1.0` | Release versions |
+| `v<version>` | `v0.6.0` | Release versions |
 
 Use `sha-<commit>` tags for immutable deployments. The build workflow does not
 publish `latest`.
@@ -292,11 +297,11 @@ Images are published to:
 ```bash
 # GitHub Container Registry
 echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
-docker pull ghcr.io/johnm-dta/elspeth:v0.1.0
+docker pull ghcr.io/johnm-dta/elspeth:${IMAGE_TAG}
 
 # Azure Container Registry
 az acr login --name your-acr
-docker pull your-acr.azurecr.io/elspeth:v0.1.0
+docker pull your-acr.azurecr.io/elspeth:${IMAGE_TAG}
 ```
 
 ---

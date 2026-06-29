@@ -690,6 +690,117 @@ def test_check_rotation_audit_flags_unrecorded_rotation(tmp_path: Path) -> None:
     assert violation.new_key == "a.py:R1:foo:fp=bbbb"
 
 
+def test_check_rotation_audit_flags_delete_plus_rotation_under_same_prefix(tmp_path: Path) -> None:
+    """A same-prefix delete must not hide a sibling fingerprint rotation."""
+    _init_git_fixture(tmp_path)
+    allowlist_dir = tmp_path / "config" / "cicd" / "enforce_tier_model"
+    allowlist_dir.mkdir(parents=True)
+    (allowlist_dir / "web.yaml").write_text(
+        """allow_hits:
+- key: a.py:R1:foo:fp=aaaa
+  owner: team
+  reason: boundary
+  safety: validated
+- key: a.py:R1:foo:fp=bbbb
+  owner: team
+  reason: boundary
+  safety: validated
+""",
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "baseline with duplicate prefix")
+
+    (allowlist_dir / "web.yaml").write_text(
+        """allow_hits:
+- key: a.py:R1:foo:fp=cccc
+  owner: team
+  reason: boundary
+  safety: validated
+""",
+        encoding="utf-8",
+    )
+    _commit(tmp_path, "delete one same-prefix entry and rotate another")
+
+    report = check_rotation_audit_coverage(
+        allowlist_root=tmp_path / "config" / "cicd",
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        rotation_log_path=tmp_path / ".elspeth" / "rotations.log",
+    )
+
+    assert not report.passes
+    assert report.checked_rotation_count == 1
+    assert len(report.violations) == 1
+    violation = report.violations[0]
+    assert violation.allowlist_file == "config/cicd/enforce_tier_model/web.yaml"
+    assert violation.new_key == "a.py:R1:foo:fp=cccc"
+
+
+def test_check_rotation_audit_accepts_recorded_delete_plus_rotation_under_same_prefix(tmp_path: Path) -> None:
+    """The manifest can disambiguate which same-prefix old key rotated."""
+    _init_git_fixture(tmp_path)
+    allowlist_dir = tmp_path / "config" / "cicd" / "enforce_tier_model"
+    allowlist_dir.mkdir(parents=True)
+    (allowlist_dir / "web.yaml").write_text(
+        """allow_hits:
+- key: a.py:R1:foo:fp=aaaa
+  owner: team
+  reason: boundary
+  safety: validated
+- key: a.py:R1:foo:fp=bbbb
+  owner: team
+  reason: boundary
+  safety: validated
+""",
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "baseline with duplicate prefix")
+
+    (allowlist_dir / "web.yaml").write_text(
+        """allow_hits:
+- key: a.py:R1:foo:fp=cccc
+  owner: team
+  reason: boundary
+  safety: validated
+""",
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / ".elspeth" / "rotations.log"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "tier_model_rotation",
+                "recorded_at": "2026-05-24T00:00:00+00:00",
+                "allowlist_dir": "config/cicd/enforce_tier_model",
+                "rotations": [
+                    {
+                        "source_file": "web.yaml",
+                        "old_key": "a.py:R1:foo:fp=bbbb",
+                        "new_key": "a.py:R1:foo:fp=cccc",
+                    }
+                ],
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _commit(tmp_path, "recorded delete plus rotation")
+
+    report = check_rotation_audit_coverage(
+        allowlist_root=tmp_path / "config" / "cicd",
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+        rotation_log_path=manifest_path,
+    )
+
+    assert report.passes
+    assert report.checked_rotation_count == 1
+    assert report.violations == ()
+
+
 def test_check_rotation_audit_accepts_rejudged_key_change_without_manifest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

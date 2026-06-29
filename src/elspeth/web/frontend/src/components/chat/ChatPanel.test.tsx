@@ -3078,12 +3078,13 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     render(<ChatPanel />);
 
     expect(
-      screen.getByTestId("interpretation-review-inline-message"),
+      screen.getByTestId("acknowledgement-card"),
     ).toBeInTheDocument();
   });
 
-  // Test 14: guided mode → inline message NOT rendered (guided turn handles it).
-  it("does NOT render the inline message in guided mode (the guided turn handles it)", () => {
+  // Test 14: guided mode also unifies on the AcknowledgementStack — the same
+  // card renders (one surface for both modes; they can no longer drift).
+  it("renders the acknowledgement card in guided mode too (unified surface)", () => {
     const event = makeInterpretationEvent();
     useSessionStore.setState({
       activeSessionId: sessionFixture.id,
@@ -3115,11 +3116,9 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
 
     render(<ChatPanel />);
 
-    // The guided branch is rendered (no fall-through to the freeform body),
-    // so the inline-message widget is not in the DOM.
-    expect(
-      screen.queryByTestId("interpretation-review-inline-message"),
-    ).not.toBeInTheDocument();
+    // The guided branch mounts the same AcknowledgementStack at the top of its
+    // reply surface, so the card IS present in guided mode.
+    expect(screen.getByTestId("acknowledgement-card")).toBeInTheDocument();
   });
 
   // Test 15: two pending events → two inline messages in created_at-ascending order.
@@ -3153,7 +3152,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     render(<ChatPanel />);
 
     const widgets = screen.getAllByTestId(
-      "interpretation-review-inline-message",
+      "acknowledgement-card",
     );
     expect(widgets).toHaveLength(2);
     // The earlier-created event renders first (top-of-list).  Match by the
@@ -3188,7 +3187,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
 
     const { rerender } = render(<ChatPanel />);
     expect(
-      screen.getByTestId("interpretation-review-inline-message"),
+      screen.getByTestId("acknowledgement-card"),
     ).toBeInTheDocument();
 
     // Drive the opt-out via the store action — same surface the widget's
@@ -3201,7 +3200,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
 
     expect(optOutSpy).toHaveBeenCalledWith(sessionFixture.id);
     expect(
-      screen.queryByTestId("interpretation-review-inline-message"),
+      screen.queryByTestId("acknowledgement-card"),
     ).not.toBeInTheDocument();
   });
 
@@ -3267,7 +3266,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       ).toBeInTheDocument();
     });
     expect(
-      screen.queryByTestId("interpretation-review-inline-message"),
+      screen.queryByTestId("acknowledgement-card"),
     ).not.toBeInTheDocument();
   });
 
@@ -3307,7 +3306,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
 
     // Initially the inline widget is mounted; no confirmation yet.
     expect(
-      screen.getByTestId("interpretation-review-inline-message"),
+      screen.getByTestId("acknowledgement-card"),
     ).toBeInTheDocument();
     expect(
       screen.queryByTestId("interpretation-review-confirmation"),
@@ -3320,7 +3319,9 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     // unmounts (its event was removed from pendingBySession).
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /Accept the LLM's interpretation/i }),
+        screen.getByRole("button", {
+          name: /Acknowledge the LLM's interpretation/i,
+        }),
       );
     });
 
@@ -3333,7 +3334,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     );
     expect(confirmation.textContent).toMatch(/cool/);
     expect(
-      screen.queryByTestId("interpretation-review-inline-message"),
+      screen.queryByTestId("acknowledgement-card"),
     ).not.toBeInTheDocument();
     expect(resolveSpy).toHaveBeenCalledWith(
       sessionFixture.id,

@@ -6,7 +6,6 @@ import {
   projectInlineSourceSummary,
   useInlineSourceStore,
 } from "@/stores/inlineSourceStore";
-import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useComposer } from "@/hooks/useComposer";
 import { FOCUSABLE_SELECTOR } from "@/hooks/useFocusTrap";
 import {
@@ -29,13 +28,13 @@ import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
 import {
-  GuidedInterpretationReviews,
+  AcknowledgementLiveRegion,
+  AcknowledgementStack,
   useHasPendingGuidedInterpretations,
-} from "./guided/GuidedInterpretationReviews";
+} from "./AcknowledgementStack";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
 import { InlineSourceDisambiguationTurn } from "./InlineSourceDisambiguationTurn";
 import { InlineSourceFallbackPrompt } from "./InlineSourceFallbackPrompt";
-import { InterpretationReviewInlineMessage } from "./InterpretationReviewInlineMessage";
 import { sortedSourceEntries } from "@/utils/compositionState";
 import type {
   BlobMetadata,
@@ -670,47 +669,13 @@ export function ChatPanel({
     activeSessionId !== null ? s.summariesBySession[activeSessionId] ?? null : null,
   );
 
-  // ── Interpretation review pending events (Phase 5b Task 5) ────────────────
+  // ── Interpretation review surfacing ───────────────────────────────────────
   //
-  // Freeform-mode surfacing of LLM-interpretation review affordances.
-  // Guided mode renders these inside the GuidedTurn dispatch
-  // (InterpretationReviewTurn).  In freeform mode they appear inline in
-  // the chat message stream — one InterpretationReviewInlineMessage per
-  // pending event, ordered by created_at ascending so the oldest
-  // unresolved interpretation surfaces first.
-  //
-  // The dispatch predicate is structural: the store has at least one
-  // pending event for the active session AND the freeform branch is
-  // reached (the guided branches return early above).  We do NOT key off
-  // the proposal summary text here — interpretation events come from a
-  // separate wire route (POST /interpretations/resolve) and live in
-  // their own store; an inline_blob proposal whose summary lacks
-  // "I read" / "interpreted as" simply does not produce a pending
-  // interpretation event, so it cannot trigger this widget.  Task 5
-  // test 17 asserts this routing predicate's negative branch.
-  //
-  // Subscribe to the per-session pending map so a new pending event
-  // arriving via store.addPendingEvent / store.refreshAll triggers a
-  // re-render.  Reading via a stable selector that returns an empty
-  // record (rather than undefined) when the session has no entry yet
-  // avoids identity churn from `?? {}` on every render.
-  const pendingInterpretationEventsBySession = useInterpretationEventsStore(
-    (s) => s.pendingBySession,
-  );
-  const pendingInterpretationEvents = useMemo(() => {
-    if (activeSessionId === null) return [];
-    const map = pendingInterpretationEventsBySession[activeSessionId];
-    if (!map) return [];
-    // Sort by created_at ascending (ISO-8601 strings sort lexicographically
-    // in chronological order).  Stable order is important because the
-    // widget is rendered with the event id as the React key — re-sorts
-    // on each render would not remount the components, but the visual
-    // top-to-bottom order would shift if a new event arrived with an
-    // earlier created_at (which the wire contract permits but is rare).
-    return Object.values(map).sort((a, b) =>
-      a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
-    );
-  }, [activeSessionId, pendingInterpretationEventsBySession]);
+  // Both guided and freeform render pending interpretation events through the
+  // single AcknowledgementStack (pinned at the top of the chat column), driven
+  // by the same `pendingBySession[sessionId]` projection.  The stack owns the
+  // ordering, the count announce, the cards, and the foot-of-stack opt-out;
+  // ChatPanel only supplies the post-resolve callbacks per mode.
 
   // ── Interpretation review resolve-success confirmation (Phase 5b.18b.8) ──
   //
@@ -1377,9 +1342,20 @@ export function ChatPanel({
           they belong at the top of the reply surface, not buried below it. The
           widget owns its own role/aria; empty-state returns nothing.
         */}
-        <GuidedInterpretationReviews
+        {/*
+          Persistent count announcer.  Mounted regardless of pending count so
+          the role="status" region pre-exists its content — the 0→1 appearance
+          is then a reliable content mutation (see AcknowledgementLiveRegion).
+        */}
+        <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
+        <AcknowledgementStack
           sessionId={activeSessionId ?? ""}
           isTutorial={isTutorial}
+          onResolved={(newState) => {
+            if (newState !== null) {
+              useSessionStore.setState({ compositionState: newState });
+            }
+          }}
         />
         {/*
           Intent box (LLM-primary, spec §"Core model" point 1). This is the
@@ -1641,6 +1617,34 @@ export function ChatPanel({
         </div>
       )}
 
+      {/*
+        Acknowledgement stack — pinned at the top of the chat column.  Both
+        guided and freeform unify on this surface; in freeform it sits above
+        the scrolling message list so pending decisions stay visible.  The
+        resolved event is surfaced so the "Got it…" confirmation bubble below
+        can read user_term; applyResolvedInterpretation re-syncs + re-validates
+        so the run gate opens once the last decision is acknowledged.  Opt-out
+        passes a null event so no per-term confirmation fires.
+      */}
+      {activeSessionId !== null && (
+        <>
+          {/*
+            Persistent count announcer (see the guided branch / the component
+            doc): pre-exists its content so the 0→1 appearance announces.
+          */}
+          <AcknowledgementLiveRegion sessionId={activeSessionId} />
+          <AcknowledgementStack
+            sessionId={activeSessionId}
+            onResolved={(newState, event) => {
+              applyResolvedInterpretation(newState);
+              if (event !== null) {
+                handleInterpretationResolved(event);
+              }
+            }}
+          />
+        </>
+      )}
+
       {/* Message list */}
       <div
         ref={scrollContainerRef}
@@ -1716,47 +1720,6 @@ export function ChatPanel({
             onEdit={handleEditInlineSource}
           />
         )}
-        {/*
-          Interpretation-review inline messages (Phase 5b Task 5).
-
-          Freeform-mode rendering of pending interpretation events.  One
-          message per event, in created_at-ascending order.  Lives inside
-          the chat-panel-messages region (role="log") so the messages
-          flow naturally with surrounding assistant turns; the inline
-          widget brings its own role="region" with a stable accessible
-          name so AT users can jump to it independently of the message
-          stream.
-
-          The guided-mode counterpart (InterpretationReviewTurn) is
-          dispatched by GuidedTurn higher up in the file's guided
-          branch; that branch returns early before reaching this
-          freeform body.  Both surfaces consume the same
-          interpretationEventsStore so a resolution on either side
-          updates the other automatically.
-        */}
-        {pendingInterpretationEvents.map((event) => (
-          <InterpretationReviewInlineMessage
-            key={event.id}
-            event={event}
-            sessionId={activeSessionId}
-            // Capture user_term BEFORE the widget unmounts so the
-            // confirmation line below can show it. The callback fires
-            // for both "Use mine" and "Submit amendment" resolves; we do
-            // NOT fire it for opt-out (event.user_term is null for
-            // opt-out rows — see InterpretationEvent contract) and the
-            // handler skips null/empty user_terms.
-            //
-            // applyResolvedInterpretation re-syncs the displayed pipeline with
-            // the patched state AND re-validates, so the run-gate opens once the
-            // last review is resolved (resolving alone leaves validationResult
-            // stale, which previously left the Run button disabled with no
-            // signal of what to do next).
-            onResolved={(newState) => {
-              applyResolvedInterpretation(newState);
-              handleInterpretationResolved(event);
-            }}
-          />
-        ))}
         {/*
           Resolve-success confirmation bubbles (Phase 5b.18b.8).
 

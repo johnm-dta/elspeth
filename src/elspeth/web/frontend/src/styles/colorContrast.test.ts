@@ -259,6 +259,38 @@ describe("disabled button contrast", () => {
   });
 });
 
+describe("form input placeholder contrast", () => {
+  // The .input/.textarea ::placeholder colour was migrated off
+  // --color-text-muted (only ~3.84:1 on --color-surface-elevated, the input
+  // background — below AA) to --color-text-secondary as part of the
+  // acknowledge-card-stack restyle. These assertions gate both the rule
+  // (placeholder uses the secondary token) and the underlying contrast so a
+  // future palette rebalance cannot silently regress placeholder legibility.
+  it("uses --color-text-secondary (not muted) for ::placeholder", () => {
+    const placeholderMatch =
+      /\.input::placeholder,\s*\n\s*\.textarea::placeholder\s*\{([\s\S]*?)\n\}/.exec(
+        appCss,
+      );
+    expect(
+      placeholderMatch,
+      "::placeholder rule must exist for .input/.textarea",
+    ).not.toBeNull();
+    const body = placeholderMatch![1];
+    expect(body).toContain("color: var(--color-text-secondary)");
+    expect(body).not.toContain("var(--color-text-muted)");
+  });
+
+  it("keeps placeholder text at AA on the input surface in both themes", () => {
+    const darkSecondary = extractRootToken("--color-text-secondary");
+    const darkSurface = extractRootToken("--color-surface-elevated");
+    const lightSecondary = extractLightThemeToken("--color-text-secondary");
+    const lightSurface = extractLightThemeToken("--color-surface-elevated");
+
+    expect(contrastRatio(darkSecondary, darkSurface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightSecondary, lightSurface)).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
 describe("base interaction tokens", () => {
   it("uses a 16px base font size token", () => {
     expect(appCss).toMatch(/--font-size-base:\s*16px;/);

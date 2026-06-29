@@ -314,7 +314,10 @@
 }
 .input::placeholder,
 .textarea::placeholder {
-  color: var(--color-text-muted);
+  /* --color-text-muted is only ~3.84:1 on --color-surface-elevated (the input
+     background) — below AA. --color-text-secondary clears 4.5:1 on elevated in
+     both themes (gated by colorContrast.test.ts "placeholder text" assertion). */
+  color: var(--color-text-secondary);
 }
 .input:focus-visible,
 .textarea:focus-visible,

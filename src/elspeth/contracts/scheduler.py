@@ -84,8 +84,12 @@ class BranchLossSpec:
     recorded_by: str
 
 
-def _validate_scheduler_enum(value: object, enum_type: type, field_name: str) -> None:
-    if value is not None and type(value) is not enum_type:
+def _validate_scheduler_enum(value: object, enum_type: type[StrEnum], field_name: str, *, optional: bool = False) -> None:
+    if value is None:
+        if optional:
+            return
+        raise TypeError(f"{field_name} must be {enum_type.__name__}, got None")
+    if type(value) is not enum_type:
         raise TypeError(f"{field_name} must be {enum_type.__name__}, got {type(value).__name__}: {value!r}")
 
 
@@ -222,7 +226,7 @@ class SchedulerEvent:
 
     def __post_init__(self) -> None:
         _validate_scheduler_enum(self.event_type, SchedulerEventType, "event_type")
-        _validate_scheduler_enum(self.from_status, TokenWorkStatus, "from_status")
+        _validate_scheduler_enum(self.from_status, TokenWorkStatus, "from_status", optional=True)
         _validate_scheduler_enum(self.to_status, TokenWorkStatus, "to_status")
         require_int(self.from_attempt, "from_attempt", optional=True, min_value=0)
         require_int(self.to_attempt, "to_attempt", min_value=0)

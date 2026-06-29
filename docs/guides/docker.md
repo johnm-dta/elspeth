@@ -152,7 +152,7 @@ docker run --rm \
   -v $(pwd)/output:/app/output \
   -v $(pwd)/state:/app/state \
   ghcr.io/johnm-dta/elspeth:${IMAGE_TAG} \
-  resume abc123
+  resume abc123 --execute
 ```
 
 ---

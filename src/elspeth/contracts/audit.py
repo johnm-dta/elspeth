@@ -1096,8 +1096,12 @@ class SecretResolutionInput:
         SecretResolution. These checks prevent:
         - Plaintext secrets being written as fingerprints (security)
         - Invalid source values persisting undetected (Tier 1 integrity)
+        - Key Vault rows that cannot round-trip through the read-side contract
+        - Non-finite timestamps persisting into Tier 1 audit data
         - Non-negative latency invariant (data quality)
         """
+        import math
+
         if not self.env_var_name:
             raise ValueError("SecretResolutionInput: env_var_name is required and cannot be empty")
         if not self.source or self.source not in self._ALLOWED_SOURCES:
@@ -1107,5 +1111,12 @@ class SecretResolutionInput:
                 f"SecretResolutionInput: fingerprint must be 64-char lowercase hex (HMAC-SHA256), "
                 f"got {self.fingerprint!r} (length={len(self.fingerprint)})"
             )
+        if not isinstance(self.timestamp, (int, float)) or math.isinf(self.timestamp) or math.isnan(self.timestamp):
+            raise ValueError(f"SecretResolutionInput: timestamp must be a finite number, got {self.timestamp!r}")
         if self.resolution_latency_ms < 0:
             raise ValueError(f"SecretResolutionInput: resolution_latency_ms must be non-negative, got {self.resolution_latency_ms!r}")
+        if self.source == "keyvault":
+            if not self.vault_url:
+                raise ValueError("SecretResolutionInput: vault_url is required when source='keyvault'")
+            if not self.secret_name:
+                raise ValueError("SecretResolutionInput: secret_name is required when source='keyvault'")

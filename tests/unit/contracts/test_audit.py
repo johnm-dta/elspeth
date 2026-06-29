@@ -2050,6 +2050,18 @@ class TestSecretResolutionInputValidation:
         with pytest.raises(ValueError, match="non-negative"):
             SecretResolutionInput(**self._valid_kwargs(resolution_latency_ms=-1.0))  # type: ignore[arg-type]
 
+    def test_non_finite_timestamp_rejected(self) -> None:
+        with pytest.raises(ValueError, match="timestamp must be a finite number"):
+            SecretResolutionInput(**self._valid_kwargs(timestamp=float("inf")))  # type: ignore[arg-type]
+
+    def test_keyvault_requires_vault_url(self) -> None:
+        with pytest.raises(ValueError, match="vault_url is required"):
+            SecretResolutionInput(**self._valid_kwargs(vault_url=None))  # type: ignore[arg-type]
+
+    def test_keyvault_requires_secret_name(self) -> None:
+        with pytest.raises(ValueError, match="secret_name is required"):
+            SecretResolutionInput(**self._valid_kwargs(secret_name=None))  # type: ignore[arg-type]
+
     def test_zero_latency_accepted(self) -> None:
         """Zero latency is valid (e.g., cached resolution)."""
         sri = SecretResolutionInput(**self._valid_kwargs(resolution_latency_ms=0.0))  # type: ignore[arg-type]

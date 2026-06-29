@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -455,7 +455,7 @@ def _write_duplicate_widget_lookup_entries(
 
 def _live_fingerprint_for_widget(root: Path) -> str:
     """Run the scanner once to grab the fingerprint of the R1 finding."""
-    return _live_widget_finding(root).fingerprint
+    return cast(str, _live_widget_finding(root).fingerprint)
 
 
 def _live_widget_finding(root: Path) -> Any:
@@ -2472,8 +2472,6 @@ def test_t6b_fsync_called_per_outcome(tmp_path: Path, monkeypatch: pytest.Monkey
     """
     import os as _os
 
-    from elspeth_lints.core import reaudit_sidecar
-
     fsync_calls: list[int] = []
     real_fsync = _os.fsync
 
@@ -2481,7 +2479,7 @@ def test_t6b_fsync_called_per_outcome(tmp_path: Path, monkeypatch: pytest.Monkey
         fsync_calls.append(fd)
         real_fsync(fd)
 
-    monkeypatch.setattr(reaudit_sidecar.os, "fsync", spy_fsync)
+    monkeypatch.setattr("elspeth_lints.core.reaudit_sidecar.os.fsync", spy_fsync)
 
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
@@ -2891,6 +2889,96 @@ def test_t6d_resume_after_sigkill_truncates_partial_line_and_appends_cleanly(tmp
     # Also: the partial prefix should NOT appear anywhere in the
     # truncated file (it was dropped wholesale).
     assert partial_prefix not in final_bytes, "partial prefix bytes survived truncation — T6d truncation point was wrong"
+
+
+def test_resume_preserves_complete_unterminated_final_outcome(tmp_path: Path) -> None:
+    """A complete JSON outcome without its newline is durable and must not be truncated."""
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarHeader,
+        SidecarWriter,
+        compute_allowlist_hash,
+        load_sidecar,
+        sidecar_path_for,
+    )
+
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    run_id = "completeoutcome"
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+    header = SidecarHeader(
+        run_id=run_id,
+        started_at=datetime.now(UTC),
+        total_entries=3,
+        allowlist_path=str(allowlist_dir),
+        allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        rule_filter="trust_tier.tier_model",
+        since_iso=None,
+        limit=None,
+        include_pre_judge=False,
+    )
+    with SidecarWriter(sidecar, header) as writer:
+        for index in range(3):
+            writer.write_outcome(
+                _fixed_outcome(
+                    key=f"entry-{index}",
+                    divergence=ReauditDivergence.STILL_AGREES,
+                    original_verdict=JudgeVerdict.ACCEPTED,
+                    fresh_verdict=JudgeVerdict.ACCEPTED,
+                    fresh_rationale="ok",
+                )
+            )
+
+    lines = sidecar.read_text(encoding="utf-8").splitlines(keepends=True)
+    sidecar.write_bytes("".join(lines).rstrip("\n").encode("utf-8"))
+    assert not sidecar.read_bytes().endswith(b"\n")
+    loaded_before = load_sidecar(sidecar)
+    assert len(loaded_before.outcomes) == 3
+
+    with SidecarWriter(sidecar, header, append=True, on_resume_locked=lambda loaded: None):
+        pass
+
+    loaded_after = load_sidecar(sidecar)
+    assert len(loaded_after.outcomes) == 3
+    assert loaded_after.classified_keys == loaded_before.classified_keys
+    assert sidecar.read_bytes().endswith(b"\n")
+
+
+def test_resume_preserves_complete_unterminated_header_only_sidecar(tmp_path: Path) -> None:
+    """A header-only sidecar missing its newline must stay readable on resume."""
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarHeader,
+        SidecarWriter,
+        compute_allowlist_hash,
+        load_sidecar,
+        sidecar_path_for,
+    )
+
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    run_id = "headeronly"
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+    header = SidecarHeader(
+        run_id=run_id,
+        started_at=datetime.now(UTC),
+        total_entries=0,
+        allowlist_path=str(allowlist_dir),
+        allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        rule_filter="trust_tier.tier_model",
+        since_iso=None,
+        limit=None,
+        include_pre_judge=False,
+    )
+    with SidecarWriter(sidecar, header):
+        pass
+    sidecar.write_bytes(sidecar.read_text(encoding="utf-8").rstrip("\n").encode("utf-8"))
+    assert not sidecar.read_bytes().endswith(b"\n")
+    assert load_sidecar(sidecar).header.run_id == run_id
+
+    with SidecarWriter(sidecar, header, append=True, on_resume_locked=lambda loaded: None):
+        pass
+
+    loaded_after = load_sidecar(sidecar)
+    assert loaded_after.header.run_id == run_id
+    assert loaded_after.outcomes == ()
+    assert sidecar.read_bytes().endswith(b"\n")
 
 
 def test_t6d_truncate_is_idempotent_on_clean_sidecar(tmp_path: Path) -> None:

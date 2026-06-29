@@ -17,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
 ACTIONLINT_CONFIG = REPO_ROOT / ".github" / "actionlint.yaml"
 JUDGE_GATES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "enforce-allowlist-judge-gates.yaml"
+CODEQL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "codeql.yaml"
+CODEQL_CONFIG = REPO_ROOT / ".github" / "codeql" / "codeql-config.yml"
 _SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|"})
 
 
@@ -182,6 +184,20 @@ def test_judge_gates_workflow_has_bounded_job_timeouts() -> None:
     for job_name in ("check-override-rate",):
         job = judge_workflow["jobs"][job_name]
         assert job["timeout-minutes"] == 15
+
+
+def test_codeql_security_suites_do_not_filter_by_problem_severity() -> None:
+    """Security suites must not drop security queries whose problem severity is warning."""
+    workflow = _workflow(CODEQL_WORKFLOW)
+    init_step = _step(workflow["jobs"]["analyze"], "Initialize CodeQL")
+    queries = init_step["with"]["queries"]
+    assert "security-extended" in queries
+    assert "security-and-quality" in queries
+
+    config = _workflow(CODEQL_CONFIG)
+    for query_filter in config.get("query-filters", ()):
+        exclude = query_filter.get("exclude", {})
+        assert "problem.severity" not in exclude
 
 
 def test_override_rate_workflow_pins_threshold_policy() -> None:

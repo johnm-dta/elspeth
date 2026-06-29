@@ -67,6 +67,8 @@ _PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
+_HTTP_URL_CANDIDATE_RE = re.compile(r"https?://[^\s'\"<>]+")
+
 # Key-name match is case-insensitive and separator-insensitive (see
 # ``_is_secret_key_name``). Every entry must be lowercase here.
 #
@@ -155,6 +157,21 @@ def _is_secret_key_name(key: str) -> bool:
 
 
 def _contains_sensitive_http_url(value: str) -> bool:
+    return any(_parsed_http_url_contains_sensitive_parts(candidate) for candidate in _http_url_candidates(value))
+
+
+def _http_url_candidates(value: str) -> tuple[str, ...]:
+    parsed = urlparse(value)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        standalone: tuple[str, ...] = ()
+    else:
+        standalone = (value,)
+
+    embedded = tuple(candidate for match in _HTTP_URL_CANDIDATE_RE.finditer(value) if (candidate := match.group(0).rstrip(".,;:!?)]}")))
+    return standalone + embedded
+
+
+def _parsed_http_url_contains_sensitive_parts(value: str) -> bool:
     parsed = urlparse(value)
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         return False

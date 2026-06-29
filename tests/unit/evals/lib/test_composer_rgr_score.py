@@ -174,6 +174,31 @@ class TestBaselineAmberSignals:
 
         assert result["verdict"] == "GREEN", result["amber_reasons"]
 
+    @pytest.mark.parametrize(
+        ("expected_token", "observed_plugin"),
+        [
+            ("rag", "rag_retrieval"),
+            ("rag", "chroma"),
+            ("batch", "batch_stats"),
+            ("batch", "stats"),
+            ("content_safety", "azure_content_safety"),
+            ("content_safety", "moderation"),
+            ("json", "jsonl"),
+        ],
+    )
+    def test_node_kind_group_matches_generated_shape_tokens(self, expected_token: str, observed_plugin: str) -> None:
+        scenario = _scenario(green={"must_have_node_kinds_substring_any_of": [[expected_token]]})
+        result = score(
+            scenario=scenario,
+            messages=[_msg("assistant", "ok")],
+            state=_state_valid(
+                nodes=[{"id": "n0", "node_type": "transform", "plugin": observed_plugin}],
+                outputs=[{"name": "out", "plugin": "csv"}],
+            ),
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
     def test_amber_on_outputs_min(self) -> None:
         result = score(
             scenario=_scenario(green={"must_have_outputs_min": 2}),
@@ -277,6 +302,24 @@ class TestNodeChainInOrder:
 
         result = score(
             scenario=_scenario(green={"must_have_node_chain_in_order": ["csv", "t1", "t2", "jsonl"]}),
+            messages=[_msg("assistant", "ok")],
+            state=state,
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    def test_chain_matches_generated_shape_tokens(self) -> None:
+        state = _state_valid(
+            source={"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+            nodes=[
+                {"id": "n0", "node_type": "transform", "plugin": "rag_retrieval"},
+                {"id": "n1", "node_type": "transform", "plugin": "azure_content_safety"},
+            ],
+            outputs=[{"name": "out", "plugin": "jsonl"}],
+        )
+
+        result = score(
+            scenario=_scenario(green={"must_have_node_chain_in_order": ["csv", "rag", "content_safety", "json"]}),
             messages=[_msg("assistant", "ok")],
             state=state,
         )
@@ -669,6 +712,16 @@ class TestOutputPluginAsserters:
         )
         assert result["verdict"] == "AMBER"
         assert any("output plugins" in r and "csv" in r and "json" in r for r in result["amber_reasons"])
+
+    def test_green_when_required_output_plugin_is_generated_shape_token(self) -> None:
+        state = _state_valid(outputs=[{"name": "out", "plugin": "jsonl", "options": {}}])
+        result = score(
+            scenario=_scenario(green={"must_have_output_plugins": ["json"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
 
 
 # --------------------------------------------------------------------------

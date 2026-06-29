@@ -121,6 +121,33 @@ def _normalise_plugin_token(value: Any) -> str:
     return value.strip().lower() if isinstance(value, str) else ""
 
 
+_SHAPE_TOKEN_ALIASES: dict[str, frozenset[str]] = {
+    "batch": frozenset({"stats"}),
+    "content_safety": frozenset({"moderation"}),
+    "json": frozenset({"jsonl"}),
+    "rag": frozenset({"chroma"}),
+}
+
+
+def _plugin_token_matches(expected: Any, observed: Any) -> bool:
+    """Return true when a generated shape token matches an observed plugin.
+
+    Scenario generation emits short shape tokens for plugin families
+    (`rag`, `content_safety`, `llm`) so committed panel criteria can match
+    pack-prefixed or suffixed concrete plugin names without accepting arbitrary
+    substring hits such as `gate` inside `aggregate`.
+    """
+    token = _normalise_plugin_token(expected)
+    plugin = _normalise_plugin_token(observed)
+    if not token or not plugin:
+        return False
+    if token == plugin:
+        return True
+    if plugin in _SHAPE_TOKEN_ALIASES.get(token, frozenset()):
+        return True
+    return plugin.startswith(f"{token}_") or plugin.endswith(f"_{token}") or f"_{token}_" in plugin
+
+
 def _workflow_plugins_for_chain(state: Any) -> list[str]:
     """Extract source, node, and output plugin/type identifiers for chain checks."""
     if not isinstance(state, dict):
@@ -154,8 +181,8 @@ def _workflow_plugins_for_chain(state: Any) -> list[str]:
 def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
     """Return an AMBER reason if `chain` identifiers don't appear in workflow order.
 
-    Each element in `chain` must be a case-insensitive exact match for some
-    source plugin, node plugin/type, or output plugin identifier, and the
+    Each element in `chain` must be a case-insensitive plugin token match for
+    some source plugin, node plugin/type, or output plugin identifier, and the
     matches must be strictly non-decreasing in index.
     """
     plugins = _workflow_plugins_for_chain(state)
@@ -164,7 +191,7 @@ def _check_node_chain_in_order(state: Any, chain: list[str]) -> str | None:
         needle_l = _normalise_plugin_token(needle)
         match_idx: int | None = None
         for i in range(cursor, len(plugins)):
-            if needle_l == plugins[i]:
+            if _plugin_token_matches(needle_l, plugins[i]):
                 match_idx = i
                 break
         if match_idx is None:
@@ -238,16 +265,22 @@ def _output_plugins(state: Any) -> list[str]:
 
 
 def _check_output_plugins(state: Any, expected: list[str]) -> str | None:
-    """None when output plugins satisfy the expected lower-case multiset."""
+    """None when output plugins satisfy the expected token multiset."""
     expected_plugins = [plugin.lower() for plugin in expected if isinstance(plugin, str) and plugin]
     if not expected_plugins:
         return None
 
     observed = _output_plugins(state)
-    observed_counts = Counter(observed)
+    remaining = list(observed)
     missing: list[str] = []
     for plugin, required_count in Counter(expected_plugins).items():
-        observed_count = observed_counts[plugin]
+        observed_count = 0
+        for _ in range(required_count):
+            match_idx = next((i for i, candidate in enumerate(remaining) if _plugin_token_matches(plugin, candidate)), None)
+            if match_idx is None:
+                break
+            observed_count += 1
+            remaining.pop(match_idx)
         if observed_count < required_count:
             missing.append(f"{plugin} x{required_count} (found {observed_count})")
     if not missing:
@@ -697,11 +730,12 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
         kind_groups = green.get("must_have_node_kinds_substring_any_of") or []
         if kind_groups:
             ok = False
-            workflow_plugin_set = set(workflow_plugins)
             for group in kind_groups:
                 required_tokens = [_normalise_plugin_token(needle) for needle in group]
                 required_tokens = [token for token in required_tokens if token]
-                if required_tokens and all(token in workflow_plugin_set for token in required_tokens):
+                if required_tokens and all(
+                    any(_plugin_token_matches(token, plugin) for plugin in workflow_plugins) for token in required_tokens
+                ):
                     ok = True
                     break
             if not ok:

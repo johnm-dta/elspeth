@@ -247,6 +247,47 @@ def test_component_type_aliased_base_with_declared_type_is_clean() -> None:
     assert findings == []
 
 
+def test_component_type_known_literal_base_not_suppressed_by_alias_target() -> None:
+    # elspeth-81fb854e58: a literal known untyped base keeps the CT1 reporting
+    # decision even if the import alias map also has a stale typed target for
+    # the same local name.
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import SourceDataConfig as DataPluginConfig
+
+            class DataPluginConfig:
+                pass
+
+            class AliasTargetShouldNotSuppress(DataPluginConfig):
+                path: str
+            """),
+            Path("bad.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["CT1"]
+    assert "AliasTargetShouldNotSuppress" in findings[0].message
+
+
+def test_component_type_accepts_non_known_alias_to_typed_base() -> None:
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import SourceDataConfig as SourceBase
+
+            class AliasInheritedType(SourceBase):
+                path: str
+            """),
+            Path("good.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
 def test_component_type_flags_invalid_component_type_value() -> None:
     # elspeth-a2b240c29b: an out-of-contract string label must be flagged, not
     # silently accepted. The documented contract allows only source/sink/transform.

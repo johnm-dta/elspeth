@@ -1881,8 +1881,8 @@ class TestFieldResolutionUnion:
 
 class TestFieldMappingCollisionPolarity:
     """B3.1: field_mapping-created collisions are config faults (crash), not data
-    faults (quarantine). Mirrors the azure test suite's
-    test_json_field_mapping_collision_crashes_not_quarantines."""
+    faults (quarantine). Azure Blob JSON differs because blob row field sets are
+    external source data and are quarantined per row."""
 
     def test_field_mapping_collision_crashes_not_quarantines(self) -> None:
         """A field_mapping that collapses two fields into one final name is a CONFIG

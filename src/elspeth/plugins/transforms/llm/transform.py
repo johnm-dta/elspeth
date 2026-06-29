@@ -139,6 +139,27 @@ def _shutdown_requested_result(
     return TransformResult.error(cast(TransformErrorReason, reason), retryable=False)
 
 
+def _blank_required_input_result(row: PipelineRow, required_fields: frozenset[str]) -> TransformResult | None:
+    """Return a row error when declared LLM input content is blank at runtime."""
+    for field_name in sorted(required_fields):
+        if field_name not in row:
+            continue
+        value = row[field_name]
+        if value is None or (type(value) is str and not value.strip()):
+            return TransformResult.error(
+                cast(
+                    TransformErrorReason,
+                    {
+                        "reason": "required_input_field_blank",
+                        "field": field_name,
+                        "message": "Declared required_input_fields must contain non-blank row content before LLM dispatch.",
+                    },
+                ),
+                retryable=False,
+            )
+    return None
+
+
 def _finish_reason_error(
     finish_reason: ParsedFinishReason,
     *,
@@ -1626,6 +1647,10 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
         if self._provider is None:
             raise RuntimeError("Provider not initialized — _process_row called before on_start()")
         self._shutdown_event = cast("threading.Event | None", getattr(ctx, "shutdown_event", None))
+
+        blank_required_input = _blank_required_input_result(row, self.declared_input_fields)
+        if blank_required_input is not None:
+            return blank_required_input
 
         return self._strategy.execute(
             row,

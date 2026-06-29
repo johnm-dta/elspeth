@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from elspeth_lints.core.allowlist import Allowlist, AllowlistEntry
+from elspeth_lints.core.allowlist_governance import allowlist_governance_findings_for_root
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.manifest.contract_manifest.metadata import (
     RULE_ID,
@@ -107,33 +109,6 @@ class RegistrationCall:
     trivial_body_sites: frozenset[str] = frozenset()
 
 
-@dataclass(slots=True)
-class ContractAllowlistEntry:
-    """A single legacy allow_contracts entry."""
-
-    key: str
-    owner: str
-    reason: str
-    task: str
-    expires: date | None
-    matched: bool = field(default=False, compare=False)
-
-
-@dataclass(slots=True)
-class ContractAllowlist:
-    """Legacy allow_contracts allowlist."""
-
-    entries: list[ContractAllowlistEntry]
-
-    def match(self, finding: ContractFinding) -> ContractAllowlistEntry | None:
-        """Return the matching entry for a finding, if any."""
-        for entry in self.entries:
-            if entry.key == finding.canonical_key:
-                entry.matched = True
-                return entry
-        return None
-
-
 @dataclass(frozen=True, slots=True)
 class ContractManifestRule:
     """Detect declaration contract manifest drift."""
@@ -165,8 +140,14 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
         manifest_file_rel,
         assign_line,
     )
-    active = [finding for finding in contract_findings if allowlist.match(finding) is None]
-    return [to_lint_finding(finding) for finding in active]
+    active = [finding for finding in contract_findings if _match_contract_allowlist(allowlist, finding) is None]
+    governance = allowlist_governance_findings_for_root(
+        allowlist,
+        allowlist_dir,
+        root=root,
+        allowlist_dir_override=allowlist_dir_override,
+    )
+    return [to_lint_finding(finding) for finding in active] + governance
 
 
 def resolve_scan_roots(root: Path) -> tuple[Path, Path]:
@@ -559,34 +540,74 @@ def to_lint_finding(finding: ContractFinding) -> Finding:
     )
 
 
-def load_contract_allowlist(path: Path) -> ContractAllowlist:
+def _match_contract_allowlist(allowlist: Allowlist, finding: ContractFinding) -> AllowlistEntry | None:
+    """Return the matching legacy allow_contracts entry for a finding, if any."""
+    for entry in allowlist.entries:
+        if entry.key == finding.canonical_key:
+            entry.matched = True
+            return entry
+    return None
+
+
+def load_contract_allowlist(path: Path) -> Allowlist:
     """Load legacy allow_contracts YAML from a file or directory."""
     if path.is_dir():
-        entries: list[ContractAllowlistEntry] = []
+        defaults = _load_contract_allowlist_defaults(path / "_defaults.yaml")
+        entries: list[AllowlistEntry] = []
         for yaml_file in sorted(file for file in path.glob("*.yaml") if file.name != "_defaults.yaml"):
-            entries.extend(_parse_allowlist_entries(_load_yaml(yaml_file)))
-        return ContractAllowlist(entries=entries)
+            entries.extend(_parse_allowlist_entries(_load_yaml(yaml_file), source_file=yaml_file.name))
+        return Allowlist(entries=entries, fail_on_stale=defaults[0], fail_on_expired=defaults[1])
     if not path.exists():
-        return ContractAllowlist(entries=[])
-    return ContractAllowlist(entries=_parse_allowlist_entries(_load_yaml(path)))
+        return Allowlist(entries=[])
+    data = _load_yaml(path)
+    defaults = _contract_allowlist_defaults_from_mapping(data)
+    return Allowlist(
+        entries=_parse_allowlist_entries(data, source_file=path.name),
+        fail_on_stale=defaults[0],
+        fail_on_expired=defaults[1],
+    )
 
 
-def _parse_allowlist_entries(data: dict[str, Any]) -> list[ContractAllowlistEntry]:
-    entries: list[ContractAllowlistEntry] = []
+def _parse_allowlist_entries(data: dict[str, Any], *, source_file: str) -> list[AllowlistEntry]:
+    entries: list[AllowlistEntry] = []
     for item in data.get("allow_contracts", []):
         key = item.get("key", "")
         if not key:
             continue
         entries.append(
-            ContractAllowlistEntry(
+            AllowlistEntry(
                 key=str(key),
                 owner=str(item.get("owner", "unknown")),
                 reason=str(item.get("reason", "")),
-                task=str(item.get("task", "")),
+                safety="contract_manifest",
                 expires=_parse_date(item.get("expires")),
+                source_file=source_file,
             )
         )
     return entries
+
+
+def _load_contract_allowlist_defaults(path: Path) -> tuple[bool, bool]:
+    if not path.exists():
+        return True, True
+    return _contract_allowlist_defaults_from_mapping(_load_yaml(path))
+
+
+def _contract_allowlist_defaults_from_mapping(data: dict[str, Any]) -> tuple[bool, bool]:
+    defaults = data.get("defaults", {})
+    if not isinstance(defaults, dict):
+        defaults = {}
+    return (
+        _bool_value(defaults, "fail_on_stale", default=True),
+        _bool_value(defaults, "fail_on_expired", default=True),
+    )
+
+
+def _bool_value(data: dict[str, Any], key: str, *, default: bool) -> bool:
+    value = data.get(key, default)
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"allow_contracts defaults.{key} must be a boolean; got {value!r}")
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:

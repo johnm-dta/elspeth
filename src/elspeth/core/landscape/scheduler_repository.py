@@ -68,14 +68,15 @@ def token_from_journal_item(
     item: TokenWorkItem,
     *,
     attempt_offset: int,
-    resume_checkpoint_id: str,
+    resume_checkpoint_id: str | None,
 ) -> TokenInfo:
-    """Rebuild a ``TokenInfo`` from a journal BLOCKED row (F1 resume path).
+    """Rebuild a ``TokenInfo`` from a journal BLOCKED row.
 
-    Shared by the aggregation and coalesce executors' ``restore_from_journal``:
-    the journal row is authoritative for the payload and token lineage, while
-    the resume provenance (``attempt_offset`` = audit-derived max_attempt + 1,
-    ``resume_checkpoint_id``) is supplied by the restoring caller.
+    Shared by barrier intake and the aggregation/coalesce executors'
+    ``restore_from_journal`` paths. The journal row is authoritative for the
+    payload and token lineage. Resume callers supply audit-derived
+    ``attempt_offset`` and ``resume_checkpoint_id``; normal-run follower
+    handoffs use offset zero with no checkpoint provenance.
 
     Lives next to ``serialize_row_payload`` / ``deserialize_row_payload``
     because the payload round-trip is the heart of the mapping.

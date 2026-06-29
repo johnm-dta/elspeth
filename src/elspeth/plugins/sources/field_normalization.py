@@ -35,17 +35,25 @@ class ExternalHeaderError(ValueError):
     """Raised when EXTERNAL header data (Tier 3) cannot be resolved to valid,
     collision-free field names.
 
-    This is distinct from configuration errors (a bad ``field_mapping`` key, a
-    mapping that creates a collision, a non-identifier mapping value) which are
-    Tier-1 faults in code/config we own and MUST crash the run. ExternalHeaderError
-    marks failures *caused by the external source's own header bytes* — empty
-    headers, headers that collide after normalization, duplicate raw headers —
-    which a source catches at the header boundary to record + quarantine/discard
-    per ``on_validation_failure``, exactly as it does for a malformed data row.
+    This is distinct from configuration errors (a bad ``field_mapping`` key or a
+    non-identifier mapping value) which are Tier-1 faults in code/config we own
+    and MUST crash the run. ExternalHeaderError marks failures *caused by the
+    external source's own header bytes* — empty headers, headers that collide
+    after normalization, duplicate raw headers — which a source catches at the
+    header boundary to record + quarantine/discard per ``on_validation_failure``,
+    exactly as it does for a malformed data row.
 
     Subclasses ``ValueError`` so existing broad ``except ValueError`` callers keep
     working; sources catch ``ExternalHeaderError`` *specifically* so config
     ``ValueError``s still propagate and crash.
+    """
+
+
+class FieldMappingCollisionError(ValueError):
+    """Raised when field_mapping creates duplicate final field names.
+
+    The source boundary decides whether this is an owned config fault for fixed
+    headers, or a row-level external-data fault for sparse JSON-like records.
     """
 
 
@@ -152,7 +160,8 @@ def check_mapping_collisions(
         field_mapping: The mapping that was applied
 
     Raises:
-        ValueError: If mapping causes multiple fields to have same final name
+        FieldMappingCollisionError: If mapping causes multiple fields to have
+            same final name.
     """
     if len(post_mapping) != len(set(post_mapping)):
         # Build mapping from target to all sources (both mapped and passthrough)
@@ -164,7 +173,7 @@ def check_mapping_collisions(
 
         if collisions:
             details = [f"  '{target}' <- {', '.join(repr(s) for s in sources)}" for target, sources in sorted(collisions.items())]
-            raise ValueError("field_mapping creates collision:\n" + "\n".join(details))
+            raise FieldMappingCollisionError("field_mapping creates collision:\n" + "\n".join(details))
 
 
 def check_duplicate_raw_headers(raw_headers: list[str]) -> None:
@@ -244,7 +253,10 @@ def resolve_field_names(
         FieldResolution with final headers, audit mapping, and algorithm version
 
     Raises:
-        ValueError: On collision, invalid mapping key, or configuration error
+        ExternalHeaderError: On external header normalization failures.
+        FieldMappingCollisionError: On field_mapping-created duplicate final names.
+        ValueError: On invalid mapping key, invalid mapping output, or
+            configuration error.
     """
     # Determine source of headers
     if columns is not None:

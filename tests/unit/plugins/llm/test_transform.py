@@ -288,6 +288,27 @@ class TestSingleQuerySuccess:
         assert result.row["llm_response"] == "classified as: positive"
         assert result.row["llm_response_model"] == "gpt-4o"
 
+    def test_blank_required_input_field_fails_before_provider_call(self) -> None:
+        """A declared required input field that renders blank is a row fault, not
+        permission to ask the model to infer from weaker fields.
+        """
+        transform, mock_provider = _make_transform_with_mock_provider()
+        mock_provider.execute_query.return_value = LLMQueryResult(
+            content="fabricated answer",
+            usage=TokenUsage.known(10, 5),
+            model="gpt-4o",
+            finish_reason=FinishReason.STOP,
+        )
+
+        result = transform._process_row(_make_row({"text": "   ", "url": "https://example.invalid"}), _make_ctx())
+
+        assert result.status == "error"
+        assert result.retryable is False
+        assert result.reason is not None
+        assert result.reason["reason"] == "required_input_field_blank"
+        assert result.reason["field"] == "text"
+        mock_provider.execute_query.assert_not_called()
+
     def test_contract_propagation_single_query(self) -> None:
         """Single-query mode uses propagate_contract on input contract."""
         transform, mock_provider = _make_transform_with_mock_provider()

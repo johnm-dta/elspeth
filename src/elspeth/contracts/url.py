@@ -8,7 +8,7 @@ Usage:
     from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl
 
     # Database URLs - extracts password, fingerprints it, returns sanitized URL
-    sanitized = SanitizedDatabaseUrl.from_raw_url("postgresql://user:secret@host/db")
+    sanitized = SanitizedDatabaseUrl.from_raw_url(raw_database_url)
     # sanitized.sanitized_url = "postgresql://user@host/db"
     # sanitized.fingerprint = "abc123..." (HMAC of password)
 
@@ -20,7 +20,7 @@ Usage:
 
 import json as json_module
 from dataclasses import dataclass
-from urllib.parse import parse_qs, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, unquote, unquote_plus, urlencode, urlparse, urlunparse
 
 from elspeth.contracts.security import (
     SecretFingerprintError,
@@ -89,6 +89,10 @@ SENSITIVE_PARAMS = frozenset(
         "key",
         "secret",
         "password",
+        "pwd",
+        "passwd",
+        "pass",
+        "sslpassword",
         "auth",
         # OAuth patterns
         "access_token",
@@ -106,6 +110,20 @@ SENSITIVE_PARAMS = frozenset(
         "credentials",
     }
 )
+
+
+def _strip_sensitive_param_parts(raw_params: str) -> str:
+    """Remove sensitive query/fragment pairs while preserving remaining raw text."""
+    if not raw_params:
+        return ""
+
+    kept_parts: list[str] = []
+    for part in raw_params.split("&"):
+        key = part.split("=", 1)[0]
+        if _base_param_name(unquote_plus(key).lower()) in SENSITIVE_PARAMS:
+            continue
+        kept_parts.append(part)
+    return "&".join(kept_parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +146,22 @@ class SanitizedDatabaseUrl:
         if parsed.password is not None:
             raise ValueError(
                 "SanitizedDatabaseUrl cannot contain a password in the URL. Use SanitizedDatabaseUrl.from_raw_url() to sanitize first."
+            )
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        sensitive_in_query = [k for k in query_params if _base_param_name(k.lower()) in SENSITIVE_PARAMS]
+        if sensitive_in_query:
+            raise ValueError(
+                f"SanitizedDatabaseUrl cannot contain sensitive query parameters: "
+                f"{sensitive_in_query}. "
+                f"Use SanitizedDatabaseUrl.from_raw_url() to sanitize first."
+            )
+        fragment_params = parse_qs(parsed.fragment, keep_blank_values=True)
+        sensitive_in_fragment = [k for k in fragment_params if _base_param_name(k.lower()) in SENSITIVE_PARAMS]
+        if sensitive_in_fragment:
+            raise ValueError(
+                f"SanitizedDatabaseUrl cannot contain sensitive fragment parameters: "
+                f"{sensitive_in_fragment}. "
+                f"Use SanitizedDatabaseUrl.from_raw_url() to sanitize first."
             )
 
     @classmethod
@@ -157,35 +191,54 @@ class SanitizedDatabaseUrl:
                                     and fail_if_no_key=True
         """
         parsed = urlparse(url)
+        query_params = parse_qs(parsed.query, keep_blank_values=True)
+        fragment_params = parse_qs(parsed.fragment, keep_blank_values=True)
+        has_sensitive_query_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in query_params)
+        has_sensitive_fragment_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in fragment_params)
 
-        if parsed.password is None:
+        if parsed.password is None and not has_sensitive_query_keys and not has_sensitive_fragment_keys:
             return cls(sanitized_url=url, fingerprint=None)
 
-        # Compute fingerprint if we have a key
-        fingerprint: str | None = None
-        try:
-            get_fingerprint_key()
-            have_key = True
-        except ValueError:
-            have_key = False
-
-        if have_key:
+        sensitive_values: list[str] = []
+        if parsed.password is not None:
             # Decode percent-encoding before fingerprinting so the fingerprint
             # represents the actual secret value, not the URL encoding.
             # urlparse().password preserves percent-encoding (e.g., "p%40ss" for "p@ss").
-            fingerprint = secret_fingerprint(unquote(parsed.password))
-        elif fail_if_no_key:
-            raise SecretFingerprintError(
-                "Database URL contains a password but ELSPETH_FINGERPRINT_KEY "
-                "is not set. Either set the environment variable or use "
-                "ELSPETH_ALLOW_RAW_SECRETS=true for development "
-                "(not recommended for production)."
-            )
-        # else: dev mode - just remove password without fingerprint
+            sensitive_values.append(unquote(parsed.password))
+        for key, values in query_params.items():
+            if _base_param_name(key.lower()) in SENSITIVE_PARAMS:
+                sensitive_values.extend(v for v in values if v)
+        for key, values in fragment_params.items():
+            if _base_param_name(key.lower()) in SENSITIVE_PARAMS:
+                sensitive_values.extend(v for v in values if v)
+
+        # Compute fingerprint if we have a key
+        fingerprint: str | None = None
+        if sensitive_values:
+            try:
+                get_fingerprint_key()
+                have_key = True
+            except ValueError:
+                have_key = False
+
+            if have_key:
+                if len(sensitive_values) == 1:
+                    fingerprint = secret_fingerprint(sensitive_values[0])
+                else:
+                    combined = json_module.dumps(sorted(sensitive_values), separators=(",", ":"))
+                    fingerprint = secret_fingerprint(combined)
+            elif fail_if_no_key:
+                raise SecretFingerprintError(
+                    "Database URL contains a password but ELSPETH_FINGERPRINT_KEY "
+                    "is not set. Either set the environment variable or use "
+                    "ELSPETH_ALLOW_RAW_SECRETS=true for development "
+                    "(not recommended for production)."
+                )
+            # else: dev mode - just remove password without fingerprint
+        # else: only empty sensitive values (e.g., ?password=) - no fingerprint needed
 
         # Reconstruct netloc without password.
-        # hostname can be None for Unix-socket DSNs like
-        # postgresql://user:pass@/dbname?host=/var/run/postgresql
+        # hostname can be None for Unix-socket DSNs with userinfo passwords.
         host_part = ""
         if parsed.hostname:
             if ":" in parsed.hostname:
@@ -201,14 +254,17 @@ class SanitizedDatabaseUrl:
         else:
             netloc = f"{host_part}{port_str}"
 
+        sanitized_query = _strip_sensitive_param_parts(parsed.query)
+        sanitized_fragment = _strip_sensitive_param_parts(parsed.fragment)
+
         sanitized = urlunparse(
             (
                 parsed.scheme,
                 netloc,
                 parsed.path,
                 parsed.params,
-                parsed.query,
-                parsed.fragment,
+                sanitized_query,
+                sanitized_fragment,
             )
         )
 

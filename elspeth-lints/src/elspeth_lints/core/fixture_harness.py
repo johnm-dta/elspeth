@@ -7,6 +7,7 @@ import importlib
 import importlib.util
 import json
 import sys
+import tempfile
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -129,7 +130,17 @@ def _is_fixture_item(path: Path) -> bool:
 def _run_fixture_case(case: RuleFixtureCase) -> list[Finding]:
     rule = _rule_for_case(case)
     root = case.fixture_path if case.fixture_path.is_dir() else case.fixture_path.parent
-    context = RuleContext(root=root)
+    fixture_allowlist_dir = _fixture_allowlist_dir(root)
+    if fixture_allowlist_dir is not None:
+        context = RuleContext(root=root, allowlist_dir_override=fixture_allowlist_dir)
+        return _run_fixture_case_with_context(case, rule, root, context)
+
+    with tempfile.TemporaryDirectory(prefix="elspeth-lints-empty-allowlist-") as empty_allowlist:
+        context = RuleContext(root=root, allowlist_dir_override=Path(empty_allowlist))
+        return _run_fixture_case_with_context(case, rule, root, context)
+
+
+def _run_fixture_case_with_context(case: RuleFixtureCase, rule: Rule, root: Path, context: RuleContext) -> list[Finding]:
     if rule.scope == RuleScope.WHOLE_REPO:
         return list(rule.analyze(ast.Module(body=[], type_ignores=[]), root, context))
 
@@ -153,6 +164,17 @@ def _run_fixture_case(case: RuleFixtureCase) -> list[Finding]:
             raise AssertionError(f"{case.name}: fixture I/O error ({parsed.error_type}): {parsed.message}")
         findings.extend(_run_incremental_rule(rule, parsed, context))
     return findings
+
+
+def _fixture_allowlist_dir(root: Path) -> Path | None:
+    """Return the fixture-local allowlist directory when one is unambiguous."""
+    cicd_dir = root / "config" / "cicd"
+    if not cicd_dir.is_dir():
+        return None
+    allowlist_dirs = tuple(sorted(item for item in cicd_dir.iterdir() if item.is_dir()))
+    if len(allowlist_dirs) == 1:
+        return allowlist_dirs[0]
+    return None
 
 
 def _rule_for_case(case: RuleFixtureCase) -> Rule:

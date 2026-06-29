@@ -614,25 +614,32 @@ class TestAzureBlobSourceJSON:
         assert len(quarantined) == 1
         assert "Expected JSON object" in quarantined[0].quarantine_error
 
-    def test_json_field_mapping_collision_crashes_not_quarantines(self, ctx: PluginContext) -> None:
-        """A field_mapping that collapses two distinct fields into one final name is a
-        CONFIG fault (ours), not bad source data: it must crash, not be quarantined.
-
-        Here field_mapping maps 'a' -> 'x' while the row also carries a passthrough
-        'x', so resolve_field_names raises a plain ValueError ('field_mapping creates
-        collision'). After narrowing _validate_and_yield to catch only the Tier-3
-        ExternalHeaderError marker, this config ValueError propagates and crashes —
-        mirroring the CSV header path (which lets the same plain ValueError escape).
-        Previously the broad `except ValueError` masked it as a per-row quarantine.
+    @pytest.mark.parametrize(
+        ("data", "quarantine_index"),
+        [
+            ([{"a": 1, "x": 2}, {"a": 3}], 0),
+            ([{"a": 1}, {"a": 2, "x": 3}, {"a": 4}], 1),
+        ],
+    )
+    def test_json_field_mapping_collision_quarantines_not_crashes(
+        self,
+        data: list[dict[str, int]],
+        quarantine_index: int,
+        ctx: PluginContext,
+    ) -> None:
+        """Azure Blob JSON rows are external data, so row-created mapping collisions
+        must route through on_validation_failure instead of aborting the run.
         """
-        data = [{"a": 1, "x": 2}]
         source = _make_source(_base_config(format="json", field_mapping={"a": "x"}))
 
-        with (
-            patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())),
-            pytest.raises(ValueError, match="collision"),
-        ):
-            list(source.load(ctx))
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == len(data)
+        assert rows[quarantine_index].is_quarantined is True
+        assert rows[quarantine_index].quarantine_error is not None
+        assert "field_mapping creates collision" in rows[quarantine_index].quarantine_error
+        assert [row.row for row in rows if not row.is_quarantined] == [{"x": row["a"]} for row in data if "x" not in row]
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,7 @@ from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
 from elspeth.contracts.coordination import CoordinationSnapshot, CoordinationToken
 from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
+from elspeth.contracts.events import RunSummary
 from elspeth.contracts.payload_store import PayloadStore
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.plugin_protocols import SinkProtocol, SourceProtocol, TransformProtocol
@@ -38,7 +39,7 @@ from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator import PipelineConfig, prepare_for_run
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
-from elspeth.engine.orchestrator.core import Orchestrator
+from elspeth.engine.orchestrator.core import Orchestrator, _RunFailedWithPartialResultError
 from elspeth.engine.orchestrator.resume import run_resume_processing_loop, setup_resume_context
 from elspeth.engine.orchestrator.types import ExecutionCounters, LoopContext, LoopResult, ResumeState
 from elspeth.engine.processor import RowProcessor
@@ -280,6 +281,98 @@ class TestResumeFinalizesAsFailed:
         assert found_failed, (
             f"Run should be finalized as FAILED when resume fails with non-shutdown exception. finalize_run calls: {finalize_calls}"
         )
+
+    def test_resume_partial_failure_ceremony_reports_cumulative_audit_counters(self) -> None:
+        """Partial-result resume failures must not emit resume-local-only counters."""
+        db = make_landscape_db()
+        event_bus = MagicMock()
+        emitted_events: list[object] = []
+        event_bus.emit.side_effect = emitted_events.append
+        orch = Orchestrator(db, event_bus=event_bus)
+        run_id = "run-resume-partial-audit-counters"
+        _insert_failed_run(db, run_id)
+
+        mock_factory = MagicMock(spec=RecorderFactory)
+        coordination_token = _make_heartbeat_safe_token(run_id, mock_factory)
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-resume-partial-audit-counters",
+            run_id=run_id,
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(checkpoint=checkpoint, sequence_number=checkpoint.sequence_number)
+        resume_state = ResumeState(
+            factory=mock_factory,
+            run_id=run_id,
+            unprocessed_rows=(
+                ResumedRow(
+                    row_id="row-resumed",
+                    row_index=1,
+                    source_node_id=NodeID("source"),
+                    row_data={"value": "resumed"},
+                ),
+            ),
+            incomplete_by_row={},
+            recovery_manager=MagicMock(spec=RecoveryManager),
+            schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
+            source_names_by_source={NodeID("source"): "source"},
+            source_lifecycle_by_source={NodeID("source"): "exhausted"},
+            has_restored_barrier_work=False,
+            coordination_token=coordination_token,
+        )
+        resume_only_result = RunResult(
+            run_id=run_id,
+            status=RunStatus.FAILED,
+            rows_processed=1,
+            rows_succeeded=1,
+            rows_failed=0,
+            rows_routed_success=1,
+            rows_routed_failure=0,
+            rows_quarantined=0,
+            routed_destinations={"default": 1},
+        )
+        baseline_counters = ExecutionCounters(
+            rows_processed=3,
+            rows_succeeded=2,
+            rows_failed=1,
+            rows_routed_success=2,
+            rows_routed_failure=1,
+        )
+        baseline_counters.routed_destinations.update({"default": 2, "failsink": 1})
+        failure = RuntimeError("resume sweep failed")
+
+        with (
+            patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
+            patch.object(
+                orch._resume_coordinator,
+                "process_resumed_rows",
+                side_effect=_RunFailedWithPartialResultError(failure, resume_only_result),
+            ),
+            patch(
+                "elspeth.engine.orchestrator.resume.derive_resume_terminal_status_from_audit",
+                return_value=(RunStatus.COMPLETED_WITH_FAILURES, baseline_counters),
+            ),
+            pytest.raises(RuntimeError, match="resume sweep failed"),
+        ):
+            orch.resume(
+                resume_point,
+                MagicMock(spec=PipelineConfig),
+                MagicMock(spec=ExecutionGraph),
+                payload_store=MockPayloadStore(),
+            )
+
+        summaries = [event for event in emitted_events if isinstance(event, RunSummary)]
+        assert len(summaries) == 1
+        summary = summaries[0]
+        assert summary.status.value == "failed"
+        assert summary.total_rows == 4
+        assert summary.succeeded == 3
+        assert summary.failed == 1
+        assert summary.routed_success == 3
+        assert summary.routed_failure == 1
+        assert dict(summary.routed_destinations) == {"default": 3, "failsink": 1}
 
     def test_resume_loop_drains_scheduler_work_before_replaying_rows(self) -> None:
         """Persisted scheduler work supersedes the old unprocessed-row replay path."""

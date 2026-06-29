@@ -48,6 +48,27 @@ today = datetime.now(UTC).date()
 valid_cohorts = {"a", "b1", "b2"}
 
 
+def _is_block_scalar_indicator(value: str) -> bool:
+    """Return True for YAML block scalar indicators like |, |-, >+, or |2."""
+    if not value or value[0] not in {"|", ">"}:
+        return False
+
+    seen_chomp = False
+    seen_indent = False
+    for char in value[1:]:
+        if char in {"+", "-"}:
+            if seen_chomp:
+                return False
+            seen_chomp = True
+        elif char.isdigit() and char != "0":
+            if seen_indent:
+                return False
+            seen_indent = True
+        else:
+            return False
+    return True
+
+
 def _extract_entries(path: Path) -> list[dict[str, str]]:
     """Parse the constrained allowlist YAML shape without external deps.
 
@@ -97,7 +118,7 @@ def _extract_entries(path: Path) -> list[dict[str, str]]:
         key, value = stripped.split(":", 1)
         key = key.strip()
         value = value.strip().strip('"').strip("'")
-        if key in {"commit_sha", "cohort", "reason", "owner", "expires"} and value in {"|", ">"}:
+        if key in {"commit_sha", "cohort", "reason", "owner", "expires"} and _is_block_scalar_indicator(value):
             block_key = key
             block_indent = indent
             block_lines = []

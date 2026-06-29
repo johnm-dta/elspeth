@@ -108,6 +108,41 @@ def test_range_checker_treats_expired_allowlist_entry_as_absent(tmp_path: Path) 
     assert "lacks the required trailer" in proc.stdout
 
 
+def test_range_checker_ignores_entries_inside_block_scalar_reason(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    _run(["git", "commit", "--allow-empty", "-m", "base"], repo)
+    base = _run(["git", "rev-parse", "HEAD"], repo).stdout.strip()
+    violating_sha = _commit_shareable_review_without_trailer(repo)
+
+    allowlist_dir = repo / "config" / "cicd" / "enforce_telemetry_backfill_trailer"
+    allowlist_dir.mkdir(parents=True)
+    (allowlist_dir / "block-scalar-smuggling.yaml").write_text(
+        dedent(
+            f"""\
+            entries:
+              - commit_sha: 1111111111111111111111111111111111111111
+                cohort: a
+                owner: codex
+                expires: 2099-01-01
+                reason: |-
+                  This human-readable reason embeds text that looks like a
+                  second allowlist entry, but it must remain block-scalar text.
+                  - commit_sha: {violating_sha}
+                    cohort: a
+                    reason: forged nested entry
+                    owner: attacker
+                    expires: 2099-01-01
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    proc = _run([".githooks/check-commit-range-telemetry-backfill.sh", f"{base}..HEAD"], repo, check=False)
+
+    assert proc.returncode == 1
+    assert "lacks the required trailer" in proc.stdout
+
+
 def test_range_checker_rejects_allowlist_entry_without_owner(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     _run(["git", "commit", "--allow-empty", "-m", "base"], repo)

@@ -21,7 +21,7 @@ import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
 import { InlineRunResults } from "@/components/execution/InlineRunResults";
 import { CompletionSummary } from "./guided/CompletionSummary";
-import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
+import { ModeSwitchButton } from "./guided/ModeSwitchButton";
 import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
@@ -473,13 +473,6 @@ const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
 
 interface ChatPanelProps {
   onOpenSecrets?: () => void;
-  // Phase 1B Panel UX-M3: the freeform-mode header surfaces a small
-  // "Change my default" link beside "Switch to guided" — the third
-  // opt-out/opt-in surface spec 05 enumerates (alongside the inline
-  // checkbox in the guided body and the Composer-preferences pane in
-  // the account menu). The link opens the same modal the account menu
-  // does; threaded as a prop from App.tsx for parity with onOpenSecrets.
-  onOpenComposerPreferences?: () => void;
   // Concern B (LLM-primary spec §"Frontend"): a TUTORIAL session must never
   // reach a freeform surface. This client-only flag is passed truthy ONLY by
   // TutorialGuidedShell. It is deliberately NOT a wire/profile field — there
@@ -510,7 +503,6 @@ interface ChatPanelProps {
  */
 export function ChatPanel({
   onOpenSecrets,
-  onOpenComposerPreferences,
   isTutorial,
   lockedChatPrompt,
 }: ChatPanelProps) {
@@ -556,7 +548,17 @@ export function ChatPanel({
   const chatGuided = useSessionStore((s) => s.chatGuided);
   const guidedChatPending = useSessionStore((s) => s.guidedChatPending);
   const guidedResponsePending = useSessionStore((s) => s.guidedResponsePending);
-  const enterGuided = useSessionStore((s) => s.enterGuided);
+  // Whether the CURRENT chat has any work — gates the mode-switch confirmation
+  // (ModeSwitchButton). Freeform work = messages or a non-empty composition;
+  // guided work = any chat turns or completed steps. Switching is
+  // non-destructive (the session retains both modes' state either way), so this
+  // only decides whether a stray click needs a confirm vs a single click.
+  const currentChatHasWork =
+    messages.length > 0 ||
+    hasExistingCompositionContent(compositionState) ||
+    (guidedSession !== null &&
+      (guidedSession.chat_history.length > 0 ||
+        guidedSession.history.length > 0));
   // D12 / P3.6: block guided advancement while any pending user_approved
   // interpretation card remains in the store. Hook is unconditional (called at
   // the component top, not inside the conditional guided return); the empty
@@ -1363,7 +1365,7 @@ export function ChatPanel({
               className="chat-panel-header-actions"
               style={{ display: "inline-flex", gap: 8, alignItems: "center" }}
             >
-              <ExitToFreeformButton />
+              <ModeSwitchButton target="freeform" hasWork={currentChatHasWork} />
             </div>
           </div>
         )}
@@ -1556,18 +1558,13 @@ export function ChatPanel({
       // components/chat/chat.css [data-composing="true"] rules.
       data-composing={isComposing ? "true" : undefined}
     >
-      {/* Session title header.  The "Switch to guided" affordance lives in
-          the header so it's always visible without competing with the chat
-          input for vertical real-estate.  Symmetric with the "Exit to
-          freeform" button rendered by the guided branch above.
-
-          "Change my default" link (Phase 1B Panel UX-M3): the third
-          opt-out/opt-in surface spec 05 enumerates. "Switch to guided"
-          is a one-session toggle; this link opens the preferences panel
-          where the user can change the *future-default* without
-          flipping the current session. Rendered only when a handler is
-          wired (App.tsx always wires it; tests that mount ChatPanel in
-          isolation may omit it). */}
+      {/* Session title header. The "Switch to guided" affordance lives in the
+          header so it's always visible without competing with the chat input
+          for vertical real-estate. Symmetric with the "Exit to freeform"
+          control in the guided branch above — both are the same
+          ModeSwitchButton, so they share the conditional-confirm behaviour.
+          The future-default is changed from the Account menu → Composer
+          preferences panel (no longer a header link). */}
       <div className="chat-panel-header">
         {activeSessionTitle ? (
           <h2 className="chat-panel-header-title">{activeSessionTitle}</h2>
@@ -1578,34 +1575,7 @@ export function ChatPanel({
           className="chat-panel-header-actions"
           style={{ display: "inline-flex", gap: 8, alignItems: "center" }}
         >
-          <button
-            type="button"
-            className="chat-panel-switch-to-guided"
-            onClick={() => void enterGuided()}
-          >
-            Switch to guided
-          </button>
-          {onOpenComposerPreferences && (
-            <button
-              type="button"
-              onClick={onOpenComposerPreferences}
-              className="chat-panel-change-default"
-              title="Change which mode new sessions start in"
-              style={{
-                background: "transparent",
-                border: 0,
-                padding: "4px 6px",
-                font: "inherit",
-                fontSize: 12,
-                textDecoration: "underline",
-                cursor: "pointer",
-                minHeight: 24,
-                color: "var(--color-text-muted, #555)",
-              }}
-            >
-              Change my default
-            </button>
-          )}
+          <ModeSwitchButton target="guided" hasWork={currentChatHasWork} />
         </div>
       </div>
 

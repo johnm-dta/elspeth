@@ -1394,60 +1394,10 @@
   outline-offset: 2px;
 }
 
-/* ---------------------------------------------------------------------------
-   ExitToFreeformButton (Task 7.8)
-   Class: guided-exit-button.
-
-   Secondary / tertiary visual weight -- deliberately quieter than the primary
-   action buttons (accent background) used by individual widgets.  The button
-   must be visible but not compete with the widget's own call-to-action.
-
-   Sized to WCAG 2.5.8 minimum target (min-height: 44px).  Focus ring and
-   hover match the guided-* family convention.
-   --------------------------------------------------------------------------- */
-
-.guided-exit-button {
-  padding: var(--space-sm) var(--space-md);
-  background-color: transparent;
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-  font-family: inherit;
-  cursor: pointer;
-  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
-  transition: background-color 0.1s ease, border-color 0.1s ease,
-    color 0.1s ease;
-}
-
-.guided-exit-button:hover {
-  background-color: var(--color-surface-elevated);
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-}
-
-.guided-exit-button:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
-.guided-exit-confirmation {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  align-items: center;
-}
-
-.guided-exit-button--danger {
-  border-color: var(--color-error);
-  color: var(--color-error);
-}
-
-.guided-exit-button--danger:hover {
-  background-color: var(--color-error-bg);
-  border-color: var(--color-error);
-  color: var(--color-error);
-}
+/* The guided<->freeform mode toggle moved to the shared ModeSwitchButton
+   (chat.css → .mode-switch-*), used in both body headers. The old
+   ExitToFreeformButton (.guided-exit-*) styles were retired with that
+   component. */
 
 /* ---------------------------------------------------------------------------
    GuidedHistory (Task 7.9)
@@ -1752,7 +1702,6 @@
   .guided-propose-secondary-btn,
   .guided-recipe-apply-btn,
   .guided-recipe-build-btn,
-  .guided-exit-button,
   .guided-completion-save-btn,
   .guided-completion-edit-btn {
     transition: none;

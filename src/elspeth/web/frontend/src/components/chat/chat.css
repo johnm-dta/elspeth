@@ -567,11 +567,12 @@
   min-width: 0;
 }
 
-/* "Switch to guided" affordance in the freeform body header.  Visual weight
-   mirrors .guided-exit-button (the symmetric inverse) — quiet outline, hover
-   lift, WCAG 2.5.8 target height — so the two mode-switch controls read as
-   members of the same family. */
-.chat-panel-switch-to-guided {
+/* ModeSwitchButton — the symmetric guided<->freeform toggle in BOTH body
+   headers ("Switch to guided" / "Exit to freeform"). Quiet outline at rest with
+   a hover lift and WCAG 2.5.8 target height. The confirm primary is slightly
+   stronger (accent border) but NOT danger-styled, because switching is
+   non-destructive (the session keeps both modes' state). */
+.mode-switch-btn {
   padding: var(--space-sm) var(--space-md);
   background-color: transparent;
   color: var(--color-text-secondary);
@@ -587,15 +588,35 @@
     color 0.1s ease;
 }
 
-.chat-panel-switch-to-guided:hover {
+.mode-switch-btn:hover {
   background-color: var(--color-surface-elevated);
   border-color: var(--color-border-strong);
   color: var(--color-text);
 }
 
-.chat-panel-switch-to-guided:focus-visible {
+.mode-switch-btn:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+/* Confirm primary (shown only when the current chat has work). */
+.mode-switch-btn--confirm {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+/* Two-step confirm container: primary + Cancel, wraps if the header is tight. */
+.mode-switch-confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-switch-btn {
+    transition: none;
+  }
 }
 
 .chat-panel-error {

@@ -50,6 +50,7 @@ const AUDITED_COMPONENTS = [
   "ShortcutsHelp",
   "WireStageTurn",
   "SchemaFormTurn",
+  "ModeSwitchButton",
 ] as const;
 
 const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
@@ -67,6 +68,7 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "InlineSourceCreatedTurn",
   "InlineSourceDisambiguationTurn",
   "InlineSourceFallbackPrompt",
+  "ModeSwitchButton",
   "PluginCard",
   "ReadinessRowDetail",
   "SchemaFormTurn",
@@ -138,6 +140,7 @@ import { TemplateCards } from "@/components/chat/TemplateCards";
 import { ShortcutsHelp } from "@/components/common/ShortcutsHelp";
 import { WireStageTurn } from "@/components/chat/guided/WireStageTurn";
 import { SchemaFormTurn } from "@/components/chat/guided/SchemaFormTurn";
+import { ModeSwitchButton } from "@/components/chat/guided/ModeSwitchButton";
 
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -573,6 +576,26 @@ describe("TemplateCards", () => {
 describe("ShortcutsHelp", () => {
   it("has no axe violations", async () => {
     const { container } = render(<ShortcutsHelp onClose={() => {}} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("ModeSwitchButton", () => {
+  it("has no axe violations (resting)", async () => {
+    const { container } = render(
+      <ModeSwitchButton target="guided" hasWork={false} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations (confirm state)", async () => {
+    const { container } = render(
+      <ModeSwitchButton target="freeform" hasWork />,
+    );
+    // Reveal the two-step confirm (the new interactive surface).
+    await userEvent.click(
+      screen.getByRole("button", { name: "Exit to freeform" }),
+    );
     expect(await axe(container)).toHaveNoViolations();
   });
 });

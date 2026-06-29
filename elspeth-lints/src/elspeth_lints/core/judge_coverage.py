@@ -242,6 +242,9 @@ def check_one_directory(
         discriminator: sum(1 for entry in entries if _judge_metadata_payload(entry) is None)
         for discriminator, entries in baseline_by_discriminator.items()
     }
+    baseline_judge_metadata_payloads = {
+        payload for baseline_entry in baseline_entries if (payload := _judge_metadata_payload(baseline_entry)) is not None
+    }
 
     violations: list[JudgeCoverageViolation] = list(shape_violations)
     new_count = 0
@@ -285,6 +288,15 @@ def check_one_directory(
             grandfathered_count += 1
             continue
         new_count += 1
+        if _judge_metadata_payload(entry) in baseline_judge_metadata_payloads:
+            violations.append(
+                JudgeCoverageViolation(
+                    entry_key=entry.key,
+                    source_file=entry.source_file,
+                    missing_fields=(JUDGE_METADATA_MUTATED,),
+                )
+            )
+            continue
         missing = _missing_judge_fields(entry)
         if missing:
             violations.append(

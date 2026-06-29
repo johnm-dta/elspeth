@@ -618,6 +618,97 @@ def test_e2e_renewal_by_expires_edit_requires_judge(tmp_path: Path) -> None:
     assert not report.passes
 
 
+@pytest.mark.parametrize(
+    ("field_name", "head_value"),
+    [
+        ("owner", "bob"),
+        ("reason", "renewed boundary rationale"),
+        ("expires", "2026-11-01"),
+    ],
+)
+def test_e2e_judged_unsigned_discriminator_edit_requires_fresh_judge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+    head_value: str,
+) -> None:
+    """A judged entry cannot reuse a stale signature after unsigned identity edits."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    key = "web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa"
+    file_fingerprint = "0" * 64
+    recorded_at = datetime(2026, 5, 23, 12, tzinfo=UTC)
+    rationale = "judge accepted the original bounded suppression."
+    signature = _valid_v1_judge_signature(
+        key=key,
+        file_fingerprint=file_fingerprint,
+        ast_path="body[0]",
+        recorded_at=recorded_at,
+        rationale=rationale,
+    )
+    baseline_fields = {
+        "owner": "alice",
+        "reason": "legitimate boundary",
+        "expires": "2026-08-01",
+    }
+    head_fields = baseline_fields | {field_name: head_value}
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: {key}
+          owner: {baseline_fields["owner"]}
+          reason: {baseline_fields["reason"]}
+          safety: contained
+          expires: {baseline_fields["expires"]}
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '{recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: {rationale}
+          file_fingerprint: '{file_fingerprint}'
+          ast_path: body[0]
+          judge_metadata_signature: '{signature}'
+    """),
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "initial: judged bounded entry")
+
+    yaml_path.write_text(
+        textwrap.dedent(f"""\
+        allow_hits:
+        - key: {key}
+          owner: {head_fields["owner"]}
+          reason: {head_fields["reason"]}
+          safety: contained
+          expires: {head_fields["expires"]}
+          judge_verdict: ACCEPTED
+          judge_recorded_at: '{recorded_at.isoformat()}'
+          judge_model: {DEFAULT_JUDGE_MODEL}
+          judge_policy_hash: '{JUDGE_POLICY_HASH}'
+          judge_rationale: {rationale}
+          file_fingerprint: '{file_fingerprint}'
+          ast_path: body[0]
+          judge_metadata_signature: '{signature}'
+    """),
+        encoding="utf-8",
+    )
+    _commit(tmp_path, f"PR: edit judged entry {field_name} without fresh signature")
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.grandfathered_count == 0
+    assert report.new_entry_count == 1
+    assert len(report.violations) == 1
+    assert report.violations[0].missing_fields == (JUDGE_METADATA_MUTATED,)
+    assert not report.passes
+
+
 def test_e2e_new_entry_with_full_judge_quartet_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A new entry that records signed judge metadata satisfies the gate."""
     enforce_dir = _init_git_fixture(tmp_path)

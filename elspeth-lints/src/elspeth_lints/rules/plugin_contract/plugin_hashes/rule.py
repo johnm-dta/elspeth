@@ -169,8 +169,8 @@ def extract_plugin_attributes(file_path: Path) -> list[PluginAttributes]:
             continue
         if not _has_name_class_attribute(node, module_string_constants):
             continue
-        version_value, _ = _get_class_attribute_value(node, "plugin_version")
-        hash_value, _ = _get_class_attribute_value(node, "source_file_hash")
+        version_value, _ = _get_class_attribute_value(node, "plugin_version", module_string_constants)
+        hash_value, _ = _get_class_attribute_value(node, "source_file_hash", module_string_constants)
         results.append(
             PluginAttributes(
                 class_name=node.name,

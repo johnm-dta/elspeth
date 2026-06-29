@@ -318,6 +318,27 @@ class TestExtractPluginAttributes:
         assert attrs.class_name == "DynamicSource"
         assert attrs.source_file_hash is None
 
+    def test_extract_resolves_module_constants_for_version_and_hash(self, tmp_path: Path) -> None:
+        """Module-level constants must resolve for every plugin metadata attribute."""
+        source = """\
+            PLUGIN_VERSION = "2.1.0"
+            PLUGIN_HASH = "sha256:1111222233334444"
+
+            class DynamicSource:
+                name = "dynamic"
+                plugin_version = PLUGIN_VERSION
+                source_file_hash: str | None = PLUGIN_HASH
+        """
+        file_path = _write_plugin(tmp_path, source)
+        results = extract_plugin_attributes(file_path)
+
+        assert len(results) == 1
+        attrs = results[0]
+        assert attrs.class_name == "DynamicSource"
+        assert attrs.plugin_version == "2.1.0"
+        assert attrs.source_file_hash == "sha256:1111222233334444"
+        assert attrs.hash_line_number is not None
+
     def test_extract_ignores_non_plugin_classes(self, tmp_path: Path) -> None:
         """Classes without a `name` class attribute are not plugin classes."""
         source = """\

@@ -326,6 +326,27 @@ def test_plugin_hashes_reports_missing_hash_for_module_constant_name(tmp_path: P
     assert "DynamicSource" in findings[0].message
 
 
+def test_plugin_hashes_resolves_module_constants_for_version_and_hash(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "plugins" / "sources" / "constant_metadata.py",
+        """
+        PLUGIN_VERSION = "1.2.3"
+        PLUGIN_HASH = "sha256:1111222233334444"
+
+        class ConstantMetadataSource:
+            name = "constant-metadata"
+            plugin_version = PLUGIN_VERSION
+            source_file_hash = PLUGIN_HASH
+        """,
+    )
+
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
+
+    assert [finding.rule_id for finding in findings] == ["PH3"]
+    assert "stale source_file_hash" in findings[0].message
+    assert "ConstantMetadataSource" in findings[0].message
+
+
 def test_plugin_hashes_passes_on_correct_hashes(tmp_path: Path) -> None:
     _write_hashed_plugin(tmp_path, class_name="GoodSource", name="good", version="1.0.0")
 

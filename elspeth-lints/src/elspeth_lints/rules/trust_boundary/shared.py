@@ -107,7 +107,7 @@ class _TrustBoundaryDecoratorVisitor(ast.NodeVisitor):
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             root_name = alias.name.split(".", 1)[0]
-            self._import_aliases[alias.asname or root_name] = alias.name
+            self._import_aliases[alias.asname or root_name] = alias.name if alias.asname else root_name
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module is None or node.level != 0:

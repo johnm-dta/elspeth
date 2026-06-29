@@ -175,6 +175,8 @@ def _matches_elspeth_trust_boundary_import(
     dotted = ".".join(parts)
     if alias_target is None:
         return dotted in _TRUST_BOUNDARY_QUALIFIED_NAMES
+    if dotted in _TRUST_BOUNDARY_QUALIFIED_NAMES and alias_target.startswith("elspeth."):
+        return True
 
     target_parts = tuple(alias_target.split("."))
     if parts[: len(target_parts)] == target_parts:

@@ -153,3 +153,27 @@ def test_iter_trust_boundary_decorators_accepts_elspeth_import_surfaces() -> Non
 
     names = [func.name for func, _call in iter_trust_boundary_decorators(tree)]
     assert names == ["bare", "contracts_alias", "module_alias"]
+
+
+def test_iter_trust_boundary_decorators_preserves_root_binding_for_dotted_import() -> None:
+    tree = ast.parse(
+        textwrap.dedent(
+            """
+            import elspeth.contracts.trust_boundary
+            import elspeth.web
+
+            @elspeth.contracts.trust_boundary(
+                tier=3,
+                source="x",
+                source_param="data",
+                suppresses=("R1",),
+                invariant="y",
+            )
+            def handler(data):
+                return data
+            """
+        )
+    )
+
+    names = [func.name for func, _call in iter_trust_boundary_decorators(tree)]
+    assert names == ["handler"]

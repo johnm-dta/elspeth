@@ -127,6 +127,26 @@ class TestSuppressionPositive:
         ]
         assert {item.file_fingerprint for item in suppressed} == {expected_file_fingerprint}
 
+    def test_suppresses_with_fully_qualified_decorator_after_sibling_import(self) -> None:
+        """A later ``elspeth.*`` import must not hide the FQ decorator spelling."""
+        source = dedent("""
+            import elspeth.contracts.trust_boundary
+            import elspeth.web
+
+            @elspeth.contracts.trust_boundary(
+                tier=3,
+                source="LLM tool args",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="raises on shape mismatch",
+            )
+            def handler(arguments):
+                return arguments.get("nodes")
+        """)
+
+        findings = _findings(source)
+        assert _findings_by_rule(findings, "R1") == []
+
     def test_core_cli_emits_suppression_observation_without_failing(self, tmp_path: Path, capsys) -> None:
         """The CI-facing CLI surfaces suppression observations at note severity."""
         allowlist_dir = tmp_path / "config" / "cicd" / "enforce_tier_model"

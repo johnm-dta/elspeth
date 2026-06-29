@@ -884,7 +884,7 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeInTheDocument();
   });
 
-  it("tutorial guided: keeps the intent box ABOVE the decision (passive Send-then-confirm order)", () => {
+  it("tutorial guided: docks the intent box BELOW the decision (aligned with the live composer)", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -904,11 +904,14 @@ describe("ChatPanel mode discriminator", () => {
     const form = container.querySelector(".guided-current-decision");
     expect(intent).not.toBeNull();
     expect(form).not.toBeNull();
-    // The tutorial deliberately does NOT dock the composer: it stays ON TOP so
-    // the passive "press Send → confirm what it built" reading order holds.
-    // `form` follows `intent`.
+    // The tutorial now uses the SAME docked layout as the live composer: the
+    // intent box docks at the BOTTOM, AFTER the decision (mirroring the
+    // non-tutorial test above). The passive "press Send → confirm what it built"
+    // reading order is preserved by the step-advance/type focus effect, which
+    // scrolls the just-built decision into view — not by putting the box on top.
+    // `intent` follows `form`.
     expect(
-      intent!.compareDocumentPosition(form!) &
+      form!.compareDocumentPosition(intent!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     // Tutorial suppresses the exit affordance, so there is no header/exit.
@@ -1015,7 +1018,7 @@ describe("ChatPanel mode discriminator", () => {
       screen.getByText(/your request is in the transcript above/i),
     ).toBeInTheDocument();
     expect(screen.queryByTestId("chat-input")).toBeNull();
-    // The contradictory "press Send above" note is gone once Sent.
+    // The "press Send below" coaching note is gone once Sent.
     expect(
       container.querySelector(".guided-current-decision-tutorial-note"),
     ).toBeNull();
@@ -1550,6 +1553,58 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
 
     // Focus must remain on the API button; effect did not pull it back to CSV.
     expect(document.activeElement).toBe(apiButton);
+  });
+
+  it("moves focus to the new decision when a same-step build changes the turn type", async () => {
+    // The composer now docks at the BOTTOM for every session (tutorial
+    // included). A same-step `/guided/chat` Send replaces the turn with a
+    // different TYPE without advancing the step (single_select → schema_form at
+    // step 1; null → propose_chain at step 3). The just-built decision lands
+    // ABOVE the box the user Sent from, so the focus effect must re-fire on the
+    // type change and bring it into view — otherwise the passive learner is left
+    // looking at the docked box with the decision off-screen above it. This is
+    // the type-change counterpart to the same-type "does NOT re-focus" guard
+    // above; both share the [step_index, type] dependency.
+    useSessionStore.setState({
+      activeSessionId: "session-focus",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(0),
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "CSV" }),
+      );
+    });
+
+    // Same step_index (0), different turn TYPE — the build result.
+    act(() => {
+      useSessionStore.setState({
+        guidedNextTurn: {
+          type: "schema_form",
+          step_index: 0,
+          payload: {
+            mode: "plugin_options",
+            plugin: "csv",
+            knobs: { fields: [] },
+            prefilled: {},
+          },
+        },
+      });
+    });
+
+    // Focus lands on the schema form's first control (the Edit toggle), proving
+    // the effect re-fired on the type change rather than stranding the user on
+    // the prior turn's "CSV" button.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Edit" }),
+      );
+    });
   });
 });
 

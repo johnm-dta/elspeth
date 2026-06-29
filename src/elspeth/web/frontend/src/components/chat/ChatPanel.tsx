@@ -1125,13 +1125,22 @@ export function ChatPanel({
   // <body>.  Keyboard users then have to Tab from the very top to reach the new
   // turn widget — unacceptable for general a11y.
   //
-  // Keyed on step_index: fires only when the guided wizard advances to a new
-  // step, not on every store mutation that produces a new TurnPayload object
-  // with the same step_index.  The ref-null short-circuit handles all non-guided
-  // branches implicitly — guidedLogRef.current is null whenever the
-  // chat-panel-guided-log div is not mounted (completed surface, freeform
-  // surface, no session).  Observation elspeth-obs-5ea21f94af documents the
-  // original defect and the chosen Option (c) implementation.
+  // Keyed on step_index AND turn type. Fires when the wizard advances to a new
+  // step (step_index changes) OR when a same-step build replaces the turn with a
+  // different type — e.g. a `/guided/chat` Send that resolves the source turns
+  // single_select → schema_form, or step_3's null → propose_chain. The latter
+  // matters now the composer is docked at the BOTTOM for every session
+  // (including the tutorial): the just-built decision lands ABOVE the box the
+  // user just Sent from, so we scroll it into view + focus its first control
+  // rather than leaving it off-screen. It deliberately does NOT fire on
+  // same-step, same-type store churn (a new TurnPayload object with identical
+  // step_index + type) — that would yank focus while the user works the widget
+  // (pinned by the "does NOT re-focus … same-step store mutation" test). The
+  // ref-null short-circuit handles all non-guided branches implicitly —
+  // guidedLogRef.current is null whenever the chat-panel-guided-log div is not
+  // mounted (completed surface, freeform surface, no session). Observation
+  // elspeth-obs-5ea21f94af documents the original defect and the chosen
+  // Option (c) implementation.
   useEffect(() => {
     if (!guidedLogRef.current) return;
     guidedLogRef.current.scrollIntoView({
@@ -1140,7 +1149,7 @@ export function ChatPanel({
     });
     const first = guidedLogRef.current.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
     first?.focus();
-  }, [guidedNextTurn?.step_index]);
+  }, [guidedNextTurn?.step_index, guidedNextTurn?.type]);
 
   const handleSend = useCallback(
     (content: string) => {
@@ -1292,12 +1301,14 @@ export function ChatPanel({
     const tutorialStepBuilt =
       tutorialPromptSentForStep &&
       (guidedNextTurn != null || hasPendingGuidedInterpretations);
-    // "Describe what you want" composer. Rendered in ONE of two positions:
-    //   - non-tutorial: docked at the BOTTOM of the panel, full width, as the
-    //     primary chat affordance (mirrors the freeform body's ChatInput, which
-    //     docks below the message log);
-    //   - tutorial: ON TOP (inside the scroll region, above the decision) so the
-    //     passive "press Send → confirm what it built" reading order is kept.
+    // "Describe what you want" composer, docked at the BOTTOM of the panel, full
+    // width — the primary chat affordance, mirroring the freeform body's
+    // ChatInput which docks below the message log. The tutorial uses the SAME
+    // docked position as the live composer (its locked prompt + read-only box,
+    // and the "Sent" line after, ride in this same slot); the passive
+    // "press Send → confirm what it built" reading order is preserved by the
+    // step-advance/type focus effect, which scrolls the just-built decision
+    // (above) into view after a Send.
     // It routes plain English through `chatGuided` (/guided/chat), which applies
     // the phase config in place; the caption is keyed on the live step via
     // GUIDED_CHAT_PLACEHOLDERS.
@@ -1316,7 +1327,7 @@ export function ChatPanel({
           // with a static confirmation line.
           <p className="guided-step-chat-sent" role="status">
             Sent — your request is in the transcript above and the assistant
-            has built this step. Confirm the decision below to continue.
+            has built this step. Confirm the decision above to continue.
           </p>
         ) : (
           <ChatInput
@@ -1427,10 +1438,6 @@ export function ChatPanel({
               }
             }}
           />
-          {/* Tutorial: the composer renders ON TOP (above the decision) to keep
-              the passive "press Send → confirm what it built" reading order.
-              Non-tutorial renders it docked at the bottom (below this region). */}
-          {isTutorial && stepComposer}
           {/* Tutorial de-emphasis applies ONLY to Send-driven steps — those with
               a locked chat prompt (source / sink / transforms). Confirm-only steps
               (wire) have an empty locked prompt: Send is disabled there and the
@@ -1466,8 +1473,8 @@ export function ChatPanel({
               {stepIsSendDriven && !tutorialStepBuilt && (
                 <p className="guided-current-decision-tutorial-note">
                   You don't need to fill this in by hand — press{" "}
-                  <strong>Send</strong> above and the assistant builds this step.
-                  Then confirm the decision below to continue.
+                  <strong>Send</strong> below and the assistant builds this step.
+                  Then confirm the decision to continue.
                 </p>
               )}
             </div>
@@ -1500,10 +1507,13 @@ export function ChatPanel({
           })()}
           <InlineRunResults />
         </div>
-        {/* Non-tutorial: "Describe what you want" docked at the BOTTOM of the
-            panel, full width — the primary chat affordance (mirrors freeform's
-            ChatInput docked below the message log). */}
-        {!isTutorial && stepComposer}
+        {/* "Describe what you want" docked at the BOTTOM of the panel, full
+            width — the primary chat affordance (mirrors freeform's ChatInput
+            docked below the message log). Every session docks here, tutorial
+            included: the tutorial's locked prompt + "Sent" line ride this same
+            slot, and the focus effect brings the just-built decision (above)
+            into view after Send so the passive reading order survives. */}
+        {stepComposer}
       </div>
     );
   }

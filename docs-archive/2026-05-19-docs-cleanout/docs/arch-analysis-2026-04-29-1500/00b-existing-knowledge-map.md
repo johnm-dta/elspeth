@@ -79,7 +79,7 @@ Atomic claims extracted from the institutional documentation set. Each claim is 
 
 ## CLAUDE.md
 
-- KNOW-C1. CLAUDE.md states the human operator is neurodiverse; agents must relitigate unanswered questions instead of inferring consent. — CLAUDE.md:Human Operator Communication
+- KNOW-C1. CLAUDE.md states that agents must relitigate unanswered questions instead of inferring consent. — CLAUDE.md:Human Operator Communication
 - KNOW-C2. ELSPETH is a domain-agnostic framework for auditable Sense/Decide/Act (SDA) pipelines, not LLM-specific. — CLAUDE.md:Project Overview
 - KNOW-C3. Decide step can be LLM, ML model, rules engine, or threshold check. — CLAUDE.md:Project Overview
 - KNOW-C4. CLAUDE.md instructs sessions to read code, comments, docstrings before changing anything; comments are institutional memory. — CLAUDE.md:You Are a New Employee
@@ -148,7 +148,7 @@ Atomic claims extracted from the institutional documentation set. Each claim is 
 
 ## AGENTS.md
 
-- KNOW-G1. AGENTS.md repeats the neurodiverse human-operator communication policy: relitigate unanswered questions. — AGENTS.md:Human Operator Communication
+- KNOW-G1. AGENTS.md repeats the human-operator communication policy: relitigate unanswered questions instead of inferring consent. — AGENTS.md:Human Operator Communication
 - KNOW-G2. AGENTS.md treats every session as a "new employee" starting with zero context. — AGENTS.md:You Are a New Employee
 - KNOW-G3. Comments labelled "CLOSED LIST", "Composer heuristic depends on this", or "do not extend" are load-bearing instructions to the next session. — AGENTS.md:You Are a New Employee
 - KNOW-G4. The staging web UI `https://elspeth.foundryside.dev` is a source-checkout systemd/Caddy deployment, NOT the generic Docker/VM image flow in `scripts/deploy-vm.sh`. — AGENTS.md:Staging Site And Web Restart

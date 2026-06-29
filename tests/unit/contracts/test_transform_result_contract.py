@@ -132,6 +132,28 @@ class TestTransformResultWithPipelineRow:
                 success_reason={"action": "split"},
             )
 
+    def test_direct_multi_row_construction_rejects_mixed_contract_instances(
+        self,
+        output_contract: SchemaContract,
+    ) -> None:
+        structurally_equal_contract = SchemaContract(
+            mode=output_contract.mode,
+            fields=output_contract.fields,
+            locked=output_contract.locked,
+        )
+
+        with pytest.raises(PluginContractViolation, match="same contract instance"):
+            TransformResult(
+                status="success",
+                row=None,
+                rows=(
+                    _output_row(1, "alpha", output_contract),
+                    _output_row(2, "beta", structurally_equal_contract),
+                ),
+                reason=None,
+                success_reason={"action": "split"},
+            )
+
     def test_success_multi_rejects_non_pipeline_row_elements(
         self,
         output_contract: SchemaContract,

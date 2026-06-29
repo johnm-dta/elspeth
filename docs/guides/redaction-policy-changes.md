@@ -41,10 +41,16 @@ declarative key set narrowed, summarizer replaced, structured reason
 rewritten — flips the entry's hash. This change must be committed to
 the snapshot file before CI goes green.
 
-To regenerate the snapshot after editing the manifest:
+Preview the snapshot after editing the manifest:
 
 ```bash
 .venv/bin/python scripts/cicd/bootstrap_redaction_snapshot.py
+```
+
+Regenerate the snapshot after reviewing the dry-run output:
+
+```bash
+.venv/bin/python scripts/cicd/bootstrap_redaction_snapshot.py --write
 ```
 
 ### 2. Direction-aware label-gate CI step

@@ -189,6 +189,11 @@ async function driveGuidedWalk(page: Page): Promise<void> {
       (await page.locator(".guided-schema-summary").first().isVisible().catch(() => false))
     ) {
       assertedSummary = true;
+      // Capture the redesigned rationale-led read-only decision for a visual
+      // check (named, single artifact; overwritten each run).
+      await page
+        .screenshot({ path: "test-results/guided-decision-summary.png", fullPage: true })
+        .catch(() => {});
       if ((await page.locator(".guided-schema-input").count().catch(() => 0)) > 0) {
         throw new Error(
           "guided decision rendered an editable form, expected a read-only summary",

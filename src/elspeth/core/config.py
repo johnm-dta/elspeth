@@ -1660,6 +1660,25 @@ class ElspethSettings(BaseModel):
             raise ValueError(f"duplicate collection_probes for collection(s): {duplicates}")
         return v
 
+    @field_validator("depends_on")
+    @classmethod
+    def validate_unique_dependencies(cls, v: list[DependencyConfig]) -> list[DependencyConfig]:
+        """Reject duplicate dependency labels at the config boundary.
+
+        Dependency results are keyed by dependency name in commencement gate
+        context. Duplicate names would make gate expressions and audit snapshots
+        ambiguous, so reject them before dependency preflight starts.
+        """
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for dependency in v:
+            if dependency.name in seen and dependency.name not in duplicates:
+                duplicates.append(dependency.name)
+            seen.add(dependency.name)
+        if duplicates:
+            raise ValueError(f"duplicate depends_on dependency name(s): {duplicates}")
+        return v
+
     @field_validator("sinks")
     @classmethod
     def validate_sink_names_lowercase(cls, v: dict[str, SinkSettings]) -> dict[str, SinkSettings]:

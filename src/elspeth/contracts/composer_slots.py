@@ -28,9 +28,10 @@ class SlotSpec:
         if self.required or self.default is None:
             return
         try:
-            _coerce_default(f"<default for {self.slot_type}>", self.slot_type, self.default)
+            coerced = _coerce_default(f"<default for {self.slot_type}>", self.slot_type, self.default)
         except ValueError as exc:
             raise ValueError(f"SlotSpec default {self.default!r} does not satisfy slot_type {self.slot_type!r}: {exc}") from exc
+        object.__setattr__(self, "default", coerced)
 
 
 def _coerce_default(name: str, slot_type: SlotType, raw: Any) -> Any:

@@ -41,6 +41,7 @@ serialised form is stable and hashable for cross-run regression comparisons.
 from __future__ import annotations
 
 import ast
+import dis
 import hashlib
 import inspect
 import json
@@ -93,14 +94,23 @@ def _normalize_code_object(code: CodeType) -> dict[str, object]:
         "nlocals": code.co_nlocals,
         "stacksize": code.co_stacksize,
         "flags": code.co_flags,
-        "code": code.co_code.hex(),
-        "consts": [_normalize_code_constant(value) for value in code.co_consts],
+        "instructions": [_normalize_instruction(instruction) for instruction in dis.get_instructions(code)],
         "names": list(code.co_names),
         "varnames": list(code.co_varnames),
         "freevars": list(code.co_freevars),
         "cellvars": list(code.co_cellvars),
         "exceptiontable": code.co_exceptiontable.hex(),
     }
+
+
+def _normalize_instruction(instruction: dis.Instruction) -> dict[str, object]:
+    normalized: dict[str, object] = {"opname": instruction.opname}
+    if instruction.opcode in dis.hasconst:
+        normalized["const"] = _normalize_code_constant(instruction.argval)
+    elif instruction.arg is not None:
+        normalized["arg"] = instruction.arg
+        normalized["argval"] = _normalize_code_constant(instruction.argval)
+    return normalized
 
 
 def _callable_implementation_hash(func: object) -> str:

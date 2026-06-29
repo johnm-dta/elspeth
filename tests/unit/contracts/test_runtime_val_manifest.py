@@ -76,7 +76,7 @@ def test_manifest_records_declaration_contract_implementation_hash(
 
     original_code = PassThroughDeclarationContract.post_emission_check.__code__
 
-    def replacement(self, inputs, outputs):  # type: ignore[no-untyped-def]
+    def replacement(self, inputs, outputs):
         return None
 
     PassThroughDeclarationContract.post_emission_check.__code__ = replacement.__code__
@@ -92,6 +92,44 @@ def test_manifest_records_declaration_contract_implementation_hash(
     assert baseline_entry["class_module"] == mutated_entry["class_module"]
     assert baseline_entry["dispatch_sites"] == mutated_entry["dispatch_sites"]
     assert baseline_entry["implementation_hash"] != mutated_entry["implementation_hash"]
+
+
+def test_manifest_ignores_declaration_contract_method_docstring_only_edits(
+    _isolate_runtime_val_registries: None,
+) -> None:
+    import elspeth.contracts.declaration_contracts as dc
+    import elspeth.contracts.tier_registry as tr
+
+    dc._FROZEN = False
+    tr._FROZEN = False
+    prepare_for_run()
+
+    original_code = PassThroughDeclarationContract.post_emission_check.__code__
+
+    def replacement_without_docstring(self, inputs, outputs):
+        return None
+
+    def replacement_with_docstring(self, inputs, outputs):
+        """Replacement whose only semantic difference is this docstring."""
+        return None
+
+    try:
+        PassThroughDeclarationContract.post_emission_check.__code__ = replacement_without_docstring.__code__
+        baseline = build_runtime_val_manifest()
+
+        PassThroughDeclarationContract.post_emission_check.__code__ = replacement_with_docstring.__code__
+        mutated = build_runtime_val_manifest()
+    finally:
+        PassThroughDeclarationContract.post_emission_check.__code__ = original_code
+
+    baseline_entry = next(entry for entry in baseline["declaration_contracts"] if entry["name"] == "passes_through_input")
+    mutated_entry = next(entry for entry in mutated["declaration_contracts"] if entry["name"] == "passes_through_input")
+
+    assert baseline_entry["name"] == mutated_entry["name"]
+    assert baseline_entry["class_name"] == mutated_entry["class_name"]
+    assert baseline_entry["class_module"] == mutated_entry["class_module"]
+    assert baseline_entry["dispatch_sites"] == mutated_entry["dispatch_sites"]
+    assert baseline_entry["implementation_hash"] == mutated_entry["implementation_hash"]
 
 
 def test_manifest_records_delegated_declaration_helper_implementation_hash(
@@ -142,7 +180,6 @@ def test_manifest_rejects_source_unavailable_classes(
     _isolate_runtime_val_registries: None,
 ) -> None:
     import elspeth.contracts.declaration_contracts as dc
-    import elspeth.contracts.runtime_val_manifest as manifest_module
     import elspeth.contracts.tier_registry as tr
 
     dc._FROZEN = False
@@ -152,7 +189,7 @@ def test_manifest_rejects_source_unavailable_classes(
     def source_unavailable(cls: type[object]) -> str:
         raise OSError(f"source unavailable for {cls.__module__}.{cls.__qualname__}")
 
-    monkeypatch.setattr(manifest_module.inspect, "getsource", source_unavailable)
+    monkeypatch.setattr("elspeth.contracts.runtime_val_manifest.inspect.getsource", source_unavailable)
 
     with pytest.raises(FrameworkBugError, match="source unavailable"):
         build_runtime_val_manifest()
@@ -180,7 +217,7 @@ def test_manifest_records_tier_1_implementation_hash(_isolate_runtime_val_regist
 
     original_code = _TempTier1Error.describe.__code__
 
-    def replacement(self):  # type: ignore[no-untyped-def]
+    def replacement(self):
         return "after"
 
     _TempTier1Error.describe.__code__ = replacement.__code__
@@ -197,6 +234,56 @@ def test_manifest_records_tier_1_implementation_hash(_isolate_runtime_val_regist
     assert baseline_entry["class_module"] == mutated_entry["class_module"]
     assert baseline_entry["reason"] == mutated_entry["reason"]
     assert baseline_entry["implementation_hash"] != mutated_entry["implementation_hash"]
+
+
+def test_manifest_ignores_tier_1_method_docstring_only_edits(_isolate_runtime_val_registries: None) -> None:
+    import elspeth.contracts.declaration_contracts as dc
+    import elspeth.contracts.tier_registry as tr
+    from elspeth.contracts.tier_registry import tier_1_error
+
+    dc._FROZEN = False
+    tr._FROZEN = False
+
+    @tier_1_error(reason="test runtime-val manifest docstring-only drift", caller_module=__name__)
+    class _TempTier1DocstringError(Exception):
+        def describe(self) -> str:
+            return "same"
+
+    prepare_for_run()
+
+    original_code = _TempTier1DocstringError.describe.__code__
+
+    def replacement_without_docstring(self):
+        return "same"
+
+    def replacement_with_docstring(self):
+        """Replacement whose only semantic difference is this docstring."""
+        return "same"
+
+    try:
+        _TempTier1DocstringError.describe.__code__ = replacement_without_docstring.__code__
+        baseline = build_runtime_val_manifest()
+
+        _TempTier1DocstringError.describe.__code__ = replacement_with_docstring.__code__
+        mutated = build_runtime_val_manifest()
+    finally:
+        _TempTier1DocstringError.describe.__code__ = original_code
+
+    baseline_entry = next(
+        entry
+        for entry in baseline["tier_1_errors"]
+        if entry["class_name"] == "_TempTier1DocstringError" and entry["class_module"] == __name__
+    )
+    mutated_entry = next(
+        entry
+        for entry in mutated["tier_1_errors"]
+        if entry["class_name"] == "_TempTier1DocstringError" and entry["class_module"] == __name__
+    )
+
+    assert baseline_entry["class_name"] == mutated_entry["class_name"]
+    assert baseline_entry["class_module"] == mutated_entry["class_module"]
+    assert baseline_entry["reason"] == mutated_entry["reason"]
+    assert baseline_entry["implementation_hash"] == mutated_entry["implementation_hash"]
 
 
 def test_manifest_crashes_if_registered_contract_lacks_payload_schema(

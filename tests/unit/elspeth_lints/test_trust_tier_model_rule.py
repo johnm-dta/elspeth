@@ -1054,6 +1054,53 @@ class TestAllowlistMatching:
         assert matched.key == entry.key
         assert entry.matched is True
 
+    def test_scope_fallback_does_not_reuse_exact_matched_entry(self) -> None:
+        """One allowlist entry must not suppress two distinct live findings."""
+        scope_fingerprint = "a" * 64
+        entry = AllowlistEntry(
+            key="src/module.py:R1:process:fp=first",
+            owner="test",
+            reason="test",
+            safety="test",
+            expires=None,
+            ast_path="body[0]/body[0]/value",
+            scope_fingerprint=scope_fingerprint,
+            judge_signature_version=2,
+            judge_verdict=JudgeVerdict.ACCEPTED,
+        )
+        allowlist = Allowlist(entries=[entry])
+
+        first = Finding(
+            rule_id="R1",
+            file_path="src/module.py",
+            line=10,
+            col=0,
+            symbol_context=("process",),
+            fingerprint="first",
+            code_snippet="data.get('first')",
+            message="test",
+            ast_path="body[0]/body[0]/value",
+            scope_fingerprint=scope_fingerprint,
+            scope_depth=1,
+        )
+        second = Finding(
+            rule_id="R1",
+            file_path="src/module.py",
+            line=11,
+            col=0,
+            symbol_context=("process",),
+            fingerprint="second",
+            code_snippet="data.get('second')",
+            message="test",
+            ast_path="body[1]/body[0]/value",
+            scope_fingerprint=scope_fingerprint,
+            scope_depth=1,
+        )
+
+        assert _match_finding(allowlist, first) is entry
+        assert entry.matched is True
+        assert _match_finding(allowlist, second) is None
+
     def test_no_match(self) -> None:
         """Finding without matching allowlist entry should return None."""
         entry = AllowlistEntry(

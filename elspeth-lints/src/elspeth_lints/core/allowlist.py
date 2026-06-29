@@ -599,6 +599,7 @@ def find_scope_fallback_entry(
     5. its within-scope suffix ``ast_path.split("/")[scope_depth:]`` equals the
        finding's (the within-scope position is identical — the fallback-path
        replacement for the exact ``ast_path`` transplant defence).
+    6. it has not already matched another finding in this analysis run.
 
     Returns the unique candidate, or ``None`` when there are zero or **two or
     more** (ambiguity must never silently bind — fail closed). An empty
@@ -623,6 +624,8 @@ def find_scope_fallback_entry(
     live_suffix = live_components[scope_depth:]
     candidates: list[AllowlistEntry] = []
     for entry in entries:
+        if entry.matched:
+            continue
         if entry.judge_verdict is None or entry.scope_fingerprint is None or entry.ast_path is None:
             continue
         if entry.judge_verdict is JudgeVerdict.BLOCKED:

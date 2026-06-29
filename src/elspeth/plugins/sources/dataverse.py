@@ -39,6 +39,7 @@ from elspeth.plugins.infrastructure.url_validation import validate_credential_sa
 from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
     FieldResolution,
+    extend_field_resolution,
     normalize_field_name,
     resolve_field_names,
 )
@@ -434,7 +435,7 @@ class DataverseSource(BaseSource):
         # Schema validation (lines below) quarantines rows with unexpected fields.
         mapping = self._field_resolution.resolution_mapping
         result: dict[str, Any] = {}
-        has_unmapped_fields = False
+        new_raw_keys: list[str] = []
         for k, v in row.items():
             if k in mapping:
                 normalized_name = mapping[k]
@@ -446,23 +447,18 @@ class DataverseSource(BaseSource):
                 # elspeth-594221617d.)
                 nk = normalize_field_name(k)
                 normalized_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
-                has_unmapped_fields = True
+                new_raw_keys.append(k)
             result[normalized_name] = v
 
-        # If this row had fields not in the initial mapping, rebuild from the
-        # UNION of previously-seen keys and this row's new keys. Using only
-        # list(row.keys()) would REPLACE the mapping with just the current row's
-        # fields, discarding keys from earlier rows and corrupting the Landscape
-        # field-resolution audit record (B4.3, elspeth-594221617d).
-        # dict.fromkeys preserves first-seen order while deduplicating.
-        if has_unmapped_fields:
+        # If this row had fields not in the initial mapping, extend the cached
+        # resolution with just those new raw keys. This preserves B4.3 union
+        # semantics without re-normalizing every previously seen sparse key.
+        if new_raw_keys:
             assert self._field_resolution is not None  # set on first row above
-            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
-            self._field_resolution = resolve_field_names(
-                raw_headers=union_keys,
+            self._field_resolution = extend_field_resolution(
+                self._field_resolution,
+                raw_headers=new_raw_keys,
                 field_mapping=self._field_mapping,
-                columns=None,
-                require_all_mapping_keys=False,  # sparse Dataverse entities may omit optional mapped attributes
             )
 
         return result

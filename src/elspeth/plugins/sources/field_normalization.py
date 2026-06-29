@@ -218,10 +218,13 @@ class FieldResolution:
     final_headers: tuple[str, ...]
     resolution_mapping: MappingProxyType[str, str]
     normalization_version: str | None
+    effective_headers: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "final_headers", tuple(self.final_headers))
         object.__setattr__(self, "resolution_mapping", MappingProxyType(dict(self.resolution_mapping)))
+        effective_headers = tuple(self.effective_headers) if self.effective_headers else tuple(self.final_headers)
+        object.__setattr__(self, "effective_headers", effective_headers)
 
 
 def resolve_field_names(
@@ -307,4 +310,78 @@ def resolve_field_names(
         final_headers=tuple(final_headers),
         resolution_mapping=MappingProxyType(resolution_mapping),
         normalization_version=NORMALIZATION_ALGORITHM_VERSION if used_normalization else None,
+        effective_headers=tuple(effective_headers),
+    )
+
+
+def extend_field_resolution(
+    resolution: FieldResolution,
+    *,
+    raw_headers: list[str],
+    field_mapping: dict[str, str] | None,
+) -> FieldResolution:
+    """Extend a sparse source field resolution with newly seen raw headers.
+
+    This preserves first-seen union semantics without re-normalizing the full
+    historical key set every time a sparse JSON-like row introduces a field.
+    """
+    existing_mapping = dict(resolution.resolution_mapping)
+    new_raw_headers = [header for header in raw_headers if header not in existing_mapping]
+    if not new_raw_headers:
+        return resolution
+
+    new_effective_headers = [normalize_field_name(header) for header in new_raw_headers]
+    check_normalization_collisions(new_raw_headers, new_effective_headers)
+
+    existing_effective_headers = set(resolution.effective_headers)
+    if not existing_effective_headers and resolution.normalization_version is not None:
+        existing_effective_headers = {normalize_field_name(header) for header in existing_mapping}
+    for raw_header, effective_header in zip(new_raw_headers, new_effective_headers, strict=True):
+        if effective_header in existing_effective_headers:
+            raise ExternalHeaderError(
+                f"Field name collision after normalization:\n  '{effective_header}' <- previously seen field, current field '{raw_header}'"
+            )
+
+    if field_mapping:
+        for mapped_name in field_mapping.values():
+            if not mapped_name.isidentifier():
+                raise ValueError(
+                    f"field_mapping value {mapped_name!r} is not a valid Python identifier. "
+                    f"All downstream field names must be valid identifiers after normalization."
+                )
+        new_final_headers = [field_mapping[header] if header in field_mapping else header for header in new_effective_headers]
+    else:
+        new_final_headers = new_effective_headers
+
+    existing_final_headers = set(resolution.final_headers)
+    new_final_to_raw: dict[str, str] = {}
+    new_final_to_effective: dict[str, str] = {}
+    existing_final_to_effective = dict(zip(resolution.final_headers, resolution.effective_headers, strict=True))
+    for raw_header, effective_header, final_header in zip(new_raw_headers, new_effective_headers, new_final_headers, strict=True):
+        if final_header in existing_final_headers or final_header in new_final_to_raw:
+            previous = new_final_to_raw.get(final_header, "previously seen field")
+            existing_effective_header = existing_final_to_effective.get(final_header)
+            previous_new_effective_header = new_final_to_effective.get(final_header)
+            collision_uses_mapping = bool(
+                field_mapping
+                and (
+                    effective_header in field_mapping
+                    or (existing_effective_header is not None and existing_effective_header != final_header)
+                    or (previous_new_effective_header is not None and previous_new_effective_header in field_mapping)
+                )
+            )
+            if collision_uses_mapping:
+                raise FieldMappingCollisionError(f"field_mapping creates collision:\n  '{final_header}' <- {previous!r}, {raw_header!r}")
+            raise ExternalHeaderError(f"Field name collision after normalization:\n  '{final_header}' <- {previous!r}, {raw_header!r}")
+        new_final_to_raw[final_header] = raw_header
+        new_final_to_effective[final_header] = effective_header
+
+    extended_mapping = dict(existing_mapping)
+    extended_mapping.update(zip(new_raw_headers, new_final_headers, strict=True))
+
+    return FieldResolution(
+        final_headers=(*resolution.final_headers, *new_final_headers),
+        resolution_mapping=MappingProxyType(extended_mapping),
+        normalization_version=resolution.normalization_version,
+        effective_headers=(*resolution.effective_headers, *new_effective_headers),
     )

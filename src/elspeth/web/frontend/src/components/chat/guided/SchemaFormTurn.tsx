@@ -126,7 +126,14 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
           {visibleFields().map((f) => (
             <div className="guided-schema-summary-row" key={f.name}>
               <dt className="guided-schema-summary-label">{f.label}</dt>
-              <dd className="guided-schema-summary-value">{summaryValueNode(f, values[f.name])}</dd>
+              <dd className="guided-schema-summary-value">
+                {summaryValueNode(f, values[f.name])}
+                {showValidationFailureTeaching && f.name === "on_validation_failure" && (
+                  <p className="guided-schema-summary-caveat" role="note">
+                    {TUTORIAL_VALIDATION_FAILURE_CAVEAT}
+                  </p>
+                )}
+              </dd>
             </div>
           ))}
         </dl>
@@ -144,11 +151,6 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
             />
           ))}
         </div>
-      )}
-      {showValidationFailureTeaching && (
-        <p className="guided-schema-hint guided-schema-teaching" role="note">
-          {TUTORIAL_VALIDATION_FAILURE_CAVEAT}
-        </p>
       )}
       {!isTutorial && view === "summary" && !canSubmit() && (
         <p className="guided-schema-summary-needs-edit" role="status">

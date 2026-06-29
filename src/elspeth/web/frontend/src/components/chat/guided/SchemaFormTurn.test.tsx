@@ -523,6 +523,21 @@ describe("SchemaFormTurn", () => {
       expect(screen.queryByText(/quarantine sink/i)).not.toBeInTheDocument();
     });
 
+    it("attaches the caveat to the on_validation_failure summary row in tutorial mode", () => {
+      const { container } = render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "on_validation_failure", label: "On Validation Failure", kind: "text", required: true })], {
+            on_validation_failure: "discard",
+          })}
+          onSubmit={vi.fn()}
+          isTutorial
+        />,
+      );
+      const caveat = container.querySelector(".guided-schema-summary-caveat");
+      expect(caveat).not.toBeNull();
+      expect(caveat?.textContent ?? "").toMatch(/quarantine sink/i);
+    });
+
     it("masks an absolute blob storage_path to its friendly basename in tutorial summary mode", () => {
       // Path-leak guard (retargeted to the summary-first surface): a blob-backed
       // source commits the server's absolute storage_path. The tutorial renders

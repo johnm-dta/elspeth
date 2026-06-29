@@ -1232,6 +1232,39 @@ def test_extract_safe_excerpt_redacts_embedded_pem_private_key_block_body(tmp_pa
     assert "pem_private_key_block" in pattern_names
 
 
+def test_extract_safe_excerpt_redacts_pem_block_after_splitlines_only_boundaries(tmp_path: Path) -> None:
+    """PEM block location must use the same line model as excerpt windowing."""
+    root = tmp_path / "src_root"
+    (root / "plugins").mkdir(parents=True)
+    body_lines = [
+        "MIIEowIBAAKCAQEAw5Vq5Wk0L2w3n4p5q6r7s8t9u0v1x2y3z4A5B6C7D8",
+        "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh",
+        "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC",
+    ]
+    target = root / "plugins" / "widget.py"
+    text = (
+        '"""Module with embedded PEM material after form-feed separators."""\n'
+        "class Widget:\n"
+        "    marker = 1\f\f"
+        "    PEM = '''-----BEGIN RSA PRIVATE KEY-----\n"
+        f"{body_lines[0]}\n"
+        f"{body_lines[1]}\n"
+        f"{body_lines[2]}\n"
+        "-----END RSA PRIVATE KEY-----'''\n"
+    )
+    target.write_text(text, encoding="utf-8")
+    target_line = text.splitlines().index(body_lines[1]) + 1
+
+    excerpt = extract_safe_excerpt(root=root, target_file=target, line=target_line, context_lines=50)
+
+    assert "-----BEGIN RSA PRIVATE KEY-----" not in excerpt.text
+    assert "-----END RSA PRIVATE KEY-----" not in excerpt.text
+    for body_line in body_lines:
+        assert body_line not in excerpt.text
+    pattern_names = {r.pattern_name for r in excerpt.redactions}
+    assert "pem_private_key_block" in pattern_names
+
+
 @pytest.mark.parametrize(
     ("case_name", "line", "context_lines", "leaked_body_indexes"),
     [

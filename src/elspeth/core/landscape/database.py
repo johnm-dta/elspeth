@@ -27,15 +27,16 @@ from elspeth.core.landscape.schema import SQLITE_SCHEMA_EPOCH, metadata
 #
 # ``Tier1Engine`` is a NewType wrapper around :class:`sqlalchemy.engine.Engine`
 # that carries a static guarantee: the engine was created through
-# :class:`LandscapeDB` and passed the PRAGMA integrity probe
-# (:meth:`LandscapeDB._verify_sqlite_pragmas`).  The wrapper has zero runtime
+# :class:`LandscapeDB` and passed the backend-appropriate audit-integrity
+# checks. For SQLite that includes the PRAGMA integrity probe
+# (:meth:`LandscapeDB._verify_sqlite_pragmas`). The wrapper has zero runtime
 # overhead (``NewType`` is erased at runtime); it is a type-checker signal only.
 #
 # Only :meth:`LandscapeDB.engine` may mint a ``Tier1Engine`` via ``cast()``.
 # Call sites that accept ``Tier1Engine`` (e.g.
 # :class:`~elspeth.core.landscape.scheduler_repository.TokenSchedulerRepository`)
-# are guaranteed to receive a probe-verified engine — any call site that tries
-# to pass a bare :class:`Engine` will be caught by mypy.
+# are guaranteed to receive a Tier-1 engine — any call site that tries to pass
+# a bare :class:`Engine` will be caught by mypy.
 Tier1Engine = NewType("Tier1Engine", Engine)
 
 # Execution-option key that marks a connection's next transaction as carrying
@@ -87,6 +88,38 @@ _SQLITE_PRAGMA_INVARIANTS_MEMORY: tuple[tuple[str, str], ...] = (
     ("foreign_keys", "1"),
     ("busy_timeout", "5000"),
 )
+
+
+def verify_sqlite_tier1_pragmas(engine: Engine, *, owner: str) -> None:
+    """Refuse SQLite engines that bypassed LandscapeDB's PRAGMA gate.
+
+    Repository constructors use this as a runtime defense against casts or
+    type ignores that smuggle a bare SQLite engine past the ``Tier1Engine``
+    type. Non-SQLite engines deliberately skip this probe: PostgreSQL has no
+    SQLite PRAGMA surface, and issuing these statements there is a backend
+    syntax error.
+    """
+    if engine.dialect.name != "sqlite":
+        return
+
+    with engine.connect() as conn:
+        fk_result = conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one_or_none()
+        jm_result = conn.exec_driver_sql("PRAGMA journal_mode").scalar_one_or_none()
+
+    foreign_keys = "" if fk_result is None else str(fk_result).lower()
+    journal_mode = "" if jm_result is None else str(jm_result).lower()
+
+    violations: list[str] = []
+    if foreign_keys != "1":
+        violations.append(f"PRAGMA foreign_keys: expected '1', observed {foreign_keys!r}")
+    if journal_mode not in ("wal", "memory"):
+        violations.append(f"PRAGMA journal_mode: expected 'wal' (or 'memory' for :memory: DBs), observed {journal_mode!r}")
+
+    if violations:
+        raise AuditIntegrityError(
+            f"{owner} received an engine that does not meet Tier-1 audit-integrity "
+            "requirements; the engine was not opened through LandscapeDB. " + "; ".join(violations)
+        )
 
 
 class SchemaCompatibilityError(Exception):
@@ -1071,7 +1104,8 @@ class LandscapeDB:
 
         ``Tier1Engine`` is a :func:`typing.NewType` over
         :class:`~sqlalchemy.engine.Engine` that carries the static guarantee
-        that the engine passed the PRAGMA integrity probe
+        that the engine passed backend-appropriate audit-integrity checks. For
+        SQLite, that includes the PRAGMA integrity probe
         (:meth:`_verify_sqlite_pragmas`).  The only place in the codebase that
         may produce a ``Tier1Engine`` is this property — the ``cast()`` here
         is the single gated mint point.

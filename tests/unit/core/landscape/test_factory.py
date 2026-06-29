@@ -2,16 +2,54 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
+from sqlalchemy.engine import Connection, Engine
 
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.factory import RecorderFactory, _PluginAuditWriterAdapter
 from elspeth.core.landscape.query_repository import QueryRepository
 from elspeth.core.landscape.run_lifecycle_repository import RunLifecycleRepository
+
+
+class _PostgresEngineWithoutPragmas:
+    dialect = type("_Dialect", (), {"name": "postgresql"})()
+
+    def connect(self) -> None:
+        raise AssertionError("SQLite PRAGMA probe should not run for PostgreSQL engines")
+
+
+def _unexpected_connection(message: str) -> Connection:
+    raise AssertionError(message)
+
+
+class _PostgresLandscapeDB:
+    is_read_only = False
+
+    def __init__(self) -> None:
+        self._engine = Tier1Engine(cast(Engine, _PostgresEngineWithoutPragmas()))
+
+    @property
+    def engine(self) -> Tier1Engine:
+        return self._engine
+
+    @contextmanager
+    def read_only_connection(self) -> Iterator[Connection]:
+        yield _unexpected_connection("RecorderFactory construction should not open a read-only connection")
+
+    @contextmanager
+    def connection(self) -> Iterator[Connection]:
+        yield _unexpected_connection("RecorderFactory construction should not open a connection")
+
+    @contextmanager
+    def write_connection(self) -> Iterator[Connection]:
+        yield _unexpected_connection("RecorderFactory construction should not open a write connection")
 
 
 @pytest.fixture()
@@ -38,10 +76,20 @@ class TestRepositoryConstruction:
         run = factory.run_lifecycle.begin_run(
             config={"sources": {"primary": {"plugin": "csv"}}},
             canonical_version="v1",
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
         retrieved = factory.run_lifecycle.get_run(run.run_id)
         assert retrieved is not None
         assert retrieved.run_id == run.run_id
+
+    def test_postgresql_factory_construction_does_not_run_sqlite_pragmas(self) -> None:
+        """Auth-audit access must not be blocked by eager SQLite-only probes."""
+        db = cast(LandscapeDB, _PostgresLandscapeDB())
+
+        factory = RecorderFactory(db)
+
+        assert factory.auth_audit is not None
 
 
 class TestPayloadStore:

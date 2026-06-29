@@ -323,10 +323,8 @@ class CoalesceExecutor:
           from ``scalars`` are already recorded — re-deriving losses from
           audit and calling ``notify_branch_lost`` for a key that already
           carries them raises ``OrchestrationInvariantError`` (duplicate
-          loss). For zero-arrival loss-only keys dropped by the stale-scalars
-          arm, re-notification of genuinely-completed keys is safe: the
-          Landscape completed-keys check inside ``notify_branch_lost``
-          returns None for them.
+          loss). For zero-arrival loss-only keys restored from scalars, replay
+          dedup consults ``has_recorded_branch_loss`` before notifying again.
 
         Args:
             items: BLOCKED journal rows for coalesce barriers (all keys).
@@ -334,10 +332,10 @@ class CoalesceExecutor:
                 row. A key with journal items but no scalars entry restores
                 with empty lost_branches (the writer only emits keys with
                 recorded losses — D3). A scalars entry whose key has NO
-                journal items is STALE (that pending key flushed/completed
-                after the checkpoint — a legitimate window under D3's
-                staleness model, since the checkpoint may be older than the
-                journal) and is dropped with a log line rather than rejected.
+                journal items but non-empty lost_branches is a zero-arrival
+                pending key unless the Landscape says the key already
+                completed. Empty, unknown, or completed scalar-only entries
+                are stale and are dropped with a log line rather than rejected.
             state_ids: Per-token node_state hold id — the PENDING node_states
                 at the coalesce node, one per restored token (written at
                 accept() time, derived from audit tables). Every journal
@@ -456,31 +454,6 @@ class CoalesceExecutor:
                 lost_branches=dict(key_scalars.lost_branches) if key_scalars is not None else {},
             )
 
-        # Stale scalars: a key with a checkpoint lost_branches record but no
-        # journal items means that pending key flushed/completed after the
-        # checkpoint was written (the crash landed between the flush
-        # terminalizing the BLOCKED rows and the next checkpoint — a
-        # legitimate window under D3's staleness model, so rejecting would
-        # refuse valid resumes). Drop them, logged.
-        #
-        # NOTE: a zero-arrival pending key whose ONLY state was lost_branches
-        # (losses notified before any branch arrived) has the same signature —
-        # no BLOCKED rows — and is dropped with it. The journal is authoritative
-        # for pending membership; if a branch later arrives for such a row, a
-        # fresh pending entry forms without the loss record and resolves via
-        # timeout/flush instead of early loss-accounting (degraded latency,
-        # not corruption). The resume restore path must not re-notify losses
-        # restored from scalars; see this method's "Caller obligations".
-        for stale_key in scalars.keys() - grouped.keys():
-            slog.info(
-                "coalesce_journal_restore_dropped_stale_scalars",
-                coalesce_name=stale_key[0],
-                row_id=stale_key[1],
-                run_id=self._run_id,
-                resume_checkpoint_id=resume_checkpoint_id,
-                lost_branches=dict(scalars[stale_key].lost_branches),
-            )
-
         # Reconstruct completed keys from Landscape (source of truth) —
         # unchanged from the blob-restore era. This eliminates:
         # - FIFO eviction gap (Landscape has ALL completed, not just last 10K)
@@ -488,6 +461,41 @@ class CoalesceExecutor:
         # Queried BEFORE any mutation: a Landscape error mid-restore must not
         # leave the executor cleared-but-unrestored.
         completed_keys = self._reconstruct_completed_keys_from_landscape()
+        completed_key_set = set(completed_keys)
+
+        # Scalar-only entries have no arrived branch payloads in the journal.
+        # If the Landscape says the key completed, the scalar is an older
+        # checkpoint image and must be dropped. Otherwise, a non-empty
+        # lost_branches scalar is the durable image of a zero-arrival pending
+        # key: restore it so a later surviving branch accounts against the
+        # recorded loss instead of forming a fresh, loss-free pending key.
+        for scalar_key in scalars.keys() - grouped.keys():
+            coalesce_name, row_id = scalar_key
+            key_scalars = scalars[scalar_key]
+            lost_branches = dict(key_scalars.lost_branches)
+            if coalesce_name in self._settings and lost_branches and scalar_key not in completed_key_set:
+                new_pending[scalar_key] = _PendingCoalesce(
+                    branches={},
+                    first_arrival=monotonic_now,
+                    lost_branches=lost_branches,
+                )
+                slog.info(
+                    "coalesce_journal_restored_loss_only_scalars",
+                    coalesce_name=coalesce_name,
+                    row_id=row_id,
+                    run_id=self._run_id,
+                    resume_checkpoint_id=resume_checkpoint_id,
+                    lost_branches=lost_branches,
+                )
+                continue
+            slog.info(
+                "coalesce_journal_restore_dropped_stale_scalars",
+                coalesce_name=coalesce_name,
+                row_id=row_id,
+                run_id=self._run_id,
+                resume_checkpoint_id=resume_checkpoint_id,
+                lost_branches=lost_branches,
+            )
 
         self._pending.clear()
         self._completed_keys.clear()

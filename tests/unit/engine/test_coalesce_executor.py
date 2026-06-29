@@ -1152,9 +1152,7 @@ class TestUnionMerge:
         executor.register_coalesce(s, "node_1")
 
         # Inject audit-DB compromise at the first step inside the merge try-body.
-        executor._merge_data = Mock(  # type: ignore[method-assign]
-            side_effect=AuditIntegrityError("audit DB unreadable mid-merge")
-        )
+        executor._merge_data = Mock(side_effect=AuditIntegrityError("audit DB unreadable mid-merge"))
 
         t1 = _make_token(branch_name="a", token_id="t1", data={"x": 1})
         t2 = _make_token(branch_name="b", token_id="t2", data={"y": 2})
@@ -2927,6 +2925,29 @@ class TestRestoreFromJournal:
         assert outcome.held is False
         assert outcome.merged_token is not None
 
+    def test_restore_from_journal_preserves_loss_only_pending_key(self) -> None:
+        """A zero-arrival pending key with durable branch loss must survive restore."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="best_effort", timeout_seconds=60.0)
+        executor.register_coalesce(s, NodeID("co-1"))
+
+        executor.restore_from_journal(
+            items=[],
+            scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"a": "error_routed"})},
+            state_ids={},
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        pending = executor._pending[("merge", "row_1")]
+        assert pending.branches == {}
+        assert pending.lost_branches == {"a": "error_routed"}
+
+        outcome = executor.accept(_make_token(row_id="row_1", branch_name="b", token_id="t2"), "merge")
+        assert outcome.held is False
+        assert outcome.merged_token is not None
+
     def test_restore_from_journal_groups_items_per_pending_key(self) -> None:
         """Items group by (coalesce_name, row_id) — keys restore independently."""
         executor, *_ = _make_executor()
@@ -2970,14 +2991,16 @@ class TestRestoreFromJournal:
         assert executor._pending[("merge", "row_1")].lost_branches == {}
 
     def test_restore_from_journal_ignores_stale_scalars(self) -> None:
-        """A scalars entry whose key has NO journal items is stale — ignored, never rejected.
+        """A completed scalars-only key is stale — ignored, never rejected.
 
-        Window: that pending key flushed/completed after the checkpoint was
-        written (checkpoint older than the journal — legitimate under D3's
-        staleness model). Mirrors aggregation's drop-stale-scalars arm.
+        Window: that pending key completed after the checkpoint was written
+        (checkpoint older than the journal — legitimate under D3's staleness
+        model). Landscape completion distinguishes it from a live zero-arrival
+        loss-only pending key.
         """
-        executor, *_ = _make_executor()
+        executor, execution, *_ = _make_executor()
         executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        execution.get_completed_row_ids_for_nodes.return_value = {("co-1", "row_gone")}
 
         executor.restore_from_journal(
             items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],

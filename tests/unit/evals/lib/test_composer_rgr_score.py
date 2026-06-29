@@ -141,6 +141,64 @@ class TestBaselineRedSignals:
         )
         assert result["verdict"] == "RED"
 
+    def test_red_when_relaxed_validity_lacks_allowed_invalid_evidence(self) -> None:
+        """must_be_valid=false is not a blanket pass for invalid non-empty states."""
+        result = score(
+            scenario=_scenario(red={"must_be_valid": False}, green={"must_be_valid": False}),
+            messages=[_msg("assistant", "Pipeline ready.")],
+            state=_state_valid(is_valid=False),
+        )
+
+        assert result["verdict"] == "RED"
+        assert any("is_valid=false" in r and "allowed" in r for r in result["red_reasons"])
+
+    def test_green_when_relaxed_validity_has_only_allowed_error_codes(self) -> None:
+        result = score(
+            scenario=_scenario(
+                red={
+                    "must_be_valid": False,
+                    "allow_is_valid_false_when_error_codes": ["interpretation_review_pending"],
+                },
+                green={"must_be_valid": False},
+            ),
+            messages=[_msg("assistant", "Reviews are surfaced for operator resolution.")],
+            state=_state_valid(
+                is_valid=False,
+                validation_errors=[
+                    {
+                        "error_code": "interpretation_review_pending",
+                        "message": "LLM model choice review is pending",
+                    }
+                ],
+            ),
+        )
+
+        assert result["verdict"] == "GREEN", result["red_reasons"]
+
+    def test_red_when_relaxed_validity_has_disallowed_error_code(self) -> None:
+        result = score(
+            scenario=_scenario(
+                red={
+                    "must_be_valid": False,
+                    "allow_is_valid_false_when_error_codes": ["interpretation_review_pending"],
+                },
+                green={"must_be_valid": False},
+            ),
+            messages=[_msg("assistant", "Pipeline ready.")],
+            state=_state_valid(
+                is_valid=False,
+                validation_errors=[
+                    {
+                        "error_code": "invalid_output_path",
+                        "message": "output path is invalid",
+                    }
+                ],
+            ),
+        )
+
+        assert result["verdict"] == "RED"
+        assert any("invalid_output_path" in r for r in result["red_reasons"])
+
 
 class TestBaselineAmberSignals:
     def test_amber_on_missing_node_kinds(self) -> None:

@@ -48,6 +48,7 @@ from uuid import UUID, uuid4
 import pytest
 import structlog
 from evals.lib.composer_rgr_score import score
+from pydantic import SecretBytes
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.composer_interpretation import InterpretationKind
@@ -64,6 +65,11 @@ from elspeth.web.sessions.telemetry import build_sessions_telemetry
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SUITE = _REPO_ROOT / "evals" / "composer-rgr" / "scenarios" / "convergence-suite"
+
+pytestmark = pytest.mark.skipif(
+    not _SUITE.exists(),
+    reason="composer-rgr scenario corpus is intentionally untracked; populate evals/composer-rgr locally to run these tests",
+)
 
 
 def _passing_preflight() -> ValidationResult:
@@ -143,7 +149,7 @@ def _make_settings(data_dir: Path) -> WebSettings:
         composer_max_discovery_turns=10,
         composer_timeout_seconds=85.0,
         composer_rate_limit_per_minute=10,
-        shareable_link_signing_key=b"\x00" * 32,
+        shareable_link_signing_key=SecretBytes(b"\x00" * 32),
     )
 
 
@@ -228,11 +234,16 @@ def _state_dict_for_scoring(result: Any) -> dict[str, Any]:
     ``state.get('source')``, ``state.get('nodes')``, ``state.get('outputs')``,
     and ``state.get('composer_meta')``. ``CompositionState.to_dict()`` covers
     source/nodes/outputs but does not include is_valid (a runtime
-    determination from preflight) or composer_meta (from the result wrapper).
-    Compose them here so the round-trip mirrors API persistence.
+    determination from preflight), structured runtime validation error codes,
+    or composer_meta (from the result wrapper). Compose them here so scoring
+    sees the same run-defining facts the mocked harness asserted.
     """
     state_dict = result.state.to_dict()
     state_dict["is_valid"] = bool(result.runtime_preflight is not None and result.runtime_preflight.is_valid)
+    if result.runtime_preflight is not None and result.runtime_preflight.errors:
+        state_dict["validation_errors"] = [
+            {"error_code": error.error_code, "message": error.message} for error in result.runtime_preflight.errors
+        ]
     state_dict["composer_meta"] = _composer_meta_for(result)
     return cast("dict[str, Any]", state_dict)
 

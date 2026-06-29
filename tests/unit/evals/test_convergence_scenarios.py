@@ -36,6 +36,8 @@ _KNOWN_RED_KEYS = {
     "build_failure_note",
     "must_be_valid",
     "must_be_valid_note",
+    "allow_is_valid_false_when_error_codes",
+    "allow_is_valid_false_when_error_codes_note",
 }
 
 _KNOWN_GREEN_KEYS = {

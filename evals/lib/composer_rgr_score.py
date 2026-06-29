@@ -11,7 +11,11 @@ Detection rules (ordered by reliability):
      failed preflight. Most reliable RED signal.
   2. is_valid=false on the final composition state. Independent of
      message content, catches cases where the model gets stuck in
-     tool loops without ever surfacing a sentinel.
+     tool loops without ever surfacing a sentinel. Scenarios that set
+     ``red_criteria.must_be_valid=false`` must additionally declare
+     ``allow_is_valid_false_when_error_codes`` and provide matching
+     structured validation error codes on the scored state; otherwise
+     invalid terminal states fail closed.
   3. Passivity phrases in final assistant content. Catches the
      'If you want, I can…' / 'Should I…' rationalisation pattern that
      the skill's anti-passivity section explicitly forbids.
@@ -646,6 +650,61 @@ def _check_discover_before_mutation(messages: list[dict[str, Any]]) -> str | Non
     )
 
 
+def _extract_error_codes_from_entries(entries: Any) -> list[str]:
+    """Return structured validation error codes from a list-like payload.
+
+    Persisted session rows may only carry human-readable messages. Those are not
+    enough to prove an invalid terminal state belongs to an explicitly allowed
+    class, so strings are deliberately ignored and the caller fails closed.
+    """
+    if not isinstance(entries, list):
+        return []
+    codes: list[str] = []
+    for entry in entries:
+        code: Any
+        if isinstance(entry, dict):
+            code = entry.get("error_code") or entry.get("code")
+        else:
+            code = getattr(entry, "error_code", None) or getattr(entry, "code", None)
+        if isinstance(code, str) and code:
+            codes.append(code)
+    return codes
+
+
+def _validation_error_codes(state: Any) -> list[str]:
+    """Extract structured runtime validation error codes from scorer state."""
+    if not isinstance(state, dict):
+        return []
+    codes: list[str] = []
+    for entries in (state.get("validation_errors"), state.get("errors")):
+        codes.extend(_extract_error_codes_from_entries(entries))
+    runtime_preflight = state.get("runtime_preflight")
+    if isinstance(runtime_preflight, dict):
+        codes.extend(_extract_error_codes_from_entries(runtime_preflight.get("errors")))
+    return codes
+
+
+def _relaxed_invalid_state_reason(red: dict[str, Any], state: Any) -> str | None:
+    """Return a RED reason unless is_valid=false has explicit, proven allowance."""
+    allowed_raw = red.get("allow_is_valid_false_when_error_codes")
+    allowed = {code for code in allowed_raw if isinstance(code, str) and code} if isinstance(allowed_raw, list) else set()
+    if not allowed:
+        return "final composition state has is_valid=false and no allowed invalid validation error codes were declared"
+
+    observed = _validation_error_codes(state)
+    if not observed:
+        return (
+            f"final composition state has is_valid=false but no structured validation error codes were present (allowed: {sorted(allowed)})"
+        )
+
+    disallowed = sorted({code for code in observed if code not in allowed})
+    if disallowed:
+        return (
+            f"final composition state has is_valid=false with disallowed validation error code(s) {disallowed} (allowed: {sorted(allowed)})"
+        )
+    return None
+
+
 def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) -> dict[str, Any]:
     """Score a captured composer-rgr run. Pure function — no I/O.
 
@@ -687,6 +746,10 @@ def score(scenario: dict[str, Any], messages: list[dict[str, Any]], state: Any) 
         # degenerate-state floor above (and would otherwise double-append its
         # red_reason here), so this gate only needs the is_valid=false branch.
         red_reasons.append("final composition state has is_valid=false")
+    elif is_valid is False:
+        relaxed_reason = _relaxed_invalid_state_reason(red, state)
+        if relaxed_reason is not None:
+            red_reasons.append(relaxed_reason)
 
     phrase_hits = [p for p in red.get("passivity_phrases", []) if p in final_body]
     if phrase_hits:

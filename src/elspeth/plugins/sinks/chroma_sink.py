@@ -291,8 +291,9 @@ class ChromaSink(BaseSink):
 
         for i, row in enumerate(rows):
             # Required fields: id and document must be present.
-            # Tier-2 type contract: raw_id/raw_doc must be str (source validated).
-            # Missing field = per-row data problem; wrong type = upstream bug → crash.
+            # Missing or wrong-type values are per-row data problems. Observed
+            # schemas defer id/document typing to runtime, so validate before
+            # building the Chroma payload.
             try:
                 raw_id = row[fm.id_field]
                 raw_doc = row[fm.document_field]
@@ -301,6 +302,19 @@ class ChromaSink(BaseSink):
                     row,
                     row_index=i,
                     reason=f"Missing required field: {exc}",
+                )
+                continue
+
+            bad_required_fields: dict[str, str] = {}
+            if not isinstance(raw_id, str):
+                bad_required_fields[fm.id_field] = type(raw_id).__name__
+            if not isinstance(raw_doc, str):
+                bad_required_fields[fm.document_field] = type(raw_doc).__name__
+            if bad_required_fields:
+                self._divert_row(
+                    row,
+                    row_index=i,
+                    reason=f"Invalid ChromaDB required field types: {bad_required_fields}",
                 )
                 continue
 

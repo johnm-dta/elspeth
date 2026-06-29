@@ -611,6 +611,41 @@ class TestChromaSinkMetadataTypeValidation:
         mock_collection.upsert.assert_called_once()
 
 
+class TestChromaSinkRequiredFieldTypeValidation:
+    """Required Chroma id/document fields must be strings at runtime."""
+
+    def test_observed_schema_non_string_required_fields_are_diverted(self) -> None:
+        """Observed schemas defer typing, so bad id/document values must divert per row."""
+        mock_collection = MagicMock()
+        config = _make_config(
+            field_mapping={"document_field": "text", "id_field": "doc_id", "metadata_fields": []},
+            schema={"mode": "observed"},
+        )
+        sink = inject_write_failure(ChromaSink(config))
+        sink._collection = mock_collection
+        sink._on_write_failure = "csv_failsink"
+
+        ctx = _make_sink_ctx()
+        rows: list[dict[str, Any]] = [
+            {"doc_id": "d1", "text": "valid"},
+            {"doc_id": 123, "text": "bad id"},
+            {"doc_id": "d3", "text": ["bad", "document"]},
+        ]
+        result = sink.write(rows, ctx)
+
+        mock_collection.upsert.assert_called_once()
+        call_kwargs = mock_collection.upsert.call_args.kwargs
+        assert call_kwargs["ids"] == ["d1"]
+        assert call_kwargs["documents"] == ["valid"]
+        assert len(result.diversions) == 2
+        assert result.diversions[0].row_index == 1
+        assert "doc_id" in result.diversions[0].reason
+        assert "int" in result.diversions[0].reason
+        assert result.diversions[1].row_index == 2
+        assert "text" in result.diversions[1].reason
+        assert "list" in result.diversions[1].reason
+
+
 class TestChromaSinkDivertRow:
     """Tests for _divert_row() integration with metadata validation."""
 

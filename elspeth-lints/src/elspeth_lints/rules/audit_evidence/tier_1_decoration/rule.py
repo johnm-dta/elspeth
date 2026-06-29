@@ -16,6 +16,7 @@ from elspeth_lints.core.ast_walker import (
 from elspeth_lints.core.protocols import Finding, RuleContext, RuleMetadata, RuleScope
 from elspeth_lints.rules.audit_evidence.shared import (
     allowlist_path_for_root,
+    class_allowlist_governance_findings_for_root,
     display_path,
     load_class_allowlist,
     repo_relative_display_path,
@@ -81,7 +82,16 @@ def scan_root(root: Path, *, allowlist_dir_override: Path | None = None) -> list
             continue
         parsed = _parse_or_raise(path)
         findings.extend(scan_tree(parsed.tree, display_path(path, root), parsed.source.splitlines(), emit_tde1=False))
-    return [finding for finding in findings if finding.rule_id != RULE_TDE1 or allowlist.match_key(finding.fingerprint) is None]
+    active = [finding for finding in findings if finding.rule_id != RULE_TDE1 or allowlist.match_key(finding.fingerprint) is None]
+    return [
+        *active,
+        *class_allowlist_governance_findings_for_root(
+            allowlist,
+            allowlist_dir,
+            root=root,
+            allowlist_dir_override=allowlist_dir_override,
+        ),
+    ]
 
 
 def _parse_or_raise(path: Path) -> ParsedPythonFile:

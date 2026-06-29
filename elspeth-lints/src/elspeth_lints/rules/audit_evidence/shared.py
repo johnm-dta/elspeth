@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -10,6 +11,9 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from elspeth_lints.core.allowlist_governance import RULE_EXPIRED_ENTRY, RULE_STALE_ENTRY
+from elspeth_lints.core.protocols import Finding, Severity
 
 
 @dataclass(slots=True)
@@ -38,8 +42,114 @@ class ClassAllowlist:
         for entry in self.entries:
             if entry.key == key:
                 entry.matched = True
+                if _class_allowlist_entry_expired(entry):
+                    return None
                 return entry
         return None
+
+    def get_unused_entries(self) -> list[ClassAllowlistEntry]:
+        """Return exact class allowlist entries that did not match a finding."""
+        return [entry for entry in self.entries if not entry.matched]
+
+    def get_expired_entries(self) -> list[ClassAllowlistEntry]:
+        """Return exact class allowlist entries whose expiry is in the past."""
+        return [entry for entry in self.entries if _class_allowlist_entry_expired(entry)]
+
+
+def class_allowlist_governance_findings_for_root(
+    allowlist: ClassAllowlist,
+    allowlist_dir: Path,
+    *,
+    root: Path,
+    allowlist_dir_override: Path | None,
+) -> list[Finding]:
+    """Return governance findings when the class allowlist belongs to this scan."""
+    if not _class_governance_applies_to_root(root, allowlist_dir, allowlist_dir_override=allowlist_dir_override):
+        return []
+    return class_allowlist_governance_findings(allowlist, allowlist_dir)
+
+
+def class_allowlist_governance_findings(allowlist: ClassAllowlist, allowlist_dir: Path) -> list[Finding]:
+    """Return stale/expired findings for legacy ``allow_classes`` entries."""
+    findings: list[Finding] = []
+    if allowlist.fail_on_stale:
+        findings.extend(_class_stale_entry_finding(entry, allowlist_dir) for entry in allowlist.get_unused_entries())
+    if allowlist.fail_on_expired:
+        findings.extend(_class_expired_entry_finding(entry, allowlist_dir) for entry in allowlist.get_expired_entries())
+    return findings
+
+
+def _class_allowlist_entry_expired(entry: ClassAllowlistEntry) -> bool:
+    return entry.expires is not None and entry.expires < datetime.now(UTC).date()
+
+
+def _class_governance_applies_to_root(
+    root: Path,
+    allowlist_dir: Path,
+    *,
+    allowlist_dir_override: Path | None,
+) -> bool:
+    if allowlist_dir_override is not None:
+        return True
+    resolved_root = root.resolve()
+    resolved_allowlist_dir = allowlist_dir.resolve()
+    if _is_relative_to(resolved_allowlist_dir, resolved_root):
+        return True
+    return _is_relative_to(resolved_root, Path.cwd().resolve())
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _class_stale_entry_finding(entry: ClassAllowlistEntry, allowlist_dir: Path) -> Finding:
+    return _class_governance_finding(
+        rule_id=RULE_STALE_ENTRY,
+        file_path=_class_allowlist_source_file(allowlist_dir, entry.source_file),
+        message=f"Legacy class allowlist entry no longer matches any finding: {entry.key}",
+        fingerprint_payload=f"{RULE_STALE_ENTRY}|{entry.source_file}|{entry.key}",
+        suggestion="Remove the stale allow_classes entry or rotate it through the rule's reviewed process.",
+    )
+
+
+def _class_expired_entry_finding(entry: ClassAllowlistEntry, allowlist_dir: Path) -> Finding:
+    return _class_governance_finding(
+        rule_id=RULE_EXPIRED_ENTRY,
+        file_path=_class_allowlist_source_file(allowlist_dir, entry.source_file),
+        message=f"Legacy class allowlist entry expired on {entry.expires}: {entry.key}",
+        fingerprint_payload=f"{RULE_EXPIRED_ENTRY}|{entry.source_file}|{entry.key}|{entry.expires}",
+        suggestion="Remove the expired allow_classes entry or renew it through the rule's reviewed process.",
+    )
+
+
+def _class_governance_finding(
+    *,
+    rule_id: str,
+    file_path: str,
+    message: str,
+    fingerprint_payload: str,
+    suggestion: str,
+) -> Finding:
+    return Finding(
+        rule_id=rule_id,
+        file_path=file_path,
+        line=1,
+        column=0,
+        message=message,
+        fingerprint=hashlib.sha256(fingerprint_payload.encode("utf-8")).hexdigest()[:16],
+        severity=Severity.ERROR,
+        suggestion=suggestion,
+    )
+
+
+def _class_allowlist_source_file(allowlist_dir: Path, source_file: str) -> str:
+    if not source_file:
+        return allowlist_dir.as_posix()
+    return (allowlist_dir / source_file).as_posix()
 
 
 def display_path(file_path: Path, root: Path) -> str:

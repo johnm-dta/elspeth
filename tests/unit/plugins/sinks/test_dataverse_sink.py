@@ -766,6 +766,7 @@ class TestWriteLifecycle:
             "Bad request (400)",
             retryable=False,
             status_code=400,
+            error_category="row_data_error",
         )
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
@@ -981,12 +982,13 @@ class TestPerRowWriteFailureRouting:
     @pytest.mark.parametrize("status_code", [400, 404, 409, 412, 422])
     @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
     def test_non_retryable_payload_4xx_diverts(self, _mock_schema: MagicMock, status_code: int) -> None:
-        """Non-retryable 4xx about the row payload/key are diverted."""
+        """Structured row-data 4xx about the row payload/key are diverted."""
         sink, _client = self._make_sink(
             DataverseClientError(
                 f"Client error ({status_code})",
                 retryable=False,
                 status_code=status_code,
+                error_category="row_data_error",
             )
         )
         ctx = self._make_mock_ctx()
@@ -1000,6 +1002,31 @@ class TestPerRowWriteFailureRouting:
         # Diverted row's original data is recorded for routing.
         assert result.diversions[0].row_data == {"email": "a@b.com", "name": "Alice"}
         # ERROR audit fired before diverting.
+        assert ctx.record_call.call_args_list[0].kwargs["status"].value == "error"
+
+    @pytest.mark.parametrize("status_code", [400, 404, 409, 412, 422])
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_generic_non_retryable_4xx_raises_fail_closed(self, _mock_schema: MagicMock, status_code: int) -> None:
+        """A status-only 4xx is not enough to prove a single-row fault.
+
+        Dataverse uses these same HTTP statuses for sink-wide configuration
+        failures such as invalid entity sets, API paths, schema metadata, or
+        alternate-key setup. With on_write_failure=discard enabled, diverting a
+        generic 4xx would silently drop every row from a misconfigured sink.
+        """
+        sink, _client = self._make_sink(
+            DataverseClientError(
+                f"Generic client error ({status_code})",
+                retryable=False,
+                status_code=status_code,
+            )
+        )
+        ctx = self._make_mock_ctx()
+        rows = [{"email": "a@b.com", "name": "Alice"}]
+
+        with pytest.raises(DataverseClientError):
+            sink.write(rows, ctx)
+
         assert ctx.record_call.call_args_list[0].kwargs["status"].value == "error"
 
     @pytest.mark.parametrize(
@@ -1054,7 +1081,12 @@ class TestPerRowWriteFailureRouting:
         at the correct input-batch position.
         """
         good = _make_204_response()
-        bad = DataverseClientError("Bad request (400)", retryable=False, status_code=400)
+        bad = DataverseClientError(
+            "Bad request (400)",
+            retryable=False,
+            status_code=400,
+            error_category="row_data_error",
+        )
 
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
@@ -1092,7 +1124,12 @@ class TestPerRowWriteFailureRouting:
         describes only what was actually written.
         """
         good = _make_204_response()
-        bad = DataverseClientError("Bad request (400)", retryable=False, status_code=400)
+        bad = DataverseClientError(
+            "Bad request (400)",
+            retryable=False,
+            status_code=400,
+            error_category="row_data_error",
+        )
 
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
@@ -1197,6 +1234,7 @@ class TestRequestDataRecordsJsonPayload:
             "Bad request (400)",
             retryable=False,
             status_code=400,
+            error_category="row_data_error",
         )
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client

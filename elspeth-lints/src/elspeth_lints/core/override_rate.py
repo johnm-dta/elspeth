@@ -499,7 +499,11 @@ def _compute_allowlist_hash(allowlist_root: Path) -> str:
         rel = path.relative_to(allowlist_root).as_posix()
         hasher.update(rel.encode("utf-8"))
         hasher.update(b"\0")
-        hasher.update(path.read_bytes())
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise OverrideRateError(f"allowlist hash could not read {path}: {exc}") from exc
+        hasher.update(content)
         hasher.update(b"\0")
     return hasher.hexdigest()
 

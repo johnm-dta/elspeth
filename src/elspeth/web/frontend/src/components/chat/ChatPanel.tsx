@@ -27,6 +27,7 @@ import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
+import { latestAssistantRationale } from "./guided/guidedRationale";
 import {
   AcknowledgementLiveRegion,
   AcknowledgementStack,
@@ -1425,6 +1426,11 @@ export function ChatPanel({
         {(() => {
           const stepIsSendDriven =
             isTutorial && (lockedChatPrompt?.[guidedSession.step] ?? "") !== "";
+          // Lead the decision with the dynamic build rationale (the LLM's
+          // "what I built" summary for this step); fall back to the static
+          // step purpose when no assistant turn exists yet (server-emitted /
+          // empty cases) so the headline is never blank.
+          const rationale = latestAssistantRationale(guidedSession);
           return (
         <section
           className={
@@ -1435,10 +1441,15 @@ export function ChatPanel({
           aria-labelledby="guided-current-decision-heading"
         >
           <div className="guided-current-decision-copy">
-            <h2 id="guided-current-decision-heading">
+            <p className="guided-current-decision-eyebrow" aria-hidden="true">
               Current decision
+            </p>
+            <h2
+              id="guided-current-decision-heading"
+              className="guided-current-decision-rationale"
+            >
+              {rationale ?? GUIDED_STEP_PURPOSES[guidedSession.step]}
             </h2>
-            <p>{GUIDED_STEP_PURPOSES[guidedSession.step]}</p>
             {stepIsSendDriven && !tutorialStepBuilt && (
               <p className="guided-current-decision-tutorial-note">
                 You don't need to fill this in by hand — press{" "}

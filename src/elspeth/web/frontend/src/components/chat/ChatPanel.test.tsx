@@ -557,11 +557,14 @@ describe("ChatPanel mode discriminator", () => {
 
     render(<ChatPanel />);
 
+    // The decision now leads with the dynamic rationale (or, when no assistant
+    // turn exists for the step, the step-purpose fallback) AS the heading;
+    // "Current decision" is a decorative, aria-hidden eyebrow.
     expect(
-      screen.getByRole("heading", { name: /current decision/i }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(/choose the input and confirm what elspeth can read/i),
+      screen.getByRole("heading", {
+        level: 2,
+        name: /choose the input and confirm what elspeth can read/i,
+      }),
     ).toBeInTheDocument();
   });
 

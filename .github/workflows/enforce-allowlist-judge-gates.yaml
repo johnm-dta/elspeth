@@ -49,7 +49,8 @@
 #
 # BRANCH PROTECTION: the aggregate ``judge-gates-success`` job at the bottom
 # is the single required status check for these gates (mirroring ci.yaml's
-# ``ci-success``). Branch protection MUST require ``judge-gates-success`` —
+# ``ci-success``). Branch protection MUST require ``Judge gates success`` from
+# GitHub Actions —
 # requiring the individual gate jobs is fragile (a renamed job silently drops
 # the requirement) and GitHub keys protection on one named check. The
 # aggregate fails if C3 is not ``success``; VAL may be ``skipped`` (it is

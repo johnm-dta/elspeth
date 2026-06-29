@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import Path
 from types import SimpleNamespace
@@ -157,6 +158,21 @@ def test_judge_gates_workflow_mirrors_ci_concurrency_policy() -> None:
     judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
 
     assert judge_workflow["concurrency"] == ci_workflow["concurrency"]
+
+
+def test_judge_gates_required_context_matches_emitted_check_name() -> None:
+    """Branch-protection docs must name the check context GitHub emits."""
+    workflow_text = JUDGE_GATES_WORKFLOW.read_text(encoding="utf-8")
+    required_context = re.search(
+        r"Branch protection MUST require ``(?P<context>[^`]+)``",
+        workflow_text,
+    )
+    assert required_context is not None, "workflow header must document the required context"
+
+    judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
+    aggregate_job = judge_workflow["jobs"]["judge-gates-success"]
+
+    assert required_context.group("context") == aggregate_job["name"]
 
 
 def test_judge_gates_workflow_has_bounded_job_timeouts() -> None:

@@ -123,6 +123,8 @@ class Run:
         _validate_enum(self.export_status, ExportStatus, "export_status", optional=True)
         if type(self.seeded_from_cache) is not bool:
             raise TypeError(f"seeded_from_cache must be bool, got {type(self.seeded_from_cache).__name__}: {self.seeded_from_cache!r}")
+        if self.seeded_from_cache and self.cache_key is None:
+            raise ValueError(f"seeded_from_cache=True requires cache_key for run {self.run_id!r}")
         if self.cache_key is not None and not _SHA256_HEX_PATTERN.fullmatch(self.cache_key):
             raise ValueError(f"cache_key must be 64 lowercase hex chars or None, got {self.cache_key!r} for run {self.run_id!r}")
 

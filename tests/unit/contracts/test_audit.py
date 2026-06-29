@@ -76,6 +76,19 @@ class TestAuditEnumValidation:
         assert run.reproducibility_grade is None
         assert run.export_status is None
 
+    def test_seeded_from_cache_requires_cache_key(self) -> None:
+        """Cache replay runs must carry the cache key they were replayed from."""
+        with pytest.raises(ValueError, match="seeded_from_cache=True requires cache_key"):
+            Run(
+                run_id="run-1",
+                started_at=datetime.now(UTC),
+                config_hash="a" * 64,
+                settings_json="{}",
+                canonical_version="1.0",
+                status=RunStatus.COMPLETED,
+                seeded_from_cache=True,
+            )
+
 
 class TestNodeStateVariants:
     """Tests for NodeState discriminated union."""

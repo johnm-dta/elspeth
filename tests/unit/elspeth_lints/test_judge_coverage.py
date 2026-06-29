@@ -1192,6 +1192,77 @@ def test_check_judge_coverage_rejects_bad_baseline_ref(tmp_path: Path) -> None:
     assert "baseline-ref" in str(exc_info.value)
 
 
+def test_check_judge_coverage_leniently_loads_historical_baseline_without_safety(tmp_path: Path) -> None:
+    """Historical baseline entries missing later-required fields still grandfather.
+
+    The baseline ref is read-only diff context. It must remain parseable when a
+    newer HEAD schema adds fields such as ``safety``; otherwise C1 crashes before
+    it can compare the current strict HEAD entries against their baseline
+    counterpart.
+    """
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+    """),
+        encoding="utf-8",
+    )
+    baseline = _commit(tmp_path, "initial: historical pre-safety entry")
+
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+          safety: contained
+    """),
+        encoding="utf-8",
+    )
+    _commit(tmp_path, "PR: preserve entry under current schema")
+
+    report = check_one_directory(
+        allowlist_dir=enforce_dir,
+        baseline_ref=baseline,
+        repo_root=tmp_path,
+    )
+
+    assert report.head_entry_count == 1
+    assert report.grandfathered_count == 1
+    assert report.new_entry_count == 0
+    assert report.violations == ()
+
+
+def test_check_judge_coverage_keeps_head_safety_required(tmp_path: Path) -> None:
+    """Lenient baseline loading must not weaken current HEAD validation."""
+    enforce_dir = _init_git_fixture(tmp_path)
+    yaml_path = enforce_dir / "web.yaml"
+    yaml_path.write_text("allow_hits: []\n", encoding="utf-8")
+    baseline = _commit(tmp_path, "initial: empty allowlist")
+
+    yaml_path.write_text(
+        textwrap.dedent("""\
+        allow_hits:
+        - key: web/x.py:R1:fn:fp=aaaaaaaaaaaaaaaa
+          owner: alice
+          reason: legitimate boundary
+    """),
+        encoding="utf-8",
+    )
+    _commit(tmp_path, "PR: add current entry without safety")
+
+    with pytest.raises(JudgeCoverageError, match="safety"):
+        check_one_directory(
+            allowlist_dir=enforce_dir,
+            baseline_ref=baseline,
+            repo_root=tmp_path,
+        )
+
+
 def test_check_judge_coverage_skips_standalone_legacy_allow_classes_shape(tmp_path: Path) -> None:
     """Standalone legacy allowlist formats are outside the C1 judge surface.
 

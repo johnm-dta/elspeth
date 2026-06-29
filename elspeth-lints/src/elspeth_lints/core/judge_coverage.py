@@ -744,10 +744,9 @@ def _load_entries_from_git(
     with the offending baseline path and parse diagnostic. The
     operator fixes the baseline (or the ref), not the symptoms.
 
-    Same discipline applies to ``_parse_allow_hits`` invariant
-    violations: a baseline whose entry shape no longer parses under
-    the current schema is a structural anomaly that the operator
-    must see, not silently route around.
+    Baseline entries are read-only diff context, so the loader accepts
+    the historical pre-``safety`` shape while preserving fail-closed
+    behaviour for malformed YAML and every other parser invariant.
     """
     rel_dir = _relative_to_repo(allowlist_dir, repo_root)
     file_names = _ls_tree_yaml_files(
@@ -781,7 +780,13 @@ def _load_entries_from_git(
             # source_root=None: baseline entries come from a historical
             # git ref where the source tree at that ref isn't on disk —
             # binding verification is meaningless here.
-            entries.extend(parse_allow_hits(data, source_file=Path(rel_path).name))
+            entries.extend(
+                parse_allow_hits(
+                    data,
+                    source_file=Path(rel_path).name,
+                    allow_historical_missing_safety=True,
+                )
+            )
             per_file_rules.extend(_parse_per_file_rules_for_coverage(data, source_file=Path(rel_path).name))
         except AllowlistIOError as exc:
             raise JudgeCoverageError(f"baseline {baseline_ref}:{rel_path}: {exc}") from exc

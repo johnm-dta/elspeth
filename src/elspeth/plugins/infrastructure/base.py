@@ -1412,9 +1412,11 @@ class BaseSource(ABC):
     # All sources must set this - config-based sources get it from SourceDataConfig
     _on_validation_failure: str
 
-    # Success routing: sink name for rows that pass source validation
-    # All sources must set this - config-based sources get it from SourceDataConfig
-    on_success: str
+    # Success routing: sink name for rows that pass source validation.
+    # Always non-None at runtime (SourceSettings requires on_success).
+    # Base class default is None because injection happens post-construction
+    # via runtime_factory bridge (set from SourceSettings.on_success).
+    on_success: str | None = None
 
     # Guaranteed-field enforcement (centralized in the source boundary contract).
     # Sources set this from schema_config.get_effective_guaranteed_fields() at init.

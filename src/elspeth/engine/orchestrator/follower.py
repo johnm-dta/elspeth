@@ -514,7 +514,13 @@ def build_follower_processor(
     source_id = sources[0]
 
     # Get on_success for the first source (required RowProcessor param).
-    first_source = next(iter(config.sources.values()))
+    first_source_name, first_source = next(iter(config.sources.items()))
+    first_source_on_success = first_source.on_success
+    if first_source_on_success is None:
+        raise OrchestrationInvariantError(
+            f"Source '{first_source_name}' reached follower RowProcessor construction before on_success was injected. "
+            "Sources must be constructed through the runtime factory bridge before execution."
+        )
 
     # Build the edge_map from the database (same as the resume path).
     # The leader already registered nodes and edges in Landscape; the follower
@@ -546,7 +552,7 @@ def build_follower_processor(
         span_factory=SpanFactory(),
         run_id=run_id,
         source_node_id=source_id,
-        source_on_success=first_source.on_success,
+        source_on_success=first_source_on_success,
         source_plugin=None,  # follower: no source
         edge_map=edge_map,
         route_resolution_map=graph.get_route_resolution_map(),

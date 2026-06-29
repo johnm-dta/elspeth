@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from elspeth.contracts import PluginSchema
+from elspeth.contracts.plugin_protocols import SourceProtocol, TransformProtocol
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.sinks.csv_sink import CSVSink
 from elspeth.plugins.sources.csv_source import CSVSource
@@ -168,3 +169,9 @@ def test_data_plugins_reject_invalid_schema_on_init(
         plugin_factory(config_factory(tmp_path, deepcopy(schema)))
 
     assert not _sink_output_path(tmp_path).exists()
+
+
+def test_source_on_success_matches_transform_post_construction_injection_contract() -> None:
+    """Source and transform success routing are both injected after construction."""
+    assert SourceProtocol.__annotations__["on_success"] == str | None
+    assert TransformProtocol.__annotations__["on_success"] == str | None

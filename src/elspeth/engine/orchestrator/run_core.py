@@ -374,14 +374,20 @@ class RunExecutionCore:
 
         # RowProcessor still carries a run-level source view for legacy helper
         # surfaces. Per-row processing passes the active source explicitly.
-        first_source = next(iter(config.sources.values()))
+        first_source_name, first_source = next(iter(config.sources.items()))
+        first_source_on_success = first_source.on_success
+        if first_source_on_success is None:
+            raise OrchestrationInvariantError(
+                f"Source '{first_source_name}' reached RowProcessor construction before on_success was injected. "
+                "Sources must be constructed through the runtime factory bridge before execution."
+            )
         processor = RowProcessor(
             execution=factory.execution,
             data_flow=factory.data_flow,
             span_factory=self._span_factory,
             run_id=run_id,
             source_node_id=source_id,
-            source_on_success=first_source.on_success,
+            source_on_success=first_source_on_success,
             source_plugin=first_source,
             edge_map=edge_map,
             route_resolution_map=route_resolution_map,

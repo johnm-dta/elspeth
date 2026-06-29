@@ -153,7 +153,7 @@ from elspeth_lints.core.reaudit import (
 # operator's mid-sweep state is bound to a specific schema, and an
 # upgrade that silently changes line shapes would corrupt
 # reconstruction.
-SIDECAR_SCHEMA_VERSION = 5  # v5: outcome records carry the reaudit cause axis
+SIDECAR_SCHEMA_VERSION = 6  # v6: header binds the judge transport used by the sweep
 
 SIDECAR_DIRNAME = ".reaudit-state"
 
@@ -235,6 +235,11 @@ class SidecarHeader:
     detect "the allowlist was edited between the original sweep and the
     resume" (and crash rather than silently produce a corrupt report).
 
+    ``judge_transport`` binds the sweep to the verdict producer used
+    by each per-entry judge call. A ``--resume`` with a different
+    transport crashes rather than mixing verdicts from distinct judge
+    boundaries in one audit trail.
+
     Filter fields (``rule_filter``, ``since_iso``, ``limit``,
     ``include_pre_judge``) bind the sweep to the exact filtered entry
     list. A ``--resume`` whose filters differ from the header crashes:
@@ -248,6 +253,7 @@ class SidecarHeader:
     total_entries: int
     allowlist_path: str
     allowlist_hash: str
+    judge_transport: str
     rule_filter: str
     since_iso: str | None
     limit: int | None
@@ -737,6 +743,7 @@ def _header_to_dict(header: SidecarHeader) -> dict[str, Any]:
         "total_entries": header.total_entries,
         "allowlist_path": header.allowlist_path,
         "allowlist_hash": header.allowlist_hash,
+        "judge_transport": header.judge_transport,
         "rule_filter": header.rule_filter,
         "since_iso": header.since_iso,
         "limit": header.limit,
@@ -767,6 +774,7 @@ def _header_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: i
         total_entries=_required(payload, "total_entries", int, sidecar_path, line_no),
         allowlist_path=_required(payload, "allowlist_path", str, sidecar_path, line_no),
         allowlist_hash=_required(payload, "allowlist_hash", str, sidecar_path, line_no),
+        judge_transport=_required(payload, "judge_transport", str, sidecar_path, line_no),
         rule_filter=_required(payload, "rule_filter", str, sidecar_path, line_no),
         since_iso=since_iso,
         limit=limit,
@@ -1076,6 +1084,7 @@ def validate_header_for_resume(
     *,
     header: SidecarHeader,
     allowlist_dir: Path,
+    judge_transport: str,
     rule_filter: str,
     since_iso: str | None,
     limit: int | None,
@@ -1089,11 +1098,14 @@ def validate_header_for_resume(
        the original sweep and the resume. Re-deriving the filtered
        entry list would produce a different order or different entries
        and the "skip already-classified" logic becomes meaningless.
-    2. Filter argument drift — ``--rule`` / ``--since`` / ``--limit`` /
+    2. Judge transport drift — ``--judge-transport`` differs from the
+       header. A single sidecar must not mix verdicts from distinct
+       judge boundaries.
+    3. Filter argument drift — ``--rule`` / ``--since`` / ``--limit`` /
        ``--include-pre-judge`` differ from the header. Different
        filters produce a different filtered list; resume becomes
        reconstruction of a sweep that never existed.
-    3. ``allowlist_path`` drift — the operator pointed ``--allowlist-dir``
+    4. ``allowlist_path`` drift — the operator pointed ``--allowlist-dir``
        at a different directory than the one the sweep ran against.
     """
     expected_hash = compute_allowlist_hash(allowlist_dir)
@@ -1113,6 +1125,11 @@ def validate_header_for_resume(
             f"--resume {header.run_id}: --allowlist-dir {allowlist_dir} "
             f"does not match the directory the sweep ran against "
             f"({header.allowlist_path})."
+        )
+    if judge_transport != header.judge_transport:
+        raise SidecarCorruptError(
+            f"--resume {header.run_id}: judge transport {judge_transport!r} does not match "
+            f"the original sweep's judge transport {header.judge_transport!r}."
         )
     if rule_filter != header.rule_filter:
         raise SidecarCorruptError(

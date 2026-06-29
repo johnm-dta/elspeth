@@ -3074,6 +3074,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
             total_entries=0,
             allowlist_path=str(allowlist_dir.resolve()),
             allowlist_hash="",
+            judge_transport=transport,
             rule_filter=args.rule,
             since_iso=since_iso_for_header,
             limit=args.limit,
@@ -3091,6 +3092,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
             validate_header_for_resume(
                 header=loaded.header,
                 allowlist_dir=allowlist_dir,
+                judge_transport=transport,
                 rule_filter=args.rule,
                 since_iso=since_iso_for_header,
                 limit=args.limit,
@@ -3148,6 +3150,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
             total_entries=len(filtered_preview),
             allowlist_path=str(allowlist_dir.resolve()),
             allowlist_hash=compute_allowlist_hash(allowlist_dir),
+            judge_transport=transport,
             rule_filter=args.rule,
             since_iso=since_iso_for_header,
             limit=args.limit,

@@ -2309,7 +2309,8 @@ def test_t6b_sidecar_happy_path_writes_header_outcomes_trailer(tmp_path: Path, c
     assert lines[0]["type"] == "header"
     assert lines[0]["run_id"] == run_id
     assert lines[0]["total_entries"] == 3
-    assert lines[0]["schema_version"] == 5
+    assert lines[0]["schema_version"] == 6
+    assert lines[0]["judge_transport"] == TRANSPORT_OPENROUTER
     assert lines[0]["rule_filter"] == "trust_tier.tier_model"
     outcome_lines = [line for line in lines if line["type"] == "outcome"]
     assert len(outcome_lines) == 3
@@ -2505,6 +2506,59 @@ def test_t6b_resume_rejects_allowlist_edit_via_header_mismatch(tmp_path: Path, c
     assert resume_exit == 2
     err = capsys.readouterr().err
     assert "hash drift" in err
+
+
+def test_t6b_resume_rejects_judge_transport_mismatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Changing --judge-transport between sweep and resume crashes the resume."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    def _accepted_response(*, transport: str) -> JudgeResponse:
+        return JudgeResponse(
+            verdict=JudgeVerdict.ACCEPTED,
+            model_id=DEFAULT_AGENT_JUDGE_MODEL if transport == TRANSPORT_AGENT else DEFAULT_JUDGE_MODEL,
+            judge_rationale="still a genuine Tier-3 boundary",
+            recorded_at=datetime.now(UTC),
+            should_use_decorator=None,
+            confidence=0.91,
+            prompt_tokens_total=4000,
+            prompt_tokens_cached=0,
+            policy_hash=JUDGE_POLICY_HASH,
+            judge_transport=transport,
+        )
+
+    initial_calls = 0
+
+    def _initial_judge(_request: JudgeRequest, **kwargs: Any) -> JudgeResponse:
+        nonlocal initial_calls
+        initial_calls += 1
+        if initial_calls == 1:
+            return _accepted_response(transport=kwargs["transport"])
+        raise KeyboardInterrupt()
+
+    with (
+        patch("elspeth_lints.core.reaudit.call_judge", side_effect=_initial_judge),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+
+    resumed_judge = MagicMock(return_value=_accepted_response(transport=TRANSPORT_AGENT))
+    with patch("elspeth_lints.core.reaudit.call_judge", resumed_judge):
+        resume_exit = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--resume", run_id, "--judge-transport", "agent"],
+        )
+
+    assert resume_exit == 2
+    assert resumed_judge.call_count == 0
+    err = capsys.readouterr().err
+    assert "judge transport" in err
+    assert TRANSPORT_OPENROUTER in err
+    assert TRANSPORT_AGENT in err
 
 
 def test_t6b_fsync_called_per_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2955,6 +3009,7 @@ def test_resume_preserves_complete_unterminated_final_outcome(tmp_path: Path) ->
         total_entries=3,
         allowlist_path=str(allowlist_dir),
         allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        judge_transport=TRANSPORT_OPENROUTER,
         rule_filter="trust_tier.tier_model",
         since_iso=None,
         limit=None,
@@ -3006,6 +3061,7 @@ def test_resume_preserves_complete_unterminated_header_only_sidecar(tmp_path: Pa
         total_entries=0,
         allowlist_path=str(allowlist_dir),
         allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        judge_transport=TRANSPORT_OPENROUTER,
         rule_filter="trust_tier.tier_model",
         since_iso=None,
         limit=None,
@@ -3075,6 +3131,7 @@ def test_t6d_truncate_is_idempotent_on_clean_sidecar(tmp_path: Path) -> None:
         total_entries=3,
         allowlist_path=str(allowlist_dir),
         allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        judge_transport=TRANSPORT_OPENROUTER,
         rule_filter="trust_tier.tier_model",
         since_iso=None,
         limit=None,
@@ -3135,6 +3192,7 @@ def test_t6d_truncation_shrinks_file_to_last_newline_offset(tmp_path: Path) -> N
         total_entries=3,
         allowlist_path=str(allowlist_dir),
         allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        judge_transport=TRANSPORT_OPENROUTER,
         rule_filter="trust_tier.tier_model",
         since_iso=None,
         limit=None,
@@ -3240,6 +3298,7 @@ def test_t6d_truncation_runs_inside_flock_window(tmp_path: Path) -> None:
             total_entries=3,
             allowlist_path=str(allowlist_dir),
             allowlist_hash=compute_allowlist_hash(allowlist_dir),
+            judge_transport=TRANSPORT_OPENROUTER,
             rule_filter="trust_tier.tier_model",
             since_iso=None,
             limit=None,
@@ -3452,6 +3511,7 @@ def test_t6c_completed_sidecar_pruned_after_retention_horizon(tmp_path: Path) ->
         total_entries=0,
         allowlist_path=str(allowlist_dir.resolve()),
         allowlist_hash="0" * 64,
+        judge_transport=TRANSPORT_OPENROUTER,
         rule_filter="trust_tier.tier_model",
         since_iso=None,
         limit=None,

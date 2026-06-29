@@ -9,6 +9,7 @@ Coverage goals:
 """
 
 import base64
+from collections.abc import Iterator
 from unittest.mock import Mock, patch
 
 import httpx
@@ -17,7 +18,7 @@ import respx
 
 from elspeth.contracts import CallStatus, CallType
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient, HTTPResponseBodyTooLargeError
 
 
 @pytest.fixture
@@ -44,6 +45,19 @@ def http_client(mock_execution, mock_telemetry_emit):
         telemetry_emit=mock_telemetry_emit,
         timeout=30.0,
     )
+
+
+class _CountingByteStream(httpx.SyncByteStream):
+    """Streaming fixture that exposes how many chunks the client consumed."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.yielded: list[bytes] = []
+
+    def __iter__(self) -> Iterator[bytes]:
+        for chunk in self._chunks:
+            self.yielded.append(chunk)
+            yield chunk
 
 
 # ============================================================================
@@ -372,6 +386,54 @@ def test_get_telemetry_failure_doesnt_corrupt_audit(http_client, mock_execution,
 
     assert response.status_code == 200
     mock_execution.record_call.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "response_headers",
+    [
+        {},
+        {"content-length": "3"},
+        {"transfer-encoding": "chunked"},
+    ],
+)
+@respx.mock
+def test_get_body_cap_streams_and_aborts_without_trusting_response_headers(
+    response_headers: dict[str, str],
+    mock_execution,
+    mock_telemetry_emit,
+) -> None:
+    """Configured body cap aborts during streaming for absent, lying, and chunked lengths."""
+    stream = _CountingByteStream([b"abc", b"def", b"must-not-read"])
+    headers = {"content-type": "text/plain", **response_headers}
+    respx.get("https://api.example.com/huge").mock(return_value=httpx.Response(200, headers=headers, stream=stream))
+    client = AuditedHTTPClient(
+        execution=mock_execution,
+        state_id="test-state-001",
+        run_id="test-run-001",
+        telemetry_emit=mock_telemetry_emit,
+        timeout=30.0,
+        max_response_body_bytes=5,
+    )
+
+    with pytest.raises(HTTPResponseBodyTooLargeError) as exc_info:
+        client.get("https://api.example.com/huge")
+
+    assert exc_info.value.body_size == 6
+    assert exc_info.value.max_body_bytes == 5
+    assert stream.yielded == [b"abc", b"def"]
+    mock_execution.record_call.assert_called_once()
+    call_args = mock_execution.record_call.call_args.kwargs
+    assert call_args["status"] is CallStatus.ERROR
+    assert call_args["error"].type == "HTTPResponseBodyTooLargeError"
+    response_data = call_args["response_data"].to_dict()
+    assert response_data["body_size"] == 6
+    assert response_data["body"] == {
+        "_truncated": True,
+        "_reason": "body_too_large",
+        "_captured_body": False,
+        "_observed_body_size": 6,
+        "_max_body_bytes": 5,
+    }
 
 
 # ============================================================================

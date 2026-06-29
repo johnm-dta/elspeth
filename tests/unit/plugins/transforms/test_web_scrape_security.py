@@ -7,6 +7,7 @@ Tests the complete SSRF-safe pipeline:
 """
 
 import socket
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import Mock, patch
@@ -431,19 +432,21 @@ class TestRedirectAllowedRangesBehavior:
             initial_client = Mock()
             initial_client.__enter__ = Mock(return_value=initial_client)
             initial_client.__exit__ = Mock(return_value=False)
-            initial_client.get.return_value = httpx.Response(
+            initial_response = httpx.Response(
                 301,
                 headers={"location": "http://localhost/redirected"},
                 request=httpx.Request("GET", "http://93.184.216.34:80/start"),
             )
+            initial_client.stream.return_value = nullcontext(initial_response)
             hop_client = Mock()
             hop_client.__enter__ = Mock(return_value=hop_client)
             hop_client.__exit__ = Mock(return_value=False)
-            hop_client.get.return_value = httpx.Response(
+            hop_response = httpx.Response(
                 200,
                 text="<html>Local content</html>",
                 request=httpx.Request("GET", "http://127.0.0.1:80/redirected"),
             )
+            hop_client.stream.return_value = nullcontext(hop_response)
             MockClient.side_effect = [shared_client, initial_client, hop_client]
 
             result = allowed_loopback_transform.process(make_pipeline_row({"url": "http://example.com/start"}), mock_ctx)
@@ -480,11 +483,12 @@ class TestRedirectAllowedRangesBehavior:
             initial_client = Mock()
             initial_client.__enter__ = Mock(return_value=initial_client)
             initial_client.__exit__ = Mock(return_value=False)
-            initial_client.get.return_value = httpx.Response(
+            initial_response = httpx.Response(
                 301,
                 headers={"location": "http://192.168.1.1/internal"},
                 request=httpx.Request("GET", "http://93.184.216.34:80/start"),
             )
+            initial_client.stream.return_value = nullcontext(initial_response)
             MockClient.return_value = initial_client
 
             result = allowed_loopback_transform.process(make_pipeline_row({"url": "http://example.com/start"}), mock_ctx)
@@ -520,11 +524,12 @@ class TestRedirectAllowedRangesBehavior:
             initial_client = Mock()
             initial_client.__enter__ = Mock(return_value=initial_client)
             initial_client.__exit__ = Mock(return_value=False)
-            initial_client.get.return_value = httpx.Response(
+            initial_response = httpx.Response(
                 301,
                 headers={"location": "http://169.254.169.254/latest/meta-data/"},
                 request=httpx.Request("GET", "http://93.184.216.34:80/start"),
             )
+            initial_client.stream.return_value = nullcontext(initial_response)
             MockClient.return_value = initial_client
 
             result = allow_private_transform.process(make_pipeline_row({"url": "http://example.com/start"}), mock_ctx)

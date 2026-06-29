@@ -40,11 +40,12 @@ from elspeth.core.security.web import (
     validate_url_for_ssrf,
 )
 from elspeth.plugins.infrastructure.base import BaseTransform
-from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
+from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient, HTTPResponseBodyTooLargeError
 from elspeth.plugins.infrastructure.config_base import TransformDataConfig
 from elspeth.plugins.infrastructure.results import TransformResult
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.transforms.web_scrape_errors import (
+    BodyTooLargeError,
     ClientError,
     ForbiddenError,
     InvalidURLError,
@@ -740,6 +741,16 @@ class WebScrapeTransform(BaseTransform):
         try:
             response, final_hostname_url, call = self._fetch_url(safe_request, ctx)
             final_resolved_ip = _final_response_ip(response)
+        except BodyTooLargeError as e:
+            return TransformResult.error(
+                {
+                    "reason": "body_too_large",
+                    "error": str(e),
+                    "url": safe_request.original_url,
+                    "body_size": e.body_size,
+                    "max_body_bytes": e.max_body_bytes,
+                }
+            )
         except WebScrapeError as e:
             if e.retryable:
                 # Re-raise retryable errors for engine RetryManager
@@ -772,17 +783,9 @@ class WebScrapeTransform(BaseTransform):
                 }
             )
 
-        # Body-size guard: reject responses that exceed the configured limit (B3.10).
-        #
-        # LIMITATION: this is a POST-buffer guard. AuditedHTTPClient does a
-        # non-streaming GET, so by the time we get here the full body is already
-        # downloaded into response.content AND audit-captured (body_size +
-        # base64 payload). This guard therefore bounds only EXTRACTION and
-        # fingerprinting of a hostile body -- it does NOT bound download time,
-        # peak memory, or audit-payload size. A true pre-buffer cap requires a
-        # streaming byte-cap (early abort) in AuditedHTTPClient, which is a
-        # shared-client change with its own audit-semantics + test surface.
-        # Tracked: filigree elspeth-a6f246d02a (operator-deferred 2026-06-15).
+        # Body-size guard: AuditedHTTPClient enforces this during download.
+        # Keep this post-buffer check as a defensive backstop for tests or
+        # injected clients that bypass the shared HTTP client.
         body_size = len(response.content)
         if body_size > self._max_body_bytes:
             return TransformResult.error(
@@ -895,6 +898,7 @@ class WebScrapeTransform(BaseTransform):
             timeout=self._timeout,
             limiter=limiter,
             token_id=ctx.token.token_id if ctx.token is not None else None,
+            max_response_body_bytes=self._max_body_bytes,
         )
 
         # Add responsible scraping headers
@@ -942,6 +946,8 @@ class WebScrapeTransform(BaseTransform):
             raise NetworkError(f"Timeout fetching {safe_request.original_url}: {e}") from e
         except httpx.ConnectError as e:
             raise NetworkError(f"Connection error fetching {safe_request.original_url}: {e}") from e
+        except HTTPResponseBodyTooLargeError as e:
+            raise BodyTooLargeError(str(e), body_size=e.body_size, max_body_bytes=e.max_body_bytes) from e
         except SSRFBlockedError as e:
             # Redirect hop resolved to a blocked IP — non-retryable security violation
             from elspeth.plugins.transforms.web_scrape_errors import SSRFBlockedError as WSSRFBlockedError

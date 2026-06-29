@@ -18,6 +18,7 @@ import importlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 _HARNESS_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HARNESS_ROOT))
@@ -25,10 +26,8 @@ sys.path.insert(0, str(_HARNESS_ROOT))
 # (e.g. batch1_refactor_insist imports batch1_pressured).
 sys.path.insert(0, str(_HARNESS_ROOT / "scenarios"))
 
-from harness import evaluate, load_skill, run_scenario  # noqa: E402
 
-
-def _load_scenario(name: str):
+def _load_scenario(name: str) -> Any:
     """Load the scenario object by name from ``scenarios/<name>.py``.
 
     The scenario module is expected to expose a single uppercase
@@ -40,7 +39,7 @@ def _load_scenario(name: str):
     expected = name.upper()
     if not hasattr(module, expected):
         # Fall back to the first Scenario instance found.
-        from harness import Scenario
+        from harness import Scenario  # type: ignore[import-not-found]
 
         for attr in dir(module):
             obj = getattr(module, attr)
@@ -79,6 +78,8 @@ def main() -> int:
         help="Predicate phase to evaluate after the run",
     )
     args = parser.parse_args()
+
+    from harness import evaluate, load_skill, run_scenario
 
     scenario = _load_scenario(args.scenario)
     skill_text = load_skill(override_path=Path(args.skill)) if args.skill else load_skill()

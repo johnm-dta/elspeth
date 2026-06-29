@@ -23,8 +23,8 @@ def validate_database_url_format(url: str) -> str:
 
     try:
         parsed = make_url(url)
-        if not parsed.drivername:
-            raise ValueError("database URL missing driver (e.g., 'sqlite', 'postgresql')")
-    except ArgumentError as e:
+    except (ArgumentError, ValueError) as e:
         raise ValueError(f"invalid database URL format: {e}") from e
+    if not parsed.drivername:
+        raise ValueError("database URL missing driver (e.g., 'sqlite', 'postgresql')")
     return url

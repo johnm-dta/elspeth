@@ -591,6 +591,21 @@ class TestDiscoveryOptionalDependency:
         result = discover_plugins_in_directory(tmp_path, BaseSource)
         assert result == []
 
+    def test_jinja2_optional_dependency_skips_file_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """LLM template support imports jinja2, which belongs to optional plugin extras."""
+        from elspeth.plugins.infrastructure import discovery
+
+        plugin_file = tmp_path / "llm_plugin.py"
+        plugin_file.write_text("raise AssertionError('patched discovery should not execute this file')\n")
+
+        def missing_jinja2(_py_file: Path, _base_class: type) -> list[type]:
+            raise ModuleNotFoundError("No module named 'jinja2'", name="jinja2")
+
+        monkeypatch.setattr(discovery, "_discover_in_file", missing_jinja2)
+
+        result = discover_plugins_in_directory(tmp_path, BaseTransform)
+        assert result == []
+
     def test_missing_internal_import_in_concrete_plugin_crashes(self, tmp_path: Path) -> None:
         """A broken concrete system plugin must not disappear as an optional extra."""
         plugin_file = tmp_path / "broken_internal_import.py"

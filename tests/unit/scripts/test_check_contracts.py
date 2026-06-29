@@ -19,6 +19,8 @@ from scripts.check_contracts import (
     extract_from_settings_accesses,
     extract_from_settings_field_mappings,
     extract_from_settings_hardcodes,
+    find_dict_patterns_in_file,
+    find_dict_violations,
     find_settings_classes,
     find_type_definitions,
     get_settings_class_fields,
@@ -342,6 +344,28 @@ value: foo.Foo
     index = ImportIndex.build(tmp_path)
 
     assert index.find_cross_boundary_usages(tmp_path, "Foo", defining_file) == [using_file]
+
+
+def test_dict_pattern_guard_detects_qualified_typing_any(tmp_path: Path) -> None:
+    test_file = tmp_path / "qualified_any.py"
+    test_file.write_text("""
+import typing
+
+
+def build(payload: dict[str, typing.Any]) -> dict[str, typing.Any]:
+    return payload
+""")
+
+    violations = find_dict_violations(test_file, whitelist=set(), matched_entries={})
+
+    assert [(violation.context, violation.param_name) for violation in violations] == [
+        ("build", "payload"),
+        ("build", "return"),
+    ]
+    assert find_dict_patterns_in_file(test_file) == [
+        f"{test_file}:build:payload",
+        f"{test_file}:build:return",
+    ]
 
 
 # =============================================================================

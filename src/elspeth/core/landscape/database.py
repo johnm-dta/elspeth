@@ -426,6 +426,18 @@ _REQUIRED_COMPOSITE_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[s
     ("scheduler_events", ("node_id", "run_id"), "nodes", ("node_id", "run_id")),
 )
 
+# Foreign keys that belonged to older schema shapes but are incompatible with
+# current runtime semantics. Exact matches must fail startup validation.
+_FORBIDDEN_FOREIGN_KEYS: tuple[tuple[str, tuple[str, ...], str, tuple[str, ...], str], ...] = (
+    (
+        "node_states",
+        ("resume_checkpoint_id",),
+        "checkpoints",
+        ("checkpoint_id",),
+        "resume_checkpoint_id is marker-only; checkpoints are deletable progress state",
+    ),
+)
+
 # Required check constraints for audit integrity.
 # Format: (table_name, constraint_name)
 _REQUIRED_CHECK_CONSTRAINTS: tuple[tuple[str, str], ...] = (
@@ -1004,6 +1016,23 @@ class LandscapeDB:
             if not has_correct_fk:
                 missing_composite_fks.append((table_name, constrained_columns, referenced_table, referenced_columns))
 
+        forbidden_fks: list[tuple[str, tuple[str, ...], str, tuple[str, ...], str]] = []
+
+        for table_name, constrained_columns, referenced_table, referenced_columns, reason in _FORBIDDEN_FOREIGN_KEYS:
+            if table_name not in existing_tables:
+                continue
+
+            fks = inspector.get_foreign_keys(table_name)
+            has_forbidden_fk = any(
+                tuple(fk["constrained_columns"]) == constrained_columns
+                and fk["referred_table"] == referenced_table
+                and tuple(fk["referred_columns"]) == referenced_columns
+                for fk in fks
+            )
+
+            if has_forbidden_fk:
+                forbidden_fks.append((table_name, constrained_columns, referenced_table, referenced_columns, reason))
+
         # Check for required check constraints (Tier 1 audit integrity)
         missing_checks: list[tuple[str, str]] = []
 
@@ -1039,6 +1068,7 @@ class LandscapeDB:
             or token_outcomes_shape_errors
             or missing_fks
             or missing_composite_fks
+            or forbidden_fks
             or missing_checks
             or missing_indexes
             or epoch_incompatible
@@ -1069,6 +1099,13 @@ class LandscapeDB:
                     for table, columns, ref_table, ref_columns in missing_composite_fks
                 )
                 error_parts.append(f"Missing composite foreign keys: {missing_composite_fk_str}")
+
+            if forbidden_fks:
+                forbidden_fk_str = ", ".join(
+                    f"{table}({', '.join(columns)}) → {ref_table}({', '.join(ref_columns)}) [{reason}]"
+                    for table, columns, ref_table, ref_columns, reason in forbidden_fks
+                )
+                error_parts.append(f"Forbidden foreign keys: {forbidden_fk_str}")
 
             if missing_checks:
                 missing_checks_str = ", ".join(f"{t}.{name}" for t, name in missing_checks)

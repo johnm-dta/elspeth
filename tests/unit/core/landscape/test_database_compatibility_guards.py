@@ -896,6 +896,52 @@ class TestSchemaCompatibilityGuards:
         assert "transform_errors(transform_id, run_id) → nodes(node_id, run_id)" in msg
         instance.close()
 
+    def test_validate_schema_rejects_stale_resume_checkpoint_marker_foreign_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """resume_checkpoint_id is marker-only and must not retain the old checkpoint FK."""
+        import sqlalchemy
+
+        instance = _make_instance(f"sqlite:///{tmp_path / 'stale_resume_checkpoint_fk.db'}")
+
+        mock_inspector = Mock()
+        mock_inspector.get_table_names.return_value = ["node_states", "checkpoints"]
+        mock_inspector.get_columns.side_effect = lambda table_name: [
+            {"name": column_name}
+            for column_name in {
+                "node_states": ("state_id", "resume_checkpoint_id"),
+                "checkpoints": ("checkpoint_id",),
+            }[table_name]
+        ]
+        mock_inspector.get_foreign_keys.side_effect = lambda table_name: (
+            [
+                {
+                    "constrained_columns": ["resume_checkpoint_id"],
+                    "referred_table": "checkpoints",
+                    "referred_columns": ["checkpoint_id"],
+                }
+            ]
+            if table_name == "node_states"
+            else []
+        )
+
+        monkeypatch.setattr(sqlalchemy, "inspect", lambda engine: mock_inspector)
+        monkeypatch.setattr(database_module, "metadata", SimpleNamespace(tables={"node_states": object(), "checkpoints": object()}))
+        monkeypatch.setattr(database_module, "_REQUIRED_COLUMNS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_COMPOSITE_FOREIGN_KEYS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_CHECK_CONSTRAINTS", ())
+        monkeypatch.setattr(database_module, "_REQUIRED_INDEXES", ())
+
+        with pytest.raises(SchemaCompatibilityError) as exc_info:
+            instance._validate_schema()
+
+        msg = str(exc_info.value)
+        assert "Forbidden foreign keys:" in msg
+        assert "node_states(resume_checkpoint_id) → checkpoints(checkpoint_id)" in msg
+        assert "marker-only" in msg
+        instance.close()
+
     def test_validate_schema_rejects_missing_runtime_required_columns(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Runtime write paths must not pass compatibility checks without their physical columns."""
         db_path = tmp_path / "missing_runtime_required_columns.db"

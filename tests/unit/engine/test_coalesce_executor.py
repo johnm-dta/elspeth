@@ -3417,6 +3417,61 @@ class TestNotifyBranchLostEvaluateAfterLoss:
 
     # --- first policy ---
 
+    def test_first_policy_all_lost_no_arrivals_fails_and_cleans_up(self):
+        """first: if all branches are lost before any arrival, fail without leaving pending state."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=60.0)
+        executor.register_coalesce(s, "node_1")
+
+        result_a = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result_a is None
+        assert ("merge", "row_1") in executor._pending
+
+        result_b = executor.notify_branch_lost("merge", "row_1", "b", "error_b")
+        assert result_b is not None
+        assert result_b.held is False
+        assert result_b.merged_token is None
+        assert result_b.failure_reason == "all_branches_lost"
+        assert result_b.outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+        assert ("merge", "row_1") in executor._completed_keys
+
+    def test_first_policy_flush_zero_arrivals_from_loss_fails_and_cleans_up(self):
+        """first: EOF flush of a loss-only pending row fails gracefully instead of raising."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=60.0)
+        executor.register_coalesce(s, "node_1")
+
+        result = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result is None
+
+        results = executor.flush_pending()
+        assert len(results) == 1
+        assert results[0].held is False
+        assert results[0].merged_token is None
+        assert results[0].failure_reason == "all_branches_lost"
+        assert results[0].outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+
+    def test_first_policy_timeout_zero_arrivals_from_loss_fails_and_cleans_up(self):
+        """first: timeout of a loss-only pending row fails gracefully instead of raising."""
+        executor, _execution, _data_flow, _, clock = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=5.0)
+        executor.register_coalesce(s, "node_1")
+
+        result = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result is None
+
+        clock.advance(6.0)
+        results = executor.check_timeouts("merge")
+        assert len(results) == 1
+        assert results[0].held is False
+        assert results[0].merged_token is None
+        assert results[0].failure_reason == "first_timeout_no_arrivals"
+        assert results[0].outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+        assert ("merge", "row_1") in executor._completed_keys
+
     def test_first_policy_loss_returns_none(self):
         """first: branch loss has no effect — merge should have happened on first arrival."""
         executor, *_ = _make_executor()

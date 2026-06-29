@@ -226,9 +226,10 @@ derive_resume_terminal_status_from_audit = derive_terminal_status_from_audit
 #      cleanup) write FAILED node_states the derive counts but the live
 #      accumulator misses (it only counts the timeout/EOF sweeps) — audit MAY
 #      EXCEED live, and the audit value is the owned improvement;
-#   2. a zero-arrival best_effort_timeout_no_arrivals failure consumes no
-#      tokens and writes no node_states — live counts it, the derive cannot,
-#      so live MAY EXCEED audit (accepted, audit-is-truth doctrine).
+#   2. a zero-arrival best_effort_timeout_no_arrivals or
+#      first_timeout_no_arrivals failure consumes no tokens and writes no
+#      node_states — live counts it, the derive cannot, so live MAY EXCEED
+#      audit (accepted, audit-is-truth doctrine).
 _PARITY_STRICT_FIELDS: tuple[str, ...] = (
     "rows_processed",
     "rows_succeeded",

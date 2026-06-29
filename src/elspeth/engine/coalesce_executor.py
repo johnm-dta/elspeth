@@ -1521,8 +1521,16 @@ class CoalesceExecutor:
             )
 
         elif settings.policy == "first":
+            if len(pending.branches) == 0:
+                return self._fail_pending(
+                    settings,
+                    key,
+                    step,
+                    failure_reason="first_timeout_no_arrivals" if is_timeout else "all_branches_lost",
+                    is_timeout=is_timeout,
+                )
             raise RuntimeError(
-                f"Invariant violation: 'first' policy should never have pending entries "
+                f"Invariant violation: 'first' policy should never have arrived pending branches "
                 f"at coalesce '{coalesce_name}', row_id='{key[1]}'. "
                 f"'first' merges immediately on arrival — bug in accept()."
             )
@@ -1538,6 +1546,8 @@ class CoalesceExecutor:
 
         For best_effort policy, merges whatever has arrived when timeout expires.
         For quorum policy with timeout, merges if quorum met when timeout expires.
+        For first policy, only a zero-arrival loss-created pending entry can
+        time out; that fails cleanly rather than tripping the arrival invariant.
 
         Step position is resolved internally via the injected StepResolver
         from the coalesce point's registered node_id.
@@ -1593,7 +1603,9 @@ class CoalesceExecutor:
         For best_effort policy: merges whatever arrived.
         For quorum policy: merges if quorum met, returns failure otherwise.
         For require_all policy: returns failure (never partial merge).
-        For first policy: should never have pending (merges immediately).
+        For first policy: arrived tokens should never be pending (merges
+        immediately); a zero-arrival entry created by branch-loss accounting
+        fails cleanly.
 
         Step positions are resolved internally via the injected StepResolver
         from each coalesce point's registered node_id.
@@ -1748,7 +1760,7 @@ class CoalesceExecutor:
         - require_all: ANY lost branch = immediate failure
         - quorum: fail if quorum is now impossible, merge if already met
         - best_effort: merge immediately if all branches accounted for
-        - first: no action (should have merged on first arrival)
+        - first: fail if all branches are lost before first arrival
 
         Args:
             settings: Coalesce settings for the affected point
@@ -1804,8 +1816,16 @@ class CoalesceExecutor:
             return None  # Still waiting for remaining branches
 
         elif settings.policy == "first":
-            # first: should already have merged on first arrival
-            # If no arrivals yet, nothing to merge
+            # first: if every branch is lost before any arrival, fail the row
+            # cleanly. If any branch arrived, accept() should already have
+            # merged and marked the key complete.
+            if arrived_count == 0 and arrived_count + lost_count >= total_branches:
+                return self._fail_pending(
+                    settings,
+                    key,
+                    step,
+                    failure_reason="all_branches_lost",
+                )
             return None
 
         else:

@@ -525,6 +525,26 @@ def test_frozen_annotations_reports_mutable_annotation_variants(annotation: str)
 
 @pytest.mark.parametrize(
     "annotation",
+    ['"list[int]"', "'dict[str, int]'", '"typing.List[int]"', '"Optional[List[int]]"'],
+)
+def test_frozen_annotations_reports_quoted_mutable_annotation_variants(annotation: str) -> None:
+    findings = _analyze_frozen_annotations(
+        f"""
+        import typing
+        from typing import List, Optional
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Example:
+            items: {annotation}
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["immutability.frozen_annotations"]
+
+
+@pytest.mark.parametrize(
+    "annotation",
     [
         # elspeth-a586a7212e: capitalized typing aliases (subscripted + qualified)
         "List[int]",

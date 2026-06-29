@@ -8,6 +8,7 @@ import hashlib
 import os
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from scripts.eval._backfill_lib import (
     build_scenario_manifest,
     classify_correlation_confidence,
@@ -40,10 +41,29 @@ def test_extract_sink_paths_returns_absolute_path_per_sink_for_mapping_shape(tmp
     )
 
 
-def test_extract_sink_paths_passes_through_absolute_paths_unchanged(tmp_path) -> None:
-    final_yaml_dict = {"yaml": ("sinks:\n  results:\n    plugin: jsonl\n    options:\n      path: /tmp/already-absolute/results.jsonl\n")}
+def test_extract_sink_paths_accepts_absolute_path_under_outputs_root(tmp_path) -> None:
+    target = tmp_path / "outputs" / "already-absolute" / "results.jsonl"
+    final_yaml_dict = {"yaml": (f"sinks:\n  results:\n    plugin: jsonl\n    options:\n      path: {target}\n")}
     sinks = extract_sink_paths_from_final_yaml(final_yaml_dict, data_dir=str(tmp_path))
-    assert sinks == [("results", "/tmp/already-absolute/results.jsonl")]
+    assert sinks == [("results", str(target))]
+
+
+def test_extract_sink_paths_rejects_absolute_paths_outside_allowed_data_roots(tmp_path) -> None:
+    final_yaml_dict = {"yaml": ("sinks:\n  results:\n    plugin: jsonl\n    options:\n      path: /tmp/already-absolute/results.jsonl\n")}
+    with pytest.raises(ValueError, match="outside allowed eval data roots"):
+        extract_sink_paths_from_final_yaml(final_yaml_dict, data_dir=str(tmp_path))
+
+
+def test_extract_sink_paths_rejects_relative_traversal_outside_allowed_data_roots(tmp_path) -> None:
+    final_yaml_dict = {"yaml": ("sinks:\n  results:\n    plugin: jsonl\n    options:\n      path: ../host-secret.txt\n")}
+    with pytest.raises(ValueError, match="outside allowed eval data roots"):
+        extract_sink_paths_from_final_yaml(final_yaml_dict, data_dir=str(tmp_path))
+
+
+def test_extract_sink_paths_rejects_relative_paths_outside_outputs_or_blobs(tmp_path) -> None:
+    final_yaml_dict = {"yaml": ("sinks:\n  results:\n    plugin: jsonl\n    options:\n      path: logs/results.jsonl\n")}
+    with pytest.raises(ValueError, match="outside allowed eval data roots"):
+        extract_sink_paths_from_final_yaml(final_yaml_dict, data_dir=str(tmp_path))
 
 
 def test_extract_sink_paths_skips_sinks_without_path_options(tmp_path) -> None:

@@ -175,7 +175,13 @@ async function driveGuidedWalk(page: Page): Promise<void> {
   const deadline = Date.now() + 600_000;
   while (Date.now() < deadline) {
     // Done once the guided surface is replaced by the run turn.
-    if (await runHeading.isVisible().catch(() => false)) return;
+    if (await runHeading.isVisible().catch(() => false)) {
+      // Non-vacuous: by the time the run turn appears we must have observed at
+      // least one read-only decision summary (the source decision is one), so
+      // the guard above cannot silently no-op.
+      expect(assertedSummary, "expected to observe a read-only decision summary").toBe(true);
+      return;
+    }
     if (!(await guidedPanel.isVisible().catch(() => false))) return;
 
     if (

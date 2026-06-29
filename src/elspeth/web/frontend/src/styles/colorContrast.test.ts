@@ -595,10 +595,15 @@ describe("design-review contrast remediation (2026-06-29)", () => {
     // .guided-schema-summary-needs-edit banner. Gate --color-text-secondary on
     // --color-bg so a palette rebalance can't drop these below AA.
     for (const theme of themes) {
-      expect(
-        contrastRatio(resolveHex(theme, "--color-text-secondary"), resolveHex(theme, "--color-bg")),
-        `secondary on bg (${theme})`,
-      ).toBeGreaterThanOrEqual(4.5);
+      // The eyebrow/caveat/needs-edit text actually renders on the decision
+      // card (--color-surface); the section sits on --color-bg. Gate both so a
+      // palette rebalance can't drop these below AA on either surface.
+      for (const surface of ["--color-bg", "--color-surface"]) {
+        expect(
+          contrastRatio(resolveHex(theme, "--color-text-secondary"), resolveHex(theme, surface)),
+          `secondary on ${surface} (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
     }
   });
 

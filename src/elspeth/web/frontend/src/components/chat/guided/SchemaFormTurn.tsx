@@ -152,6 +152,11 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
           ))}
         </div>
       )}
+      {/* The Edit affordance and this needs-edit banner are non-tutorial only.
+          Tutorial mode therefore PRESUPPOSES every required knob is prefilled
+          (canSubmit() true at mount): a passive learner has no Edit button to
+          fix an unmet field, so an invalid tutorial payload would strand them
+          on a disabled Continue. Backend guided tutorial payloads satisfy this. */}
       {!isTutorial && view === "summary" && !canSubmit() && (
         <p className="guided-schema-summary-needs-edit" role="status">
           Some values need attention — click Edit to review.

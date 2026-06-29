@@ -568,6 +568,38 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeInTheDocument();
   });
 
+  it("leads the decision with the assistant rationale heading when chat_history has one", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "assistant",
+            content: "Source created as a 3-row CSV.",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "t",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    // With an assistant rationale for the active step, it leads AS the heading
+    // (instead of the static step-purpose fallback).
+    expect(
+      screen.getByRole("heading", {
+        level: 2,
+        name: /source created as a 3-row csv/i,
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("scrolls the guided log into view when the active step advances", () => {
     const scrollSpy = vi.fn();
     Element.prototype.scrollIntoView = scrollSpy;

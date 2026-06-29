@@ -12,7 +12,7 @@ IMPORTANT:
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal
@@ -251,6 +251,20 @@ class TransformResult:
                 "Use TransformResult.success(row, success_reason={'action': '...'}) "
                 "to create success results. Missing success_reason is a plugin bug."
             )
+        if self.status == "success":
+            if not isinstance(self.success_reason, Mapping):
+                raise ValueError(
+                    "TransformResult with status='success' MUST provide success_reason as a mapping. "
+                    "Use TransformResult.success(row, success_reason={'action': '...'}) "
+                    "to create success results. Invalid success_reason is a plugin bug."
+                )
+            action = self.success_reason.get("action")
+            if not isinstance(action, str):
+                raise ValueError(
+                    "TransformResult with status='success' MUST include success_reason['action'] as a str. "
+                    "Use TransformResult.success(row, success_reason={'action': '...'}) "
+                    "to create success results. Missing success_reason['action'] is a plugin bug."
+                )
         if self.status == "success" and self.row is None and self.rows is None:
             raise ValueError(
                 "TransformResult with status='success' MUST have output data (row or rows). "

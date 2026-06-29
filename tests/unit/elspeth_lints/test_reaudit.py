@@ -2244,6 +2244,38 @@ def _extract_run_id_from_stderr(stderr: str) -> str:
     return match.group(1)
 
 
+def test_reaudit_sidecar_path_requires_generated_run_id_shape(tmp_path: Path) -> None:
+    """Recovery run IDs must not be usable as path fragments."""
+    from elspeth_lints.core.reaudit_sidecar import sidecar_path_for
+
+    allowlist_dir = tmp_path / "allowlist"
+    valid_run_id = "a" * 32
+
+    assert sidecar_path_for(allowlist_dir, valid_run_id) == allowlist_dir / ".reaudit-state" / f"{valid_run_id}.jsonl"
+
+    for bad_run_id in ("../outside", "../../other/state", "/tmp/outside", "ABCDEF" * 5 + "AB", "g" * 32, "short"):
+        with pytest.raises(ValueError, match="run_id"):
+            sidecar_path_for(allowlist_dir, bad_run_id)
+
+
+@pytest.mark.parametrize("flag", ["--render-incomplete", "--resume"])
+def test_cli_reaudit_recovery_flags_reject_invalid_run_id(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+) -> None:
+    """Recovery flags reject untrusted run IDs before opening sidecar paths."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    exit_code = _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir, extra_args=[flag, "../outside"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "reaudit error:" in captured.err
+    assert "run_id" in captured.err
+
+
 def test_t6b_sidecar_happy_path_writes_header_outcomes_trailer(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A normal sweep writes header + N outcome lines + trailer.
 
@@ -2902,7 +2934,7 @@ def test_resume_preserves_complete_unterminated_final_outcome(tmp_path: Path) ->
     )
 
     allowlist_dir = _build_allowlist_dir(tmp_path)
-    run_id = "completeoutcome"
+    run_id = "c" * 32
     sidecar = sidecar_path_for(allowlist_dir, run_id)
     header = SidecarHeader(
         run_id=run_id,
@@ -2953,7 +2985,7 @@ def test_resume_preserves_complete_unterminated_header_only_sidecar(tmp_path: Pa
     )
 
     allowlist_dir = _build_allowlist_dir(tmp_path)
-    run_id = "headeronly"
+    run_id = "d" * 32
     sidecar = sidecar_path_for(allowlist_dir, run_id)
     header = SidecarHeader(
         run_id=run_id,
@@ -3399,9 +3431,10 @@ def test_t6c_completed_sidecar_pruned_after_retention_horizon(tmp_path: Path) ->
     # Trigger lazy cleanup by entering a fresh SidecarWriter (a new
     # run, distinct run_id). The completed-ancient sidecar must be
     # deleted; the incomplete-ancient one must persist.
-    trigger_path = allowlist_dir / ".reaudit-state" / "trigger.jsonl"
+    trigger_run_id = "e" * 32
+    trigger_path = sidecar_path_for(allowlist_dir, trigger_run_id)
     trigger_header = SidecarHeader(
-        run_id="trigger",
+        run_id=trigger_run_id,
         started_at=_datetime.now(_UTC),
         total_entries=0,
         allowlist_path=str(allowlist_dir.resolve()),

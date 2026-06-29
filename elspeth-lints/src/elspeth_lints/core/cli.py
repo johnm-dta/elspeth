@@ -3011,10 +3011,10 @@ def _run_reaudit(args: argparse.Namespace) -> int:
         tool_scope = build_readonly_tool_scope(root=args.root.resolve(), allowlist_dir=allowlist_dir)
 
     if args.render_incomplete_run_id is not None:
-        sidecar_path = sidecar_path_for(allowlist_dir, args.render_incomplete_run_id)
         try:
+            sidecar_path = sidecar_path_for(allowlist_dir, args.render_incomplete_run_id)
             loaded = load_sidecar(sidecar_path)
-        except ReauditError as exc:
+        except (ValueError, ReauditError) as exc:
             sys.stderr.write(f"reaudit error: {exc}\n")
             return 2
         report = report_from_loaded_sidecar(loaded)
@@ -3058,7 +3058,11 @@ def _run_reaudit(args: argparse.Namespace) -> int:
         from datetime import UTC as _UTC
         from datetime import datetime as _datetime
 
-        sidecar_path = sidecar_path_for(allowlist_dir, args.resume_run_id)
+        try:
+            sidecar_path = sidecar_path_for(allowlist_dir, args.resume_run_id)
+        except ValueError as exc:
+            sys.stderr.write(f"reaudit error: {exc}\n")
+            return 2
         run_id = args.resume_run_id
         # Placeholder header — never written. Resume mode (append=True)
         # never writes a header line; the constructor needs a non-None

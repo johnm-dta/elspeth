@@ -128,6 +128,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -163,6 +164,7 @@ SIDECAR_DIRNAME = ".reaudit-state"
 # window: long enough to outlast a post-incident audit cycle, short
 # enough that a routine reaudit cadence keeps the directory bounded.
 COMPLETED_SIDECAR_RETENTION_DAYS = 30
+_RUN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 # =========================================================================
@@ -186,6 +188,8 @@ def sidecar_path_for(allowlist_dir: Path, run_id: str) -> Path:
     The sidecar directory is created lazily by :class:`SidecarWriter`'s
     ``__enter__`` so callers don't need to pre-create anything.
     """
+    if _RUN_ID_RE.fullmatch(run_id) is None:
+        raise ValueError("reaudit run_id must be the 32-character lowercase hexadecimal value emitted by a prior sweep")
     return allowlist_dir / SIDECAR_DIRNAME / f"{run_id}.jsonl"
 
 

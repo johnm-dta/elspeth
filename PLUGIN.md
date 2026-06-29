@@ -839,7 +839,7 @@ class MyTransform(BaseTransform):
 - [ ] Transform field declarations are set (`declared_input_fields`, `declared_output_fields`, `_output_schema_config`) when the plugin requires or adds fields
 - [ ] Sink required fields are set with `declared_required_fields`
 - [ ] Plugin file lives in a scanned discovery directory, or `PLUGIN_SCAN_CONFIG` was updated
-- [ ] `scripts/cicd/enforce_plugin_hashes.py check --root src/elspeth --fix` has refreshed `source_file_hash`
+- [ ] `elspeth-lints check --rules plugin_contract.plugin_hashes --root src/elspeth` passes (`source_file_hash` is current)
 - [ ] Contract tests pass
 - [ ] `close()` is idempotent
 

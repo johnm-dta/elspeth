@@ -145,7 +145,7 @@ def implements_dispatch_site(site_name: DispatchSiteName) -> Callable[[F], F]:
        this marker to build the per-site registration map. Methods without
        the marker are NOT invoked by the dispatcher for any site, even if
        their name happens to match a ``DispatchSite`` value.
-    2. Static: ``scripts/cicd/enforce_contract_manifest.py`` MC3a/b/c rules
+    2. Static: ``manifest.contract_manifest`` ``elspeth-lints`` MC3a/b/c rules
        AST-detect the decorator on concrete contract classes. Required for
        multi-level-inheritance detection per the D1 correction on H2
        (``subclass.__dict__`` does not see mixin-inherited overrides).
@@ -1041,8 +1041,9 @@ _REGISTRY_LOCK = _DECLARATION_REGISTRY.lock
 # CLOSED SET — adding or removing a contract requires updating this manifest
 # in the SAME commit as the register_declaration_contract(...) call site AND
 # the @implements_dispatch_site markers on the contract's methods.
-# ``scripts/cicd/enforce_contract_manifest.py`` scans the source tree and
-# fails CI if the manifest drifts from the registration + marker call sites.
+# The ``manifest.contract_manifest`` ``elspeth-lints`` rule scans the source
+# tree and fails CI if the manifest drifts from the registration + marker call
+# sites.
 
 
 EXPECTED_CONTRACT_SITES: Mapping[str, frozenset[DispatchSiteName]] = MappingProxyType(

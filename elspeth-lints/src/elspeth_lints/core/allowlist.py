@@ -1454,6 +1454,8 @@ def _optional_date(data: dict[str, Any], key: str, *, context: str) -> date | No
     if key not in data or data[key] is None:
         return None
     value = data[key]
+    if isinstance(value, datetime):
+        raise ValueError(f"{context}.{key} must be YYYY-MM-DD")
     if isinstance(value, date):
         return value
     if not isinstance(value, str):

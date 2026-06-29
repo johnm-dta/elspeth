@@ -1263,6 +1263,42 @@ allow_hits:
         assert allowlist.fail_on_stale is True
         assert allowlist.fail_on_expired is False
 
+    @pytest.mark.parametrize(
+        ("yaml_body", "expected_field"),
+        [
+            (
+                """
+version: 1
+allow_hits:
+  - key: "src/module.py:R1:process:fp=deadbeefcafebabe"
+    owner: "john"
+    reason: "Legacy code"
+    safety: "Will be refactored"
+    expires: 2026-12-31 23:59:59
+""",
+                r"allow_hits\[0\]\.expires",
+            ),
+            (
+                """
+version: 1
+per_file_rules:
+  - pattern: "src/module.py"
+    rules: ["R1"]
+    reason: "Legacy code"
+    expires: 2026-12-31 23:59:59
+""",
+                r"per_file_rules\[0\]\.expires",
+            ),
+        ],
+    )
+    def test_load_rejects_timestamp_expiry_fields(self, temp_dir: Path, yaml_body: str, expected_field: str) -> None:
+        """Expiry fields are date-only; YAML timestamps must not flow through as datetimes."""
+        allowlist_path = temp_dir / "allowlist.yaml"
+        allowlist_path.write_text(dedent(yaml_body))
+
+        with pytest.raises(ValueError, match=rf"{expected_field} must be YYYY-MM-DD"):
+            load_allowlist(allowlist_path)
+
     def test_load_nonexistent_file(self, temp_dir: Path) -> None:
         """Missing allowlist file is Tier-1 audit-data loss."""
         allowlist_path = temp_dir / "missing.yaml"

@@ -254,10 +254,11 @@ def _operator_override_authorization_error() -> str | None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the elspeth-lints CLI."""
-    DEFAULT_REGISTRY.load_builtin_rules()
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "check":
+        if _parse_rules(args.rules):
+            DEFAULT_REGISTRY.load_builtin_rules()
         return _run_check(args, registry=DEFAULT_REGISTRY)
     if args.command == "dump-edges":
         return _run_dump_edges(args)

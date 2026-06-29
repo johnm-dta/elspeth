@@ -1159,7 +1159,7 @@ Full web application platform for chat-first pipeline composition, three-provide
 
 #### Secret Reference System
 
-- **`$secret{name}` reference resolution** — `SecretResolution` audit extension accepting `"env"` / `"user"` sources, a recursive `resolve_secret_refs()` config tree-walk, and `ServerSecretStore` / `WebSecretService` chained resolution with allowlist enforcement, env-var boundary, and fingerprint audit.
+- **Historical `$secret{name}` reference resolution** — `SecretResolution` audit extension accepting `"env"` / `"user"` sources, a recursive `resolve_secret_refs()` config tree-walk, and `ServerSecretStore` / `WebSecretService` chained resolution with allowlist enforcement, env-var boundary, and fingerprint audit. Current Composer authoring uses `{secret_ref: NAME}` markers for new nodes and `wire_secret_ref(...)` for existing components.
 - **Secret-system surface and hardening** — REST API, composer tools, execution integration, frontend wiring, plus audit trail, fingerprints, leakage prevention, and input validation.
 
 #### Pipeline Execution Layer

@@ -1108,14 +1108,18 @@ class ResumeCoordinator:
         # nullcontext if no rows are reprocessed, which is irrelevant
         # because the early-exit path skips this method entirely.
         preflight_retry_manager = RetryManager(RuntimeRetryConfig.from_settings(settings.retry)) if settings is not None else None
-        run_transform_runtime_preflights(
-            factory,
-            run_id,
-            config,
-            run_ctx.ctx,
-            retry_manager=preflight_retry_manager,
-            shutdown_event=shutdown_event,
-        )
+        try:
+            run_transform_runtime_preflights(
+                factory,
+                run_id,
+                config,
+                run_ctx.ctx,
+                retry_manager=preflight_retry_manager,
+                shutdown_event=shutdown_event,
+            )
+        except BaseException:
+            cleanup_plugins(config, run_ctx.ctx, include_source=False)
+            raise
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),

@@ -448,6 +448,66 @@ class TestResumeFinalizesAsFailed:
         processor.process_existing_row.assert_not_called()
         flush_sinks.assert_not_called()
 
+    def test_resume_runtime_preflight_failure_cleans_initialized_plugins(self) -> None:
+        """Resume preflight failure must tear down transform/sink resources opened by on_start."""
+        orch = _make_orchestrator(make_landscape_db())
+        source = _specced_source()
+        source.on_success = "default"
+        transform = _specced_transform()
+        sink = _specced_sink()
+        config = PipelineConfig(
+            sources={"source": source},
+            transforms=(transform,),
+            sinks={"default": sink},
+        )
+        processor = MagicMock(spec=RowProcessor)
+        processor.run_id = "run-resume-runtime-preflight-fails"
+        artifacts = SimpleNamespace(
+            source_id_map={"source": NodeID("source")},
+            edge_map={},
+            sink_id_map={"default": NodeID("sink")},
+            source_id=NodeID("source"),
+        )
+        run_ctx = SimpleNamespace(
+            processor=processor,
+            ctx=MagicMock(spec=PluginContext),
+            agg_transform_lookup={},
+            coalesce_executor=None,
+            coalesce_node_map={},
+        )
+
+        with (
+            patch("elspeth.engine.orchestrator.resume.setup_resume_context", return_value=artifacts),
+            patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
+            patch(
+                "elspeth.engine.orchestrator.resume.run_transform_runtime_preflights",
+                side_effect=RuntimeError("resume runtime preflight exploded"),
+            ),
+            patch.object(orch._run_core, "flush_and_write_sinks") as flush_sinks,
+            pytest.raises(RuntimeError, match="resume runtime preflight exploded"),
+        ):
+            orch._resume_coordinator.process_resumed_rows(
+                MagicMock(spec=RecorderFactory),
+                "run-resume-runtime-preflight-fails",
+                config,
+                MagicMock(spec=ExecutionGraph),
+                unprocessed_rows=(),
+                barrier_restore=None,
+                payload_store=MagicMock(spec=PayloadStore),
+                incomplete_by_row={},
+                recovery_manager=MagicMock(spec=RecoveryManager),
+                resume_checkpoint_id="checkpoint-runtime-preflight-fails",
+                schema_contracts_by_source={NodeID("source"): MagicMock(spec=SchemaContract)},
+            )
+
+        source.on_complete.assert_not_called()
+        source.close.assert_not_called()
+        transform.on_complete.assert_called_once_with(run_ctx.ctx)
+        transform.close.assert_called_once_with()
+        sink.on_complete.assert_called_once_with(run_ctx.ctx)
+        sink.close.assert_called_once_with()
+        flush_sinks.assert_not_called()
+
     def test_setup_resume_context_uses_all_source_roots(self) -> None:
         """Multi-source resume must build a full source map instead of calling graph.get_sources()[0]."""
         graph = ExecutionGraph()

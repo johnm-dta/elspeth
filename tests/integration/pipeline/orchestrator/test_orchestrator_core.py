@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import threading
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -464,11 +464,25 @@ class TestOrchestrator:
         )
 
         orchestrator = Orchestrator(landscape_db)
-        with pytest.raises(RuntimeError, match="pre_flight_failed: provider auth exploded"):
+        with (
+            patch.object(source, "on_complete", wraps=source.on_complete) as source_on_complete,
+            patch.object(source, "close", wraps=source.close) as source_close,
+            patch.object(transform, "on_complete", wraps=transform.on_complete) as transform_on_complete,
+            patch.object(transform, "close", wraps=transform.close) as transform_close,
+            patch.object(sink, "on_complete", wraps=sink.on_complete) as sink_on_complete,
+            patch.object(sink, "close", wraps=sink.close) as sink_close,
+            pytest.raises(RuntimeError, match="pre_flight_failed: provider auth exploded"),
+        ):
             orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store, run_id=run_id)
 
         assert source.load_started is False
         assert sink.results == []
+        source_on_complete.assert_called_once()
+        source_close.assert_called_once()
+        transform_on_complete.assert_called_once()
+        transform_close.assert_called_once()
+        sink_on_complete.assert_called_once()
+        sink_close.assert_called_once()
 
         factory = make_factory(landscape_db)
         run_row = factory.run_lifecycle.get_run(run_id)

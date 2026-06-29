@@ -468,20 +468,52 @@ function resolveHex(theme: "dark" | "light", tokenName: string): string {
   });
 }
 
+// Composite an rgba() TINT token over a SPECIFIC surface (not always
+// --color-bg). A tinted banner background is not self-contained — its real
+// contrast depends on the surface rendered behind it (e.g. the YamlView
+// validation banner sits on --color-surface-paper, not the page bg).
+function resolveTintOver(
+  theme: "dark" | "light",
+  tintToken: string,
+  surfaceToken: string,
+): string {
+  const rawOf = theme === "dark" ? extractRootRawToken : extractLightThemeRawToken;
+  const hexOf = theme === "dark" ? extractRootToken : extractLightThemeToken;
+  const rgba = parseRgba(rawOf(tintToken));
+  const base = hexToRgb(hexOf(surfaceToken));
+  return rgbToHex({
+    r: rgba.red * rgba.alpha + base.r * (1 - rgba.alpha),
+    g: rgba.green * rgba.alpha + base.g * (1 - rgba.alpha),
+    b: rgba.blue * rgba.alpha + base.b * (1 - rgba.alpha),
+  });
+}
+
 describe("design-review contrast remediation (2026-06-29)", () => {
   const themes: Array<"dark" | "light"> = ["dark", "light"];
 
-  it("keeps semantic banner text at AA on its own tinted background (M02)", () => {
-    // .alert-banner / .validation-banner render color:var(--color-X) on
-    // var(--color-X-bg). The semantic tokens were deepened so this clears AA.
+  it("keeps semantic banner text at AA on its tint over EVERY surface a banner mounts on (M02)", () => {
+    // .alert-banner (page / LoginPage), .validation-banner (side-rail, on
+    // --color-surface-inspector), and YamlView's modal validation banners (on
+    // --color-surface-paper) all render color:var(--color-X) on the TINT
+    // var(--color-X-bg). The tint's real contrast depends on the surface BEHIND
+    // it — so gate every such surface, not just --color-bg. (The paper modal
+    // was the instance the first remediation pass missed; sign-off caught it.)
+    const surfaces = [
+      "--color-bg",
+      "--color-surface",
+      "--color-surface-inspector",
+      "--color-surface-paper",
+    ];
     for (const theme of themes) {
       for (const kind of ["error", "warning", "success"] as const) {
         const fg = resolveHex(theme, `--color-${kind}`);
-        const bg = resolveHex(theme, `--color-${kind}-bg`);
-        expect(
-          contrastRatio(fg, bg),
-          `${kind} text on ${kind}-bg (${theme})`,
-        ).toBeGreaterThanOrEqual(4.5);
+        for (const surface of surfaces) {
+          const bg = resolveTintOver(theme, `--color-${kind}-bg`, surface);
+          expect(
+            contrastRatio(fg, bg),
+            `${kind} text on ${kind}-bg over ${surface} (${theme})`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
       }
     }
   });

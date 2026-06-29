@@ -54,9 +54,9 @@
   --color-selected-ring:     rgba(26, 122, 82, 0.55);
 
   /* ── Semantic colours ────────────────────────────────────────────────────── */
-  --color-success:           #15b5b3;
+  --color-success:           #16bab8;
   --color-error:             #ef8784;
-  --color-warning:           #e58d51;
+  --color-warning:           #e79761;
   --color-info:              #61daff;
   --color-state-positive:    #14b0ae;
 
@@ -107,9 +107,9 @@
   /* ── Run status badges ───────────────────────────────────────────────────── */
   --color-status-pending:    #7a9a9a;
   --color-status-running:    #61daff;
-  --color-status-completed:  #15b5b3;
+  --color-status-completed:  #16bab8;
   --color-status-failed:     #ef8784;
-  --color-status-cancelled:  #e58d51;
+  --color-status-cancelled:  #e79761;
   --color-status-empty:      #a4a4a4;
 
   /* ── Scrollbar — teal-tinted ─────────────────────────────────────────────── */
@@ -165,9 +165,9 @@
   --color-highlight:         rgba(21, 96, 72, 0.12);
   --color-selected-ring:     rgba(21, 96, 72, 0.45);
 
-  --color-success:           #0b7371;
-  --color-error:             #be3634;
-  --color-warning:           #985628;
+  --color-success:           #0b6e6c;
+  --color-error:             #b23331;
+  --color-warning:           #905126;
   --color-info:              #176d8a;
   --color-state-positive:    #056e6c;
 
@@ -214,9 +214,9 @@
 
   --color-status-pending:    #5a7a84;
   --color-status-running:    #237c9f;
-  --color-status-completed:  #0b7371;
+  --color-status-completed:  #0b6e6c;
   --color-status-failed:     #c93b38;
-  --color-status-cancelled:  #985628;
+  --color-status-cancelled:  #905126;
   --color-status-empty:      #4d6a73;
 
   --color-scrollbar-track:       var(--color-bg);

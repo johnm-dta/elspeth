@@ -82,9 +82,9 @@
   --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
 
   /* ── Semantic colours — DTA/GOLD dark theme ──────────────────────────────── */
-  --color-success:           #15b5b3;
+  --color-success:           #16bab8;
   --color-error:             #ef8784;
-  --color-warning:           #e58d51;
+  --color-warning:           #e79761;
   --color-info:              #61daff;
   --color-state-positive:    #14b0ae;
 
@@ -118,9 +118,9 @@
   /* ── Status badges ───────────────────────────────────────────────────────── */
   --color-status-pending:    #7a9a9a;
   --color-status-running:    #61daff;
-  --color-status-completed:  #15b5b3;
+  --color-status-completed:  #16bab8;
   --color-status-failed:     #ef8784;
-  --color-status-cancelled:  #e58d51;
+  --color-status-cancelled:  #e79761;
   /* Phase 2.2 (elspeth-0de989c56d): EMPTY uses a distinct neutral grey,
      darker than --color-status-pending so the two non-success-but-clean
      statuses are visually distinguishable.  COMPLETED_WITH_FAILURES
@@ -295,9 +295,9 @@
      colorContrast.test.ts. The semantic-colour-on-tinted-bg pairings (e.g.
      --color-info on --color-info-bg) become slightly higher-contrast, which
      is the desired direction. */
-  --color-success:           #0b7371;
-  --color-error:             #be3634;
-  --color-warning:           #985628;
+  --color-success:           #0b6e6c;
+  --color-error:             #b23331;
+  --color-warning:           #905126;
   --color-info:              #176d8a;
   --color-state-positive:    #056e6c;
 
@@ -347,9 +347,9 @@
   /* ── Status badges ───────────────────────────────────────────────────────── */
   --color-status-pending:    #5a7a84;
   --color-status-running:    #237c9f;
-  --color-status-completed:  #0b7371;
+  --color-status-completed:  #0b6e6c;
   --color-status-failed:     #c93b38;
-  --color-status-cancelled:  #985628;
+  --color-status-cancelled:  #905126;
   --color-status-empty:      #4d6a73;
 
   /* ── Scrollbar — darker for light backgrounds ─────────────────────────── */

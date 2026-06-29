@@ -262,11 +262,23 @@ class TestLLMCallResponse:
         with pytest.raises(AttributeError):
             obj.content = "modified"  # type: ignore[misc]
 
+    def test_empty_content_is_allowed(self) -> None:
+        response = LLMCallResponse(
+            content="",
+            model="gpt-4",
+            usage=TokenUsage.unknown(),
+            raw_response={},
+        )
+
+        assert response.content == ""
+
 
 class TestLLMCallResponseConstructionInvariants:
     @pytest.mark.parametrize(
         "overrides",
         [
+            {"content": None},
+            {"content": {"x": 1}},
             {"model": ""},
             {"usage": {"prompt_tokens": 1}},
             {"raw_response": ["not", "a", "mapping"]},

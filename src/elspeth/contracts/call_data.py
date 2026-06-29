@@ -82,6 +82,12 @@ def _require_non_empty_str(value: object, field_name: str) -> str:
     return value
 
 
+def _require_str(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+    return value
+
+
 def _require_finite_number(value: object, field_name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{field_name} must be int or float, got {type(value).__name__}: {value!r}")
@@ -188,6 +194,7 @@ class LLMCallResponse:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "raw_response")
+        _require_str(self.content, "content")
         _require_non_empty_str(self.model, "model")
         if type(self.usage) is not TokenUsage:
             raise TypeError(f"usage must be TokenUsage, got {type(self.usage).__name__}: {self.usage!r}")

@@ -304,10 +304,14 @@ docs/assets/*.pdf
 # `elspeth_lints/core/atomic_io.py` for the locking rationale.
 config/cicd/**/.*.lock
 
-# Release PDF pipeline source is intentionally tracked; generated
-# outputs and bulky font source trees are not.
+# Release PDF pipeline source is intentionally tracked; generated outputs are not.
 docs/release/*
-!docs/release/pdf/output/
+!docs/release/pdf/
+!docs/release/pdf/**
+docs/release/pdf/out/
+docs/release/pdf/out/**
+docs/release/pdf/output/
+docs/release/pdf/output/**
 
 
 ## Internal tooling

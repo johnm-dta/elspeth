@@ -1289,8 +1289,8 @@ class RetrySettings(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
     max_attempts: int = Field(default=3, gt=0, description="Maximum retry attempts")
-    initial_delay_seconds: float = Field(default=1.0, gt=0, description="Initial backoff delay")
-    max_delay_seconds: float = Field(default=60.0, gt=0, description="Maximum backoff delay")
+    initial_delay_seconds: float = Field(default=1.0, ge=0.01, description="Initial backoff delay")
+    max_delay_seconds: float = Field(default=60.0, ge=0.1, description="Maximum backoff delay")
     exponential_base: float = Field(default=2.0, gt=1.0, description="Exponential backoff base")
 
 

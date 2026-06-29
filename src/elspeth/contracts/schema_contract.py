@@ -390,26 +390,40 @@ class SchemaContract:
             Restored SchemaContract
 
         Raises:
-            KeyError: If checkpoint has unknown python_type
-            ValueError: If restored hash doesn't match stored hash
+            AuditIntegrityError: If checkpoint keys are missing, a field carries
+                an unknown python_type, or restored hash doesn't match stored
+                hash.
         """
         # Tier 1 data: crash on corruption, but with informative messages.
         # to_checkpoint_format() writes "fields", "mode", "locked", "version_hash" —
         # if any are missing, the checkpoint is corrupted.
         try:
-            fields = tuple(
-                FieldContract(
-                    normalized_name=f["normalized_name"],
-                    original_name=f["original_name"],
-                    python_type=CONTRACT_TYPE_MAP[f["python_type"]],
-                    required=f["required"],
-                    source=f["source"],
-                    nullable=f["nullable"],
-                )
-                for f in data["fields"]
-            )
+            raw_fields = data["fields"]
         except KeyError as e:
             raise AuditIntegrityError(f"Corrupt SchemaContract checkpoint: missing key {e}. Top-level keys: {sorted(data.keys())}") from e
+
+        restored_fields: list[FieldContract] = []
+        try:
+            for f in raw_fields:
+                python_type_name = f["python_type"]
+                if not isinstance(python_type_name, str) or python_type_name not in CONTRACT_TYPE_MAP:
+                    raise AuditIntegrityError(
+                        f"Corrupt SchemaContract checkpoint: unknown python_type {python_type_name!r}; "
+                        f"allowed: {sorted(CONTRACT_TYPE_MAP)}. Top-level keys: {sorted(data.keys())}"
+                    )
+                restored_fields.append(
+                    FieldContract(
+                        normalized_name=f["normalized_name"],
+                        original_name=f["original_name"],
+                        python_type=CONTRACT_TYPE_MAP[python_type_name],
+                        required=f["required"],
+                        source=f["source"],
+                        nullable=f["nullable"],
+                    )
+                )
+        except KeyError as e:
+            raise AuditIntegrityError(f"Corrupt SchemaContract checkpoint: missing key {e}. Top-level keys: {sorted(data.keys())}") from e
+        fields = tuple(restored_fields)
 
         try:
             contract = cls(

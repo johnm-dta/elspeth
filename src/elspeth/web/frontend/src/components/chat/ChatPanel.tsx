@@ -22,7 +22,6 @@ import { BlobManager } from "@/components/blobs/BlobManager";
 import { InlineRunResults } from "@/components/execution/InlineRunResults";
 import { CompletionSummary } from "./guided/CompletionSummary";
 import { ExitToFreeformButton } from "./guided/ExitToFreeformButton";
-import { InlineOptOutCheckbox } from "./guided/InlineOptOutCheckbox";
 import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
@@ -1291,209 +1290,218 @@ export function ChatPanel({
     const tutorialStepBuilt =
       tutorialPromptSentForStep &&
       (guidedNextTurn != null || hasPendingGuidedInterpretations);
+    // "Describe what you want" composer. Rendered in ONE of two positions:
+    //   - non-tutorial: docked at the BOTTOM of the panel, full width, as the
+    //     primary chat affordance (mirrors the freeform body's ChatInput, which
+    //     docks below the message log);
+    //   - tutorial: ON TOP (inside the scroll region, above the decision) so the
+    //     passive "press Send → confirm what it built" reading order is kept.
+    // It routes plain English through `chatGuided` (/guided/chat), which applies
+    // the phase config in place; the caption is keyed on the live step via
+    // GUIDED_CHAT_PLACEHOLDERS.
+    const stepComposer = (
+      <section
+        className="guided-step-chat"
+        role="region"
+        aria-label="Describe what you want"
+      >
+        <h2 className="guided-step-chat-heading">Describe what you want</h2>
+        {tutorialStepBuilt ? (
+          // Tutorial: the locked prompt was already Sent for this step (it is
+          // in the transcript above) AND a forward affordance exists below.
+          // Replace the redundant active box — which otherwise kept the
+          // just-sent prompt with a live Send and read as "did it send?" —
+          // with a static confirmation line.
+          <p className="guided-step-chat-sent" role="status">
+            Sent — your request is in the transcript above and the assistant
+            has built this step. Confirm the decision below to continue.
+          </p>
+        ) : (
+          <ChatInput
+            onSend={(content) => void chatGuided(content)}
+            // Gate on BOTH pending flags: `guidedChatPending` blocks
+            // double-submits of a chat in flight; `guidedResponsePending` blocks
+            // a chat WHILE a turn-respond is advancing the step — otherwise the
+            // chat captures the stale `guidedSession.step` and the backend
+            // rejects the step mismatch with 409 (guided.py step-match guard).
+            disabled={guidedChatPending || guidedResponsePending}
+            inputRef={inputRef}
+            placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
+            maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
+            // Tutorial: the box is locked read-only and prefilled with the
+            // CURRENT phase's per-stage prompt (recipe/wire have none → empty,
+            // confirm-only). Kept controlled (value defined) across all phases
+            // to avoid controlled↔uncontrolled flips. Normal session: undefined
+            // value → editable freeform-intent box.
+            value={
+              isTutorial ? (lockedChatPrompt?.[guidedSession.step] ?? "") : undefined
+            }
+            onChange={isTutorial ? () => undefined : undefined}
+            readOnly={isTutorial === true}
+          />
+        )}
+      </section>
+    );
     return (
       <div
         id="chat-main"
         className="chat-panel chat-panel--guided"
         aria-label="Guided composer"
       >
+        {/* Header — mirrors the freeform body header so the mode-switch control
+            ("Exit to freeform") sits in the same top-right spot that freeform's
+            "Switch to guided" occupies. The tutorial suppresses the exit
+            affordance, so it has no header. */}
+        {!isTutorial && (
+          <div className="chat-panel-header">
+            {activeSessionTitle ? (
+              <h2 className="chat-panel-header-title">{activeSessionTitle}</h2>
+            ) : (
+              <span aria-hidden="true" />
+            )}
+            <div
+              className="chat-panel-header-actions"
+              style={{ display: "inline-flex", gap: 8, alignItems: "center" }}
+            >
+              <ExitToFreeformButton />
+            </div>
+          </div>
+        )}
         <GuidedWorkflowStepper activeStep={guidedSession.step} />
         {error && (
           <GuidedErrorBanner error={error} onDismiss={clearError} />
         )}
-        {/*
-          aria-live region scope (mirrors the freeform body's
-          `<div className="chat-panel-messages">` region below).
+        {/* Scrollable content region (mirrors the freeform body's
+            `.chat-panel-messages`): everything between the stepper and the
+            bottom-docked composer scrolls here, capped + centred to the sheet
+            width. `min-height:0` (in CSS) lets it shrink so a non-tutorial
+            composer stays pinned at the bottom. */}
+        <div className="guided-scroll">
+          {/*
+            aria-live region scope (mirrors the freeform body's
+            `<div className="chat-panel-messages">` region).
 
-          Only the live turn surface (<GuidedTurn>) lives inside the role="log"
-          region.  Rationale:
+            Only the live turn surface (<GuidedTurn>) lives inside the role="log"
+            region.  Rationale:
 
-          * GuidedHistory is historical context — already-resolved turns that
-            were announced when they first arrived.  Replaying them through the
-            live region on every step transition would create redundant SR
-            chatter; keep it outside.
-          * ExitToFreeformButton is a persistent affordance (always present
-            in guided mode).  It is not "new content" on turn change, so it
-            also lives outside the log region.
-          * GuidedTurn replaces in place when a new step's payload arrives.
-            That replacement IS the "new content" event that SRs need to hear
-            about — hence the wrapping log region.
+            * GuidedHistory is historical context — already-resolved turns that
+              were announced when they first arrived.  Replaying them through the
+              live region on every step transition would create redundant SR
+              chatter; keep it outside.
+            * GuidedTurn replaces in place when a new step's payload arrives.
+              That replacement IS the "new content" event that SRs need to hear
+              about — hence the wrapping log region.
 
-          Load-bearing for `InspectAndConfirmTurn.tsx` — search for the
-          "Warnings accessibility" comment block (the widget's warnings <aside>
-          deliberately omits its own aria-live region under the convention that
-          the parent ChatPanel wraps turn content in one).
-        */}
-        <GuidedHistory
-          history={guidedSession.history}
-          currentStep={guidedSession.step}
-        />
-        {/*
-          Per-step chat log (Phase A slice 6). Placed ABOVE the editable
-          form. GuidedChatHistory carries its OWN role="log" + aria-live so
-          new chat turns are announced independently of wizard turn advances.
-          The intent box (the reply surface) now renders directly below this
-          log and above the form — see the "Intent box" section. Empty-state
-          returns null; no DOM contribution before the first chat exchange.
-        */}
-        <GuidedChatHistory chatHistory={guidedSession.chat_history} />
-        {/*
-          Pending LLM approvals (interpretation reviews) render ABOVE the intent
-          box and the form: the learner must approve them before advancing, so
-          they belong at the top of the reply surface, not buried below it. The
-          widget owns its own role/aria; empty-state returns nothing.
-        */}
-        {/*
-          Persistent count announcer.  Mounted regardless of pending count so
-          the role="status" region pre-exists its content — the 0→1 appearance
-          is then a reliable content mutation (see AcknowledgementLiveRegion).
-        */}
-        <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
-        <AcknowledgementStack
-          sessionId={activeSessionId ?? ""}
-          isTutorial={isTutorial}
-          onResolved={(newState) => {
-            if (newState !== null) {
-              useSessionStore.setState({ compositionState: newState });
-            }
-          }}
-        />
-        {/*
-          Intent box (LLM-primary, spec §"Core model" point 1). This is the
-          PRIMARY input for the phase and renders ABOVE the editable form.
-          It routes the learner's plain English through `chatGuided`
-          (/guided/chat), which p1 makes apply-capable: an actionable submit
-          re-proposes + applies this phase's config IN PLACE (step pointer
-          unchanged) and the form below re-renders from the new step_N_result;
-          a question / prose / failure falls back to advisory prose with no
-          mutation. p2 owns only the layout + caption; the apply behavior is
-          p1's backend contract (chatGuided is unchanged here).
-
-          The caption is keyed on the live `guidedSession.step` via
-          GUIDED_CHAT_PLACEHOLDERS (closed list at module top), recaptioned
-          per phase to invite intent ("Describe the source you want…") rather
-          than advisory Q&A.
-
-          `disabled={guidedChatPending}` blocks rapid double-submits while a
-          /guided/chat round-trip is in flight.
-        */}
-        <section
-          className="guided-step-chat"
-          role="region"
-          aria-label="Describe what you want"
-        >
-          <h2 className="guided-step-chat-heading">Describe what you want</h2>
-          {tutorialStepBuilt ? (
-            // Tutorial: the locked prompt was already Sent for this step (it is
-            // in the transcript above) AND a forward affordance exists below.
-            // Replace the redundant active box — which otherwise kept the
-            // just-sent prompt with a live Send and read as "did it send?" —
-            // with a static confirmation line.
-            <p className="guided-step-chat-sent" role="status">
-              Sent — your request is in the transcript above and the assistant
-              has built this step. Confirm the decision below to continue.
-            </p>
-          ) : (
-            <ChatInput
-              onSend={(content) => void chatGuided(content)}
-              // Gate on BOTH pending flags: `guidedChatPending` blocks
-              // double-submits of a chat in flight; `guidedResponsePending` blocks
-              // a chat WHILE a turn-respond is advancing the step — otherwise the
-              // chat captures the stale `guidedSession.step` and the backend
-              // rejects the step mismatch with 409 (guided.py step-match guard).
-              disabled={guidedChatPending || guidedResponsePending}
-              inputRef={inputRef}
-              placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
-              maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
-              // Tutorial: the box is locked read-only and prefilled with the
-              // CURRENT phase's per-stage prompt (recipe/wire have none → empty,
-              // confirm-only). Kept controlled (value defined) across all phases
-              // to avoid controlled↔uncontrolled flips. Normal session: undefined
-              // value → editable freeform-intent box.
-              value={
-                isTutorial ? (lockedChatPrompt?.[guidedSession.step] ?? "") : undefined
+            Load-bearing for `InspectAndConfirmTurn.tsx` — search for the
+            "Warnings accessibility" comment block (the widget's warnings <aside>
+            deliberately omits its own aria-live region under the convention that
+            the parent ChatPanel wraps turn content in one).
+          */}
+          <GuidedHistory
+            history={guidedSession.history}
+            currentStep={guidedSession.step}
+          />
+          {/*
+            Per-step chat log (Phase A slice 6). GuidedChatHistory carries its
+            OWN role="log" + aria-live so new chat turns are announced
+            independently of wizard turn advances. Empty-state returns null; no
+            DOM contribution before the first chat exchange.
+          */}
+          <GuidedChatHistory chatHistory={guidedSession.chat_history} />
+          {/*
+            Pending LLM approvals (interpretation reviews) render ABOVE the
+            decision: the learner must approve them before advancing. The
+            persistent count announcer is mounted regardless of pending count so
+            the role="status" region pre-exists its content — the 0→1 appearance
+            is then a reliable content mutation (see AcknowledgementLiveRegion).
+          */}
+          <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
+          <AcknowledgementStack
+            sessionId={activeSessionId ?? ""}
+            isTutorial={isTutorial}
+            onResolved={(newState) => {
+              if (newState !== null) {
+                useSessionStore.setState({ compositionState: newState });
               }
-              onChange={isTutorial ? () => undefined : undefined}
-              readOnly={isTutorial === true}
-            />
-          )}
-        </section>
-        {/* Tutorial de-emphasis applies ONLY to Send-driven steps — those with
-            a locked chat prompt (source / sink / transforms). Confirm-only steps
-            (wire) have an empty locked prompt: Send is disabled there and the
-            manual widget IS the path, so they keep full emphasis and no
-            "press Send" note (which would point at a disabled button). */}
-        {(() => {
-          const stepIsSendDriven =
-            isTutorial && (lockedChatPrompt?.[guidedSession.step] ?? "") !== "";
-          // Lead the decision with the dynamic build rationale (the LLM's
-          // "what I built" summary for this step); fall back to the static
-          // step purpose when no assistant turn exists yet (server-emitted /
-          // empty cases) so the headline is never blank.
-          const rationale = latestAssistantRationale(guidedSession);
-          return (
-        <section
-          className={
-            stepIsSendDriven
-              ? "guided-current-decision guided-current-decision--tutorial"
-              : "guided-current-decision"
-          }
-          aria-labelledby="guided-current-decision-heading"
-        >
-          <div className="guided-current-decision-copy">
-            <p className="guided-current-decision-eyebrow" aria-hidden="true">
-              Current decision
-            </p>
-            <h2
-              id="guided-current-decision-heading"
-              className="guided-current-decision-rationale"
+            }}
+          />
+          {/* Tutorial: the composer renders ON TOP (above the decision) to keep
+              the passive "press Send → confirm what it built" reading order.
+              Non-tutorial renders it docked at the bottom (below this region). */}
+          {isTutorial && stepComposer}
+          {/* Tutorial de-emphasis applies ONLY to Send-driven steps — those with
+              a locked chat prompt (source / sink / transforms). Confirm-only steps
+              (wire) have an empty locked prompt: Send is disabled there and the
+              manual widget IS the path, so they keep full emphasis and no
+              "press Send" note (which would point at a disabled button). */}
+          {(() => {
+            const stepIsSendDriven =
+              isTutorial && (lockedChatPrompt?.[guidedSession.step] ?? "") !== "";
+            // Lead the decision with the dynamic build rationale (the LLM's
+            // "what I built" summary for this step); fall back to the static
+            // step purpose when no assistant turn exists yet (server-emitted /
+            // empty cases) so the headline is never blank.
+            const rationale = latestAssistantRationale(guidedSession);
+            return (
+          <section
+            className={
+              stepIsSendDriven
+                ? "guided-current-decision guided-current-decision--tutorial"
+                : "guided-current-decision"
+            }
+            aria-labelledby="guided-current-decision-heading"
+          >
+            <div className="guided-current-decision-copy">
+              <p className="guided-current-decision-eyebrow" aria-hidden="true">
+                Current decision
+              </p>
+              <h2
+                id="guided-current-decision-heading"
+                className="guided-current-decision-rationale"
+              >
+                {rationale ?? GUIDED_STEP_PURPOSES[guidedSession.step]}
+              </h2>
+              {stepIsSendDriven && !tutorialStepBuilt && (
+                <p className="guided-current-decision-tutorial-note">
+                  You don't need to fill this in by hand — press{" "}
+                  <strong>Send</strong> above and the assistant builds this step.
+                  Then confirm the decision below to continue.
+                </p>
+              )}
+            </div>
+            <div
+              ref={guidedLogRef}
+              className="chat-panel-guided-log"
+              role="log"
+              aria-label="Guided wizard step"
+              aria-live="polite"
+              aria-relevant="additions"
             >
-              {rationale ?? GUIDED_STEP_PURPOSES[guidedSession.step]}
-            </h2>
-            {stepIsSendDriven && !tutorialStepBuilt && (
-              <p className="guided-current-decision-tutorial-note">
-                You don't need to fill this in by hand — press{" "}
-                <strong>Send</strong> above and the assistant builds this step.
-                Then confirm the decision below to continue.
+              {/* Interpretation reviews moved above the intent box (approve-before-
+                  advance); the turn widget remains here as the current decision. */}
+              {guidedNextTurn && (
+                <GuidedTurn
+                  turn={guidedNextTurn}
+                  onSubmit={(body) => void respondGuided(body)}
+                  disabled={guidedResponsePending || hasPendingGuidedInterpretations}
+                  isTutorial={isTutorial}
+                />
+              )}
+            </div>
+            {guidedResponsePending && (
+              <p className="guided-current-decision-pending" role="status">
+                Saving decision...
               </p>
             )}
-          </div>
-          <div
-            ref={guidedLogRef}
-            className="chat-panel-guided-log"
-            role="log"
-            aria-label="Guided wizard step"
-            aria-live="polite"
-            aria-relevant="additions"
-          >
-            {/* Interpretation reviews moved above the intent box (approve-before-
-                advance); the turn widget remains here as the current decision. */}
-            {guidedNextTurn && (
-              <GuidedTurn
-                turn={guidedNextTurn}
-                onSubmit={(body) => void respondGuided(body)}
-                disabled={guidedResponsePending || hasPendingGuidedInterpretations}
-                isTutorial={isTutorial}
-              />
-            )}
-          </div>
-          {guidedResponsePending && (
-            <p className="guided-current-decision-pending" role="status">
-              Saving decision...
-            </p>
-          )}
-        </section>
-          );
-        })()}
-        {!isTutorial && <ExitToFreeformButton />}
-        {/* Phase 1B inline opt-out: footer-weight affordance to flip the
-            account-level default-mode preference from guided→freeform (or
-            back). Same backend row as the Settings → Composer pane. Hidden in
-            the tutorial: graduation owns the default-mode save, and a mid-walk
-            "always start in freeform mode" toggle contradicts the guided lesson
-            (mirrors the !isTutorial guard on ExitToFreeformButton above). */}
-        {!isTutorial && <InlineOptOutCheckbox />}
-        <InlineRunResults />
+          </section>
+            );
+          })()}
+          <InlineRunResults />
+        </div>
+        {/* Non-tutorial: "Describe what you want" docked at the BOTTOM of the
+            panel, full width — the primary chat affordance (mirrors freeform's
+            ChatInput docked below the message log). */}
+        {!isTutorial && stepComposer}
       </div>
     );
   }

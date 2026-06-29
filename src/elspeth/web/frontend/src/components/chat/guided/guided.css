@@ -101,19 +101,47 @@
   background-color: var(--color-surface);
 }
 
-/* Operator request: stop the guided surface stretching full-bleed on wide
-   viewports — cap each panel to a centred "sheet" (~A5 landscape). max-width
-   caps the stretched flex column item; margin-inline:auto centres it once
-   capped (and collapses to a flush fill below the cap, so narrow screens are
-   unaffected). 50rem keeps the 5-step stepper above its 640px 2-column
-   breakpoint. */
+/* Operator request: cap the guided surface to a centred content "sheet" on wide
+   viewports instead of full-bleed. The stepper (a direct child) and the
+   scroll-region content are capped + centred; the full-width chrome — the
+   header (top) and the bottom-docked composer — is deliberately NOT capped, so
+   the surface reads like a normal chat window (full-width bars top/bottom, a
+   centred content column between). 64rem keeps the 5-step stepper above its
+   640px 2-column breakpoint. (Width is provisional — tune to taste.)
+   max-width caps the stretched flex item; margin-inline:auto centres it once
+   capped and collapses to a flush fill below the cap (narrow screens
+   unaffected). */
 .chat-panel--guided > .guided-workflow,
-.chat-panel--guided > .guided-chat-history,
-.chat-panel--guided > .guided-step-chat,
-.chat-panel--guided > .guided-current-decision,
-.chat-panel--guided > .inline-run-results {
-  max-width: 50rem;
+.guided-scroll > * {
+  max-width: 64rem;
   margin-inline: auto;
+}
+
+/* Scrollable content region between the stepper and the docked composer
+   (mirrors the freeform body's `.chat-panel-messages`). flex:1 absorbs the
+   remaining height; min-height:0 lets it shrink below its content size so the
+   non-tutorial composer below stays pinned at the bottom — the classic
+   flex-column chat layout. */
+.guided-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Non-tutorial: "Describe what you want" docked at the bottom of the panel as a
+   full-width chat input. Only the DOCKED instance is a direct child of
+   .chat-panel--guided (the tutorial renders the composer inside .guided-scroll,
+   where it keeps the dashed-card chrome from the base rule above), so this
+   selector targets the docked one alone: full width (NOT sheet-capped), pinned
+   (flex-shrink:0), with a top divider replacing the card border. Inherits the
+   base rule's padding. */
+.chat-panel--guided > .guided-step-chat {
+  flex-shrink: 0;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+  background-color: var(--color-surface);
 }
 
 .guided-current-decision-copy {

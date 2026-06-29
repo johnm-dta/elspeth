@@ -30,7 +30,6 @@ import { axe } from "./axe-config";
 const AUDITED_COMPONENTS = [
   "ComposerPreferencesPanel",
   "UserMenu",
-  "InlineOptOutCheckbox",
   "DefaultModeChangedBanner",
   "AuditReadinessPanel",
   "ReadinessRowDetail",
@@ -65,7 +64,6 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "GraphMiniView",
   "HeaderSessionSwitcher",
   "HeaderVersionSelector",
-  "InlineOptOutCheckbox",
   "InlineSourceCreatedTurn",
   "InlineSourceDisambiguationTurn",
   "InlineSourceFallbackPrompt",
@@ -119,7 +117,6 @@ vi.mock("../../api/auditReadiness", () => ({
 
 import { ComposerPreferencesPanel } from "@/components/settings/ComposerPreferencesPanel";
 import { UserMenu } from "@/components/common/UserMenu";
-import { InlineOptOutCheckbox } from "@/components/chat/guided/InlineOptOutCheckbox";
 import { DefaultModeChangedBanner } from "@/components/common/DefaultModeChangedBanner";
 import { AuditReadinessPanel } from "@/components/audit/AuditReadinessPanel";
 import { ReadinessRowDetail } from "@/components/audit/ReadinessRowDetail";
@@ -207,13 +204,6 @@ describe("UserMenu", () => {
     const { container } = render(
       <UserMenu onOpenSettings={() => {}} onSignOut={() => {}} />,
     );
-    expect(await axe(container)).toHaveNoViolations();
-  });
-});
-
-describe("InlineOptOutCheckbox", () => {
-  it("has no axe violations", async () => {
-    const { container } = render(<InlineOptOutCheckbox />);
     expect(await axe(container)).toHaveNoViolations();
   });
 });

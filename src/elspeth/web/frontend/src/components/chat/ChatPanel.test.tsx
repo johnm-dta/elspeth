@@ -14,6 +14,7 @@ import {
   parseProposedRowsFromUserInput,
 } from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
+import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
@@ -461,12 +462,33 @@ describe("ChatPanel mode discriminator", () => {
     expect(chatMain).not.toBeNull();
     expect(chatMain?.classList.contains("chat-panel--guided")).toBe(true);
 
-    // Phase A slice 4 / LLM-primary reorder: the intent ChatInput is rendered
-    // INSIDE the guided-active branch, now ABOVE the GuidedTurn form (it is
-    // the primary input). This test asserts presence only; per-step
-    // placeholder + onSend wiring are exercised in the dedicated tests below.
+    // The intent ChatInput is rendered INSIDE the guided-active branch. For a
+    // non-tutorial session it now docks at the BOTTOM (below the decision), as
+    // the primary chat affordance; DOM order is asserted in the dedicated
+    // "docks ... BELOW the decision" test above. This test asserts presence
+    // only; per-step placeholder + onSend wiring are exercised below.
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
+  });
+
+  it("non-tutorial guided: no 'always start in freeform mode' opt-out checkbox", () => {
+    // Load preferences so the (now-removed) InlineOptOutCheckbox would render if
+    // it were still wired — it returns null until prefs load, so without this
+    // the assertion would pass vacuously.
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByText(/always start new sessions in freeform mode/i),
+    ).toBeNull();
   });
 
   it("renders a persistent guided workflow stepper with the active step marked", () => {
@@ -832,7 +854,7 @@ describe("ChatPanel mode discriminator", () => {
     );
   });
 
-  it("renders the intent box ABOVE the editable form (LLM-primary layout)", () => {
+  it("non-tutorial guided: docks the intent box BELOW the editable form (chat-window layout)", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -843,22 +865,56 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    // Classnames are unchanged (Option B): the intent box keeps
-    // `.guided-step-chat`; only its heading text + aria-label were recaptioned.
+    // Classnames are unchanged: the intent box keeps `.guided-step-chat`.
     const intent = container.querySelector(".guided-step-chat");
     const form = container.querySelector(".guided-current-decision");
     expect(intent).not.toBeNull();
     expect(form).not.toBeNull();
-    // Document-order: intent precedes form. compareDocumentPosition returns
-    // DOCUMENT_POSITION_FOLLOWING (4) when `form` follows `intent`.
+    // Document-order (non-tutorial): the intent box docks at the BOTTOM, AFTER
+    // the decision form — mirroring the freeform body, where the ChatInput docks
+    // below the message log. compareDocumentPosition returns
+    // DOCUMENT_POSITION_FOLLOWING (4) when `intent` follows `form`.
     expect(
-      intent!.compareDocumentPosition(form!) &
+      form!.compareDocumentPosition(intent!) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     // The intent box's recaptioned heading is present.
     expect(
       screen.getByRole("region", { name: "Describe what you want" }),
     ).toBeInTheDocument();
+  });
+
+  it("tutorial guided: keeps the intent box ABOVE the decision (passive Send-then-confirm order)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    const intent = container.querySelector(".guided-step-chat");
+    const form = container.querySelector(".guided-current-decision");
+    expect(intent).not.toBeNull();
+    expect(form).not.toBeNull();
+    // The tutorial deliberately does NOT dock the composer: it stays ON TOP so
+    // the passive "press Send → confirm what it built" reading order holds.
+    // `form` follows `intent`.
+    expect(
+      intent!.compareDocumentPosition(form!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // Tutorial suppresses the exit affordance, so there is no header/exit.
+    expect(
+      screen.queryByRole("button", { name: "Exit to freeform" }),
+    ).toBeNull();
   });
 
   it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {

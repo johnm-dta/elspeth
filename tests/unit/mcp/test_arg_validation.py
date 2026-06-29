@@ -320,9 +320,15 @@ class TestToolDefImmutability:
         with pytest.raises(TypeError):
             tool.schema_properties["injected"] = "evil"  # type: ignore[index]
 
+        assert isinstance(tool.schema_properties["run_id"], MappingProxyType)
+        with pytest.raises(TypeError):
+            tool.schema_properties["run_id"]["type"] = "integer"  # type: ignore[index]
+
         # Caller's original dict must be decoupled
         original["injected"] = "evil"  # type: ignore[assignment]
+        original["run_id"]["type"] = "integer"
         assert "injected" not in tool.schema_properties
+        assert tool.schema_properties["run_id"]["type"] == "string"
 
 
 class TestSchemaAndValidatorConsistency:

@@ -51,7 +51,7 @@ _MCP_SCHEMA_FAILURE_PREFIX = "Landscape MCP server cannot open the configured au
 _MCP_INT_ARG_MAXIMUMS = {"limit": MCP_RESULT_LIMIT_MAX}
 
 
-def _schema_properties_with_int_bounds(args: "_ArgSpec", schema_properties: Mapping[str, Any]) -> MappingProxyType[str, Any]:
+def _schema_properties_with_int_bounds(args: "_ArgSpec", schema_properties: Mapping[str, Any]) -> dict[str, Any]:
     """Return schema properties with validation bounds advertised."""
     properties: dict[str, Any] = {name: dict(prop) for name, prop in schema_properties.items()}
     for field_name, minimum in args.optional_int_min:
@@ -60,7 +60,19 @@ def _schema_properties_with_int_bounds(args: "_ArgSpec", schema_properties: Mapp
     for field_name, maximum in _MCP_INT_ARG_MAXIMUMS.items():
         if any(field_name == candidate for candidate, _default in args.optional_int) and field_name in properties:
             properties[field_name]["maximum"] = maximum
-    return MappingProxyType(properties)
+    return properties
+
+
+def _freeze_schema_properties(schema_properties: Mapping[str, Any]) -> dict[str, Any]:
+    return {name: _freeze_schema_value(prop) for name, prop in schema_properties.items()}
+
+
+def _freeze_schema_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_schema_value(child) for key, child in value.items()})
+    if isinstance(value, list):
+        return [_freeze_schema_value(child) for child in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +103,11 @@ class _ToolDef:
     schema_properties: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "schema_properties", _schema_properties_with_int_bounds(self.args, self.schema_properties))
+        object.__setattr__(
+            self,
+            "schema_properties",
+            MappingProxyType(_freeze_schema_properties(_schema_properties_with_int_bounds(self.args, self.schema_properties))),
+        )
 
 
 _TOOLS: dict[str, _ToolDef] = {

@@ -202,6 +202,11 @@ class TestTransformResult:
             # Using the dataclass directly to bypass factory's keyword-only arg
             TransformResult(status="success", row=make_pipeline_row({"x": 1}), reason=None)
 
+    def test_success_factory_requires_mapping_success_reason(self) -> None:
+        """Success metadata must be mapping-like at construction."""
+        with pytest.raises(ValueError, match="MUST provide success_reason as a mapping"):
+            TransformResult.success(make_pipeline_row({"x": 1}), success_reason=["not", "a", "mapping"])  # type: ignore[arg-type]
+
     @pytest.mark.parametrize("success_reason", [{}, {"action": 123}])
     def test_success_factory_requires_string_action(self, success_reason: Any) -> None:
         """Success metadata must include a runtime-valid action at construction."""

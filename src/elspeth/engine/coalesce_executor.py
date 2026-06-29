@@ -454,10 +454,9 @@ class CoalesceExecutor:
                 lost_branches=dict(key_scalars.lost_branches) if key_scalars is not None else {},
             )
 
-        # Reconstruct completed keys from Landscape (source of truth) —
-        # unchanged from the blob-restore era. This eliminates:
-        # - FIFO eviction gap (Landscape has ALL completed, not just last 10K)
-        # - Checkpoint-Landscape divergence risk
+        # Reconstruct completed keys from Landscape (source of truth) into the
+        # bounded FIFO cache. Evicted keys remain correct because accept()
+        # does an exact Landscape point lookup on cache miss.
         # Queried BEFORE any mutation: a Landscape error mid-restore must not
         # leave the executor cleared-but-unrestored.
         completed_keys = self._reconstruct_completed_keys_from_landscape()
@@ -500,7 +499,7 @@ class CoalesceExecutor:
         self._pending.clear()
         self._completed_keys.clear()
         for completed_key in completed_keys:
-            self._completed_keys[completed_key] = None
+            self._mark_completed(completed_key)
         self._pending.update(new_pending)
 
         slog.info(
@@ -518,9 +517,10 @@ class CoalesceExecutor:
         with tokens to get row_ids. Maps node_id → coalesce_name via the
         reverse of self._node_ids.
 
-        This is the source-of-truth path: the Landscape records ALL completed
-        coalesces (no FIFO eviction), so late-arrival detection works correctly
-        even for pipelines with >max_completed_keys coalesced rows.
+        This is the restore seeding path: the Landscape records all completed
+        coalesces, but the executor keeps only a bounded FIFO performance
+        cache. Late arrivals for evicted keys are rediscovered through an exact
+        Landscape point lookup.
 
         Returns the keys instead of mutating ``_completed_keys`` so the caller
         (``restore_from_journal``) can run the Landscape query BEFORE clearing
@@ -544,8 +544,8 @@ class CoalesceExecutor:
         """Check the Landscape for whether a coalesce key has completed.
 
         Cache-miss fallback for late-arrival detection. When the FIFO cache
-        (self._completed_keys) doesn't contain a key, this queries the
-        Landscape before allowing a new pending entry. If the Landscape
+        (self._completed_keys) doesn't contain a key, this queries the exact
+        Landscape row before allowing a new pending entry. If the Landscape
         shows the coalesce completed, the key is added to the cache and
         the token is treated as a late arrival.
 
@@ -563,17 +563,9 @@ class CoalesceExecutor:
             return False
         node_id = self._node_ids[coalesce_name]
 
-        completed_pairs = self._execution.get_completed_row_ids_for_nodes(
-            run_id=self._run_id,
-            node_ids=frozenset({str(node_id)}),
-        )
-
-        # Check if any of the completed pairs match our row_id
-        for _nid, completed_row_id in completed_pairs:
-            if completed_row_id == row_id:
-                # Cache hit: add to FIFO so subsequent lookups are fast
-                self._completed_keys[(coalesce_name, row_id)] = None
-                return True
+        if self._execution.has_completed_row_for_node(run_id=self._run_id, node_id=str(node_id), row_id=row_id):
+            self._mark_completed((coalesce_name, row_id))
+            return True
         return False
 
     def _mark_completed(self, key: tuple[str, str]) -> None:

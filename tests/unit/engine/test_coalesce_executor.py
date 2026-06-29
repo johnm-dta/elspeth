@@ -136,6 +136,7 @@ def _make_executor(
     # Default: Landscape returns no completed coalesces (unit tests don't have a real DB).
     # Tests that exercise Landscape-based restoration override this per-test.
     execution.get_completed_row_ids_for_nodes.return_value = set()
+    execution.has_completed_row_for_node.return_value = False
     data_flow = MagicMock(spec=DataFlowRepository)
     span_factory = MagicMock()
     token_manager = MagicMock()
@@ -176,6 +177,7 @@ def _make_raw_executor(
     execution = MagicMock(spec=ExecutionRepository)
     execution.begin_node_state.side_effect = lambda **kw: Mock(state_id=_next_state_id())
     execution.get_completed_row_ids_for_nodes.return_value = set()
+    execution.has_completed_row_for_node.return_value = False
     data_flow = MagicMock(spec=DataFlowRepository)
     span_factory = MagicMock()
     token_manager = MagicMock()
@@ -2634,13 +2636,17 @@ class TestLandscapeCompletedKeys:
         assert ("merge", "row_1") in executor._completed_keys
         assert ("merge", "row_2") in executor._completed_keys
 
-        # Late arrival for evicted row_0 — Landscape fallback should catch it
-        execution.get_completed_row_ids_for_nodes.return_value = {("node_1", "row_0")}
+        # Late arrival for evicted row_0 — exact Landscape fallback should catch it
+        # without materializing every completed row for node_1.
+        execution.reset_mock()
+        execution.has_completed_row_for_node.return_value = True
         late = _make_token(branch_name="a", token_id="t_late", row_id="row_0")
         outcome = executor.accept(late, "merge")
 
         assert outcome.held is False
         assert outcome.failure_reason == "late_arrival_after_merge"
+        execution.has_completed_row_for_node.assert_called_once_with(run_id="run_1", node_id="node_1", row_id="row_0")
+        execution.get_completed_row_ids_for_nodes.assert_not_called()
         # Key should now be in the FIFO cache (backfilled from Landscape)
         assert ("merge", "row_0") in executor._completed_keys
 
@@ -3064,6 +3070,23 @@ class TestRestoreFromJournal:
         assert outcome.held is False
         assert outcome.failure_reason == "late_arrival_after_merge"
         assert outcome.outcomes_recorded is True
+
+    def test_restore_from_journal_keeps_completed_keys_bounded(self) -> None:
+        """Restore seeds the FIFO cache through the bounded completion path."""
+        executor, execution, _, _, _ = _make_executor(max_completed_keys=2)
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        execution.get_completed_row_ids_for_nodes.return_value = {("co-1", f"row_{i}") for i in range(5)}
+
+        executor.restore_from_journal(
+            items=[],
+            scalars={},
+            state_ids={},
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        assert len(executor._completed_keys) == 2
 
     # --- corruption guards (journal/audit disagreement = crash, no coercion) ---
 

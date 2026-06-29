@@ -1358,11 +1358,14 @@ class TierModelVisitor(ast.NodeVisitor):
 
         for index, handler in enumerate(node.handlers):
             self.path_stack.append(f"handlers[{index}]")
+            self.node_stack.append(handler)
             try:
+                self._check_exception_handler(handler)
                 if handler.type is not None:
                     self._visit_ast_child("type", handler.type)
                 branch_ends.append(self._visit_statement_sequence_from_snapshot("body", handler.body, branch_start))
             finally:
+                self.node_stack.pop()
                 self.path_stack.pop()
 
         self._set_current_derived_names(self._intersect_snapshots(tuple(branch_ends)))
@@ -1571,8 +1574,8 @@ class TierModelVisitor(ast.NodeVisitor):
                     )
         self._visit_with_like(node)
 
-    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
-        """Detect R4: broad exception suppression."""
+    def _check_exception_handler(self, node: ast.ExceptHandler) -> None:
+        """Detect R4/R6 exception handler findings without visiting children."""
         # Check for bare except or except Exception
         is_broad = False
         if node.type is None:
@@ -1619,6 +1622,9 @@ class TierModelVisitor(ast.NodeVisitor):
                 f"Exception swallowed without re-raise or explicit error: {self._get_code_snippet(node.lineno)}",
             )
 
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
+        """Detect R4/R6 exception handling findings."""
+        self._check_exception_handler(node)
         self.generic_visit(node)
 
     def generic_visit(self, node: ast.AST) -> None:

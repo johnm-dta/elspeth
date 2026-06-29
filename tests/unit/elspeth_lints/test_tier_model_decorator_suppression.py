@@ -324,6 +324,60 @@ class TestLiveDerivedNameSuppression:
         assert _findings_by_rule(_findings(source), "R1") == []
 
 
+class TestTryHandlersInsideBoundary:
+    """Exception handlers inside a boundary still run exception rules."""
+
+    def test_broad_except_still_fires_inside_trust_boundary(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="LLM tool args",
+                source_param="arguments",
+                suppresses=("R1", "R5"),
+                invariant="raises on shape mismatch",
+            )
+            def handler(arguments):
+                try:
+                    return arguments["value"]
+                except Exception:
+                    pass
+                return None
+        """)
+
+        findings = _findings(source)
+
+        r4 = _findings_by_rule(findings, "R4")
+        assert len(r4) == 1
+        assert "Broad exception caught without re-raise" in r4[0].message
+
+    def test_silent_specific_except_still_fires_inside_trust_boundary(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="LLM tool args",
+                source_param="arguments",
+                suppresses=("R1", "R5"),
+                invariant="raises on shape mismatch",
+            )
+            def handler(arguments):
+                try:
+                    return arguments["value"]
+                except ValueError:
+                    pass
+                return None
+        """)
+
+        findings = _findings(source)
+
+        r6 = _findings_by_rule(findings, "R6")
+        assert len(r6) == 1
+        assert "Exception swallowed without re-raise" in r6[0].message
+
+
 # =============================================================================
 # Negative cases: decorator does NOT suppress
 # =============================================================================

@@ -1,6 +1,7 @@
 version: 1
-# Active legacy scripts are explicitly tracked so the meta gate can reject any
-# new bespoke scripts/cicd/enforce_*.py file during the elspeth-lints migration.
+# Active legacy policy scripts are explicitly tracked so the meta gate can reject
+# any new bespoke scripts/cicd/enforce_*.py file or workflow-invoked
+# scripts/cicd/*.py policy script during the elspeth-lints migration.
 # Status lifecycle:
 #   pending -> shadow -> cutover -> deleted
 #
@@ -12,10 +13,34 @@ version: 1
 # Supported command placeholders:
 #   {python}, {root}, {old_script}, {new_rule}
 rules:
+  - old_script: scripts/cicd/assert_redaction_label.py
+    new_rule: null
+    status: pending
+    migration_issue: elspeth-313cd53771
+  - old_script: scripts/cicd/check_redaction_direction.py
+    new_rule: null
+    status: pending
+    migration_issue: elspeth-313cd53771
+  - old_script: scripts/cicd/check_release_required_checks.py
+    new_rule: null
+    status: pending
+    migration_issue: elspeth-313cd53771
+  - old_script: scripts/cicd/check_slot_type_cross_language.py
+    new_rule: null
+    status: pending
+    migration_issue: elspeth-313cd53771
   - old_script: scripts/cicd/enforce_adapter_budget.py
     new_rule: null
     status: pending
     migration_issue: null
+  - old_script: scripts/cicd/generate_skill_inventory.py
+    new_rule: null
+    status: pending
+    migration_issue: elspeth-313cd53771
+  - old_script: scripts/cicd/parity_harness.py
+    new_rule: null
+    status: pending
+    migration_issue: elspeth-313cd53771
   - old_script: scripts/cicd/enforce_audit_evidence_nominal.py
     new_rule: audit_evidence.nominal_base
     status: deleted

@@ -1089,12 +1089,11 @@ def _reaudit_one_entry(
     )
     surrounding_code = safe_excerpt.text
     symbol_for_request = ".".join(symbol_part) if symbol_part else "_module_"
-    from elspeth_lints.rules.trust_tier.tier_model.rule import describe_rule
 
     request = JudgeRequest(
         file_path=file_path,
         rule_id=rule_id,
-        rule_definition=describe_rule(rule_id),
+        rule_definition=_rule_definition_for(rule_filter=rule_filter, rule_id=rule_id),
         symbol=symbol_for_request,
         fingerprint=fingerprint,
         rationale=entry.reason,
@@ -1497,6 +1496,70 @@ def _valid_rule_ids_for(rule_filter: str) -> frozenset[str]:
         bad = [type(value).__name__ for value in values if not isinstance(value, str)]
         raise ReauditError(f"{rule_filter}: vocabulary constants must be strings, got {bad}")
     return frozenset(values)
+
+
+def _rule_definition_for(*, rule_filter: str, rule_id: str) -> str:
+    """Return rule-specific prompt context for a reaudit judge request."""
+    if rule_filter == "trust_tier.tier_model":
+        from elspeth_lints.rules.trust_tier.tier_model.rule import describe_rule
+
+        return describe_rule(rule_id)
+
+    from elspeth_lints.rules import BUILTIN_RULES
+
+    rule = next((candidate for candidate in BUILTIN_RULES if candidate.id == rule_filter), None)
+    if rule is None:
+        raise ReauditError(f"Rule {rule_filter!r} is supported by reaudit but is not registered in BUILTIN_RULES.")
+
+    metadata = rule.metadata
+    parts = [
+        f"{metadata.id}: {metadata.name}",
+        f"Finding id: {rule_id}",
+        f"Rule package description: {metadata.description}",
+        f"Severity: {metadata.severity.value}; category: {metadata.category.value}; scope: {metadata.scope.value}",
+    ]
+    sub_rule = _sub_rule_definition_for(rule_filter=rule_filter, rule_id=rule_id)
+    if sub_rule is not None:
+        parts.append(sub_rule)
+    return "\n".join(parts)
+
+
+def _sub_rule_definition_for(*, rule_filter: str, rule_id: str) -> str | None:
+    """Return the registered sub-rule definition when the rule exposes one."""
+    spec = _RULE_VOCABULARY_REGISTRY.get(rule_filter)
+    if spec is None:
+        return None
+
+    if spec.use_mapping_keys:
+        rules_mapping = _lookup_module_attr(spec.module_path, spec.attr_names[0])
+        if not isinstance(rules_mapping, Mapping):
+            return None
+        raw_definition = rules_mapping.get(rule_id)
+        if isinstance(raw_definition, Mapping):
+            name = raw_definition.get("name")
+            description = raw_definition.get("description")
+            remediation = raw_definition.get("remediation")
+            lines = [f"{rule_id}: {name}" if isinstance(name, str) and name else f"{rule_id}"]
+            if isinstance(description, str) and description:
+                lines.append(f"Description: {description}")
+            if isinstance(remediation, str) and remediation:
+                lines.append(f"Remediation: {remediation}")
+            return "\n".join(lines)
+        if raw_definition is not None:
+            return f"{rule_id}: {raw_definition}"
+        return None
+
+    if spec.use_collection_values:
+        values_collection = _lookup_module_attr(spec.module_path, spec.attr_names[0])
+        if not isinstance(values_collection, str) and isinstance(values_collection, Collection) and rule_id in values_collection:
+            return f"{rule_id}: emitted by {rule_filter}."
+        return None
+
+    for attr_name in spec.attr_names:
+        value = _lookup_module_attr(spec.module_path, attr_name)
+        if value == rule_id:
+            return f"{rule_id}: emitted by {rule_filter}.{attr_name}."
+    return None
 
 
 def _lookup_module_attr(module_path: str, attr_name: str) -> Any:

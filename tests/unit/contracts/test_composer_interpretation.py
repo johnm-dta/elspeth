@@ -359,6 +359,39 @@ def test_opted_out_record_requires_null_surface_and_provenance_fields() -> None:
         InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("kwargs_factory", "overrides", "expected_fields"),
+    [
+        (
+            _opted_out_record_kwargs,
+            {"arguments_hash": "b" * 64, "hash_domain_version": "v2"},
+            ("arguments_hash", "hash_domain_version"),
+        ),
+        (
+            _surface_opt_out_record_kwargs,
+            {"accepted_value": None, "arguments_hash": None, "hash_domain_version": None},
+            ("accepted_value", "arguments_hash", "hash_domain_version"),
+        ),
+    ],
+)
+def test_shape_violation_summary_includes_lifecycle_field_offenders(
+    kwargs_factory: Callable[[], dict[str, object]],
+    overrides: dict[str, object],
+    expected_fields: tuple[str, ...],
+) -> None:
+    """The offending-fields summary must include every field the shape validator can flag."""
+    kwargs = kwargs_factory()
+    kwargs.update(overrides)
+
+    with pytest.raises(ValueError) as exc_info:
+        InterpretationEventRecord(**kwargs)  # type: ignore[arg-type]
+
+    message = str(exc_info.value)
+    offender_summary = message.split("offending fields: ", maxsplit=1)[1].split(";", maxsplit=1)[0]
+    for expected_field in expected_fields:
+        assert expected_field in offender_summary
+
+
 def test_no_surfaces_record_requires_null_surfaces_and_provenance() -> None:
     """AUTO_INTERPRETED_NO_SURFACES mirrors ck_interpretation_events_no_surfaces_shape."""
     kwargs = _no_surfaces_record_kwargs()

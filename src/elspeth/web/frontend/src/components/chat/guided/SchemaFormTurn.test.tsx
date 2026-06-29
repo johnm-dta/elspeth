@@ -564,4 +564,98 @@ describe("SchemaFormTurn", () => {
       expect(body.edited_values.options.path).toBe(realPath);
     });
   });
+
+  describe("read-only summary view", () => {
+    it("renders prefilled scalar knobs as read-only text, not editable controls", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload(
+            [
+              field({ name: "encoding", label: "Encoding", kind: "text" }),
+              field({ name: "skip_rows", label: "Skip Rows", kind: "number-int" }),
+              field({ name: "enabled", label: "Enabled", kind: "checkbox" }),
+            ],
+            { encoding: "utf-8", skip_rows: 0, enabled: true },
+          )}
+          onSubmit={vi.fn()}
+        />,
+      );
+      // Summary is the default — no schema-form inputs are rendered up front.
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+      expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
+      expect(screen.getByText("Encoding")).toBeInTheDocument();
+      expect(screen.getByText("utf-8")).toBeInTheDocument();
+      expect(screen.getByText("Skip Rows")).toBeInTheDocument();
+      expect(screen.getByText("0")).toBeInTheDocument();
+      expect(screen.getByText("Yes")).toBeInTheDocument(); // checkbox -> Yes/No
+    });
+
+    it("renders empty/undefined scalar values as (none)", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "columns", label: "Columns", kind: "string-list" })], { columns: [] })}
+          onSubmit={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("(none)")).toBeInTheDocument();
+    });
+
+    it("renders a JSON-shaped knob value through CodeBlock (pretty/highlighted)", () => {
+      const { container } = render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "schema", label: "Schema", kind: "json-object" })], {
+            schema: { mode: "observed", guaranteed_fields: ["url"] },
+          })}
+          onSubmit={vi.fn()}
+        />,
+      );
+      expect(container.querySelector("[data-codeblock-format]")).not.toBeNull();
+    });
+
+    it("masks an absolute blob path to its friendly basename in the summary", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", label: "Path", kind: "text" })], {
+            path: "/home/u/data/blobs/sess/cb7f1f46-b724-4472-9acb-1680cefef45e_project_pages.json",
+          })}
+          onSubmit={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("project_pages.json")).toBeInTheDocument();
+      expect(screen.queryByText(/\/home\/u\/data\/blobs/)).not.toBeInTheDocument();
+    });
+
+    it("hides a visible_when-gated field from the summary when its predicate is unmet", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload(
+            [
+              field({ name: "provider", label: "Provider", kind: "enum", enum: ["azure", "openrouter"] }),
+              field({ name: "deployment_name", label: "Deployment", kind: "text", visible_when: { field: "provider", equals: "azure" } }),
+            ],
+            { provider: "openrouter" },
+          )}
+          onSubmit={vi.fn()}
+        />,
+      );
+      expect(screen.queryByText("Deployment")).not.toBeInTheDocument();
+    });
+
+    // FORWARD GUARD (not a genuine RED — today's form already submits prefilled
+    // values on Continue): pins that the summary-default path keeps submit parity.
+    it("submits the prefilled values verbatim from the summary (no edit)", async () => {
+      const user = userEvent.setup();
+      const onSubmit = vi.fn();
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "encoding", label: "Encoding", kind: "text" })], { encoding: "utf-8" })}
+          onSubmit={onSubmit}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "Continue" }));
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({ edited_values: expect.objectContaining({ options: { encoding: "utf-8" } }) }),
+      );
+    });
+  });
 });

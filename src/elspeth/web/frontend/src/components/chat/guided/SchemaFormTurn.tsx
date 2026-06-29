@@ -1,6 +1,7 @@
-import { useId, useState } from "react";
+import { useId, useState, type ReactNode } from "react";
 import type { GuidedRespondRequest, KnobField, SchemaFormPayload } from "@/types/guided";
 import { TUTORIAL_VALIDATION_FAILURE_CAVEAT } from "@/components/tutorial/copy";
+import { CodeBlock } from "../CodeBlock";
 import { RecipeContextHeader } from "./RecipeContextHeader";
 
 interface SchemaFormTurnProps {
@@ -19,6 +20,7 @@ type FormValues = Record<string, unknown>;
 
 export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial = false }: SchemaFormTurnProps) {
   const reactId = useId();
+  const [view, setView] = useState<"summary" | "edit">("summary");
   const [values, setValues] = useState<FormValues>(() =>
     initialValues(payload.knobs.fields, payload.prefilled),
   );
@@ -119,19 +121,30 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
       {payload.mode === "recipe_decision" && (
         <RecipeContextHeader context={payload.recipe_context} />
       )}
-      <div className="guided-schema-fields">
-        {visibleFields().map((field) => (
-          <KnobFieldRenderer
-            key={field.name}
-            field={field}
-            value={values[field.name]}
-            onChange={(value) => onChange(field.name, value)}
-            idPrefix={reactId}
-            disabled={disabled}
-            isTutorial={isTutorial}
-          />
-        ))}
-      </div>
+      {view === "summary" ? (
+        <dl className="guided-schema-summary">
+          {visibleFields().map((f) => (
+            <div className="guided-schema-summary-row" key={f.name}>
+              <dt className="guided-schema-summary-label">{f.label}</dt>
+              <dd className="guided-schema-summary-value">{summaryValueNode(f, values[f.name])}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <div className="guided-schema-fields">
+          {visibleFields().map((field) => (
+            <KnobFieldRenderer
+              key={field.name}
+              field={field}
+              value={values[field.name]}
+              onChange={(value) => onChange(field.name, value)}
+              idPrefix={reactId}
+              disabled={disabled}
+              isTutorial={isTutorial}
+            />
+          ))}
+        </div>
+      )}
       {showValidationFailureTeaching && (
         <p className="guided-schema-hint guided-schema-teaching" role="note">
           {TUTORIAL_VALIDATION_FAILURE_CAVEAT}
@@ -159,6 +172,32 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
       </div>
     </div>
   );
+}
+
+// Render a single knob value read-only for the summary view. Pure presentation
+// over the same `values` the editable form holds: short scalars inline, JSON via
+// the shared CodeBlock, string-list comma-joined, checkbox as Yes/No, and the
+// blob `path` masked to its friendly basename so the absolute storage_path never
+// leaks (mirrors the editable form's tutorial mask, here applied for every mode).
+function summaryValueNode(field: KnobField, value: unknown): ReactNode {
+  if (field.kind === "checkbox") return Boolean(value) ? "Yes" : "No";
+  if (field.kind === "json-object" || field.kind === "json-array" || field.kind === "json-value") {
+    return (
+      <CodeBlock
+        code={typeof value === "string" ? value : JSON.stringify(value ?? null)}
+        prettyJson
+        showCopy={false}
+        ariaLabel={field.label}
+      />
+    );
+  }
+  if (field.kind === "string-list") {
+    const text = Array.isArray(value) ? value.join(", ") : typeof value === "string" ? value : "";
+    return text === "" ? "(none)" : text;
+  }
+  const raw = value === null || value === undefined ? "" : String(value);
+  if (field.name === "path" && raw.startsWith("/")) return friendlyBlobRef(raw);
+  return raw === "" ? "(none)" : raw;
 }
 
 function initialValues(fields: KnobField[], prefilled: Record<string, unknown>): FormValues {

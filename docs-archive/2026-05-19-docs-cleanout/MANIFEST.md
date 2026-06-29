@@ -11,7 +11,6 @@ directory. To map an old active path, prefix it with
 | --- | --- | --- |
 | `docs/release/rc2-checklist.md`, `rc3-checklist.md` | Obsolete release gate checklists | Git history and this archive |
 | `docs/release/feature-inventory.md` | RC-3-era statements that read like current truth | `docs/release/elspeth-progress-rc1-to-rc5.md`, `docs/README.md`, `docs/reference/`, and `docs/release/rc-3-release-notes.md` for release history |
-| `docs/release/guarantees.md` | RC-3-era guarantees snapshot; useful contract content was surfaced, stale release wrapper was deleted | `docs/contracts/assurance-contract.md` |
 | `docs/release/rc4-executive-brief.md` | RC-4 planning snapshot superseded by RC-5 composer work and the RC-5.2 audience brief | `docs/release/executive-summary.md`, `docs/release/elspeth-progress-rc1-to-rc5.md`, Filigree RC5/RC5.2 work items, and `docs/composer/ux-redesign-2026-05/` |
 | `docs/release/rc-2-checkpoint-fix.md` | Historical release note; useful migration note folded into the resume runbook | `docs/runbooks/resume-failed-run.md` |
 | `docs/analysis/security-posture-brief.md`, `security-comparison-blog.md` | March RC-3.3 assurance snapshots with stale metrics | Fresh security or assurance work should start from live code and Filigree |
@@ -33,6 +32,7 @@ directory. To map an old active path, prefix it with
 | Path/group | Reason |
 | --- | --- |
 | `docs/release/README.md`, `docs/release/executive-summary.md`, `docs/release/elspeth-progress-rc1-to-rc5.md`, `docs/release/elspeth-velocity-rc1-to-rc5.md` | Retained because they were created for specific current audiences: public-sector evaluators, engineering leadership, and engineering reviewers. |
+| `docs/release/guarantees.md` | Retained because it is the active long-lived layered assurance appendix, refreshed after RC-5.2 and RC-6. |
 | `docs/audit/findings/*.md` | Retained because `_tickets-to-file.md` still marks CI allowlist subticket filing as incomplete under `elspeth-297b8f5c5d`. |
 | `docs/audit/2026-05-19-cicd-allowlist-audit.md` | Current audit synthesis and still active. |
 | `docs/assets/*.pdf` | No tracked files were present in this checkout. PDF build outputs now default to `tools/pdf/out/`. |

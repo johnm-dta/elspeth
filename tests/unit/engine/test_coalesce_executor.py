@@ -3681,6 +3681,74 @@ class TestPrecomputedOutputSchema:
         merged_contract = outcome_b.merged_token.row_data.contract
         assert merged_contract == precomputed_schema, "Runtime contract should match pre-computed DAG schema, not runtime merge"
 
+    def test_partial_union_precomputed_schema_keeps_lost_branch_optional_fields(self):
+        """Partial union must not crash when precomputed schema includes lost-branch fields."""
+        executor, *_ = _make_executor()
+
+        precomputed_schema = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field(
+                    "present",
+                    original_name="present",
+                    python_type=int,
+                    required=False,
+                    source="declared",
+                    nullable=False,
+                ),
+                make_field(
+                    "lost_optional",
+                    original_name="lost_optional",
+                    python_type=str,
+                    required=False,
+                    source="declared",
+                    nullable=True,
+                ),
+            ),
+            locked=True,
+        )
+        settings = _settings(
+            branches=["a", "b"],
+            policy="best_effort",
+            merge="union",
+            timeout_seconds=5.0,
+        )
+        executor.register_coalesce(settings, "node_1", output_schema=precomputed_schema)
+
+        contract_a = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field(
+                    "present",
+                    original_name="Present Header",
+                    python_type=int,
+                    required=False,
+                    source="declared",
+                    nullable=False,
+                ),
+            ),
+            locked=True,
+        )
+        token_a = _make_token(branch_name="a", token_id="t1", data={"present": 42}, contract=contract_a)
+
+        assert executor.accept(token_a, "merge").held is True
+        outcome = executor.notify_branch_lost("merge", "row_1", "b", "error_routed")
+
+        assert outcome is not None
+        assert outcome.merged_token is not None
+        assert outcome.merged_token.row_data.to_dict() == {"present": 42}
+        assert outcome.coalesce_metadata.union_field_origins == {"present": "a"}
+
+        merged_contract = outcome.merged_token.row_data.contract
+        present = merged_contract.get_field("present")
+        lost_optional = merged_contract.get_field("lost_optional")
+        assert present is not None
+        assert lost_optional is not None
+        assert present.original_name == "Present Header"
+        assert lost_optional.original_name == "lost_optional"
+        assert lost_optional.required is False
+        assert lost_optional.nullable is True
+
     def test_union_merge_falls_back_to_runtime_merge_when_no_schema(self):
         """Without pre-computed schema, runtime merge() is used (backward compat)."""
         executor, *_ = _make_executor()

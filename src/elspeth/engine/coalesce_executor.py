@@ -1326,11 +1326,10 @@ class CoalesceExecutor:
                 original_name = branch_original_names[(fc.normalized_name, winning_branch)]
             else:
                 # Precomputed-declared field not contributed by any branch
-                # (e.g., nullable field with no data this row). fallback_original_names
-                # is built from every branch contract's fields, so a precomputed field
-                # absent here means precomputed and branch contracts disagree on
-                # schema — crash on the integrity violation.
-                original_name = fallback_original_names[fc.normalized_name]
+                # (e.g., optional field from a branch lost under a partial
+                # policy). When no arrived branch contract can supply its source
+                # header, keep the normalized name from the precomputed schema.
+                original_name = fallback_original_names.get(fc.normalized_name, fc.normalized_name)
             merged_fields.append(
                 FieldContract(
                     normalized_name=fc.normalized_name,

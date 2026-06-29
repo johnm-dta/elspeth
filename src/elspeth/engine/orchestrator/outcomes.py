@@ -517,14 +517,16 @@ def handle_coalesce_timeouts(
                     pending_tokens,
                 )
             else:
-                _mark_barrier_tokens_terminal(
-                    processor,
-                    barrier_key=str(coalesce_name),
-                    consumed_tokens=tuple(outcome.consumed_tokens),
-                )
+                consumed_tokens = tuple(outcome.consumed_tokens)
+                if consumed_tokens:
+                    _mark_barrier_tokens_terminal(
+                        processor,
+                        barrier_key=str(coalesce_name),
+                        consumed_tokens=consumed_tokens,
+                    )
                 counters.rows_coalesce_failed += 1
-                counters.rows_failed += len(outcome.consumed_tokens)
-                _emit_failed_coalesce_telemetry(ctx, outcome.consumed_tokens)
+                counters.rows_failed += len(consumed_tokens)
+                _emit_failed_coalesce_telemetry(ctx, consumed_tokens)
 
 
 def flush_coalesce_pending(

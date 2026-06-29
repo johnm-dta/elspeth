@@ -234,6 +234,25 @@
   cursor: not-allowed;
 }
 
+/* Side-rail action buttons (Run pipeline / Save for review / Export YAML) sit
+   on the warm inspection surface (--color-surface-inspector), where the global
+   disabled fill (--color-bg) reads as a raised dark chip rather than
+   "inactive" — so a disabled action (e.g. Run with "No pipeline yet") can be
+   mistaken for a clickable one. Re-merge disabled rail buttons into the rail
+   surface so they read as a recessed, outlined slot against the raised teal of
+   the enabled buttons. The global .btn:disabled rule is intentionally
+   unchanged — --color-bg merges into the page background and is gated by
+   colorContrast.test.ts; this only re-targets the surface the rail sits on.
+   Text stays --color-text-muted, AA-verified on --color-surface-inspector
+   (dark 4.84:1, light 6.33:1); the --color-border-strong outline is inherited
+   so the disabled control stays distinguishable. */
+.layout-siderail .btn:disabled,
+.layout-siderail .btn[aria-disabled="true"],
+.layout-siderail .btn-compact:disabled,
+.layout-siderail .btn-compact[aria-disabled="true"] {
+  background-color: var(--color-surface-inspector);
+}
+
 .btn-primary {
   background-color: var(--color-btn-primary-bg);
   border-color: var(--color-btn-primary-bg);

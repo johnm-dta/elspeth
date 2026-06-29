@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { runTutorialPipeline } from "@/api/client";
+import { AlertBanner } from "@/components/ui";
 import type { TutorialRunResponse } from "@/types/api";
 import { TUTORIAL_RUN_PREAMBLE, TUTORIAL_SHIELD_OVERRIDE_CAVEAT, TURN_4_PRIMARY_BUTTON } from "./copy";
 import type { RunResultRow, TutorialRunResult } from "./tutorialMachine";
@@ -170,7 +171,9 @@ export function TutorialTurn4Run({
       <h2 id="tutorial-run-title" ref={headingRef} tabIndex={-1}>
         Running your pipeline.
       </h2>
-      <p className="tutorial-muted">{TUTORIAL_RUN_PREAMBLE}</p>
+      <AlertBanner tone="info" className="tutorial-disclosure">
+        {TUTORIAL_RUN_PREAMBLE}
+      </AlertBanner>
       <p className="tutorial-callout">{TUTORIAL_SHIELD_OVERRIDE_CAVEAT}</p>
       {result === null && error === null && (
         <>

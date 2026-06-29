@@ -257,6 +257,32 @@ describe("disabled button contrast", () => {
     expect(body).toContain("color: var(--color-text-muted)");
     expect(body).not.toMatch(/opacity:\s*0\.[0-9]+/);
   });
+
+  // F4: side-rail buttons sit on the warm inspection surface, where the global
+  // --color-bg disabled fill reads as a raised chip rather than "inactive". A
+  // rail-scoped override re-merges disabled rail buttons into
+  // --color-surface-inspector so they read as recessed/outlined. These gate
+  // both that the override exists and that its muted text stays AA on the rail.
+  it("re-merges disabled side-rail buttons into the inspector surface", () => {
+    const railMatch =
+      /\.layout-siderail \.btn:disabled,[\s\S]*?\{([\s\S]*?)\n\}/.exec(appCss);
+    expect(
+      railMatch,
+      "rail-scoped disabled rule must exist in shared.css",
+    ).not.toBeNull();
+    expect(railMatch![1]).toContain(
+      "background-color: var(--color-surface-inspector)",
+    );
+  });
+
+  it("keeps disabled rail-button text at AA on the inspector surface in both themes", () => {
+    const darkText = extractRootToken("--color-text-muted");
+    const darkSurface = extractRootToken("--color-surface-inspector");
+    const lightText = extractLightThemeToken("--color-text-muted");
+    const lightSurface = extractLightThemeToken("--color-surface-inspector");
+    expect(contrastRatio(darkText, darkSurface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(lightText, lightSurface)).toBeGreaterThanOrEqual(4.5);
+  });
 });
 
 describe("form input placeholder contrast", () => {

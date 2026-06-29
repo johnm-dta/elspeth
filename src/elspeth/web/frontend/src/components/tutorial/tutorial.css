@@ -134,10 +134,32 @@
 }
 
 .tutorial-preamble {
-  /* Small subdued line under the welcome cards and above the Turn 4 run
-     indicator. Signals "here is what happens next" before the LLM call. */
+  /* Top margin for the disclosure note under the welcome cards / above the
+     Turn 4 run indicator. (Font size now comes from the AlertBanner.) */
   margin-top: var(--space-md);
-  font-size: var(--font-size-sm);
+}
+
+.tutorial-disclosure.alert-banner {
+  /* The network/LLM egress disclosure ("…calls the configured LLM and fetches
+     pages over the network") is a real data-handling statement, so it renders
+     as the design system's info AlertBanner rather than the muted line it used
+     to be — buried low-contrast text understated a notice that should be seen.
+     The base .alert-banner is a top-of-panel strip (bottom border only); these
+     overrides make it a self-contained, left-aligned info note with a leading
+     glyph, matching the weight of what it says. Info-on-info contrast and the
+     glyph echo the app's status vocabulary (∅, ⚠). */
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: var(--space-sm);
+  border: 1px solid var(--color-info-border);
+  border-radius: var(--radius-md);
+}
+
+.tutorial-disclosure.alert-banner::before {
+  content: "\24d8"; /* ⓘ — decorative; the role="status" text carries meaning */
+  flex-shrink: 0;
+  font-size: var(--font-size-md);
+  line-height: 1.4;
 }
 
 .tutorial-textarea-label {

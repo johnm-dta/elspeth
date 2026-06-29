@@ -1,3 +1,4 @@
+import { AlertBanner } from "../ui";
 import {
   TURN_1_PRIMARY_BUTTON,
   TURN_1_SKIP_BUTTON,
@@ -30,9 +31,9 @@ export function TutorialTurn1Welcome({
           </li>
         ))}
       </ol>
-      <p className="tutorial-muted tutorial-preamble">
+      <AlertBanner tone="info" className="tutorial-disclosure tutorial-preamble">
         {TUTORIAL_RUN_PREAMBLE}
-      </p>
+      </AlertBanner>
       <div className="tutorial-actions">
         <button type="button" className="btn btn-primary" onClick={onStart}>
           {TURN_1_PRIMARY_BUTTON}

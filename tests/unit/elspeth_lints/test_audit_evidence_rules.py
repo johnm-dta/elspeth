@@ -256,6 +256,8 @@ def test_tier_1_decoration_reports_missing_caller_module() -> None:
     findings = list(
         TIER_1_DECORATION_RULE.analyze(
             _tree("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
             @tier_1_error(reason="registered")
             class WidgetError(Exception):
                 pass
@@ -275,6 +277,8 @@ def test_tier_1_decoration_reports_missing_reason() -> None:
     findings = list(
         TIER_1_DECORATION_RULE.analyze(
             _tree("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
             @tier_1_error(caller_module=__name__)
             class MissingReasonError(Exception):
                 pass
@@ -293,6 +297,8 @@ def test_tier_1_decoration_reports_empty_reason() -> None:
     findings = list(
         TIER_1_DECORATION_RULE.analyze(
             _tree("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
             @tier_1_error(reason="", caller_module=__name__)
             class EmptyReasonError(Exception):
                 pass
@@ -423,6 +429,22 @@ def test_tier_1_decoration_accepts_qualified_decorator(tmp_path: Path) -> None:
     )
 
     assert findings == []
+
+
+def test_tier_1_decoration_rejects_spoofed_qualified_decorator(tmp_path: Path) -> None:
+    findings = _tier_1_findings_from_file(
+        tmp_path,
+        """
+        import some_other_module as fake
+
+        @fake.tier_1_error(reason="spoofed", caller_module=__name__)
+        class SpoofedError(Exception):
+            pass
+        """,
+    )
+
+    assert [finding.rule_id for finding in findings] == ["TDE1"]
+    assert "SpoofedError" in findings[0].message
 
 
 def test_tier_1_decoration_accepts_tier_2_comment(tmp_path: Path) -> None:

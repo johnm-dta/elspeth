@@ -496,6 +496,7 @@ class TestRecordCallHappyPath:
         assert writer.node_state_lookups == []
         assert writer.operation_calls[0]["request_data"].to_dict() == {"path": "/tmp/output.csv"}
         assert writer.operation_calls[0]["error"].to_dict() == {"type": "OSError", "message": "disk full"}
+        assert writer.operation_calls[0]["latency_ms"] is None
 
         assert len(emitted_events) == 1
         event = emitted_events[0]
@@ -503,7 +504,8 @@ class TestRecordCallHappyPath:
         assert event.operation_id == "operation-001"
         assert event.token_id is None
         assert event.provider == "filesystem"
-        assert event.latency_ms == 0.0
+        assert event.latency_ms is None
+        assert event.to_dict()["latency_ms"] is None
         assert event.request_hash == recorded.request_hash
 
 

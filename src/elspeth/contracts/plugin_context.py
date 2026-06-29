@@ -383,7 +383,7 @@ class PluginContext:
                     call_type=call_type,
                     provider=provider,
                     status=status,
-                    latency_ms=latency_ms if latency_ms is not None else 0.0,
+                    latency_ms=latency_ms,
                     request_hash=recorded_call.request_hash,
                     response_hash=recorded_call.response_hash,
                     request_payload=request_payload,

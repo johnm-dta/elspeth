@@ -23,8 +23,11 @@ Any PR that modifies:
 - `tests/unit/web/composer/test_adequacy_guard.py`
 - `tests/unit/web/composer/test_walk_model_schema.py`
 
-...will trigger the `composer-redaction-gate` CI workflow at
-`.github/workflows/composer-redaction-gate.yml`.
+...will make the `composer-redaction-gate` CI workflow at
+`.github/workflows/composer-redaction-gate.yml` enforce the redaction policy
+direction check. The workflow itself starts on every pull request to the
+protected branch set and exits successfully as not applicable when no
+redaction-sensitive files changed.
 
 ---
 
@@ -55,8 +58,8 @@ Regenerate the snapshot after reviewing the dry-run output:
 
 ### 2. Direction-aware label-gate CI step
 
-The `composer-redaction-gate` CI workflow fires when the snapshot file
-changes on a PR. It performs a **direction-aware** check:
+The `composer-redaction-gate` CI workflow performs its **direction-aware** check
+when the snapshot file changes on a PR:
 
 - Computes the `sensitive_path_count` per manifest entry (the number of
   `Sensitive`-annotated field paths as enumerated by `walk_model_schema`)

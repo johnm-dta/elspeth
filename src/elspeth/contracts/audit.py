@@ -78,14 +78,16 @@ def validate_resolved_prompt_template_hash(call_type: CallType, resolved_prompt_
         raise ValueError("Call.resolved_prompt_template_hash must be a 64-character lowercase hex digest")
 
 
-def _validate_enum(value: object, enum_type: type, field_name: str) -> None:
+def _validate_enum(value: object, enum_type: type, field_name: str, *, optional: bool = False) -> None:
     """Validate that value is an instance of the expected enum type.
 
     Tier 1 audit data must crash on invalid types - no coercion, no defaults.
     Per Data Manifesto: If we read garbage from our own database,
     something catastrophic happened - crash immediately.
     """
-    if value is not None and not isinstance(value, enum_type):
+    if value is None and optional:
+        return
+    if not isinstance(value, enum_type):
         raise TypeError(f"{field_name} must be {enum_type.__name__}, got {type(value).__name__}: {value!r}")
 
 
@@ -117,8 +119,8 @@ class Run:
         """Validate enum fields - Tier 1 crash on invalid types."""
         require_int(self.llm_call_count, "llm_call_count", optional=True, min_value=0)
         _validate_enum(self.status, RunStatus, "status")
-        _validate_enum(self.reproducibility_grade, ReproducibilityGrade, "reproducibility_grade")
-        _validate_enum(self.export_status, ExportStatus, "export_status")
+        _validate_enum(self.reproducibility_grade, ReproducibilityGrade, "reproducibility_grade", optional=True)
+        _validate_enum(self.export_status, ExportStatus, "export_status", optional=True)
         if type(self.seeded_from_cache) is not bool:
             raise TypeError(f"seeded_from_cache must be bool, got {type(self.seeded_from_cache).__name__}: {self.seeded_from_cache!r}")
         if self.cache_key is not None and not _SHA256_HEX_PATTERN.fullmatch(self.cache_key):
@@ -483,7 +485,7 @@ class Batch:
         """Validate enum fields - Tier 1 crash on invalid types."""
         require_int(self.attempt, "attempt", min_value=0)
         _validate_enum(self.status, BatchStatus, "status")
-        _validate_enum(self.trigger_type, TriggerType, "trigger_type")
+        _validate_enum(self.trigger_type, TriggerType, "trigger_type", optional=True)
 
 
 @dataclass(frozen=True, slots=True)

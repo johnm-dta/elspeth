@@ -45,6 +45,38 @@ from elspeth.contracts import (
 from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 
 
+class TestAuditEnumValidation:
+    """Tests for required vs optional enum validation in audit contracts."""
+
+    def test_required_enum_field_rejects_none(self) -> None:
+        """Required enum fields must reject None, not silently pass."""
+        with pytest.raises(TypeError, match="status must be RunStatus"):
+            Run(
+                run_id="run-1",
+                started_at=datetime.now(UTC),
+                config_hash="a" * 64,
+                settings_json="{}",
+                canonical_version="1.0",
+                status=None,  # type: ignore[arg-type]
+            )
+
+    def test_optional_enum_fields_accept_none(self) -> None:
+        """Optional enum fields keep accepting None after required enum tightening."""
+        run = Run(
+            run_id="run-1",
+            started_at=datetime.now(UTC),
+            config_hash="a" * 64,
+            settings_json="{}",
+            canonical_version="1.0",
+            status=RunStatus.RUNNING,
+            reproducibility_grade=None,
+            export_status=None,
+        )
+
+        assert run.reproducibility_grade is None
+        assert run.export_status is None
+
+
 class TestNodeStateVariants:
     """Tests for NodeState discriminated union."""
 

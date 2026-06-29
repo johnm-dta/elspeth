@@ -85,3 +85,12 @@ class ClientError(WebScrapeError):
 
     def __init__(self, message: str, *, retryable: bool = False) -> None:
         super().__init__(message, retryable=retryable)
+
+
+class BodyTooLargeError(WebScrapeError):
+    """Response body exceeded web_scrape's configured max_body_bytes."""
+
+    def __init__(self, message: str, *, body_size: int, max_body_bytes: int) -> None:
+        super().__init__(message, retryable=False)
+        self.body_size = body_size
+        self.max_body_bytes = max_body_bytes

@@ -89,3 +89,35 @@ def test_run_scenario_rejects_malformed_tool_call_arguments(
     assert len(tool_errors) == 1
     assert tool_errors[0]["name"] == "set_source"
     assert tool_errors[0]["raw_args"] == "{not-json"
+
+
+def test_run_scenario_pins_sampling_controls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_kwargs: dict[str, Any] = {}
+
+    monkeypatch.setattr(harness, "TRANSCRIPTS_DIR", tmp_path)
+    monkeypatch.setattr(harness, "get_tool_definitions", lambda: [])
+
+    def fake_completion(**kwargs: Any) -> _FakeResponse:
+        captured_kwargs.update(kwargs)
+        return _FakeResponse({"role": "assistant", "content": "done", "tool_calls": []})
+
+    monkeypatch.setattr(litellm, "completion", fake_completion)
+    scenario = harness.Scenario(
+        name="sampling_controls",
+        user_prompt="compose a pipeline",
+        max_turns=1,
+    )
+
+    harness.run_scenario(
+        scenario,
+        skill_text="system",
+        model="test-model",
+        label="red",
+    )
+
+    assert captured_kwargs["temperature"] == 0
+    assert captured_kwargs["seed"] == 0
+    assert captured_kwargs["drop_params"] is True

@@ -99,8 +99,8 @@ def tier_1_error(_cls: type | None = None, *, reason: str, caller_module: str): 
         reason: Non-empty justification string. Recorded in the registry
             and queryable via ``tier_1_reason(cls)``.
         caller_module: The calling module's ``__name__``. Every call site
-            MUST pass the literal ``__name__`` here — the CI scanner
-            ``scripts/cicd/enforce_tier_1_decoration.py`` (rule TDE2) rejects
+            MUST pass the literal ``__name__`` here — the
+            ``audit_evidence.tier_1_decoration`` ``elspeth-lints`` rule rejects
             any non-literal value (variable, f-string, attribute, etc.)
             because the value is the primary input to the module-prefix
             allowlist check (``elspeth.contracts.*`` / ``elspeth.engine.*``

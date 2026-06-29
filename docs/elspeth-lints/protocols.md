@@ -83,12 +83,14 @@ elspeth-lints check \
   --allowlist-dir config/cicd/example \
   --files src/example.py
 
-elspeth-lints dump-edges --root . --format json
+elspeth-lints dump-edges --root . --format json --output build/elspeth-lints-edges.json
 ```
 
 `check --format sarif` emits SARIF 2.1.0 with `runs[].tool.driver.rules`
 populated from `RuleMetadata` and `runs[].results[]` populated from `Finding`.
 GitHub workflow-command output is available with `--format github`.
+`dump-edges --format json` and `dump-edges --format dot` write to the explicit
+`--output` path; use the Mermaid format when stdout output is needed.
 
 Incremental rules are scoped by `RuleMetadata.path_filter`, matched against
 paths relative to `--root`. When `--files` is provided, any file outside every

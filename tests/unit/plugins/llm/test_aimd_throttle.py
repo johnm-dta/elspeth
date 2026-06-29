@@ -63,6 +63,25 @@ class TestAIMDThrottleBackoff:
         throttle.on_capacity_error()  # 200 * 2 = 400
         assert throttle.current_delay_ms == 400
 
+    def test_errors_at_min_floor_multiply_when_recovery_step_is_smaller(self) -> None:
+        """Repeated errors at the configured min floor must still back off."""
+        config = ThrottleConfig(
+            min_dispatch_delay_ms=100,
+            max_dispatch_delay_ms=1000,
+            backoff_multiplier=2.0,
+            recovery_step_ms=50,
+        )
+        throttle = AIMDThrottle(config)
+
+        throttle.on_capacity_error()  # bootstrap: max(50, 100) = 100
+        assert throttle.current_delay_ms == 100
+
+        throttle.on_capacity_error()  # 100 * 2 = 200
+        assert throttle.current_delay_ms == 200
+
+        throttle.on_capacity_error()  # 200 * 2 = 400
+        assert throttle.current_delay_ms == 400
+
     def test_delay_capped_at_max(self) -> None:
         """Delay should not exceed max_dispatch_delay_ms."""
         config = ThrottleConfig(

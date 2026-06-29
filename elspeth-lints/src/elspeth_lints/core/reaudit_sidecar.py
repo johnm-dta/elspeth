@@ -96,24 +96,30 @@ JSON onto the truncated tail, producing an unparseable line that
 the tail-truncation heuristic no longer fires). The operator's natural
 recovery action destroys the data the read-side fix preserved.
 
-``SidecarWriter.__enter__`` therefore truncates any partial last line
-INSIDE the flock-held window, AFTER the resume-validate callback runs
-and BEFORE the first append. Detection: the on-disk bytes do not end
-with ``\\n``. Truncation point: ``rfind(b"\\n") + 1`` (keep the final
-newline; drop the partial bytes after it). Persistence: ``os.ftruncate``
-on the open fd, ``os.fsync`` of the fd, then ``os.fsync`` of the parent
-directory to make the inode-size change durable across crashes.
+``SidecarWriter.__enter__`` therefore repairs any unterminated final
+line INSIDE the flock-held window, AFTER the resume-validate callback
+runs and BEFORE the first append. If the final line parses as JSON, it
+is already durable data and the writer appends the missing newline. If
+the final line does not parse as JSON, it is the true partial-write case
+and is truncated at ``rfind(b"\\n") + 1`` (keep the final newline; drop
+the partial bytes after it). Persistence: ``os.ftruncate`` or newline
+append on the open fd, ``os.fsync`` of the fd, then ``os.fsync`` of the
+parent directory to make the repair durable across crashes.
 
-The partial last line is unrecoverable data — that is the deliberate
-Tier-1 trade-off: losing the one in-flight outcome (which the killed
-sweep had not durably persisted anyway) beats losing the entire
-sidecar (the prior outcomes plus everything appended after the glued
-line). The dropped entry is re-classified on resume because its key
-never made it into ``classified_keys``.
+The malformed partial last line is unrecoverable data — that is the
+deliberate Tier-1 trade-off: losing the one in-flight outcome (which
+the killed sweep had not durably persisted anyway) beats losing the
+entire sidecar (the prior outcomes plus everything appended after the
+glued line). A complete final JSON line without ``\\n`` is not dropped:
+``load_sidecar`` has already accepted it, and the writer preserves it by
+adding the missing separator byte. Dropped malformed entries are
+re-classified on resume because their keys never made it into
+``classified_keys``.
 
 Cleanly-terminated sidecars (final byte is ``\\n``) are not modified.
 ``--render-incomplete`` reads sidecars via :func:`load_sidecar` directly
-and never enters the writer; render is read-only and never truncates.
+and never enters the writer; render is read-only and never repairs or
+truncates.
 """
 
 from __future__ import annotations
@@ -122,6 +128,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -146,7 +153,7 @@ from elspeth_lints.core.reaudit import (
 # operator's mid-sweep state is bound to a specific schema, and an
 # upgrade that silently changes line shapes would corrupt
 # reconstruction.
-SIDECAR_SCHEMA_VERSION = 5  # v5: outcome records carry the reaudit cause axis
+SIDECAR_SCHEMA_VERSION = 6  # v6: header binds the judge transport used by the sweep
 
 SIDECAR_DIRNAME = ".reaudit-state"
 
@@ -157,6 +164,7 @@ SIDECAR_DIRNAME = ".reaudit-state"
 # window: long enough to outlast a post-incident audit cycle, short
 # enough that a routine reaudit cadence keeps the directory bounded.
 COMPLETED_SIDECAR_RETENTION_DAYS = 30
+_RUN_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 # =========================================================================
@@ -180,6 +188,8 @@ def sidecar_path_for(allowlist_dir: Path, run_id: str) -> Path:
     The sidecar directory is created lazily by :class:`SidecarWriter`'s
     ``__enter__`` so callers don't need to pre-create anything.
     """
+    if _RUN_ID_RE.fullmatch(run_id) is None:
+        raise ValueError("reaudit run_id must be the 32-character lowercase hexadecimal value emitted by a prior sweep")
     return allowlist_dir / SIDECAR_DIRNAME / f"{run_id}.jsonl"
 
 
@@ -225,6 +235,11 @@ class SidecarHeader:
     detect "the allowlist was edited between the original sweep and the
     resume" (and crash rather than silently produce a corrupt report).
 
+    ``judge_transport`` binds the sweep to the verdict producer used
+    by each per-entry judge call. A ``--resume`` with a different
+    transport crashes rather than mixing verdicts from distinct judge
+    boundaries in one audit trail.
+
     Filter fields (``rule_filter``, ``since_iso``, ``limit``,
     ``include_pre_judge``) bind the sweep to the exact filtered entry
     list. A ``--resume`` whose filters differ from the header crashes:
@@ -238,6 +253,7 @@ class SidecarHeader:
     total_entries: int
     allowlist_path: str
     allowlist_hash: str
+    judge_transport: str
     rule_filter: str
     since_iso: str | None
     limit: int | None
@@ -288,22 +304,21 @@ class SidecarWriter:
     each other's trailers. With the callback running under the lock,
     only one resume can validate at a time.
 
-    Partial-last-line truncation (T6d): if the sidecar's final byte is
-    not ``\\n``, the writer truncates the file to the last newline
-    boundary BEFORE the first append, with ``os.ftruncate`` on the
-    locked fd plus an ``os.fsync`` of the file and the parent
-    directory. The truncation is the deliberate Tier-1 trade-off
-    documented at module scope: the partial last line (a SIGKILL'd
-    in-flight write, never durably persisted) is LOST, but everything
-    written before it is preserved, and the new outcomes append cleanly
-    without gluing onto a truncated tail. Without this truncation,
-    POSIX append-mode writes start at the mid-line byte offset and
-    produce an unparseable glued line that the loader's structural
-    validation rejects with :class:`SidecarCorruptError` — destroying
-    the very data the T6c read-side recovery preserved. The
-    truncation runs AFTER ``on_resume_locked`` (so a rejected resume
-    leaves the file untouched) and INSIDE the flock window (so a
-    second process cannot append between read-and-truncate).
+    Partial-last-line repair (T6d/T6e): if the sidecar's final byte is
+    not ``\\n``, the writer repairs the file BEFORE the first append,
+    with ``os.ftruncate`` or newline append on the locked fd plus an
+    ``os.fsync`` of the file and the parent directory. A final line that
+    parses as JSON is durable data and is preserved by appending the
+    missing newline. A final line that does not parse is the deliberate
+    Tier-1 trade-off documented at module scope: the partial last line
+    (a SIGKILL'd in-flight write, never durably persisted) is LOST, but
+    everything written before it is preserved, and the new outcomes
+    append cleanly without gluing onto a truncated tail. Without this
+    repair, POSIX append-mode writes start at the mid-line byte offset
+    and produce a glued line. The repair runs AFTER ``on_resume_locked``
+    (so a rejected resume leaves the file untouched) and INSIDE the
+    flock window (so a second process cannot append between read-and-
+    repair).
     """
 
     def __init__(
@@ -365,21 +380,11 @@ class SidecarWriter:
                     self._file = None
                 raise
         if self._append:
-            # T6d: truncate any partial last line BEFORE the first
-            # append. POSIX append mode positions writes at EOF; if EOF
-            # sits mid-partial-line (no trailing newline because a
-            # SIGKILL caught the writer between write() and the next
-            # flush()+fsync()), the first append would glue its JSON
-            # onto the truncated tail and produce an unparseable line.
-            # The next load_sidecar would then crash with
-            # SidecarCorruptError because the file once again ends with
-            # "\n", so the T6c tail-truncation heuristic no longer
-            # fires. Truncating to the last newline boundary preserves
-            # every durable prior outcome at the cost of the
-            # never-durable partial one — the Tier-1 trade-off
-            # documented in the module docstring.
+            # T6d/T6e: repair any unterminated last line BEFORE the first append.
+            # Complete JSON lines are preserved by appending the missing newline;
+            # malformed JSON tails are truncated to the prior durable boundary.
             try:
-                self._truncate_partial_tail()
+                self._repair_unterminated_tail()
             except BaseException:
                 try:
                     fcntl.flock(self._file.fileno(), fcntl.LOCK_UN)
@@ -391,15 +396,16 @@ class SidecarWriter:
             self._write_line(_header_to_dict(self._header))
         return self
 
-    def _truncate_partial_tail(self) -> None:
-        """Drop any partial last line; no-op when the file ends with ``\\n``.
+    def _repair_unterminated_tail(self) -> None:
+        """Repair an unterminated final line; no-op when the file ends with ``\\n``.
 
         Reads the on-disk bytes (we hold the exclusive flock, so no
-        other process can have appended since the fd was opened),
-        locates the last newline, and ``ftruncate``s to one past it.
-        Then ``fsync`` the fd so the inode-size shrink is durable, and
-        ``fsync`` the parent directory so the new size survives a
-        crash before the next file-content write.
+        other process can have appended since the fd was opened). If
+        the final line parses as JSON, it is a complete durable sidecar
+        line missing only the separator byte, so append ``\\n``. If it
+        does not parse, locate the last newline and ``ftruncate`` to one
+        past it. Then ``fsync`` the fd and parent directory so the repair
+        survives a crash before the next file-content write.
 
         Failure modes propagate as :class:`OSError` (disk full,
         permission, EIO from the underlying device) — those are
@@ -409,8 +415,7 @@ class SidecarWriter:
 
         Idempotent: a clean newline-terminated file is left
         byte-identical (no ftruncate, no fsync). An empty file is also
-        a no-op (the file ends with no bytes at all; nothing to
-        truncate).
+        a no-op (the file ends with no bytes at all; nothing to repair).
         """
         raw_bytes = self._sidecar_path.read_bytes()
         if not raw_bytes:
@@ -418,6 +423,18 @@ class SidecarWriter:
         if raw_bytes.endswith(b"\n"):
             return
         last_newline = raw_bytes.rfind(b"\n")
+        tail = raw_bytes[last_newline + 1 :]
+        if tail.strip():
+            try:
+                json.loads(tail.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
+            else:
+                self._file.write("\n")
+                self._file.flush()
+                os.fsync(self._file.fileno())
+                self._fsync_parent_dir()
+                return
         # last_newline == -1 means the file is one partial line with no
         # newline anywhere — truncation point is 0, the file becomes
         # empty. In practice this is unreachable on the resume path
@@ -428,6 +445,11 @@ class SidecarWriter:
         truncate_to = last_newline + 1
         os.ftruncate(self._file.fileno(), truncate_to)
         os.fsync(self._file.fileno())
+
+        self._fsync_parent_dir()
+
+    def _fsync_parent_dir(self) -> None:
+        """Fsync the parent directory after a sidecar size/metadata repair."""
         # Parent-directory fsync makes the inode-size change durable
         # across a crash — without it, the kernel may have queued the
         # metadata update separately from the file content writes,
@@ -721,6 +743,7 @@ def _header_to_dict(header: SidecarHeader) -> dict[str, Any]:
         "total_entries": header.total_entries,
         "allowlist_path": header.allowlist_path,
         "allowlist_hash": header.allowlist_hash,
+        "judge_transport": header.judge_transport,
         "rule_filter": header.rule_filter,
         "since_iso": header.since_iso,
         "limit": header.limit,
@@ -751,6 +774,7 @@ def _header_from_dict(payload: dict[str, Any], *, sidecar_path: Path, line_no: i
         total_entries=_required(payload, "total_entries", int, sidecar_path, line_no),
         allowlist_path=_required(payload, "allowlist_path", str, sidecar_path, line_no),
         allowlist_hash=_required(payload, "allowlist_hash", str, sidecar_path, line_no),
+        judge_transport=_required(payload, "judge_transport", str, sidecar_path, line_no),
         rule_filter=_required(payload, "rule_filter", str, sidecar_path, line_no),
         since_iso=since_iso,
         limit=limit,
@@ -1060,6 +1084,7 @@ def validate_header_for_resume(
     *,
     header: SidecarHeader,
     allowlist_dir: Path,
+    judge_transport: str,
     rule_filter: str,
     since_iso: str | None,
     limit: int | None,
@@ -1073,11 +1098,14 @@ def validate_header_for_resume(
        the original sweep and the resume. Re-deriving the filtered
        entry list would produce a different order or different entries
        and the "skip already-classified" logic becomes meaningless.
-    2. Filter argument drift — ``--rule`` / ``--since`` / ``--limit`` /
+    2. Judge transport drift — ``--judge-transport`` differs from the
+       header. A single sidecar must not mix verdicts from distinct
+       judge boundaries.
+    3. Filter argument drift — ``--rule`` / ``--since`` / ``--limit`` /
        ``--include-pre-judge`` differ from the header. Different
        filters produce a different filtered list; resume becomes
        reconstruction of a sweep that never existed.
-    3. ``allowlist_path`` drift — the operator pointed ``--allowlist-dir``
+    4. ``allowlist_path`` drift — the operator pointed ``--allowlist-dir``
        at a different directory than the one the sweep ran against.
     """
     expected_hash = compute_allowlist_hash(allowlist_dir)
@@ -1097,6 +1125,11 @@ def validate_header_for_resume(
             f"--resume {header.run_id}: --allowlist-dir {allowlist_dir} "
             f"does not match the directory the sweep ran against "
             f"({header.allowlist_path})."
+        )
+    if judge_transport != header.judge_transport:
+        raise SidecarCorruptError(
+            f"--resume {header.run_id}: judge transport {judge_transport!r} does not match "
+            f"the original sweep's judge transport {header.judge_transport!r}."
         )
     if rule_filter != header.rule_filter:
         raise SidecarCorruptError(

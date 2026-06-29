@@ -182,6 +182,74 @@ allow_classes:
     assert _root_findings(AUDIT_EVIDENCE_NOMINAL_RULE, tmp_path) == []
 
 
+def test_audit_evidence_nominal_reports_stale_allowlist_entries(tmp_path: Path) -> None:
+    allowlist = tmp_path / "config" / "cicd" / "enforce_audit_evidence_nominal"
+    allowlist.mkdir(parents=True)
+    (allowlist / "_defaults.yaml").write_text(
+        """
+version: 1
+defaults:
+  fail_on_stale: true
+  fail_on_expired: true
+""",
+        encoding="utf-8",
+    )
+    (allowlist / "rules.yaml").write_text(
+        """
+allow_classes:
+  - key: stale.py:AEN1:Removed
+    owner: tests
+    reason: stale fixture
+    task: tests
+""",
+        encoding="utf-8",
+    )
+
+    findings = _root_findings(AUDIT_EVIDENCE_NOMINAL_RULE, tmp_path)
+
+    assert [finding.rule_id for finding in findings] == ["allowlist.stale_entry"]
+    assert "stale.py:AEN1:Removed" in findings[0].message
+
+
+def test_audit_evidence_nominal_expired_allowlist_entry_does_not_suppress(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "bad.py",
+        """
+        class Mimic(RuntimeError):
+            def to_audit_dict(self):
+                return {}
+        """,
+    )
+    allowlist = tmp_path / "config" / "cicd" / "enforce_audit_evidence_nominal"
+    allowlist.mkdir(parents=True)
+    (allowlist / "_defaults.yaml").write_text(
+        """
+version: 1
+defaults:
+  fail_on_stale: true
+  fail_on_expired: true
+""",
+        encoding="utf-8",
+    )
+    (allowlist / "rules.yaml").write_text(
+        """
+allow_classes:
+  - key: bad.py:AEN1:Mimic
+    owner: tests
+    reason: expired fixture
+    task: tests
+    expires: 2000-01-01
+""",
+        encoding="utf-8",
+    )
+
+    findings = _root_findings(AUDIT_EVIDENCE_NOMINAL_RULE, tmp_path)
+
+    assert [finding.rule_id for finding in findings] == ["AEN1", "allowlist.expired_entry"]
+    assert "Mimic" in findings[0].message
+    assert "bad.py:AEN1:Mimic" in findings[1].message
+
+
 def test_load_class_allowlist_rejects_malformed_expiry(tmp_path: Path) -> None:
     """A typoed ``expires`` must fail closed, not silently drop the time bound.
 
@@ -256,6 +324,8 @@ def test_tier_1_decoration_reports_missing_caller_module() -> None:
     findings = list(
         TIER_1_DECORATION_RULE.analyze(
             _tree("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
             @tier_1_error(reason="registered")
             class WidgetError(Exception):
                 pass
@@ -275,6 +345,8 @@ def test_tier_1_decoration_reports_missing_reason() -> None:
     findings = list(
         TIER_1_DECORATION_RULE.analyze(
             _tree("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
             @tier_1_error(caller_module=__name__)
             class MissingReasonError(Exception):
                 pass
@@ -293,6 +365,8 @@ def test_tier_1_decoration_reports_empty_reason() -> None:
     findings = list(
         TIER_1_DECORATION_RULE.analyze(
             _tree("""
+            from elspeth.contracts.tier_registry import tier_1_error
+
             @tier_1_error(reason="", caller_module=__name__)
             class EmptyReasonError(Exception):
                 pass
@@ -423,6 +497,22 @@ def test_tier_1_decoration_accepts_qualified_decorator(tmp_path: Path) -> None:
     )
 
     assert findings == []
+
+
+def test_tier_1_decoration_rejects_spoofed_qualified_decorator(tmp_path: Path) -> None:
+    findings = _tier_1_findings_from_file(
+        tmp_path,
+        """
+        import some_other_module as fake
+
+        @fake.tier_1_error(reason="spoofed", caller_module=__name__)
+        class SpoofedError(Exception):
+            pass
+        """,
+    )
+
+    assert [finding.rule_id for finding in findings] == ["TDE1"]
+    assert "SpoofedError" in findings[0].message
 
 
 def test_tier_1_decoration_accepts_tier_2_comment(tmp_path: Path) -> None:

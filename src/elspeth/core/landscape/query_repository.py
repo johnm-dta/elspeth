@@ -686,10 +686,11 @@ class QueryRepository:
         live accumulator only increments ``rows_coalesce_failed`` for barriers
         resolved by the timeout/flush sweeps (``outcomes.py``) — those
         arrival-time failures are real failed barriers and the durable record
-        is the broader truth.  Conversely a zero-arrival best-effort timeout
-        (``best_effort_timeout_no_arrivals``) consumed no tokens and leaves no
-        node_states, so it is invisible here by construction.  Reconciling the
-        live accumulator with this durable breadth is tracked:
+        is the broader truth.  Conversely zero-arrival timeout failures
+        (``best_effort_timeout_no_arrivals`` or ``first_timeout_no_arrivals``)
+        consume no tokens and leave no node_states, so they are invisible here
+        by construction.  Reconciling the live accumulator with this durable
+        breadth is tracked:
         elspeth-ff6d48c180.
 
         Cumulativity: resume re-drives record under the SAME ``run_id``

@@ -127,6 +127,26 @@ class TestSuppressionPositive:
         ]
         assert {item.file_fingerprint for item in suppressed} == {expected_file_fingerprint}
 
+    def test_suppresses_with_fully_qualified_decorator_after_sibling_import(self) -> None:
+        """A later ``elspeth.*`` import must not hide the FQ decorator spelling."""
+        source = dedent("""
+            import elspeth.contracts.trust_boundary
+            import elspeth.web
+
+            @elspeth.contracts.trust_boundary(
+                tier=3,
+                source="LLM tool args",
+                source_param="arguments",
+                suppresses=("R1",),
+                invariant="raises on shape mismatch",
+            )
+            def handler(arguments):
+                return arguments.get("nodes")
+        """)
+
+        findings = _findings(source)
+        assert _findings_by_rule(findings, "R1") == []
+
     def test_core_cli_emits_suppression_observation_without_failing(self, tmp_path: Path, capsys) -> None:
         """The CI-facing CLI surfaces suppression observations at note severity."""
         allowlist_dir = tmp_path / "config" / "cicd" / "enforce_tier_model"
@@ -302,6 +322,60 @@ class TestLiveDerivedNameSuppression:
         """)
 
         assert _findings_by_rule(_findings(source), "R1") == []
+
+
+class TestTryHandlersInsideBoundary:
+    """Exception handlers inside a boundary still run exception rules."""
+
+    def test_broad_except_still_fires_inside_trust_boundary(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="LLM tool args",
+                source_param="arguments",
+                suppresses=("R1", "R5"),
+                invariant="raises on shape mismatch",
+            )
+            def handler(arguments):
+                try:
+                    return arguments["value"]
+                except Exception:
+                    pass
+                return None
+        """)
+
+        findings = _findings(source)
+
+        r4 = _findings_by_rule(findings, "R4")
+        assert len(r4) == 1
+        assert "Broad exception caught without re-raise" in r4[0].message
+
+    def test_silent_specific_except_still_fires_inside_trust_boundary(self) -> None:
+        source = dedent("""
+            from elspeth.contracts import trust_boundary
+
+            @trust_boundary(
+                tier=3,
+                source="LLM tool args",
+                source_param="arguments",
+                suppresses=("R1", "R5"),
+                invariant="raises on shape mismatch",
+            )
+            def handler(arguments):
+                try:
+                    return arguments["value"]
+                except ValueError:
+                    pass
+                return None
+        """)
+
+        findings = _findings(source)
+
+        r6 = _findings_by_rule(findings, "R6")
+        assert len(r6) == 1
+        assert "Exception swallowed without re-raise" in r6[0].message
 
 
 # =============================================================================

@@ -1145,7 +1145,7 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     name = "llm"
     requires_runtime_preflight = True
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:cae1833d43364ba4"
+    source_file_hash: str | None = "sha256:fb05396de55e1fc8"
     determinism: Determinism = Determinism.NON_DETERMINISTIC
     config_model = LLMConfig  # Base; get_config_model dispatches to provider-specific
     passes_through_input = True
@@ -1759,18 +1759,23 @@ class LLMTransform(BaseTransform, BatchTransformMixin):
     ) -> tuple[str, ...]:
         hints: list[str] = []
         # Manual _usage / _model field declared by hand → tell them it's automatic.
-        if "response_field" in config_snapshot and "output_schema" in config_snapshot:
-            response_field = config_snapshot["response_field"]
-            output_schema = config_snapshot["output_schema"]
-            if isinstance(response_field, str) and isinstance(output_schema, Mapping) and "fields" in output_schema:
-                fields = output_schema["fields"]
-                if isinstance(fields, Sequence):
-                    manual_appendix = {f"{response_field}_usage", f"{response_field}_model"}
-                    declared = {field.split(":", 1)[0].strip() if isinstance(field, str) else "" for field in fields}
-                    if manual_appendix & declared:
-                        hints.append(
-                            f"You declared {sorted(manual_appendix & declared)!r} in the schema, but token-usage and model-ID fields are appended automatically. Remove them from output_schema.fields."
-                        )
+        response_field = config_snapshot.get("response_field")
+        fields: object | None = None
+        fields_location = "schema.fields"
+        for schema_key, location in (("schema", "schema.fields"), ("output_schema", "output_schema.fields")):
+            schema_snapshot = config_snapshot.get(schema_key)
+            if isinstance(schema_snapshot, Mapping) and "fields" in schema_snapshot:
+                fields = schema_snapshot["fields"]
+                fields_location = location
+                break
+
+        if isinstance(response_field, str) and isinstance(fields, Sequence) and not isinstance(fields, (str, bytes)):
+            manual_appendix = {f"{response_field}_usage", f"{response_field}_model"}
+            declared = {field.split(":", 1)[0].strip() if isinstance(field, str) else "" for field in fields}
+            if manual_appendix & declared:
+                hints.append(
+                    f"You declared {sorted(manual_appendix & declared)!r} in the schema, but token-usage and model-ID fields are appended automatically. Remove them from {fields_location}."
+                )
         return tuple(hints)
 
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Literal
 
+from elspeth.contracts.contract_builder import ContractBuilder
 from elspeth.contracts.schema_contract import FieldContract, SchemaContract
 
 if TYPE_CHECKING:
@@ -76,7 +77,7 @@ def create_contract_from_config(
     # field_resolution is original->normalized, we need normalized->original
     normalized_to_original: dict[str, str] = {}
     if field_resolution:
-        normalized_to_original = {v: k for k, v in field_resolution.items()}
+        normalized_to_original = ContractBuilder._normalized_to_original(field_resolution)
 
     # For explicit schemas, create FieldContracts from FieldDefinitions
     fields: tuple[FieldContract, ...] = ()

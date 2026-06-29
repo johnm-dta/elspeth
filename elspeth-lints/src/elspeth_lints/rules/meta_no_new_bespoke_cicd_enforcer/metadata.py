@@ -11,13 +11,14 @@ RULE_METADATA = RuleMetadata(
     name="No new bespoke CI enforcers",
     description=(
         "New ELSPETH-specific CI checks must be elspeth-lints rules, not new "
-        "scripts/cicd/enforce_*.py files or untracked legacy inventory scripts."
+        "scripts/cicd/enforce_*.py files, workflow-invoked scripts/cicd/*.py "
+        "policy scripts, or untracked legacy inventory scripts."
     ),
     severity=Severity.ERROR,
     category=Category.MANIFEST,
     cwe=("CWE-1059",),
     scope=RuleScope.WHOLE_REPO,
-    path_filter=r"^scripts/cicd/(enforce_.*|adr019_(symbol|test)_inventory)\.py$",
+    path_filter=r"^(scripts/cicd/.*\.py|\.github/workflows/.*\.ya?ml)$",
     examples_violation_count=1,
     examples_clean_count=1,
 )

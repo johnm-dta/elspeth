@@ -73,6 +73,7 @@ class TestNullSource:
         # NullSource no longer validates on_success from config dict;
         # it's injected post-construction by the instantiation bridge.
         source = NullSource({})
+        assert source.on_success is None
         source.on_success = "output"
         assert source.on_success == "output"
 

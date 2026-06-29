@@ -7,16 +7,16 @@
 
 ## Context
 
-ELSPETH's CI enforces a growing set of project-specific invariants through bespoke Python scripts under `scripts/cicd/enforce_*.py`. As of 2026-05-19 the inventory is 14 enforcement scripts (8,758 LOC), covering six conceptual categories:
+ELSPETH's CI originally enforced a growing set of project-specific invariants through bespoke Python scripts under `scripts/cicd/enforce_*.py`. As of 2026-05-19 the inventory was 14 enforcement scripts (8,758 LOC), covering six conceptual categories that now map to `elspeth-lints` rule families:
 
 | Category | Representative gates | What it enforces |
 |---|---|---|
-| **Trust-tier** | `enforce_tier_model.py` (2,401 LOC) | `.get()`/`hasattr()`/`getattr()` on typed dataclass fields, 4-layer import discipline, defensive-pattern detection at trust boundaries |
-| **Immutability** | `enforce_freeze_guards.py`, `enforce_frozen_annotations.py` | `freeze_fields()` contract, `frozen=True, slots=True` annotations on dataclasses with container fields |
-| **Audit evidence** | `enforce_tier_1_decoration.py`, `enforce_guard_symmetry.py`, `enforce_gve_attribution.py` | Decorator presence and kwarg shape at audit-emission call sites |
-| **Plugin contract** | `enforce_component_type.py`, `enforce_options_metadata.py`, `enforce_plugin_hashes.py` | Required class annotations, options-metadata schema, declared-vs-computed plugin hash manifests |
-| **Composer** | `enforce_composer_catch_order.py`, `enforce_composer_exception_channel.py` | Except-handler ordering, composer exception-routing invariant |
-| **Manifest** | `enforce_contract_manifest.py`, `adr019_symbol_inventory.py`, `adr019_test_inventory.py` | Recompute a manifest from source, compare to checked-in declaration; symbol-inventory and test-to-source-mapping invariants |
+| **Trust-tier** | `trust_tier.tier_model` | `.get()`/`hasattr()`/`getattr()` on typed dataclass fields, 4-layer import discipline, defensive-pattern detection at trust boundaries |
+| **Immutability** | `immutability.freeze_guards`, `immutability.frozen_annotations` | `freeze_fields()` contract, `frozen=True, slots=True` annotations on dataclasses with container fields |
+| **Audit evidence** | `audit_evidence.tier_1_decoration`, `audit_evidence.guard_symmetry`, `audit_evidence.gve_attribution` | Decorator presence and kwarg shape at audit-emission call sites |
+| **Plugin contract** | `plugin_contract.component_type`, `plugin_contract.options_metadata`, `plugin_contract.plugin_hashes` | Required class annotations, options-metadata schema, declared-vs-computed plugin hash manifests |
+| **Composer** | `composer.catch_order`, `composer.exception_channel` | Except-handler ordering, composer exception-routing invariant |
+| **Manifest** | `manifest.contract_manifest`, `manifest.symbol_inventory`, `manifest.test_to_source_mapping` | Recompute a manifest from source, compare to checked-in declaration; symbol-inventory and test-to-source-mapping invariants |
 
 The enforcement scripts have grown organically. A structural review on 2026-05-19 (filigree epic `elspeth-8843308cfe`) identified that the 14 scripts should consolidate into a single `elspeth-lints` package with a rule registry, a shared CLI, SARIF output, and a findings-parity contract. That consolidation work proceeds under that epic.
 
@@ -42,7 +42,7 @@ The four candidates considered were CodeQL (already in the toolchain via `.githu
 **Why custom Python:**
 
 * **Project-specific semantic abstractions.** The invariants we enforce reach into Python concepts the off-the-shelf tools don't model well — Pydantic field metadata, `@dataclass(frozen=True, slots=True)` discipline, the `freeze_fields()` contract from `core/contracts/freeze.py`, decorator-based audit emission with specific kwarg shapes, and class-attribute conventions on plugin base classes. CodeQL's Python pack abstracts AST nodes but does not currently expose dataclass-field-aware semantics. Re-deriving these in QL would mean rebuilding what `ast` + project-specific helpers give us natively.
-* **Manifest-class rules are not static analysis in the off-the-shelf sense.** `enforce_plugin_hashes`, `enforce_contract_manifest`, `adr019_symbol_inventory`, and `adr019_test_inventory` recompute a manifest from source and compare it to a checked-in YAML/Python declaration. They read non-source artifacts (manifest YAML, hash files) and assert equivalence with computed values. This is outside the analysis model of CodeQL, Semgrep, and ast-grep entirely. Even if we ported the AST rules, the manifest rules would have to stay in custom Python — committing us to a two-toolchain world for no net simplification.
+* **Manifest-class rules are not static analysis in the off-the-shelf sense.** `plugin_contract.plugin_hashes`, `manifest.contract_manifest`, `manifest.symbol_inventory`, and `manifest.test_to_source_mapping` recompute a manifest from source and compare it to a checked-in YAML/Python declaration. They read non-source artifacts (manifest YAML, hash files) and assert equivalence with computed values. This is outside the analysis model of CodeQL, Semgrep, and ast-grep entirely. Even if we ported the AST rules, the manifest rules would have to stay in custom Python — committing us to a two-toolchain world for no net simplification.
 * **Existing investment is paid for.** 8,758 LOC of working enforcement, 19 test files, fingerprint-rotation discipline against AST-index drift (see [[feedback_ast_shift_fingerprint_rotation]]), a working allowlist mechanism with per-file expiry. Re-implementing in QL is rebuilding what we have; the labour is unjustified absent a capability gap we don't have today.
 * **Team Python fluency vs zero QL fluency.** A rule that takes 30 minutes to write today (write Python, run pytest, done) would take days against QL on the first attempt and a sustained fraction-of-a-FTE in maintenance forever after. The CodeQL CLI, query console, and database-build-then-query workflow is high friction for the bespoke per-rule iteration ELSPETH actually does.
 * **Pre-commit incremental analysis is natural in Python.** CodeQL is database-build-then-query; running it incrementally on changed files only is awkward and a known weak point of that toolchain. Python rules walking single ASTs are trivially incremental.

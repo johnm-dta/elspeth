@@ -20,7 +20,7 @@ import pytest
 
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
-from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink
+from elspeth.plugins.sinks.azure_blob_sink import AzureBlobSink, AzureBlobSinkConfig
 from tests.fixtures.base_classes import inject_write_failure
 
 # ---------------------------------------------------------------------------
@@ -109,6 +109,11 @@ class TestAzureBlobSinkConfig:
         with pytest.raises(PluginConfigError, match="placeholder"):
             AzureBlobSink(_base_config(container=container))
 
+    @pytest.mark.parametrize("container", ["todo", "unknown", "unset", "required"])
+    def test_plain_placeholder_words_can_be_container_names(self, container: str) -> None:
+        cfg = AzureBlobSinkConfig.from_dict(_base_config(container=container))
+        assert cfg.container == container
+
     def test_empty_blob_path_raises(self) -> None:
         with pytest.raises(PluginConfigError, match="blob_path"):
             AzureBlobSink(_base_config(blob_path=""))
@@ -117,6 +122,11 @@ class TestAzureBlobSinkConfig:
     def test_placeholder_blob_path_raises(self, blob_path: str) -> None:
         with pytest.raises(PluginConfigError, match="placeholder"):
             AzureBlobSink(_base_config(blob_path=blob_path))
+
+    @pytest.mark.parametrize("blob_path", ["todo", "unknown", "unset", "required"])
+    def test_plain_placeholder_words_can_be_blob_paths(self, blob_path: str) -> None:
+        cfg = AzureBlobSinkConfig.from_dict(_base_config(blob_path=blob_path))
+        assert cfg.blob_path == blob_path
 
     def test_invalid_template_syntax_raises_value_error(self) -> None:
         with pytest.raises(PluginConfigError, match="Invalid blob_path template"):

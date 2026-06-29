@@ -599,6 +599,7 @@ def find_scope_fallback_entry(
     5. its within-scope suffix ``ast_path.split("/")[scope_depth:]`` equals the
        finding's (the within-scope position is identical — the fallback-path
        replacement for the exact ``ast_path`` transplant defence).
+    6. it has not already matched another finding in this analysis run.
 
     Returns the unique candidate, or ``None`` when there are zero or **two or
     more** (ambiguity must never silently bind — fail closed). An empty
@@ -623,6 +624,8 @@ def find_scope_fallback_entry(
     live_suffix = live_components[scope_depth:]
     candidates: list[AllowlistEntry] = []
     for entry in entries:
+        if entry.matched:
+            continue
         if entry.judge_verdict is None or entry.scope_fingerprint is None or entry.ast_path is None:
             continue
         if entry.judge_verdict is JudgeVerdict.BLOCKED:
@@ -659,6 +662,26 @@ def _compute_file_fingerprint(source_path: Path) -> str:
     file the judge originally inspected).
     """
     return hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+
+def _resolve_allowlist_source_path(file_path: str, *, source_root: Path, context: str) -> Path:
+    """Resolve an allowlist key path without allowing reads outside ``source_root``."""
+    raw_path = Path(file_path)
+    if raw_path.is_absolute() or ".." in raw_path.parts:
+        raise ValueError(
+            f"{context}: judge-gated entry binds to {file_path!r} outside source_root "
+            f"{source_root}; allowlist keys must use normalized relative .py paths. "
+            "Refusing to read source bytes."
+        )
+
+    resolved_root = source_root.resolve(strict=False)
+    resolved_source = (resolved_root / raw_path).resolve(strict=False)
+    if not resolved_source.is_relative_to(resolved_root):
+        raise ValueError(
+            f"{context}: judge-gated entry binds to {file_path!r} outside source_root "
+            f"{source_root} after path resolution ({resolved_source}). Refusing to read source bytes."
+        )
+    return resolved_source
 
 
 def compute_judge_metadata_signature(
@@ -969,7 +992,7 @@ def _verify_source_binding_at_load(entry: AllowlistEntry, *, source_root: Path, 
     accompanied by removing the dependent judge-gated entry).
     """
     file_path = _file_path_from_canonical_key(entry.key)
-    source_path = source_root / file_path
+    source_path = _resolve_allowlist_source_path(file_path, source_root=source_root, context=context)
     if not source_path.exists():
         raise DanglingAllowlistEntry(
             f"{context}: judge-gated entry binds to {file_path!r} which does not exist "
@@ -1431,6 +1454,8 @@ def _optional_date(data: dict[str, Any], key: str, *, context: str) -> date | No
     if key not in data or data[key] is None:
         return None
     value = data[key]
+    if isinstance(value, datetime):
+        raise ValueError(f"{context}.{key} must be YYYY-MM-DD")
     if isinstance(value, date):
         return value
     if not isinstance(value, str):

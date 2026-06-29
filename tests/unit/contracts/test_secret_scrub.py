@@ -18,7 +18,7 @@ def test_plain_text_passes_through() -> None:
 
 
 def test_api_key_like_value_is_redacted() -> None:
-    p = {"api_key": "sk-1234567890abcdef1234567890abcdef"}
+    p = {"api_key": "sk-1234567890abcdef1234567890abcdef"}  # secret-scan: allow-this-line
     out = scrub_payload_for_audit(p)
     assert out["api_key"] == REDACTED
 
@@ -32,7 +32,7 @@ def test_openrouter_key_like_text_is_redacted() -> None:
 
 
 def test_aws_access_key_redacted() -> None:
-    p = {"note": "AKIAIOSFODNN7EXAMPLE in log"}
+    p = {"note": "AKIAIOSFODNN7EXAMPLE in log"}  # secret-scan: allow-this-line
     out = scrub_payload_for_audit(p)
     assert "AKIA" not in out["note"]
 
@@ -82,7 +82,7 @@ def test_secret_named_mapping_value_redacted_after_freeze() -> None:
 #
 # 1. Azure SAS tokens  — the `sig=` parameter in a SAS query string.
 # 2. Database connection strings — ODBC-style Password= and URL-style
-#    postgres://user:pass@host / mysql://user:pass@host.
+#    postgres://user:pass@host / mysql://user:pass@host.  # secret-scan: allow-this-line
 # 3. Basic-auth URLs  — https://user:pass@host/path.
 # 4. Bearer/session tokens under keys other than `authorization`
 #    (session_token, access_token, refresh_token, auth_cookie, sas_token,
@@ -119,19 +119,19 @@ def test_odbc_password_param_redacted() -> None:
 
 
 def test_postgres_url_with_credentials_redacted() -> None:
-    p = {"dsn": "postgresql://dbuser:dbpass-xyz@db.prod.example.com:5432/audit"}
+    p = {"dsn": "postgresql://dbuser:dbpass-xyz@db.prod.example.com:5432/audit"}  # secret-scan: allow-this-line
     out = scrub_payload_for_audit(p)
     assert out["dsn"] == REDACTED
 
 
 def test_postgres_short_scheme_redacted() -> None:
-    p = {"dsn": "postgres://dbuser:dbpass-xyz@db.prod.example.com/audit"}
+    p = {"dsn": "postgres://dbuser:dbpass-xyz@db.prod.example.com/audit"}  # secret-scan: allow-this-line
     out = scrub_payload_for_audit(p)
     assert out["dsn"] == REDACTED
 
 
 def test_mysql_url_with_credentials_redacted() -> None:
-    p = {"dsn": "mysql://root:toor@mysql-ci.internal:3306/metrics"}
+    p = {"dsn": "mysql://root:toor@mysql-ci.internal:3306/metrics"}  # secret-scan: allow-this-line
     out = scrub_payload_for_audit(p)
     assert out["dsn"] == REDACTED
 
@@ -221,6 +221,21 @@ def test_auth_cookie_key_name_redacted() -> None:
     p = {"auth_cookie": "abc123notarealtoken"}
     out = scrub_payload_for_audit(p)
     assert out["auth_cookie"] == REDACTED
+
+
+def test_client_secret_and_private_key_names_redacted() -> None:
+    p = {
+        "client_secret": "opaque-client-secret",
+        "private_key": "opaque-private-key",
+    }
+    out = scrub_payload_for_audit(p)
+    assert out["client_secret"] == REDACTED
+    assert out["private_key"] == REDACTED
+
+
+def test_key_value_secret_text_is_redacted() -> None:
+    assert scrub_text_for_audit("contract failed with client_secret=opaque-client-secret") == REDACTED
+    assert scrub_text_for_audit("contract failed with Authorization: Bearer opaque-token") == REDACTED
 
 
 # ----- Key-name match is case-insensitive -----

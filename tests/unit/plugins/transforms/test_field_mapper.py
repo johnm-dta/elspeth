@@ -94,6 +94,36 @@ class TestFieldMapper:
         assert result.row is not None
         assert result.row.to_dict() == {"price": 12.5}
 
+    def test_rename_over_existing_field_updates_output_contract(self, ctx: PluginContext) -> None:
+        """An overwrite rename must not keep the overwritten field's stale type."""
+        from elspeth.plugins.transforms.field_mapper import FieldMapper
+
+        transform = FieldMapper(
+            {
+                "schema": DYNAMIC_SCHEMA,
+                "mapping": {"name": "age"},
+            }
+        )
+        contract = SchemaContract(
+            mode="OBSERVED",
+            fields=(
+                make_field("name", str, original_name="Name", required=False, source="inferred"),
+                make_field("age", int, original_name="Age", required=False, source="inferred"),
+            ),
+            locked=True,
+        )
+        row = PipelineRow({"name": "Alice", "age": 40}, contract)
+
+        result = transform.process(row, ctx)
+
+        assert result.status == "success"
+        assert result.row is not None
+        assert result.row.to_dict() == {"age": "Alice"}
+        age_field = result.row.contract.get_field("age")
+        assert age_field.original_name == "Name"
+        assert age_field.python_type is str
+        assert result.row.contract.validate(result.row.to_dict()) == []
+
     def test_select_fields_only(self, ctx: PluginContext) -> None:
         """Only include specified fields (drop others)."""
         from elspeth.plugins.transforms.field_mapper import FieldMapper
@@ -685,6 +715,7 @@ class TestOutputSchemaConfig:
 
         assert transform.declared_output_fields == frozenset({"target"})
         assert transform._output_schema_config is not None
+        assert transform._output_schema_config.guaranteed_fields is not None
         assert frozenset(transform._output_schema_config.guaranteed_fields) == frozenset({"target", "kept"})
 
     def test_guaranteed_fields_empty_mapping(self):

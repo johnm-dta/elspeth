@@ -49,6 +49,7 @@ from elspeth.contracts.routing import RoutingAction
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.types import BranchName, CoalesceName, GateName, NodeID, SinkName
+from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
@@ -6597,6 +6598,72 @@ class TestCompleteCoalesceMerge:
             "token-held-a": "terminal",
             "merged-1": "pending_sink",
         }
+
+
+# =============================================================================
+# resume_incomplete_token
+# =============================================================================
+
+
+class TestResumeIncompleteToken:
+    """Tests for re-driving reconstructed incomplete tokens from the correct DAG node."""
+
+    def test_expanded_child_inside_coalesced_branch_resumes_after_expand_node(self) -> None:
+        """An expanded branch child must resume after expand, not at branch entry."""
+        _, factory = _make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        source_node = NodeID("source-0")
+        branch_first_node = NodeID("branch-first")
+        expand_node = NodeID("expand-branch")
+        after_expand_node = NodeID("after-expand")
+        coalesce_node = NodeID("coalesce::merge")
+
+        processor = _make_processor(
+            factory,
+            node_step_map={
+                source_node: 0,
+                branch_first_node: 1,
+                expand_node: 2,
+                after_expand_node: 3,
+                coalesce_node: 4,
+            },
+            node_to_next={
+                source_node: branch_first_node,
+                branch_first_node: expand_node,
+                expand_node: after_expand_node,
+                after_expand_node: coalesce_node,
+                coalesce_node: None,
+            },
+            branch_to_coalesce={BranchName("path_a"): CoalesceName("merge")},
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+        )
+        spec = IncompleteTokenSpec(
+            token_id="token-expanded-child",
+            row_id="row-1",
+            branch_name="path_a",
+            fork_group_id=None,
+            join_group_id=None,
+            expand_group_id="expand-1",
+            token_data_ref="payload-1",
+            step_in_pipeline=2,
+            max_attempt=0,
+        )
+
+        with (
+            patch.object(processor._nav, "resolve_branch_first_node", return_value=branch_first_node),
+            patch.object(processor, "process_token", return_value=[]) as process_token,
+        ):
+            processor.resume_incomplete_token(
+                spec,
+                make_pipeline_row({"value": 42}),
+                ctx,
+                resume_checkpoint_id="checkpoint-1",
+            )
+
+        process_token.assert_called_once()
+        _token_arg, _ctx_arg = process_token.call_args.args
+        assert process_token.call_args.kwargs == {"current_node_id": after_expand_node}
 
 
 # =============================================================================

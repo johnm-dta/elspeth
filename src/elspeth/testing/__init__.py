@@ -274,7 +274,7 @@ def make_success_multi(
         for r in rows:
             if isinstance(r, dict):
                 all_keys.update(dict.fromkeys(r, object))
-        contract = make_contract(all_keys) if all_keys else make_contract({})
+        contract = make_contract(fields=all_keys) if all_keys else make_contract({})
 
     pipeline_rows = [make_row(r, contract=contract) if isinstance(r, dict) else r for r in rows]
     return TransformResult.success_multi(

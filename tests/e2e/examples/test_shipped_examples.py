@@ -141,11 +141,13 @@ class TestShippedExamples:
         runner = CliRunner()
         result = runner.invoke(
             app,
-            ["run", "--settings", str(settings_path), "--execute", "--format", "json"],
+            # The CLI logging handler writes to stdout; JSON logs keep this
+            # captured channel parseable without skipping malformed lines.
+            ["--json-logs", "run", "--settings", str(settings_path), "--execute", "--format", "json"],
         )
         assert result.exit_code == 0, result.output
 
-        events = [json.loads(line) for line in result.output.splitlines() if line.strip()]
+        events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         execution_events = [event for event in events if event["event"] == "execution_result"]
         assert len(execution_events) == 1, result.output
         db = LandscapeDB(settings.landscape.url)

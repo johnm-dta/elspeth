@@ -1289,8 +1289,8 @@ class RetrySettings(BaseModel):
     model_config = {"frozen": True, "extra": "forbid"}
 
     max_attempts: int = Field(default=3, gt=0, description="Maximum retry attempts")
-    initial_delay_seconds: float = Field(default=1.0, gt=0, description="Initial backoff delay")
-    max_delay_seconds: float = Field(default=60.0, gt=0, description="Maximum backoff delay")
+    initial_delay_seconds: float = Field(default=1.0, ge=0.01, description="Initial backoff delay")
+    max_delay_seconds: float = Field(default=60.0, ge=0.1, description="Maximum backoff delay")
     exponential_base: float = Field(default=2.0, gt=1.0, description="Exponential backoff base")
 
 
@@ -1658,6 +1658,25 @@ class ElspethSettings(BaseModel):
             seen.add(probe.collection)
         if duplicates:
             raise ValueError(f"duplicate collection_probes for collection(s): {duplicates}")
+        return v
+
+    @field_validator("depends_on")
+    @classmethod
+    def validate_unique_dependencies(cls, v: list[DependencyConfig]) -> list[DependencyConfig]:
+        """Reject duplicate dependency labels at the config boundary.
+
+        Dependency results are keyed by dependency name in commencement gate
+        context. Duplicate names would make gate expressions and audit snapshots
+        ambiguous, so reject them before dependency preflight starts.
+        """
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for dependency in v:
+            if dependency.name in seen and dependency.name not in duplicates:
+                duplicates.append(dependency.name)
+            seen.add(dependency.name)
+        if duplicates:
+            raise ValueError(f"duplicate depends_on dependency name(s): {duplicates}")
         return v
 
     @field_validator("sinks")

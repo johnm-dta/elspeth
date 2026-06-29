@@ -145,7 +145,7 @@ def implements_dispatch_site(site_name: DispatchSiteName) -> Callable[[F], F]:
        this marker to build the per-site registration map. Methods without
        the marker are NOT invoked by the dispatcher for any site, even if
        their name happens to match a ``DispatchSite`` value.
-    2. Static: ``scripts/cicd/enforce_contract_manifest.py`` MC3a/b/c rules
+    2. Static: ``manifest.contract_manifest`` ``elspeth-lints`` MC3a/b/c rules
        AST-detect the decorator on concrete contract classes. Required for
        multi-level-inheritance detection per the D1 correction on H2
        (``subclass.__dict__`` does not see mixin-inherited overrides).
@@ -557,16 +557,16 @@ class _EmptyPayload(TypedDict):
 def _resolve_typeddict_key_sets(schema: type) -> tuple[frozenset[str], frozenset[str]]:
     """Return ``(required, optional)`` frozensets for a TypedDict class.
 
-    Implemented via ``typing.get_type_hints(schema, include_extras=True)`` so
-    ``NotRequired[...]`` / ``Required[...]`` wrappers survive under
-    ``from __future__ import annotations``. The metaclass-populated
-    ``__required_keys__`` / ``__optional_keys__`` are unreliable in that
-    case because the class-body annotations are string literals the
-    metaclass cannot parse at class-definition time. ``get_type_hints``
-    resolves the strings at call time and ``typing.get_origin`` yields
-    the wrapper so author intent survives regardless of syntax.
+    ``typing.get_type_hints(schema, include_extras=True)`` is authoritative
+    for explicit ``NotRequired[...]`` / ``Required[...]`` wrappers under
+    ``from __future__ import annotations``. For bare inherited keys, the
+    TypedDict metaclass key sets preserve the defining class's totality.
+    Combine both signals so wrapper intent wins and inherited bare keys do
+    not get reclassified by the most-derived class's ``__total__``.
     """
     total_required_default: bool = schema.__total__  # type: ignore[attr-defined]
+    native_required = frozenset(getattr(schema, "__required_keys__", frozenset()))
+    native_optional = frozenset(getattr(schema, "__optional_keys__", frozenset()))
     hints = get_type_hints(schema, include_extras=True)
     required: set[str] = set()
     optional: set[str] = set()
@@ -575,6 +575,10 @@ def _resolve_typeddict_key_sets(schema: type) -> tuple[frozenset[str], frozenset
         if origin is Required:
             required.add(key)
         elif origin is NotRequired:
+            optional.add(key)
+        elif key in native_required:
+            required.add(key)
+        elif key in native_optional:
             optional.add(key)
         elif total_required_default:
             required.add(key)
@@ -1041,8 +1045,9 @@ _REGISTRY_LOCK = _DECLARATION_REGISTRY.lock
 # CLOSED SET — adding or removing a contract requires updating this manifest
 # in the SAME commit as the register_declaration_contract(...) call site AND
 # the @implements_dispatch_site markers on the contract's methods.
-# ``scripts/cicd/enforce_contract_manifest.py`` scans the source tree and
-# fails CI if the manifest drifts from the registration + marker call sites.
+# The ``manifest.contract_manifest`` ``elspeth-lints`` rule scans the source
+# tree and fails CI if the manifest drifts from the registration + marker call
+# sites.
 
 
 EXPECTED_CONTRACT_SITES: Mapping[str, frozenset[DispatchSiteName]] = MappingProxyType(

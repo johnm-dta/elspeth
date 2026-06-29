@@ -6,7 +6,7 @@ config/cicd/contracts-whitelist.yaml.
 
 This package is Layer 0 (L0) in the 4-layer dependency hierarchy and has
 NO runtime imports from core, engine, or plugins. This is enforced by CI
-(``enforce_tier_model.py`` with rule L1). TYPE_CHECKING imports from core
+(``trust_tier.tier_model`` rule L1). TYPE_CHECKING imports from core
 exist for type annotations only and do not create runtime coupling.
 
 To maintain this property, Settings classes (RetrySettings, ElspethSettings, etc.)

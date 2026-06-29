@@ -53,7 +53,7 @@ Three new framework primitives in L0 `contracts/`, one L2 dispatcher, migrations
 
 ### Decision 1 — `AuditEvidenceBase` nominal abstract base class
 
-Replaces the bespoke `PluginContractViolation.to_audit_dict()` discriminator. Violation classes MUST inherit `AuditEvidenceBase` explicitly to contribute structured context via `NodeStateGuard.__exit__`. Nominal (not structural) because a `@runtime_checkable` Protocol with one method admits accidental duck-type matches — this was the Critical finding from the security review (spoofing audit evidence via incidental `to_audit_dict` methods on unrelated classes). CI scanner `enforce_audit_evidence_nominal.py` enforces at build time.
+Replaces the bespoke `PluginContractViolation.to_audit_dict()` discriminator. Violation classes MUST inherit `AuditEvidenceBase` explicitly to contribute structured context via `NodeStateGuard.__exit__`. Nominal (not structural) because a `@runtime_checkable` Protocol with one method admits accidental duck-type matches — this was the Critical finding from the security review (spoofing audit evidence via incidental `to_audit_dict` methods on unrelated classes). The `audit_evidence.nominal_base` `elspeth-lints` rule enforces this at build time.
 
 ### Decision 2 — `@tier_1_error(reason=...)` factory decorator + frozen registry
 
@@ -300,8 +300,8 @@ manifest:
 - **H2** (`elspeth-425047a599`): nominal ABC + 4 bundle types +
   `@implements_dispatch_site` decorator (L0) + registry restructure.
 - **N1** (`elspeth-10dc0b747f`): `EXPECTED_CONTRACT_SITES` per-site
-  manifest + `MC3a`/`MC3b`/`MC3c` CI rules in
-  `scripts/cicd/enforce_contract_manifest.py`.
+  manifest + `MC3a`/`MC3b`/`MC3c` CI rules in the
+  `manifest.contract_manifest` `elspeth-lints` rule.
 - **N3** (`elspeth-60890a7388`): collect-then-raise dispatcher +
   `AggregateDeclarationContractViolation` sibling class + catch-site
   survey. Preserves triage SQL compatibility for the N=1 reference-

@@ -27,6 +27,68 @@ def _write_valid_jwt(path: Path) -> None:
     path.write_text(f"header.{payload}.signature")
 
 
+def _write_argv_logging_curl(bin_dir: Path) -> None:
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+
+: "${CURL_ARGV_LOG:?CURL_ARGV_LOG not set}"
+
+out=""
+url=""
+{
+  printf 'CALL'
+  for arg in "$@"; do
+    printf '\t%s' "$arg"
+  done
+  printf '\n'
+} >> "$CURL_ARGV_LOG"
+
+while (( $# > 0 )); do
+  case "$1" in
+    -o)
+      out="$2"
+      shift 2
+      ;;
+    -w|-X|-H|--max-time|--data|--data-binary|-d)
+      shift 2
+      ;;
+    --*)
+      shift
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      url="$1"
+      shift
+      ;;
+  esac
+done
+
+write_out() {
+  if [[ -n "$out" ]]; then
+    printf '%s' "$1" > "$out"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+case "$url" in
+  */api/auth/login)
+    printf '{"access_token":"header.eyJleHAiOjQxMDI0NDQ4MDB9.signature"}\n200'
+    ;;
+  *)
+    write_out '{}'
+    printf '200'
+    ;;
+esac
+"""
+    )
+    fake_curl.chmod(0o755)
+
+
 def _write_fake_curl(bin_dir: Path) -> None:
     fake_curl = bin_dir / "curl"
     fake_curl.write_text(
@@ -470,6 +532,71 @@ esac
 """
     )
     fake_curl.chmod(0o755)
+
+
+def test_common_login_keeps_password_out_of_curl_argv(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_argv_logging_curl(fake_bin)
+    argv_log = tmp_path / "curl.argv.log"
+    jwt_file = tmp_path / "jwt.txt"
+    password_marker = "argv-leak-marker"
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "CURL_ARGV_LOG": str(argv_log),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+    script = f"""
+set -euo pipefail
+source {REPO_ROOT / "evals/lib/common.sh"}
+EVALS_JWT_FILE={jwt_file}
+ELSPETH_EVAL_BASE_URL=https://example.invalid
+ELSPETH_EVAL_USER=eval-user
+ELSPETH_EVAL_PASS={password_marker}
+ELSPETH_EVAL_CURL_MAX_TIME=240
+evals_login
+"""
+
+    result = subprocess.run(["bash", "-c", script], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert password_marker not in argv_log.read_text()
+
+
+def test_common_authenticated_get_keeps_jwt_out_of_curl_argv(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_argv_logging_curl(fake_bin)
+    argv_log = tmp_path / "curl.argv.log"
+    jwt_file = tmp_path / "jwt.txt"
+    out_file = tmp_path / "catalog.json"
+    _write_valid_jwt(jwt_file)
+    jwt = jwt_file.read_text()
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "CURL_ARGV_LOG": str(argv_log),
+            "PATH": f"{fake_bin}:{env['PATH']}",
+        }
+    )
+    script = f"""
+set -euo pipefail
+source {REPO_ROOT / "evals/lib/common.sh"}
+EVALS_JWT_FILE={jwt_file}
+ELSPETH_EVAL_BASE_URL=https://example.invalid
+ELSPETH_EVAL_CURL_MAX_TIME=240
+ELSPETH_EVAL_JWT_REFRESH_MARGIN_SEC=300
+_evals_http_get "$ELSPETH_EVAL_BASE_URL/api/catalog/sources" {out_file}
+"""
+
+    result = subprocess.run(["bash", "-c", script], cwd=REPO_ROOT, env=env, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert jwt not in argv_log.read_text()
 
 
 def test_harness_writes_suite_and_run_manifests(tmp_path: Path) -> None:

@@ -57,6 +57,21 @@ class TestRetrySettings:
         with pytest.raises(ValidationError):
             RetrySettings(initial_delay_seconds=-1.0)
 
+    @pytest.mark.parametrize(
+        ("field_name", "value"),
+        [
+            ("initial_delay_seconds", 0.005),
+            ("max_delay_seconds", 0.05),
+        ],
+    )
+    def test_delay_floors_match_runtime_contract(self, field_name: str, value: float) -> None:
+        from elspeth.core.config import RetrySettings
+
+        with pytest.raises(ValidationError) as exc_info:
+            RetrySettings(**{field_name: value})
+
+        assert exc_info.value.errors()[0]["loc"] == (field_name,)
+
 
 class TestElspethSettings:
     """Top-level settings validation."""

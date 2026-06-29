@@ -136,6 +136,7 @@ def _make_executor(
     # Default: Landscape returns no completed coalesces (unit tests don't have a real DB).
     # Tests that exercise Landscape-based restoration override this per-test.
     execution.get_completed_row_ids_for_nodes.return_value = set()
+    execution.has_completed_row_for_node.return_value = False
     data_flow = MagicMock(spec=DataFlowRepository)
     span_factory = MagicMock()
     token_manager = MagicMock()
@@ -176,6 +177,7 @@ def _make_raw_executor(
     execution = MagicMock(spec=ExecutionRepository)
     execution.begin_node_state.side_effect = lambda **kw: Mock(state_id=_next_state_id())
     execution.get_completed_row_ids_for_nodes.return_value = set()
+    execution.has_completed_row_for_node.return_value = False
     data_flow = MagicMock(spec=DataFlowRepository)
     span_factory = MagicMock()
     token_manager = MagicMock()
@@ -1152,9 +1154,7 @@ class TestUnionMerge:
         executor.register_coalesce(s, "node_1")
 
         # Inject audit-DB compromise at the first step inside the merge try-body.
-        executor._merge_data = Mock(  # type: ignore[method-assign]
-            side_effect=AuditIntegrityError("audit DB unreadable mid-merge")
-        )
+        executor._merge_data = Mock(side_effect=AuditIntegrityError("audit DB unreadable mid-merge"))
 
         t1 = _make_token(branch_name="a", token_id="t1", data={"x": 1})
         t2 = _make_token(branch_name="b", token_id="t2", data={"y": 2})
@@ -2636,13 +2636,17 @@ class TestLandscapeCompletedKeys:
         assert ("merge", "row_1") in executor._completed_keys
         assert ("merge", "row_2") in executor._completed_keys
 
-        # Late arrival for evicted row_0 — Landscape fallback should catch it
-        execution.get_completed_row_ids_for_nodes.return_value = {("node_1", "row_0")}
+        # Late arrival for evicted row_0 — exact Landscape fallback should catch it
+        # without materializing every completed row for node_1.
+        execution.reset_mock()
+        execution.has_completed_row_for_node.return_value = True
         late = _make_token(branch_name="a", token_id="t_late", row_id="row_0")
         outcome = executor.accept(late, "merge")
 
         assert outcome.held is False
         assert outcome.failure_reason == "late_arrival_after_merge"
+        execution.has_completed_row_for_node.assert_called_once_with(run_id="run_1", node_id="node_1", row_id="row_0")
+        execution.get_completed_row_ids_for_nodes.assert_not_called()
         # Key should now be in the FIFO cache (backfilled from Landscape)
         assert ("merge", "row_0") in executor._completed_keys
 
@@ -2927,6 +2931,29 @@ class TestRestoreFromJournal:
         assert outcome.held is False
         assert outcome.merged_token is not None
 
+    def test_restore_from_journal_preserves_loss_only_pending_key(self) -> None:
+        """A zero-arrival pending key with durable branch loss must survive restore."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="best_effort", timeout_seconds=60.0)
+        executor.register_coalesce(s, NodeID("co-1"))
+
+        executor.restore_from_journal(
+            items=[],
+            scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"a": "error_routed"})},
+            state_ids={},
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        pending = executor._pending[("merge", "row_1")]
+        assert pending.branches == {}
+        assert pending.lost_branches == {"a": "error_routed"}
+
+        outcome = executor.accept(_make_token(row_id="row_1", branch_name="b", token_id="t2"), "merge")
+        assert outcome.held is False
+        assert outcome.merged_token is not None
+
     def test_restore_from_journal_groups_items_per_pending_key(self) -> None:
         """Items group by (coalesce_name, row_id) — keys restore independently."""
         executor, *_ = _make_executor()
@@ -2970,14 +2997,16 @@ class TestRestoreFromJournal:
         assert executor._pending[("merge", "row_1")].lost_branches == {}
 
     def test_restore_from_journal_ignores_stale_scalars(self) -> None:
-        """A scalars entry whose key has NO journal items is stale — ignored, never rejected.
+        """A completed scalars-only key is stale — ignored, never rejected.
 
-        Window: that pending key flushed/completed after the checkpoint was
-        written (checkpoint older than the journal — legitimate under D3's
-        staleness model). Mirrors aggregation's drop-stale-scalars arm.
+        Window: that pending key completed after the checkpoint was written
+        (checkpoint older than the journal — legitimate under D3's staleness
+        model). Landscape completion distinguishes it from a live zero-arrival
+        loss-only pending key.
         """
-        executor, *_ = _make_executor()
+        executor, execution, *_ = _make_executor()
         executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        execution.get_completed_row_ids_for_nodes.return_value = {("co-1", "row_gone")}
 
         executor.restore_from_journal(
             items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
@@ -3041,6 +3070,23 @@ class TestRestoreFromJournal:
         assert outcome.held is False
         assert outcome.failure_reason == "late_arrival_after_merge"
         assert outcome.outcomes_recorded is True
+
+    def test_restore_from_journal_keeps_completed_keys_bounded(self) -> None:
+        """Restore seeds the FIFO cache through the bounded completion path."""
+        executor, execution, _, _, _ = _make_executor(max_completed_keys=2)
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+        execution.get_completed_row_ids_for_nodes.return_value = {("co-1", f"row_{i}") for i in range(5)}
+
+        executor.restore_from_journal(
+            items=[],
+            scalars={},
+            state_ids={},
+            attempt_offsets={},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        assert len(executor._completed_keys) == 2
 
     # --- corruption guards (journal/audit disagreement = crash, no coercion) ---
 
@@ -3394,6 +3440,61 @@ class TestNotifyBranchLostEvaluateAfterLoss:
 
     # --- first policy ---
 
+    def test_first_policy_all_lost_no_arrivals_fails_and_cleans_up(self):
+        """first: if all branches are lost before any arrival, fail without leaving pending state."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=60.0)
+        executor.register_coalesce(s, "node_1")
+
+        result_a = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result_a is None
+        assert ("merge", "row_1") in executor._pending
+
+        result_b = executor.notify_branch_lost("merge", "row_1", "b", "error_b")
+        assert result_b is not None
+        assert result_b.held is False
+        assert result_b.merged_token is None
+        assert result_b.failure_reason == "all_branches_lost"
+        assert result_b.outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+        assert ("merge", "row_1") in executor._completed_keys
+
+    def test_first_policy_flush_zero_arrivals_from_loss_fails_and_cleans_up(self):
+        """first: EOF flush of a loss-only pending row fails gracefully instead of raising."""
+        executor, *_ = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=60.0)
+        executor.register_coalesce(s, "node_1")
+
+        result = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result is None
+
+        results = executor.flush_pending()
+        assert len(results) == 1
+        assert results[0].held is False
+        assert results[0].merged_token is None
+        assert results[0].failure_reason == "all_branches_lost"
+        assert results[0].outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+
+    def test_first_policy_timeout_zero_arrivals_from_loss_fails_and_cleans_up(self):
+        """first: timeout of a loss-only pending row fails gracefully instead of raising."""
+        executor, _execution, _data_flow, _, clock = _make_executor()
+        s = _settings(branches=["a", "b"], policy="first", timeout_seconds=5.0)
+        executor.register_coalesce(s, "node_1")
+
+        result = executor.notify_branch_lost("merge", "row_1", "a", "error_a")
+        assert result is None
+
+        clock.advance(6.0)
+        results = executor.check_timeouts("merge")
+        assert len(results) == 1
+        assert results[0].held is False
+        assert results[0].merged_token is None
+        assert results[0].failure_reason == "first_timeout_no_arrivals"
+        assert results[0].outcomes_recorded is True
+        assert ("merge", "row_1") not in executor._pending
+        assert ("merge", "row_1") in executor._completed_keys
+
     def test_first_policy_loss_returns_none(self):
         """first: branch loss has no effect — merge should have happened on first arrival."""
         executor, *_ = _make_executor()
@@ -3579,6 +3680,74 @@ class TestPrecomputedOutputSchema:
         # Verify contract matches DAG schema, not runtime merge
         merged_contract = outcome_b.merged_token.row_data.contract
         assert merged_contract == precomputed_schema, "Runtime contract should match pre-computed DAG schema, not runtime merge"
+
+    def test_partial_union_precomputed_schema_keeps_lost_branch_optional_fields(self):
+        """Partial union must not crash when precomputed schema includes lost-branch fields."""
+        executor, *_ = _make_executor()
+
+        precomputed_schema = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field(
+                    "present",
+                    original_name="present",
+                    python_type=int,
+                    required=False,
+                    source="declared",
+                    nullable=False,
+                ),
+                make_field(
+                    "lost_optional",
+                    original_name="lost_optional",
+                    python_type=str,
+                    required=False,
+                    source="declared",
+                    nullable=True,
+                ),
+            ),
+            locked=True,
+        )
+        settings = _settings(
+            branches=["a", "b"],
+            policy="best_effort",
+            merge="union",
+            timeout_seconds=5.0,
+        )
+        executor.register_coalesce(settings, "node_1", output_schema=precomputed_schema)
+
+        contract_a = SchemaContract(
+            mode="FLEXIBLE",
+            fields=(
+                make_field(
+                    "present",
+                    original_name="Present Header",
+                    python_type=int,
+                    required=False,
+                    source="declared",
+                    nullable=False,
+                ),
+            ),
+            locked=True,
+        )
+        token_a = _make_token(branch_name="a", token_id="t1", data={"present": 42}, contract=contract_a)
+
+        assert executor.accept(token_a, "merge").held is True
+        outcome = executor.notify_branch_lost("merge", "row_1", "b", "error_routed")
+
+        assert outcome is not None
+        assert outcome.merged_token is not None
+        assert outcome.merged_token.row_data.to_dict() == {"present": 42}
+        assert outcome.coalesce_metadata.union_field_origins == {"present": "a"}
+
+        merged_contract = outcome.merged_token.row_data.contract
+        present = merged_contract.get_field("present")
+        lost_optional = merged_contract.get_field("lost_optional")
+        assert present is not None
+        assert lost_optional is not None
+        assert present.original_name == "Present Header"
+        assert lost_optional.original_name == "lost_optional"
+        assert lost_optional.required is False
+        assert lost_optional.nullable is True
 
     def test_union_merge_falls_back_to_runtime_merge_when_no_schema(self):
         """Without pre-computed schema, runtime merge() is used (backward compat)."""

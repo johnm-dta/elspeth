@@ -218,12 +218,14 @@ class FieldDefinition:
         }
 
 
-def _parse_field_names_list(value: Any, field_name: str) -> tuple[str, ...] | None:
+def _parse_field_names_list(value: Any, field_name: str, *, empty_as_none: bool = True) -> tuple[str, ...] | None:
     """Parse a list of field names for guaranteed_fields/required_fields.
 
     Args:
         value: Raw value from config (should be None or list of strings)
         field_name: Name of the config field for error messages
+        empty_as_none: Whether an empty list means unspecified instead of an
+            explicit empty tuple.
 
     Returns:
         Tuple of field names, or None if value is None
@@ -238,7 +240,7 @@ def _parse_field_names_list(value: Any, field_name: str) -> tuple[str, ...] | No
         raise ValueError(f"'{field_name}' must be a list of field names, got {type(value).__name__}")
 
     if len(value) == 0:
-        return None  # Empty list is treated as unspecified
+        return None if empty_as_none else ()
 
     result: list[str] = []
     for i, name in enumerate(value):
@@ -492,7 +494,7 @@ class SchemaConfig:
             raise ValueError(f"Schema config must be a Mapping, got {type(config).__name__}")
 
         # Parse contract fields (valid for all schema modes)
-        guaranteed_fields = _parse_field_names_list(config.get("guaranteed_fields"), "guaranteed_fields")
+        guaranteed_fields = _parse_field_names_list(config.get("guaranteed_fields"), "guaranteed_fields", empty_as_none=False)
         required_fields = _parse_field_names_list(config.get("required_fields"), "required_fields")
         audit_fields = _parse_field_names_list(config.get("audit_fields"), "audit_fields")
 

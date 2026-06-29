@@ -104,6 +104,12 @@ _INTERPRETATION_SHAPE_FIELDS: tuple[str, ...] = (
     *_INTERPRETATION_KIND_FIELD,
     *_INTERPRETATION_LLM_PROVENANCE_FIELDS,
 )
+_INTERPRETATION_SHAPE_DIAGNOSTIC_FIELDS: tuple[str, ...] = (
+    *_INTERPRETATION_SHAPE_FIELDS,
+    "accepted_value",
+    "arguments_hash",
+    "hash_domain_version",
+)
 _CHOICES_WITH_ACCEPTED_VALUE: frozenset[InterpretationChoice] = frozenset(
     {
         InterpretationChoice.ACCEPTED_AS_DRAFTED,
@@ -130,7 +136,7 @@ def _shape_violation_message(
     non_null_fields: list[str],
 ) -> str:
     offender_names = set(missing_required_fields) | set(non_null_fields)
-    ordered_offenders = [name for name in _INTERPRETATION_SHAPE_FIELDS if name in offender_names]
+    ordered_offenders = [name for name in _INTERPRETATION_SHAPE_DIAGNOSTIC_FIELDS if name in offender_names]
     detail_parts: list[str] = []
     if missing_required_fields:
         detail_parts.append(f"missing required fields: {', '.join(missing_required_fields)}")

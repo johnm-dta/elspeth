@@ -24,7 +24,7 @@ from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLim
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
-from elspeth.contracts.wire_visible_identity import reject_placeholder_value
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.clients.dataverse import (
     DataverseAuthConfig,
@@ -39,6 +39,7 @@ from elspeth.plugins.infrastructure.url_validation import validate_credential_sa
 from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
     FieldResolution,
+    extend_field_resolution,
     normalize_field_name,
     resolve_field_names,
 )
@@ -140,7 +141,7 @@ class DataverseSourceConfig(DataPluginConfig):
         stripped = v.strip()
         if not stripped:
             raise ValueError("entity cannot be empty")
-        return reject_placeholder_value(stripped, field_name="entity")
+        return reject_operator_required_placeholder_value(stripped, field_name="entity")
 
     @field_validator("select")
     @classmethod
@@ -152,7 +153,7 @@ class DataverseSourceConfig(DataPluginConfig):
             if not select_name or not select_name.strip():
                 raise ValueError(f"select[{index}] cannot be empty")
             stripped = select_name.strip()
-            reject_placeholder_value(stripped, field_name=f"select[{index}]")
+            reject_operator_required_placeholder_value(stripped, field_name=f"select[{index}]")
             stripped_fields.append(stripped)
         return stripped_fields
 
@@ -207,7 +208,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:d50608e3bb7dae07"
+    source_file_hash: str | None = "sha256:2300e3166a2894fb"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -434,7 +435,7 @@ class DataverseSource(BaseSource):
         # Schema validation (lines below) quarantines rows with unexpected fields.
         mapping = self._field_resolution.resolution_mapping
         result: dict[str, Any] = {}
-        has_unmapped_fields = False
+        new_raw_keys: list[str] = []
         for k, v in row.items():
             if k in mapping:
                 normalized_name = mapping[k]
@@ -446,23 +447,18 @@ class DataverseSource(BaseSource):
                 # elspeth-594221617d.)
                 nk = normalize_field_name(k)
                 normalized_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
-                has_unmapped_fields = True
+                new_raw_keys.append(k)
             result[normalized_name] = v
 
-        # If this row had fields not in the initial mapping, rebuild from the
-        # UNION of previously-seen keys and this row's new keys. Using only
-        # list(row.keys()) would REPLACE the mapping with just the current row's
-        # fields, discarding keys from earlier rows and corrupting the Landscape
-        # field-resolution audit record (B4.3, elspeth-594221617d).
-        # dict.fromkeys preserves first-seen order while deduplicating.
-        if has_unmapped_fields:
+        # If this row had fields not in the initial mapping, extend the cached
+        # resolution with just those new raw keys. This preserves B4.3 union
+        # semantics without re-normalizing every previously seen sparse key.
+        if new_raw_keys:
             assert self._field_resolution is not None  # set on first row above
-            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
-            self._field_resolution = resolve_field_names(
-                raw_headers=union_keys,
+            self._field_resolution = extend_field_resolution(
+                self._field_resolution,
+                raw_headers=new_raw_keys,
                 field_mapping=self._field_mapping,
-                columns=None,
-                require_all_mapping_keys=False,  # sparse Dataverse entities may omit optional mapped attributes
             )
 
         return result

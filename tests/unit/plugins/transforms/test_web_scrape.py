@@ -19,6 +19,7 @@ from elspeth.contracts.audit import Call
 from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
+from elspeth.core.security.web import SSRFSafeRequest
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.transforms.web_scrape import WebScrapeTransform
@@ -1108,7 +1109,7 @@ def test_web_scrape_forward_probe_preserves_baseline_and_restores_payload_store(
     assert result.row["page_fingerprint"]
     assert result.row["fetch_status"] == 200
     assert transform._payload_store is original_payload_store
-    assert transform._fetch_url.__func__ is original_fetch.__func__
+    assert transform._fetch_url == original_fetch
 
 
 class TestWebScrapeDeclaredOutputFields:
@@ -2083,6 +2084,50 @@ def test_b3_10_oversized_response_returns_error_not_fingerprint(mock_ctx):
     assert "body_too_large" in reason.get("reason", "") or "body_too_large" in reason.get("error", ""), (
         f"Error reason should indicate body too large, got {reason}"
     )
+
+
+def test_b3_10_web_scrape_wires_max_body_bytes_into_audited_http_client(mock_ctx):
+    """web_scrape's max_body_bytes must become the shared client's streaming cap."""
+    transform = WebScrapeTransform(
+        {
+            "schema": {"mode": "observed"},
+            "url_field": "url",
+            "content_field": "page_content",
+            "fingerprint_field": "page_fingerprint",
+            "http": {
+                "abuse_contact": "test@example.com",
+                "scraping_reason": "B3.10 streaming cap wiring test",
+                "max_body_bytes": 1234,
+            },
+        }
+    )
+    transform.on_start(mock_ctx)
+    safe_request = SSRFSafeRequest(
+        original_url="https://example.com/ok",
+        resolved_ip=_TEST_IP,
+        host_header="example.com",
+        port=443,
+        path="/ok",
+        scheme="https",
+        bare_hostname="example.com",
+    )
+    response = httpx.Response(
+        200,
+        text="<html>ok</html>",
+        headers={"content-type": "text/html"},
+        request=httpx.Request("GET", f"https://{_TEST_IP}:443/ok"),
+    )
+
+    with patch("elspeth.plugins.transforms.web_scrape.AuditedHTTPClient") as client_cls:
+        client = Mock()
+        client.get_ssrf_safe.return_value = (response, "https://example.com/ok", mock_ctx.landscape.record_call.return_value)
+        client_cls.return_value = client
+
+        transform._fetch_url(safe_request, mock_ctx)
+
+    assert client_cls.call_args.kwargs["max_response_body_bytes"] == 1234
+    client.get_ssrf_safe.assert_called_once()
+    client.close.assert_called_once()
 
 
 @respx.mock

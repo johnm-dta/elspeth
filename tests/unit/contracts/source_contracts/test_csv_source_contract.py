@@ -158,7 +158,7 @@ class TestCSVSourceContract(SourceContractPropertyTestBase):
         assert contract.fields == ()
         assert source.get_field_resolution() == (
             {"id": "id", "name": "name", "value": "value"},
-            "1.0.0",
+            "1.0.1",
         )
 
     def test_csv_source_load_is_deterministic_for_same_file(self, source_data: Path) -> None:

@@ -957,6 +957,32 @@ class TestHandleCoalesceTimeouts:
             ("token-a", "token-b", "token-c"),
         )
 
+    def test_failed_timeout_with_no_arrivals_does_not_terminalize_empty_barrier(self) -> None:
+        """A zero-arrival timeout has no blocked scheduler rows to terminalize."""
+        outcome = Mock()
+        outcome.merged_token = None
+        outcome.failure_reason = "best_effort_timeout_no_arrivals"
+        outcome.consumed_tokens = ()
+
+        executor, processor, counters, pending, node_map = self._setup(
+            timed_out_outcomes=[outcome],
+        )
+
+        handle_coalesce_timeouts(
+            coalesce_executor=executor,
+            coalesce_node_map=node_map,
+            processor=processor,
+            ctx=Mock(),
+            counters=counters,
+            pending_tokens=pending,
+        )
+
+        assert counters.rows_coalesce_failed == 1
+        assert counters.rows_failed == 0
+        assert counters.rows_coalesced == 0
+        processor.mark_blocked_barrier_terminal.assert_not_called()
+        processor.process_token.assert_not_called()
+
     def test_failed_timeout_raises_when_scheduler_terminal_count_does_not_match_live_tokens(self) -> None:
         """Failed timeout coalesces must reconcile durable scheduler rows before accepting counters."""
         outcome = Mock()

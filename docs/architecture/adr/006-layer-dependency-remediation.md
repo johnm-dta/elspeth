@@ -109,7 +109,7 @@ Add a `RuntimeServiceRateLimit` frozen dataclass in `contracts/config/runtime.py
 
 After all violations are fixed:
 
-1. **Strengthen `enforce_tier_model.py`** to fail CI on new upward imports. The allowlist mechanism already exists.
+1. **Strengthen the `trust_tier.tier_model` `elspeth-lints` rule** to fail CI on new upward imports. The allowlist mechanism already exists.
 2. **Document the "Violation #11 Protocol"** in CLAUDE.md — a decision protocol for when the next developer needs something from a higher layer:
    - Move the needed code down (if it has no upward dependencies)
    - Extract the primitive portion and move that down
@@ -147,7 +147,7 @@ After all violations are fixed:
 
 - `core/canonical.py` shrinks slightly (PipelineRow check removed) and gains an import from `contracts/hashing.py` — dependency direction reverses from incorrect (contracts→core) to correct (core→contracts)
 - `core/config.py` loses `SecretFingerprintError` and one validator's lazy import, slightly reducing its 1,600-line scope — directionally helpful for the separate config.py decomposition effort (T23)
-- `enforce_tier_model.py` gains new detection capabilities but the allowlist mechanism already handles exceptions
+- `trust_tier.tier_model` gains new detection capabilities but the allowlist mechanism already handles exceptions
 
 ## Alternatives Considered
 
@@ -205,7 +205,7 @@ After all violations are fixed:
 After all 5 phases:
 - `grep -rn 'from elspeth.core' src/elspeth/contracts/` returns 0 results (excluding TYPE_CHECKING blocks)
 - `grep -rn 'from elspeth.engine' src/elspeth/core/` returns 0 results (excluding TYPE_CHECKING blocks)
-- `enforce_tier_model.py` CI gate passes with no allowlist entries for layer violations
+- `trust_tier.tier_model` CI gate passes with no allowlist entries for layer violations
 - `contracts/__init__.py` docstring accurately states "leaf module with no runtime dependencies on core/engine/plugins"
 - All 8,000+ tests pass
 - mypy passes with no new `# type: ignore` additions

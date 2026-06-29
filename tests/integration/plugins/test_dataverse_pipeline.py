@@ -548,6 +548,7 @@ class TestDataverseSinkUpsert:
                     retryable=False,
                     status_code=409,
                     latency_ms=15.0,
+                    error_category="row_data_error",
                 )
             return DataversePageResponse(
                 status_code=204,

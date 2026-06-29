@@ -26,7 +26,7 @@ from elspeth.contracts.contract_builder import ContractBuilder, ContractFieldLim
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.schema_contract_factory import create_contract_from_config
-from elspeth.contracts.wire_visible_identity import reject_placeholder_value
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.core.identifiers import validate_field_names
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
@@ -36,6 +36,7 @@ from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
     FieldMappingCollisionError,
     FieldResolution,
+    extend_field_resolution,
     normalize_field_name,
     resolve_field_names,
 )
@@ -303,7 +304,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that container is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("container cannot be empty")
-        return reject_placeholder_value(v, field_name="container")
+        return reject_operator_required_placeholder_value(v, field_name="container")
 
     @field_validator("blob_path")
     @classmethod
@@ -311,7 +312,7 @@ class AzureBlobSourceConfig(DataPluginConfig):
         """Validate that blob_path is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("blob_path cannot be empty")
-        return reject_placeholder_value(v, field_name="blob_path")
+        return reject_operator_required_placeholder_value(v, field_name="blob_path")
 
     @field_validator("on_validation_failure")
     @classmethod
@@ -360,7 +361,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:eff7b45f9f07f269"
+    source_file_hash: str | None = "sha256:fcf6082d0b090fe6"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -1001,7 +1002,7 @@ class AzureBlobSource(BaseSource):
 
         mapping = self._field_resolution.resolution_mapping
         normalized: dict[str, Any] = {}
-        has_unmapped_fields = False
+        new_raw_keys: list[str] = []
         for key, value in row_items:
             if key in mapping:
                 normalized[mapping[key]] = value
@@ -1013,17 +1014,21 @@ class AzureBlobSource(BaseSource):
                 nk = normalize_field_name(key)
                 final_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
                 normalized[final_name] = value
-                has_unmapped_fields = True
+                new_raw_keys.append(key)
 
-        if has_unmapped_fields:
-            # Rebuild from the UNION of previously-seen keys and this row's new
-            # keys. Using only list(row.keys()) would REPLACE the mapping with
-            # just the current row's fields, discarding keys from earlier rows
-            # and corrupting the Landscape field-resolution audit record (B4.3).
-            # dict.fromkeys preserves first-seen order while deduplicating.
+        if new_raw_keys:
+            # Extend with just the new raw keys while preserving B4.3 union
+            # semantics. Rebuilding the full historical key set on every sparse
+            # row is quadratic in attacker-controlled fields.
             assert self._field_resolution is not None  # set on first row above
-            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
-            self._field_resolution = self._resolve_json_field_names(union_keys)
+            try:
+                self._field_resolution = extend_field_resolution(
+                    self._field_resolution,
+                    raw_headers=new_raw_keys,
+                    field_mapping=self._field_mapping,
+                )
+            except FieldMappingCollisionError as exc:
+                raise ExternalHeaderError(str(exc)) from exc
 
         return normalized
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CI_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "ci.yaml"
 ACTIONLINT_CONFIG = REPO_ROOT / ".github" / "actionlint.yaml"
 JUDGE_GATES_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "enforce-allowlist-judge-gates.yaml"
+CODEQL_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "codeql.yaml"
+CODEQL_CONFIG = REPO_ROOT / ".github" / "codeql" / "codeql-config.yml"
 _SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|"})
 
 
@@ -159,6 +162,21 @@ def test_judge_gates_workflow_mirrors_ci_concurrency_policy() -> None:
     assert judge_workflow["concurrency"] == ci_workflow["concurrency"]
 
 
+def test_judge_gates_required_context_matches_emitted_check_name() -> None:
+    """Branch-protection docs must name the check context GitHub emits."""
+    workflow_text = JUDGE_GATES_WORKFLOW.read_text(encoding="utf-8")
+    required_context = re.search(
+        r"Branch protection MUST require ``(?P<context>[^`]+)``",
+        workflow_text,
+    )
+    assert required_context is not None, "workflow header must document the required context"
+
+    judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
+    aggregate_job = judge_workflow["jobs"]["judge-gates-success"]
+
+    assert required_context.group("context") == aggregate_job["name"]
+
+
 def test_judge_gates_workflow_has_bounded_job_timeouts() -> None:
     """Judge-gate jobs must not inherit GitHub's six-hour default timeout."""
     judge_workflow = _workflow(JUDGE_GATES_WORKFLOW)
@@ -166,6 +184,20 @@ def test_judge_gates_workflow_has_bounded_job_timeouts() -> None:
     for job_name in ("check-override-rate",):
         job = judge_workflow["jobs"][job_name]
         assert job["timeout-minutes"] == 15
+
+
+def test_codeql_security_suites_do_not_filter_by_problem_severity() -> None:
+    """Security suites must not drop security queries whose problem severity is warning."""
+    workflow = _workflow(CODEQL_WORKFLOW)
+    init_step = _step(workflow["jobs"]["analyze"], "Initialize CodeQL")
+    queries = init_step["with"]["queries"]
+    assert "security-extended" in queries
+    assert "security-and-quality" in queries
+
+    config = _workflow(CODEQL_CONFIG)
+    for query_filter in config.get("query-filters", ()):
+        exclude = query_filter.get("exclude", {})
+        assert "problem.severity" not in exclude
 
 
 def test_override_rate_workflow_pins_threshold_policy() -> None:

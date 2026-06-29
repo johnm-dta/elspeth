@@ -307,7 +307,25 @@ config/cicd/**/.*.lock
 # Release PDF pipeline source is intentionally tracked; generated
 # outputs and bulky font source trees are not.
 docs/release/*
-!docs/release/pdf/output/
+!docs/release/pdf/
+!docs/release/pdf/*.typ
+!docs/release/pdf/Makefile
+!docs/release/pdf/README.md
+!docs/release/pdf/build.sh
+!docs/release/pdf/versions.lock
+!docs/release/pdf/fonts/
+!docs/release/pdf/fonts/public-sans/
+docs/release/pdf/fonts/public-sans/*
+!docs/release/pdf/fonts/public-sans/LICENSE.md
+!docs/release/pdf/fonts/public-sans/OFL.txt
+!docs/release/pdf/fonts/public-sans/fonts/
+docs/release/pdf/fonts/public-sans/fonts/*
+!docs/release/pdf/fonts/public-sans/fonts/ttf/
+!docs/release/pdf/fonts/public-sans/fonts/ttf/**
+docs/release/pdf/out/
+docs/release/pdf/out/**
+docs/release/pdf/output/
+docs/release/pdf/output/**
 docs-archive/
 
 ## Internal tooling

@@ -107,7 +107,7 @@ class TestTransformResultMultiRow:
             PipelineRow({"other": "x"}, contract_b),
         ]
         with pytest.raises(PluginContractViolation, match="inconsistent contracts"):
-            TransformResult.success_multi(rows, success_reason={"action": "expand"})
+            TransformResult.success_multi(rows, success_reason={"action": "split"})
 
     def test_success_multi_accepts_same_contract(self) -> None:
         """success_multi accepts rows that all share the same contract instance."""
@@ -116,7 +116,7 @@ class TestTransformResultMultiRow:
             PipelineRow({"value": 1}, contract),
             PipelineRow({"value": 2}, contract),
         ]
-        result = TransformResult.success_multi(rows, success_reason={"action": "expand"})
+        result = TransformResult.success_multi(rows, success_reason={"action": "split"})
         assert result.is_multi_row
 
     def test_transform_result_has_output_data(self) -> None:
@@ -202,6 +202,17 @@ class TestTransformResult:
             # Using the dataclass directly to bypass factory's keyword-only arg
             TransformResult(status="success", row=make_pipeline_row({"x": 1}), reason=None)
 
+    def test_success_factory_requires_mapping_success_reason(self) -> None:
+        """Success metadata must be mapping-like at construction."""
+        with pytest.raises(ValueError, match="MUST provide success_reason as a mapping"):
+            TransformResult.success(make_pipeline_row({"x": 1}), success_reason=["not", "a", "mapping"])  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("success_reason", [{}, {"action": 123}])
+    def test_success_factory_requires_string_action(self, success_reason: Any) -> None:
+        """Success metadata must include a runtime-valid action at construction."""
+        with pytest.raises(ValueError, match=r"MUST include success_reason\['action'\]"):
+            TransformResult.success(make_pipeline_row({"x": 1}), success_reason=success_reason)
+
     def test_error_factory(self) -> None:
         """Error factory creates result with status='error' and reason."""
         reason: TransformErrorReason = {"reason": "validation_failed", "field": "count"}
@@ -269,8 +280,9 @@ class TestTransformResultErrorInvariants:
 
     def test_error_without_reason_key_raises(self) -> None:
         """status='error' payloads must include the required 'reason' key."""
+        reason_without_key: Any = {}
         with pytest.raises(ValueError, match=r"MUST include reason\['reason'\]"):
-            TransformResult.error({})
+            TransformResult.error(reason_without_key)
 
     def test_error_with_row_raises(self) -> None:
         """status='error' with row set raises ValueError."""
@@ -716,6 +728,7 @@ class TestArtifactDescriptorAuditInvariants:
         [
             "webhook://https://user:" + "redacted" + "@example.com/hook",
             "webhook://https://api.example.com/hook?token=redacted",
+            "webhook://https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value",
             "db://results@postgresql://user:" + "redacted" + "@db/app",
             "file:///tmp/output.csv?api_key=redacted",
         ],
@@ -794,6 +807,23 @@ class TestArtifactDescriptorFactories:
         assert descriptor.content_hash == "abc789"
         assert descriptor.size_bytes == 512
         assert descriptor.metadata == {"response_code": 200}
+
+    def test_for_webhook_uses_redacted_slack_path_secret(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """for_webhook stores the known-pattern sanitized URL."""
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        sanitized_url = SanitizedWebhookUrl.from_raw_url("https://hooks.slack.com/services/T00000000/B00000000/opaque_path_segment_value")
+
+        descriptor = ArtifactDescriptor.for_webhook(
+            url=sanitized_url,
+            content_hash="abc789",
+            request_size=512,
+            response_code=200,
+        )
+
+        assert descriptor.path_or_uri == "webhook://https://hooks.slack.com/services/T00000000/B00000000/REDACTED"
+        assert "opaque_path_segment_value" not in descriptor.path_or_uri
+        assert descriptor.metadata is not None
+        assert "url_fingerprint" in descriptor.metadata
 
     def test_for_webhook_with_error_response(self) -> None:
         """for_webhook captures error response codes."""

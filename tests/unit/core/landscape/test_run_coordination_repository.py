@@ -29,6 +29,7 @@ import socket
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from sqlalchemy import create_engine, event, insert, select, update
@@ -62,6 +63,13 @@ NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=UTC)
 WINDOW = 80.0
 # Past the 80s liveness window: the seat registered at NOW is expired here.
 AFTER_EXPIRY = NOW + timedelta(seconds=200)
+
+
+class _PostgresEngineWithoutPragmas:
+    dialect = type("_Dialect", (), {"name": "postgresql"})()
+
+    def connect(self) -> None:
+        raise AssertionError("SQLite PRAGMA probe should not run for PostgreSQL engines")
 
 
 @pytest.fixture
@@ -666,6 +674,13 @@ class TestPragmaProbe:
         with pytest.raises(AuditIntegrityError, match="not opened through LandscapeDB"):
             RunCoordinationRepository(Tier1Engine(bare))
         bare.dispose()
+
+    def test_postgresql_engine_does_not_run_sqlite_pragma_probe(self) -> None:
+        engine = Tier1Engine(cast(Engine, _PostgresEngineWithoutPragmas()))
+
+        repo = RunCoordinationRepository(engine)
+
+        assert isinstance(repo, RunCoordinationRepository)
 
 
 class TestEventLedgerDiscipline:

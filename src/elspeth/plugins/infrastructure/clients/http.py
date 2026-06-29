@@ -52,6 +52,25 @@ if TYPE_CHECKING:
     from elspeth.core.rate_limit.limiter import RateLimiter
 
 
+class HTTPResponseBodyTooLargeError(httpx.HTTPError):
+    """Raised when an audited HTTP response exceeds the configured streaming cap."""
+
+    def __init__(
+        self,
+        *,
+        url: str,
+        body_size: int,
+        max_body_bytes: int,
+        response_payload: HTTPCallResponse,
+    ) -> None:
+        super().__init__(f"response body {body_size} bytes exceeds max_response_body_bytes {max_body_bytes} for {url}")
+        self.url = url
+        self.body_size = body_size
+        self.max_body_bytes = max_body_bytes
+        self.response_payload = response_payload
+        self.response_data = response_payload.to_dict()
+
+
 class AuditedHTTPClient(AuditedClientBase):
     """HTTP client that automatically records all calls to audit trail.
 
@@ -92,6 +111,7 @@ class AuditedHTTPClient(AuditedClientBase):
         limiter: RateLimiter | NoOpLimiter | None = None,
         token_id: str | None = None,
         operation_id: str | None = None,
+        max_response_body_bytes: int | None = None,
     ) -> None:
         """Initialize audited HTTP client.
 
@@ -106,11 +126,17 @@ class AuditedHTTPClient(AuditedClientBase):
             limiter: Optional rate limiter for throttling requests
             token_id: Optional token identity for telemetry correlation
             operation_id: Optional operation parent for source/sink/preflight calls
+            max_response_body_bytes: Optional streaming cap for response bodies.
+                When set, download aborts as soon as the observed body exceeds
+                this many bytes and audit records a bounded truncation marker.
         """
+        if max_response_body_bytes is not None and max_response_body_bytes <= 0:
+            raise ValueError("max_response_body_bytes must be > 0 when configured")
         super().__init__(execution, state_id, run_id, telemetry_emit, operation_id=operation_id, limiter=limiter, token_id=token_id)
         self._timeout = timeout
         self._base_url = base_url
         self._default_headers = headers or {}
+        self._max_response_body_bytes = max_response_body_bytes
         # Shared httpx.Client for connection pooling and TCP reuse.
         # httpx.Client is thread-safe; the internal pool handles concurrency.
         # Per-request timeouts override the default via timeout= kwarg.
@@ -311,6 +337,105 @@ class AuditedHTTPClient(AuditedClientBase):
         )
         return response_dto, response_dto.to_dict()
 
+    def _build_truncated_response_payload(
+        self,
+        response: httpx.Response,
+        *,
+        full_url: str,
+        observed_body_size: int,
+        redirect_count: int = 0,
+    ) -> HTTPCallResponse:
+        """Build bounded audit metadata for a response aborted by the body cap."""
+        response_dto = HTTPCallResponse(
+            status_code=response.status_code,
+            headers=self._filter_response_headers(dict(response.headers)),
+            body_size=observed_body_size,
+            body={
+                "_truncated": True,
+                "_reason": "body_too_large",
+                "_captured_body": False,
+                "_observed_body_size": observed_body_size,
+                "_max_body_bytes": self._require_response_body_cap(full_url),
+            },
+            redirect_count=redirect_count,
+        )
+        return response_dto
+
+    def _require_response_body_cap(self, full_url: str) -> int:
+        if self._max_response_body_bytes is None:
+            raise RuntimeError(f"response body cap requested for {full_url!r} but no cap is configured")
+        return self._max_response_body_bytes
+
+    def _consume_capped_response(
+        self,
+        response: httpx.Response,
+        *,
+        full_url: str,
+        redirect_count: int = 0,
+    ) -> httpx.Response:
+        """Read a streaming response, aborting as soon as it exceeds the cap."""
+        max_body_bytes = self._require_response_body_cap(full_url)
+        chunks: list[bytes] = []
+        observed_body_size = 0
+        chunk_size = min(max_body_bytes + 1, 64 * 1024)
+        for chunk in response.iter_bytes(chunk_size=chunk_size):
+            observed_body_size += len(chunk)
+            if observed_body_size > max_body_bytes:
+                response_payload = self._build_truncated_response_payload(
+                    response,
+                    full_url=full_url,
+                    observed_body_size=observed_body_size,
+                    redirect_count=redirect_count,
+                )
+                raise HTTPResponseBodyTooLargeError(
+                    url=full_url,
+                    body_size=observed_body_size,
+                    max_body_bytes=max_body_bytes,
+                    response_payload=response_payload,
+                )
+            chunks.append(chunk)
+
+        return httpx.Response(
+            response.status_code,
+            headers=response.headers,
+            content=b"".join(chunks),
+            request=response.request,
+            extensions=response.extensions,
+        )
+
+    def _request_with_optional_body_cap(
+        self,
+        client: httpx.Client,
+        method: str,
+        full_url: str,
+        *,
+        headers: dict[str, str],
+        timeout: float | None = None,
+        json: Mapping[str, Any] | None = None,
+        params: dict[str, str | int | float] | None = None,
+        extensions: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        """Send one request, streaming only when a response body cap is configured."""
+        request_kwargs: dict[str, Any] = {"headers": headers}
+        if timeout is not None:
+            request_kwargs["timeout"] = timeout
+        if json is not None or method == "POST":
+            request_kwargs["json"] = json
+        if params is not None or method == "GET":
+            request_kwargs["params"] = params
+        if extensions is not None:
+            request_kwargs["extensions"] = extensions
+
+        if self._max_response_body_bytes is None:
+            if method == "GET":
+                return client.get(full_url, **request_kwargs)
+            if method == "POST":
+                return client.post(full_url, **request_kwargs)
+            return client.request(method, full_url, **request_kwargs)
+
+        with client.stream(method, full_url, **request_kwargs) as response:
+            return self._consume_capped_response(response, full_url=full_url)
+
     def _execute_request(
         self,
         *,
@@ -372,29 +497,29 @@ class AuditedHTTPClient(AuditedClientBase):
 
         try:
             # Dispatch to the correct httpx method
-            if method == "POST":
-                response = self._client.post(
-                    full_url,
-                    json=json,
-                    headers=merged_headers,
-                    timeout=effective_timeout,
-                )
-            else:
-                response = self._client.get(
-                    full_url,
-                    params=params,
-                    headers=merged_headers,
-                    timeout=effective_timeout,
-                )
+            response = self._request_with_optional_body_cap(
+                self._client,
+                method,
+                full_url,
+                json=json,
+                params=params,
+                headers=merged_headers,
+                timeout=effective_timeout,
+            )
         except Exception as e:
             latency_ms = (time.perf_counter() - start) * 1000
+            response_payload: HTTPCallResponse | None = None
+            response_data: Mapping[str, Any] | None = None
+            if isinstance(e, HTTPResponseBodyTooLargeError):
+                response_payload = e.response_payload
+                response_data = e.response_data
 
             self._record_and_emit(
                 call_index=call_index,
                 full_url=full_url,
                 request_data=request_data,
                 response=None,
-                response_data=None,
+                response_data=response_data,
                 error_data=HTTPCallError(
                     type=type(e).__name__,
                     message=str(e),
@@ -402,7 +527,7 @@ class AuditedHTTPClient(AuditedClientBase):
                 latency_ms=latency_ms,
                 call_status=CallStatus.ERROR,
                 request_payload=request_dto,
-                response_payload=None,
+                response_payload=response_payload,
                 token_id_override=token_id,
             )
 
@@ -512,8 +637,8 @@ class AuditedHTTPClient(AuditedClientBase):
             token_id=token_id,
         )
 
-    @staticmethod
     def _send_ssrf_safe_request(
+        self,
         client: httpx.Client,
         method: str,
         connection_url: str,
@@ -524,22 +649,8 @@ class AuditedHTTPClient(AuditedClientBase):
         params: dict[str, str | int | float] | None,
     ) -> httpx.Response:
         """Send one IP-pinned request with method-specific httpx handling."""
-        if method == "GET":
-            return client.get(
-                connection_url,
-                params=params,
-                headers=headers,
-                extensions=extensions,
-            )
-        if method == "POST":
-            return client.post(
-                connection_url,
-                json=json,
-                params=params,
-                headers=headers,
-                extensions=extensions,
-            )
-        return client.request(
+        return self._request_with_optional_body_cap(
+            client,
             method,
             connection_url,
             json=json,
@@ -679,7 +790,10 @@ class AuditedHTTPClient(AuditedClientBase):
 
             response_payload: HTTPCallResponse | None = None
             error_response_data: Mapping[str, Any] | None = None
-            if response is not None:
+            if isinstance(e, HTTPResponseBodyTooLargeError):
+                response_payload = e.response_payload
+                error_response_data = e.response_data
+            elif response is not None:
                 response_payload, error_response_data = self._build_response_payload(response, request.original_url)
 
             _ = self._record_call(
@@ -901,19 +1015,23 @@ class AuditedHTTPClient(AuditedClientBase):
                     timeout=timeout,
                     follow_redirects=False,
                 ) as hop_client:
-                    response = hop_client.get(
+                    response = self._request_with_optional_body_cap(
+                        hop_client,
+                        "GET",
                         redirect_request.connection_url,
                         headers=hop_headers,
                         extensions=extensions if extensions else None,
                     )
             except Exception as hop_err:
                 hop_latency_ms = (time.perf_counter() - hop_start) * 1000
+                hop_response_payload = hop_err.response_payload if isinstance(hop_err, HTTPResponseBodyTooLargeError) else None
                 # Record the failed hop in the audit trail so lineage is complete
                 self._record_call(
                     call_index=hop_call_index,
                     call_type=CallType.HTTP_REDIRECT,
                     status=CallStatus.ERROR,
                     request_data=hop_request_dto,
+                    response_data=hop_response_payload,
                     error=HTTPCallError(
                         type=type(hop_err).__name__,
                         message=str(hop_err),

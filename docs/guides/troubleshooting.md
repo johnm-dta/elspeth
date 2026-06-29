@@ -458,7 +458,12 @@ auto-drop:
    over the partial pipeline you had at the moment of the drop, so you
    are not starting from scratch.
 4. If the LLM keeps producing the same broken chain on similar inputs,
-   that is a real bug — open an issue with the chat history attached.
+   that is a real bug. Open an issue with a sanitized reproduction:
+   include the `drop_reason`, the validator rejection text, the ELSPETH
+   version, and the minimal pipeline shape needed to reproduce it.
+   Do not attach raw composer chat history, session exports, blob contents,
+   sample rows, secret references, tokens, PII, URLs, or organization-specific
+   identifiers.
 
 ---
 
@@ -541,7 +546,9 @@ If you're still stuck:
    - ELSPETH version (`elspeth --version`)
    - Python version (`python --version`)
    - Full error message and stack trace
-   - Sanitized configuration (remove secrets)
+   - Sanitized configuration or reproduction steps
+   - Do not attach raw composer chat history; remove secrets, tokens, PII,
+     blob contents, sample rows, URLs, and organization-specific identifiers
 
 ---
 

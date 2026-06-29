@@ -21,7 +21,7 @@ from dataclasses import fields
 from types import MappingProxyType
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import find, given, settings
 from hypothesis import strategies as st
 
 from elspeth.contracts import PendingOutcome, RunStatus, TerminalOutcome, TerminalPath, TokenInfo
@@ -76,6 +76,7 @@ def aggregation_flush_results(draw: st.DrawFn) -> AggregationFlushResult:
         rows_forked=draw(counter_values),
         rows_expanded=draw(counter_values),
         rows_buffered=draw(counter_values),
+        rows_diverted=draw(counter_values),
         routed_destinations=draw(routed_dests),
     )
 
@@ -104,6 +105,7 @@ def execution_counters(draw: st.DrawFn) -> ExecutionCounters:
         rows_coalesce_failed=draw(counter_values),
         rows_expanded=draw(counter_values),
         rows_buffered=draw(counter_values),
+        rows_diverted=draw(counter_values),
         routed_destinations=Counter(draw(routed_dests)),
     )
 
@@ -201,6 +203,18 @@ def _make_row_result(
     )
 
 
+class TestCounterStrategyCoverage:
+    """Strategy smoke tests for live audit counters."""
+
+    def test_flush_strategy_can_generate_rows_diverted(self) -> None:
+        result = find(aggregation_flush_results(), lambda value: value.rows_diverted > 0)
+        assert result.rows_diverted > 0
+
+    def test_execution_counter_strategy_can_generate_rows_diverted(self) -> None:
+        counters = find(execution_counters(), lambda value: value.rows_diverted > 0)
+        assert counters.rows_diverted > 0
+
+
 # =============================================================================
 # AggregationFlushResult.__add__ Monoid Properties
 # =============================================================================
@@ -225,6 +239,7 @@ class TestFlushResultMonoidProperties:
         assert ab.rows_forked == ba.rows_forked
         assert ab.rows_expanded == ba.rows_expanded
         assert ab.rows_buffered == ba.rows_buffered
+        assert ab.rows_diverted == ba.rows_diverted
         assert ab.routed_destinations == ba.routed_destinations
 
     @given(
@@ -252,6 +267,7 @@ class TestFlushResultMonoidProperties:
         assert left.rows_forked == right.rows_forked
         assert left.rows_expanded == right.rows_expanded
         assert left.rows_buffered == right.rows_buffered
+        assert left.rows_diverted == right.rows_diverted
         assert left.routed_destinations == right.routed_destinations
 
     @given(a=aggregation_flush_results())
@@ -270,6 +286,7 @@ class TestFlushResultMonoidProperties:
         assert result.rows_forked == a.rows_forked
         assert result.rows_expanded == a.rows_expanded
         assert result.rows_buffered == a.rows_buffered
+        assert result.rows_diverted == a.rows_diverted
         assert result.routed_destinations == a.routed_destinations
 
     @given(a=aggregation_flush_results())
@@ -288,6 +305,7 @@ class TestFlushResultMonoidProperties:
         assert result.rows_forked == a.rows_forked
         assert result.rows_expanded == a.rows_expanded
         assert result.rows_buffered == a.rows_buffered
+        assert result.rows_diverted == a.rows_diverted
         assert result.routed_destinations == a.routed_destinations
 
     @given(a=aggregation_flush_results(), b=aggregation_flush_results())
@@ -305,6 +323,7 @@ class TestFlushResultMonoidProperties:
         assert result.rows_forked == a.rows_forked + b.rows_forked
         assert result.rows_expanded == a.rows_expanded + b.rows_expanded
         assert result.rows_buffered == a.rows_buffered + b.rows_buffered
+        assert result.rows_diverted == a.rows_diverted + b.rows_diverted
 
     @given(a=aggregation_flush_results(), b=aggregation_flush_results())
     @settings(max_examples=100)
@@ -340,6 +359,7 @@ class TestFlushResultMonoidProperties:
         assert zero.rows_forked == 0
         assert zero.rows_expanded == 0
         assert zero.rows_buffered == 0
+        assert zero.rows_diverted == 0
         assert zero.routed_destinations == {}
 
 
@@ -365,6 +385,7 @@ class TestAccumulateFlushResultProperties:
         before_forked = counters.rows_forked
         before_expanded = counters.rows_expanded
         before_buffered = counters.rows_buffered
+        before_diverted = counters.rows_diverted
         dict(counters.routed_destinations)
 
         counters.accumulate_flush_result(flush)
@@ -378,6 +399,7 @@ class TestAccumulateFlushResultProperties:
         assert counters.rows_forked == before_forked + flush.rows_forked
         assert counters.rows_expanded == before_expanded + flush.rows_expanded
         assert counters.rows_buffered == before_buffered + flush.rows_buffered
+        assert counters.rows_diverted == before_diverted + flush.rows_diverted
 
     @given(counters=execution_counters(), flush=aggregation_flush_results())
     @settings(max_examples=100)
@@ -400,6 +422,7 @@ class TestAccumulateFlushResultProperties:
         before_failed = counters.rows_failed
         before_routed_success = counters.rows_routed_success
         before_routed_failure = counters.rows_routed_failure
+        before_diverted = counters.rows_diverted
         before_dests = dict(counters.routed_destinations)
 
         counters.accumulate_flush_result(AggregationFlushResult())
@@ -408,6 +431,7 @@ class TestAccumulateFlushResultProperties:
         assert counters.rows_failed == before_failed
         assert counters.rows_routed_success == before_routed_success
         assert counters.rows_routed_failure == before_routed_failure
+        assert counters.rows_diverted == before_diverted
         assert dict(counters.routed_destinations) == before_dests
 
     @given(counters=execution_counters())
@@ -460,6 +484,7 @@ class TestAccumulateFlushResultProperties:
             rows_coalesce_failed=counters.rows_coalesce_failed,
             rows_expanded=counters.rows_expanded,
             rows_buffered=counters.rows_buffered,
+            rows_diverted=counters.rows_diverted,
             routed_destinations=Counter(counters.routed_destinations),
         )
         for flush in flushes:
@@ -478,6 +503,7 @@ class TestAccumulateFlushResultProperties:
             rows_coalesce_failed=counters.rows_coalesce_failed,
             rows_expanded=counters.rows_expanded,
             rows_buffered=counters.rows_buffered,
+            rows_diverted=counters.rows_diverted,
             routed_destinations=Counter(counters.routed_destinations),
         )
         total_flush = AggregationFlushResult()
@@ -495,6 +521,7 @@ class TestAccumulateFlushResultProperties:
         assert seq_counters.rows_forked == sum_counters.rows_forked
         assert seq_counters.rows_expanded == sum_counters.rows_expanded
         assert seq_counters.rows_buffered == sum_counters.rows_buffered
+        assert seq_counters.rows_diverted == sum_counters.rows_diverted
         assert dict(seq_counters.routed_destinations) == dict(sum_counters.routed_destinations)
 
 
@@ -524,6 +551,7 @@ class TestToRunResultProperties:
         assert result.rows_coalesce_failed == counters.rows_coalesce_failed
         assert result.rows_expanded == counters.rows_expanded
         assert result.rows_buffered == counters.rows_buffered
+        assert result.rows_diverted == counters.rows_diverted
 
     @given(counters=execution_counters())
     @settings(max_examples=100)
@@ -804,6 +832,7 @@ class TestRunResultFieldProperties:
         assert result.rows_coalesce_failed == 0
         assert result.rows_expanded == 0
         assert result.rows_buffered == 0
+        assert result.rows_diverted == 0
         assert result.routed_destinations == {}
 
     @given(counters=execution_counters())

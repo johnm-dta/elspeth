@@ -20,7 +20,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -455,7 +455,7 @@ def _write_duplicate_widget_lookup_entries(
 
 def _live_fingerprint_for_widget(root: Path) -> str:
     """Run the scanner once to grab the fingerprint of the R1 finding."""
-    return _live_widget_finding(root).fingerprint
+    return cast(str, _live_widget_finding(root).fingerprint)
 
 
 def _live_widget_finding(root: Path) -> Any:
@@ -1652,6 +1652,19 @@ def test_cli_reaudit_invalid_since_exits_2(tmp_path: Path, capsys: pytest.Captur
     assert "ISO-8601" in captured.err
 
 
+@pytest.mark.parametrize("limit", ["0", "-5"])
+def test_cli_reaudit_rejects_non_positive_limit(tmp_path: Path, capsys: pytest.CaptureFixture[str], limit: str) -> None:
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    with pytest.raises(SystemExit) as exc_info:
+        main([*_reaudit_argv(root, allowlist_dir), "--limit", limit])
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert f"expected a positive integer, got '{limit}'" in captured.err
+
+
 def test_cli_reaudit_unsupported_rule_exits_2(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
@@ -2244,6 +2257,38 @@ def _extract_run_id_from_stderr(stderr: str) -> str:
     return match.group(1)
 
 
+def test_reaudit_sidecar_path_requires_generated_run_id_shape(tmp_path: Path) -> None:
+    """Recovery run IDs must not be usable as path fragments."""
+    from elspeth_lints.core.reaudit_sidecar import sidecar_path_for
+
+    allowlist_dir = tmp_path / "allowlist"
+    valid_run_id = "a" * 32
+
+    assert sidecar_path_for(allowlist_dir, valid_run_id) == allowlist_dir / ".reaudit-state" / f"{valid_run_id}.jsonl"
+
+    for bad_run_id in ("../outside", "../../other/state", "/tmp/outside", "ABCDEF" * 5 + "AB", "g" * 32, "short"):
+        with pytest.raises(ValueError, match="run_id"):
+            sidecar_path_for(allowlist_dir, bad_run_id)
+
+
+@pytest.mark.parametrize("flag", ["--render-incomplete", "--resume"])
+def test_cli_reaudit_recovery_flags_reject_invalid_run_id(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    flag: str,
+) -> None:
+    """Recovery flags reject untrusted run IDs before opening sidecar paths."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+
+    exit_code = _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir, extra_args=[flag, "../outside"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "reaudit error:" in captured.err
+    assert "run_id" in captured.err
+
+
 def test_t6b_sidecar_happy_path_writes_header_outcomes_trailer(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A normal sweep writes header + N outcome lines + trailer.
 
@@ -2264,7 +2309,8 @@ def test_t6b_sidecar_happy_path_writes_header_outcomes_trailer(tmp_path: Path, c
     assert lines[0]["type"] == "header"
     assert lines[0]["run_id"] == run_id
     assert lines[0]["total_entries"] == 3
-    assert lines[0]["schema_version"] == 5
+    assert lines[0]["schema_version"] == 6
+    assert lines[0]["judge_transport"] == TRANSPORT_OPENROUTER
     assert lines[0]["rule_filter"] == "trust_tier.tier_model"
     outcome_lines = [line for line in lines if line["type"] == "outcome"]
     assert len(outcome_lines) == 3
@@ -2462,6 +2508,59 @@ def test_t6b_resume_rejects_allowlist_edit_via_header_mismatch(tmp_path: Path, c
     assert "hash drift" in err
 
 
+def test_t6b_resume_rejects_judge_transport_mismatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Changing --judge-transport between sweep and resume crashes the resume."""
+    root, _target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    _write_n_duplicate_entries(allowlist_dir, root, count=3)
+
+    def _accepted_response(*, transport: str) -> JudgeResponse:
+        return JudgeResponse(
+            verdict=JudgeVerdict.ACCEPTED,
+            model_id=DEFAULT_AGENT_JUDGE_MODEL if transport == TRANSPORT_AGENT else DEFAULT_JUDGE_MODEL,
+            judge_rationale="still a genuine Tier-3 boundary",
+            recorded_at=datetime.now(UTC),
+            should_use_decorator=None,
+            confidence=0.91,
+            prompt_tokens_total=4000,
+            prompt_tokens_cached=0,
+            policy_hash=JUDGE_POLICY_HASH,
+            judge_transport=transport,
+        )
+
+    initial_calls = 0
+
+    def _initial_judge(_request: JudgeRequest, **kwargs: Any) -> JudgeResponse:
+        nonlocal initial_calls
+        initial_calls += 1
+        if initial_calls == 1:
+            return _accepted_response(transport=kwargs["transport"])
+        raise KeyboardInterrupt()
+
+    with (
+        patch("elspeth_lints.core.reaudit.call_judge", side_effect=_initial_judge),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        _run_cli_reaudit(root=root, allowlist_dir=allowlist_dir)
+    captured = capsys.readouterr()
+    run_id = _extract_run_id_from_stderr(captured.err)
+
+    resumed_judge = MagicMock(return_value=_accepted_response(transport=TRANSPORT_AGENT))
+    with patch("elspeth_lints.core.reaudit.call_judge", resumed_judge):
+        resume_exit = _run_cli_reaudit(
+            root=root,
+            allowlist_dir=allowlist_dir,
+            extra_args=["--resume", run_id, "--judge-transport", "agent"],
+        )
+
+    assert resume_exit == 2
+    assert resumed_judge.call_count == 0
+    err = capsys.readouterr().err
+    assert "judge transport" in err
+    assert TRANSPORT_OPENROUTER in err
+    assert TRANSPORT_AGENT in err
+
+
 def test_t6b_fsync_called_per_outcome(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Each outcome write triggers a flush + os.fsync for durability.
 
@@ -2472,8 +2571,6 @@ def test_t6b_fsync_called_per_outcome(tmp_path: Path, monkeypatch: pytest.Monkey
     """
     import os as _os
 
-    from elspeth_lints.core import reaudit_sidecar
-
     fsync_calls: list[int] = []
     real_fsync = _os.fsync
 
@@ -2481,7 +2578,7 @@ def test_t6b_fsync_called_per_outcome(tmp_path: Path, monkeypatch: pytest.Monkey
         fsync_calls.append(fd)
         real_fsync(fd)
 
-    monkeypatch.setattr(reaudit_sidecar.os, "fsync", spy_fsync)
+    monkeypatch.setattr("elspeth_lints.core.reaudit_sidecar.os.fsync", spy_fsync)
 
     root, _target = _build_source_tree(tmp_path)
     allowlist_dir = _build_allowlist_dir(tmp_path)
@@ -2893,6 +2990,98 @@ def test_t6d_resume_after_sigkill_truncates_partial_line_and_appends_cleanly(tmp
     assert partial_prefix not in final_bytes, "partial prefix bytes survived truncation — T6d truncation point was wrong"
 
 
+def test_resume_preserves_complete_unterminated_final_outcome(tmp_path: Path) -> None:
+    """A complete JSON outcome without its newline is durable and must not be truncated."""
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarHeader,
+        SidecarWriter,
+        compute_allowlist_hash,
+        load_sidecar,
+        sidecar_path_for,
+    )
+
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    run_id = "c" * 32
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+    header = SidecarHeader(
+        run_id=run_id,
+        started_at=datetime.now(UTC),
+        total_entries=3,
+        allowlist_path=str(allowlist_dir),
+        allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        judge_transport=TRANSPORT_OPENROUTER,
+        rule_filter="trust_tier.tier_model",
+        since_iso=None,
+        limit=None,
+        include_pre_judge=False,
+    )
+    with SidecarWriter(sidecar, header) as writer:
+        for index in range(3):
+            writer.write_outcome(
+                _fixed_outcome(
+                    key=f"entry-{index}",
+                    divergence=ReauditDivergence.STILL_AGREES,
+                    original_verdict=JudgeVerdict.ACCEPTED,
+                    fresh_verdict=JudgeVerdict.ACCEPTED,
+                    fresh_rationale="ok",
+                )
+            )
+
+    lines = sidecar.read_text(encoding="utf-8").splitlines(keepends=True)
+    sidecar.write_bytes("".join(lines).rstrip("\n").encode("utf-8"))
+    assert not sidecar.read_bytes().endswith(b"\n")
+    loaded_before = load_sidecar(sidecar)
+    assert len(loaded_before.outcomes) == 3
+
+    with SidecarWriter(sidecar, header, append=True, on_resume_locked=lambda loaded: None):
+        pass
+
+    loaded_after = load_sidecar(sidecar)
+    assert len(loaded_after.outcomes) == 3
+    assert loaded_after.classified_keys == loaded_before.classified_keys
+    assert sidecar.read_bytes().endswith(b"\n")
+
+
+def test_resume_preserves_complete_unterminated_header_only_sidecar(tmp_path: Path) -> None:
+    """A header-only sidecar missing its newline must stay readable on resume."""
+    from elspeth_lints.core.reaudit_sidecar import (
+        SidecarHeader,
+        SidecarWriter,
+        compute_allowlist_hash,
+        load_sidecar,
+        sidecar_path_for,
+    )
+
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    run_id = "d" * 32
+    sidecar = sidecar_path_for(allowlist_dir, run_id)
+    header = SidecarHeader(
+        run_id=run_id,
+        started_at=datetime.now(UTC),
+        total_entries=0,
+        allowlist_path=str(allowlist_dir),
+        allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        judge_transport=TRANSPORT_OPENROUTER,
+        rule_filter="trust_tier.tier_model",
+        since_iso=None,
+        limit=None,
+        include_pre_judge=False,
+    )
+    with SidecarWriter(sidecar, header):
+        pass
+    sidecar.write_bytes(sidecar.read_text(encoding="utf-8").rstrip("\n").encode("utf-8"))
+    assert not sidecar.read_bytes().endswith(b"\n")
+    assert load_sidecar(sidecar).header.run_id == run_id
+
+    with SidecarWriter(sidecar, header, append=True, on_resume_locked=lambda loaded: None):
+        pass
+
+    loaded_after = load_sidecar(sidecar)
+    assert loaded_after.header.run_id == run_id
+    assert loaded_after.outcomes == ()
+    assert sidecar.read_bytes().endswith(b"\n")
+
+
 def test_t6d_truncate_is_idempotent_on_clean_sidecar(tmp_path: Path) -> None:
     """A newline-terminated sidecar is byte-identical before/after writer entry.
 
@@ -2942,6 +3131,7 @@ def test_t6d_truncate_is_idempotent_on_clean_sidecar(tmp_path: Path) -> None:
         total_entries=3,
         allowlist_path=str(allowlist_dir),
         allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        judge_transport=TRANSPORT_OPENROUTER,
         rule_filter="trust_tier.tier_model",
         since_iso=None,
         limit=None,
@@ -3002,6 +3192,7 @@ def test_t6d_truncation_shrinks_file_to_last_newline_offset(tmp_path: Path) -> N
         total_entries=3,
         allowlist_path=str(allowlist_dir),
         allowlist_hash=compute_allowlist_hash(allowlist_dir),
+        judge_transport=TRANSPORT_OPENROUTER,
         rule_filter="trust_tier.tier_model",
         since_iso=None,
         limit=None,
@@ -3107,6 +3298,7 @@ def test_t6d_truncation_runs_inside_flock_window(tmp_path: Path) -> None:
             total_entries=3,
             allowlist_path=str(allowlist_dir),
             allowlist_hash=compute_allowlist_hash(allowlist_dir),
+            judge_transport=TRANSPORT_OPENROUTER,
             rule_filter="trust_tier.tier_model",
             since_iso=None,
             limit=None,
@@ -3311,13 +3503,15 @@ def test_t6c_completed_sidecar_pruned_after_retention_horizon(tmp_path: Path) ->
     # Trigger lazy cleanup by entering a fresh SidecarWriter (a new
     # run, distinct run_id). The completed-ancient sidecar must be
     # deleted; the incomplete-ancient one must persist.
-    trigger_path = allowlist_dir / ".reaudit-state" / "trigger.jsonl"
+    trigger_run_id = "e" * 32
+    trigger_path = sidecar_path_for(allowlist_dir, trigger_run_id)
     trigger_header = SidecarHeader(
-        run_id="trigger",
+        run_id=trigger_run_id,
         started_at=_datetime.now(_UTC),
         total_entries=0,
         allowlist_path=str(allowlist_dir.resolve()),
         allowlist_hash="0" * 64,
+        judge_transport=TRANSPORT_OPENROUTER,
         rule_filter="trust_tier.tier_model",
         since_iso=None,
         limit=None,

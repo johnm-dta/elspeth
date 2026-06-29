@@ -1,8 +1,9 @@
 # CI Branch Protection Runbook
 
-ELSPETH relies on one aggregate required check, `CI Success`, rather than
-requiring each individual workflow job in branch protection. This keeps GitHub
-rules stable while `ci.yaml` owns the actual required job list.
+ELSPETH relies on one aggregate required check, `CI Success`, for ordinary CI
+jobs rather than requiring each individual `ci.yaml` job in branch protection.
+The composer redaction policy gate is a separate governance check because it
+lives in its own workflow.
 
 ## Required Repository Rules
 
@@ -12,11 +13,17 @@ The `main` ruleset should enforce:
 - non-fast-forward pushes blocked
 - pull requests required before merge
 - `CI Success` required before merge
+- `redaction-gate` from the `composer-redaction-gate` workflow required before
+  merge
 - Copilot code review optional
 
-Do not require `composer-redaction-gate` globally. It is path-filtered and only
-runs when redaction-sensitive files change, so making it globally required would
-block unrelated PRs where the workflow is correctly skipped.
+The `composer-redaction-gate` workflow is intentionally not declaratively
+path-filtered. It starts for every pull request targeting `main`, `master`, or
+an `RC*` branch, then its first shell step checks whether any
+redaction-sensitive files changed. If none changed, the job exits successfully
+with a "gate not applicable" summary. This always-starts/shell-skips shape
+keeps the status check available for branch protection without leaving unrelated
+PRs blocked on a skipped required workflow.
 
 ## CODEOWNERS Compensating Control
 
@@ -53,4 +60,6 @@ Acceptance check:
 - `main` reports `protected: true`
 - the active branch ruleset targets `~DEFAULT_BRANCH`
 - the ruleset includes a required status check for `CI Success`
+- the ruleset includes the `redaction-gate` job from
+  `.github/workflows/composer-redaction-gate.yml` as a required status check
 - pull-request rules remain active

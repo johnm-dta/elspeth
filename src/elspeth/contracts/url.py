@@ -1,8 +1,15 @@
 """URL sanitization types for audit-safe storage.
 
-These types GUARANTEE URLs cannot contain credentials when stored in the audit trail.
-Callers must explicitly sanitize using the factory methods, making accidental
-secret leaks impossible at the type level.
+These types prevent supported URL credential forms from entering the audit
+trail. Callers must explicitly sanitize using the factory methods. Database
+URLs remove passwords plus sensitive query and fragment parameters; webhook URLs
+remove userinfo, sensitive query parameters, sensitive fragments, and known
+Slack incoming-webhook path tokens.
+
+Path segments are not a generic secret boundary: outside known webhook shapes,
+an opaque path segment cannot be distinguished from a routing identifier. Callers
+with path-borne secrets must avoid persisting those URLs or add a known-pattern
+sanitizer before audit storage.
 
 Usage:
     from elspeth.contracts.url import SanitizedDatabaseUrl, SanitizedWebhookUrl
@@ -12,7 +19,7 @@ Usage:
     # sanitized.sanitized_url = "postgresql://user@host/db"
     # sanitized.fingerprint = "abc123..." (HMAC of password)
 
-    # Webhook URLs - handles query params and Basic Auth
+    # Webhook URLs - handles query params, fragments, Basic Auth, and Slack hooks
     sanitized = SanitizedWebhookUrl.from_raw_url("https://api.example.com?token=sk-xxx")
     # sanitized.sanitized_url = "https://api.example.com"
     # sanitized.fingerprint = "def456..." (HMAC of token value only)
@@ -20,7 +27,7 @@ Usage:
 
 import json as json_module
 from dataclasses import dataclass
-from urllib.parse import parse_qs, unquote, unquote_plus, urlencode, urlparse, urlunparse
+from urllib.parse import ParseResult, parse_qs, unquote, unquote_plus, urlparse, urlunparse
 
 from elspeth.contracts.security import (
     SecretFingerprintError,
@@ -111,6 +118,9 @@ SENSITIVE_PARAMS = frozenset(
     }
 )
 
+_SLACK_WEBHOOK_HOSTS = frozenset({"hooks.slack.com", "hooks.slack-gov.com"})
+_KNOWN_WEBHOOK_PATH_SECRET_REDACTION = "REDACTED"
+
 
 def _strip_sensitive_param_parts(raw_params: str) -> str:
     """Remove sensitive query/fragment pairs while preserving remaining raw text."""
@@ -124,6 +134,30 @@ def _strip_sensitive_param_parts(raw_params: str) -> str:
             continue
         kept_parts.append(part)
     return "&".join(kept_parts)
+
+
+def _extract_known_webhook_path_secret(parsed: ParseResult, *, redacted_is_safe: bool = True) -> str | None:
+    """Return the path token for known webhook URL shapes, if present."""
+    hostname = (parsed.hostname or "").lower()
+    if hostname not in _SLACK_WEBHOOK_HOSTS:
+        return None
+
+    path_parts = parsed.path.split("/")
+    if len(path_parts) != 5:
+        return None
+    if path_parts[0] != "" or path_parts[1] != "services":
+        return None
+    if not all(path_parts[2:]):
+        return None
+    if redacted_is_safe and path_parts[4] == _KNOWN_WEBHOOK_PATH_SECRET_REDACTION:
+        return None
+    return unquote(path_parts[4])
+
+
+def _redact_known_webhook_path_secret(parsed: ParseResult) -> str:
+    path_parts = parsed.path.split("/")
+    path_parts[4] = _KNOWN_WEBHOOK_PATH_SECRET_REDACTION
+    return "/".join(path_parts)
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,12 +312,14 @@ class SanitizedDatabaseUrl:
 
 @dataclass(frozen=True, slots=True)
 class SanitizedWebhookUrl:
-    """Webhook URL with tokens removed. Cannot contain secrets.
+    """Webhook URL with supported credential forms removed.
 
     This is a frozen dataclass that guarantees the URL stored in `sanitized_url`
-    has had any sensitive query parameters and Basic Auth credentials removed.
-    The `fingerprint` field contains an HMAC-SHA256 of the removed secret values
-    (not the full URL) for audit traceability.
+    has had userinfo, sensitive query parameters, sensitive fragments, and known
+    Slack incoming-webhook path tokens removed. Known Slack incoming-webhook path tokens are redacted.
+    Other path-borne secrets are not generically redacted. The `fingerprint`
+    field contains an HMAC-SHA256 of the removed secret values (not the full URL)
+    for audit traceability.
 
     Use the `from_raw_url` factory method to create instances.
     """
@@ -320,6 +356,10 @@ class SanitizedWebhookUrl:
                 f"{sensitive_in_fragment}. "
                 f"Use SanitizedWebhookUrl.from_raw_url() to sanitize first."
             )
+        if _extract_known_webhook_path_secret(parsed) is not None:
+            raise ValueError(
+                "SanitizedWebhookUrl cannot contain a known webhook path secret. Use SanitizedWebhookUrl.from_raw_url() to sanitize first."
+            )
 
     @classmethod
     def from_raw_url(
@@ -331,12 +371,14 @@ class SanitizedWebhookUrl:
         """Create sanitized URL from raw webhook URL.
 
         Handles:
+        - Userinfo credentials (e.g., https://user:pass@host/path)
         - Query parameter tokens (e.g., ?token=xxx, ?api_key=xxx)
         - Fragment tokens (e.g., #access_token=xxx) - common in OAuth implicit flow
-        - Basic Auth credentials (e.g., https://user:pass@host/path)
+        - Known Slack incoming-webhook path tokens
 
         The fingerprint is computed from ONLY the secret values (not the full URL),
         so you can verify "same token was used" even if endpoint paths differ.
+        Other path-borne secrets are not generically redacted.
 
         Args:
             url: Raw webhook URL that may contain tokens
@@ -361,6 +403,7 @@ class SanitizedWebhookUrl:
         # Track which sensitive keys are present (even if empty)
         has_sensitive_query_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in query_params)
         has_sensitive_fragment_keys = any(_base_param_name(k.lower()) in SENSITIVE_PARAMS for k in fragment_params)
+        known_path_secret = _extract_known_webhook_path_secret(parsed, redacted_is_safe=False)
 
         # Collect only non-empty sensitive values for fingerprinting
         sensitive_values: list[str] = []
@@ -387,9 +430,11 @@ class SanitizedWebhookUrl:
             sensitive_values.append(unquote(parsed.username))
         if parsed.password:
             sensitive_values.append(unquote(parsed.password))
+        if known_path_secret:
+            sensitive_values.append(known_path_secret)
 
         # If no sensitive keys in query, fragment, or Basic Auth found, return URL unchanged
-        if not has_sensitive_query_keys and not has_sensitive_fragment_keys and not has_basic_auth:
+        if not has_sensitive_query_keys and not has_sensitive_fragment_keys and not has_basic_auth and known_path_secret is None:
             return cls(sanitized_url=url, fingerprint=None)
 
         # Compute fingerprint only if there are non-empty values
@@ -419,11 +464,8 @@ class SanitizedWebhookUrl:
             # else: dev mode - sanitize without fingerprint
         # else: only empty values (e.g., ?token=) - no fingerprint needed
 
-        # Remove sensitive query params
-        sanitized_params = {k: v for k, v in query_params.items() if _base_param_name(k.lower()) not in SENSITIVE_PARAMS}
-
-        # Remove sensitive fragment params
-        sanitized_fragment_params = {k: v for k, v in fragment_params.items() if _base_param_name(k.lower()) not in SENSITIVE_PARAMS}
+        sanitized_query = _strip_sensitive_param_parts(parsed.query)
+        sanitized_fragment = _strip_sensitive_param_parts(parsed.fragment)
 
         # Reconstruct netloc without ANY Basic Auth credentials
         # SECURITY: Strip entire userinfo section when credentials present
@@ -438,18 +480,16 @@ class SanitizedWebhookUrl:
         else:
             netloc = parsed.netloc
 
-        # Reconstruct fragment from sanitized params
-        # Only include fragment if there are remaining params
-        sanitized_fragment = urlencode(sanitized_fragment_params, doseq=True) if sanitized_fragment_params else ""
+        sanitized_path = _redact_known_webhook_path_secret(parsed) if known_path_secret is not None else parsed.path
 
         # Reconstruct URL without secrets
         sanitized = urlunparse(
             (
                 parsed.scheme,
                 netloc,
-                parsed.path,
+                sanitized_path,
                 parsed.params,
-                urlencode(sanitized_params, doseq=True) if sanitized_params else "",
+                sanitized_query,
                 sanitized_fragment,
             )
         )

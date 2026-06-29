@@ -590,6 +590,57 @@ def test_counter_snapshot_is_consumed_without_yaml_rescan(
     assert detail.report.overrides_in_window == 1
 
 
+def test_cli_snapshot_hash_read_error_returns_gate_broken_exit_two(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A YAML I/O failure while checking snapshot freshness is gate-broken, not policy-failed."""
+    from elspeth_lints.core.cli import main
+
+    enforce_root = _make_allowlist_dir(tmp_path)
+    enforce_dir = enforce_root / "enforce_x"
+    now = datetime(2026, 5, 23, tzinfo=UTC)
+    _write_entry(
+        enforce_dir,
+        file_name="accepted.yaml",
+        key="x.py:R1:accepted:fp=aa",
+        verdict="ACCEPTED",
+        recorded_at=now - timedelta(days=1),
+    )
+    snapshot = write_override_rate_counter_snapshot(enforce_root)
+    unreadable_yaml = enforce_dir / "accepted.yaml"
+    original_read_bytes = Path.read_bytes
+
+    def fail_allowlist_yaml_read(path: Path) -> bytes:
+        if path == unreadable_yaml:
+            raise PermissionError("permission denied for test")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_allowlist_yaml_read)
+
+    exit_code = main(
+        [
+            "check-override-rate",
+            "--allowlist-root",
+            str(enforce_root),
+            "--counter-snapshot",
+            str(snapshot.path),
+            "--window-days",
+            "30",
+            "--min-samples",
+            "1",
+            "--max-rate",
+            "0.10",
+            "--reference-time",
+            now.isoformat(),
+        ]
+    )
+
+    assert exit_code == 2
+    assert "cannot run" in capsys.readouterr().err
+
+
 def test_stale_counter_snapshot_falls_back_to_yaml_and_reports_source(tmp_path: Path) -> None:
     """Snapshot hash drift cannot hide a current YAML change."""
     enforce_root = _make_allowlist_dir(tmp_path)

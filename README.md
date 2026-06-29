@@ -232,8 +232,11 @@ elspeth explain --run <run_id> --row <row_id> \
   --database examples/threshold_gate/runs/audit.db
 
 # Resume an interrupted run
-elspeth resume <run_id>
+elspeth resume <run_id> --execute
 ```
+
+Without `--execute`, `elspeth resume <run_id>` checks whether the run can be
+resumed and reports the resume point without continuing processing.
 
 See [Your First Pipeline](docs/guides/your-first-pipeline.md) for a complete walkthrough.
 
@@ -595,7 +598,7 @@ elspeth validate --settings pipeline.yaml
 elspeth run --settings pipeline.yaml --execute
 
 # Resume an interrupted run (run_id is positional)
-elspeth resume abc123
+elspeth resume abc123 --execute
 
 # List available plugins
 elspeth plugins list

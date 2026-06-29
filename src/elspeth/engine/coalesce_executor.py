@@ -323,10 +323,8 @@ class CoalesceExecutor:
           from ``scalars`` are already recorded — re-deriving losses from
           audit and calling ``notify_branch_lost`` for a key that already
           carries them raises ``OrchestrationInvariantError`` (duplicate
-          loss). For zero-arrival loss-only keys dropped by the stale-scalars
-          arm, re-notification of genuinely-completed keys is safe: the
-          Landscape completed-keys check inside ``notify_branch_lost``
-          returns None for them.
+          loss). For zero-arrival loss-only keys restored from scalars, replay
+          dedup consults ``has_recorded_branch_loss`` before notifying again.
 
         Args:
             items: BLOCKED journal rows for coalesce barriers (all keys).
@@ -334,10 +332,10 @@ class CoalesceExecutor:
                 row. A key with journal items but no scalars entry restores
                 with empty lost_branches (the writer only emits keys with
                 recorded losses — D3). A scalars entry whose key has NO
-                journal items is STALE (that pending key flushed/completed
-                after the checkpoint — a legitimate window under D3's
-                staleness model, since the checkpoint may be older than the
-                journal) and is dropped with a log line rather than rejected.
+                journal items but non-empty lost_branches is a zero-arrival
+                pending key unless the Landscape says the key already
+                completed. Empty, unknown, or completed scalar-only entries
+                are stale and are dropped with a log line rather than rejected.
             state_ids: Per-token node_state hold id — the PENDING node_states
                 at the coalesce node, one per restored token (written at
                 accept() time, derived from audit tables). Every journal
@@ -456,43 +454,52 @@ class CoalesceExecutor:
                 lost_branches=dict(key_scalars.lost_branches) if key_scalars is not None else {},
             )
 
-        # Stale scalars: a key with a checkpoint lost_branches record but no
-        # journal items means that pending key flushed/completed after the
-        # checkpoint was written (the crash landed between the flush
-        # terminalizing the BLOCKED rows and the next checkpoint — a
-        # legitimate window under D3's staleness model, so rejecting would
-        # refuse valid resumes). Drop them, logged.
-        #
-        # NOTE: a zero-arrival pending key whose ONLY state was lost_branches
-        # (losses notified before any branch arrived) has the same signature —
-        # no BLOCKED rows — and is dropped with it. The journal is authoritative
-        # for pending membership; if a branch later arrives for such a row, a
-        # fresh pending entry forms without the loss record and resolves via
-        # timeout/flush instead of early loss-accounting (degraded latency,
-        # not corruption). The resume restore path must not re-notify losses
-        # restored from scalars; see this method's "Caller obligations".
-        for stale_key in scalars.keys() - grouped.keys():
-            slog.info(
-                "coalesce_journal_restore_dropped_stale_scalars",
-                coalesce_name=stale_key[0],
-                row_id=stale_key[1],
-                run_id=self._run_id,
-                resume_checkpoint_id=resume_checkpoint_id,
-                lost_branches=dict(scalars[stale_key].lost_branches),
-            )
-
-        # Reconstruct completed keys from Landscape (source of truth) —
-        # unchanged from the blob-restore era. This eliminates:
-        # - FIFO eviction gap (Landscape has ALL completed, not just last 10K)
-        # - Checkpoint-Landscape divergence risk
+        # Reconstruct completed keys from Landscape (source of truth) into the
+        # bounded FIFO cache. Evicted keys remain correct because accept()
+        # does an exact Landscape point lookup on cache miss.
         # Queried BEFORE any mutation: a Landscape error mid-restore must not
         # leave the executor cleared-but-unrestored.
         completed_keys = self._reconstruct_completed_keys_from_landscape()
+        completed_key_set = set(completed_keys)
+
+        # Scalar-only entries have no arrived branch payloads in the journal.
+        # If the Landscape says the key completed, the scalar is an older
+        # checkpoint image and must be dropped. Otherwise, a non-empty
+        # lost_branches scalar is the durable image of a zero-arrival pending
+        # key: restore it so a later surviving branch accounts against the
+        # recorded loss instead of forming a fresh, loss-free pending key.
+        for scalar_key in scalars.keys() - grouped.keys():
+            coalesce_name, row_id = scalar_key
+            key_scalars = scalars[scalar_key]
+            lost_branches = dict(key_scalars.lost_branches)
+            if coalesce_name in self._settings and lost_branches and scalar_key not in completed_key_set:
+                new_pending[scalar_key] = _PendingCoalesce(
+                    branches={},
+                    first_arrival=monotonic_now,
+                    lost_branches=lost_branches,
+                )
+                slog.info(
+                    "coalesce_journal_restored_loss_only_scalars",
+                    coalesce_name=coalesce_name,
+                    row_id=row_id,
+                    run_id=self._run_id,
+                    resume_checkpoint_id=resume_checkpoint_id,
+                    lost_branches=lost_branches,
+                )
+                continue
+            slog.info(
+                "coalesce_journal_restore_dropped_stale_scalars",
+                coalesce_name=coalesce_name,
+                row_id=row_id,
+                run_id=self._run_id,
+                resume_checkpoint_id=resume_checkpoint_id,
+                lost_branches=lost_branches,
+            )
 
         self._pending.clear()
         self._completed_keys.clear()
         for completed_key in completed_keys:
-            self._completed_keys[completed_key] = None
+            self._mark_completed(completed_key)
         self._pending.update(new_pending)
 
         slog.info(
@@ -510,9 +517,10 @@ class CoalesceExecutor:
         with tokens to get row_ids. Maps node_id → coalesce_name via the
         reverse of self._node_ids.
 
-        This is the source-of-truth path: the Landscape records ALL completed
-        coalesces (no FIFO eviction), so late-arrival detection works correctly
-        even for pipelines with >max_completed_keys coalesced rows.
+        This is the restore seeding path: the Landscape records all completed
+        coalesces, but the executor keeps only a bounded FIFO performance
+        cache. Late arrivals for evicted keys are rediscovered through an exact
+        Landscape point lookup.
 
         Returns the keys instead of mutating ``_completed_keys`` so the caller
         (``restore_from_journal``) can run the Landscape query BEFORE clearing
@@ -536,8 +544,8 @@ class CoalesceExecutor:
         """Check the Landscape for whether a coalesce key has completed.
 
         Cache-miss fallback for late-arrival detection. When the FIFO cache
-        (self._completed_keys) doesn't contain a key, this queries the
-        Landscape before allowing a new pending entry. If the Landscape
+        (self._completed_keys) doesn't contain a key, this queries the exact
+        Landscape row before allowing a new pending entry. If the Landscape
         shows the coalesce completed, the key is added to the cache and
         the token is treated as a late arrival.
 
@@ -555,17 +563,9 @@ class CoalesceExecutor:
             return False
         node_id = self._node_ids[coalesce_name]
 
-        completed_pairs = self._execution.get_completed_row_ids_for_nodes(
-            run_id=self._run_id,
-            node_ids=frozenset({str(node_id)}),
-        )
-
-        # Check if any of the completed pairs match our row_id
-        for _nid, completed_row_id in completed_pairs:
-            if completed_row_id == row_id:
-                # Cache hit: add to FIFO so subsequent lookups are fast
-                self._completed_keys[(coalesce_name, row_id)] = None
-                return True
+        if self._execution.has_completed_row_for_node(run_id=self._run_id, node_id=str(node_id), row_id=row_id):
+            self._mark_completed((coalesce_name, row_id))
+            return True
         return False
 
     def _mark_completed(self, key: tuple[str, str]) -> None:
@@ -1326,11 +1326,10 @@ class CoalesceExecutor:
                 original_name = branch_original_names[(fc.normalized_name, winning_branch)]
             else:
                 # Precomputed-declared field not contributed by any branch
-                # (e.g., nullable field with no data this row). fallback_original_names
-                # is built from every branch contract's fields, so a precomputed field
-                # absent here means precomputed and branch contracts disagree on
-                # schema — crash on the integrity violation.
-                original_name = fallback_original_names[fc.normalized_name]
+                # (e.g., optional field from a branch lost under a partial
+                # policy). When no arrived branch contract can supply its source
+                # header, keep the normalized name from the precomputed schema.
+                original_name = fallback_original_names.get(fc.normalized_name, fc.normalized_name)
             merged_fields.append(
                 FieldContract(
                     normalized_name=fc.normalized_name,
@@ -1513,8 +1512,16 @@ class CoalesceExecutor:
             )
 
         elif settings.policy == "first":
+            if len(pending.branches) == 0:
+                return self._fail_pending(
+                    settings,
+                    key,
+                    step,
+                    failure_reason="first_timeout_no_arrivals" if is_timeout else "all_branches_lost",
+                    is_timeout=is_timeout,
+                )
             raise RuntimeError(
-                f"Invariant violation: 'first' policy should never have pending entries "
+                f"Invariant violation: 'first' policy should never have arrived pending branches "
                 f"at coalesce '{coalesce_name}', row_id='{key[1]}'. "
                 f"'first' merges immediately on arrival — bug in accept()."
             )
@@ -1530,6 +1537,8 @@ class CoalesceExecutor:
 
         For best_effort policy, merges whatever has arrived when timeout expires.
         For quorum policy with timeout, merges if quorum met when timeout expires.
+        For first policy, only a zero-arrival loss-created pending entry can
+        time out; that fails cleanly rather than tripping the arrival invariant.
 
         Step position is resolved internally via the injected StepResolver
         from the coalesce point's registered node_id.
@@ -1585,7 +1594,9 @@ class CoalesceExecutor:
         For best_effort policy: merges whatever arrived.
         For quorum policy: merges if quorum met, returns failure otherwise.
         For require_all policy: returns failure (never partial merge).
-        For first policy: should never have pending (merges immediately).
+        For first policy: arrived tokens should never be pending (merges
+        immediately); a zero-arrival entry created by branch-loss accounting
+        fails cleanly.
 
         Step positions are resolved internally via the injected StepResolver
         from each coalesce point's registered node_id.
@@ -1740,7 +1751,7 @@ class CoalesceExecutor:
         - require_all: ANY lost branch = immediate failure
         - quorum: fail if quorum is now impossible, merge if already met
         - best_effort: merge immediately if all branches accounted for
-        - first: no action (should have merged on first arrival)
+        - first: fail if all branches are lost before first arrival
 
         Args:
             settings: Coalesce settings for the affected point
@@ -1796,8 +1807,16 @@ class CoalesceExecutor:
             return None  # Still waiting for remaining branches
 
         elif settings.policy == "first":
-            # first: should already have merged on first arrival
-            # If no arrivals yet, nothing to merge
+            # first: if every branch is lost before any arrival, fail the row
+            # cleanly. If any branch arrived, accept() should already have
+            # merged and marked the key complete.
+            if arrived_count == 0 and arrived_count + lost_count >= total_branches:
+                return self._fail_pending(
+                    settings,
+                    key,
+                    step,
+                    failure_reason="all_branches_lost",
+                )
             return None
 
         else:

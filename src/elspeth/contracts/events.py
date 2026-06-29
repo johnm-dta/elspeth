@@ -374,7 +374,7 @@ class ExternalCallCompleted(TelemetryEvent):
         call_type: Type of external call (llm, http, sql, filesystem)
         provider: Service provider (e.g., "azure-openai", "anthropic")
         status: Call result (success, error)
-        latency_ms: Call duration in milliseconds
+        latency_ms: Call duration in milliseconds, or None when unmeasured
         request_hash: Hash of request payload for debugging (optional)
         response_hash: Hash of response payload for debugging (optional)
         request_payload: Full request data for observability (optional).
@@ -389,7 +389,7 @@ class ExternalCallCompleted(TelemetryEvent):
     call_type: CallType
     provider: str
     status: CallStatus
-    latency_ms: float
+    latency_ms: float | None
     state_id: str | None = None
     operation_id: str | None = None
     token_id: str | None = None

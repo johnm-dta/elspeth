@@ -134,4 +134,4 @@ composer-authoring additions; RC-5.3 introduces no new guarantees).
 **Released by:** *(awaiting operator sign-off — date and signatory to be inserted on publication)*
 **Document version:** 1.0-draft
 **Companion documents:** `elspeth-progress-rc1-to-rc5.md`, `elspeth-velocity-rc1-to-rc5.md`, `guarantees.md`
-**Canonical sources of truth referenced:** `/CHANGELOG.md` (RC-3+), Filigree work tracker (`filigree session-context`), `/docs/architecture/`
+**Canonical sources of truth referenced:** `/CHANGELOG.md` (RC-3+), `/docs/release/guarantees.md`, `/docs/architecture/`

@@ -158,6 +158,19 @@ class TestExportLandscapeJSON:
         ):
             export_landscape(db, "run-1", settings, factory)
 
+    @pytest.mark.parametrize("key_value", ["", "   "])
+    def test_signing_with_empty_env_key_raises(self, key_value: str) -> None:
+        """Signing enabled with an empty ELSPETH_SIGNING_KEY raises ValueError."""
+        db = Mock()
+        settings = self._make_settings(sign=True)
+        _sink, factory = _make_sink_and_factory()
+
+        with (
+            patch.dict("os.environ", {"ELSPETH_SIGNING_KEY": key_value}, clear=True),
+            pytest.raises(ValueError, match="ELSPETH_SIGNING_KEY"),
+        ):
+            export_landscape(db, "run-1", settings, factory)
+
     def test_sink_close_called_when_write_raises(self) -> None:
         """sink.close() must be called even when sink.write() raises."""
         db = Mock()

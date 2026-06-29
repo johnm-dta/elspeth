@@ -459,6 +459,44 @@ def run_resume_processing_loop(
     return interrupted_by_shutdown
 
 
+def _resume_failure_result_from_baseline(
+    run_id: str,
+    *,
+    baseline: ExecutionCounters | None,
+    partial_result: RunResult,
+) -> RunResult:
+    """Build FAILED ceremony counters from pre-resume audit + resume-local partials."""
+    if baseline is None:
+        return partial_result
+
+    counters = ExecutionCounters(
+        rows_processed=baseline.rows_processed + partial_result.rows_processed,
+        rows_succeeded=baseline.rows_succeeded + partial_result.rows_succeeded,
+        rows_failed=baseline.rows_failed + partial_result.rows_failed,
+        rows_routed_success=baseline.rows_routed_success + partial_result.rows_routed_success,
+        rows_routed_failure=baseline.rows_routed_failure + partial_result.rows_routed_failure,
+        rows_quarantined=baseline.rows_quarantined + partial_result.rows_quarantined,
+        rows_forked=baseline.rows_forked + partial_result.rows_forked,
+        rows_coalesced=baseline.rows_coalesced + partial_result.rows_coalesced,
+        rows_coalesce_failed=baseline.rows_coalesce_failed + partial_result.rows_coalesce_failed,
+        rows_expanded=baseline.rows_expanded + partial_result.rows_expanded,
+        rows_buffered=baseline.rows_buffered + partial_result.rows_buffered,
+        rows_diverted=baseline.rows_diverted + partial_result.rows_diverted,
+    )
+    counters.routed_destinations.update(baseline.routed_destinations)
+    counters.routed_destinations.update(partial_result.routed_destinations)
+    return counters.to_run_result(run_id, RunStatus.FAILED)
+
+
+def _derive_resume_failure_counter_baseline(factory: RecorderFactory, run_id: str) -> ExecutionCounters | None:
+    """Best-effort counter baseline for FAILED resume ceremony enrichment."""
+    try:
+        _terminal_status, counters = derive_resume_terminal_status_from_audit(factory, run_id)
+    except Exception:
+        return None
+    return counters
+
+
 class ResumeCoordinator:
     """Resume-path orchestration extracted from ``Orchestrator``.
 
@@ -792,6 +830,7 @@ class ResumeCoordinator:
         # When shutdown_event is provided (testing), skip signal handler
         # installation and use the caller's event directly.
         shutdown_ctx = nullcontext(shutdown_event) if shutdown_event is not None else shutdown_handler_context()
+        resume_failure_counter_baseline: ExecutionCounters | None = None
 
         try:
             incomplete_sources = {
@@ -801,6 +840,9 @@ class ResumeCoordinator:
             }
             if incomplete_sources:
                 raise IncompleteSourceResumeError(run_id, incomplete_sources)
+
+            if unprocessed_rows or state.has_restored_barrier_work:
+                resume_failure_counter_baseline = _derive_resume_failure_counter_baseline(factory, run_id)
 
             # F1 QUIESCENCE GATE (co-repointed with the buffered-token
             # exclusion, Task 3.2): journal BLOCKED barrier rows are excluded
@@ -1008,12 +1050,17 @@ class ResumeCoordinator:
         except _RunFailedWithPartialResultError as failed_exc:
             # ADR-030 §A.3: stop the heartbeat thread before the seat is released.
             _heartbeat.stop()
+            failed_result = _resume_failure_result_from_baseline(
+                run_id,
+                baseline=resume_failure_counter_baseline,
+                partial_result=failed_exc.partial_result,
+            )
             with best_effort("Partial-result failure ceremony on resume", run_id=run_id):
                 self._ceremony.emit_failed_ceremony(
                     run_id,
                     factory,
                     resume_start_time,
-                    failed_exc.partial_result,
+                    failed_result,
                     token=coordination_token,
                 )
                 # Seat hygiene: after the FAILED finalize succeeded.
@@ -1108,14 +1155,18 @@ class ResumeCoordinator:
         # nullcontext if no rows are reprocessed, which is irrelevant
         # because the early-exit path skips this method entirely.
         preflight_retry_manager = RetryManager(RuntimeRetryConfig.from_settings(settings.retry)) if settings is not None else None
-        run_transform_runtime_preflights(
-            factory,
-            run_id,
-            config,
-            run_ctx.ctx,
-            retry_manager=preflight_retry_manager,
-            shutdown_event=shutdown_event,
-        )
+        try:
+            run_transform_runtime_preflights(
+                factory,
+                run_id,
+                config,
+                run_ctx.ctx,
+                retry_manager=preflight_retry_manager,
+                shutdown_event=shutdown_event,
+            )
+        except BaseException:
+            cleanup_plugins(config, run_ctx.ctx, include_source=False)
+            raise
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),
@@ -1127,6 +1178,12 @@ class ResumeCoordinator:
             coalesce_executor=run_ctx.coalesce_executor,
             coalesce_node_map=run_ctx.coalesce_node_map,
         )
+        source_on_success_by_source: dict[NodeID, str] = {}
+        for source_name, source_id in artifacts.source_id_map.items():
+            source_on_success = config.sources[source_name].on_success
+            if source_on_success is None:
+                raise OrchestrationInvariantError(f"Cannot resume rows from source {source_name!r}: source on_success routing is missing.")
+            source_on_success_by_source[source_id] = source_on_success
 
         try:
             # 3. Process loop (resume path)
@@ -1139,9 +1196,7 @@ class ResumeCoordinator:
                 run_id=run_id,
                 resume_checkpoint_id=resume_checkpoint_id,
                 schema_contracts_by_source=schema_contracts_by_source,
-                source_on_success_by_source={
-                    source_id: config.sources[source_name].on_success for source_name, source_id in artifacts.source_id_map.items()
-                },
+                source_on_success_by_source=source_on_success_by_source,
                 shutdown_event=shutdown_event,
                 check_coordination_latch=check_coordination_latch,
             )

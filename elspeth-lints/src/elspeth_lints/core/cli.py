@@ -254,10 +254,11 @@ def _operator_override_authorization_error() -> str | None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the elspeth-lints CLI."""
-    DEFAULT_REGISTRY.load_builtin_rules()
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "check":
+        if _parse_rules(args.rules):
+            DEFAULT_REGISTRY.load_builtin_rules()
         return _run_check(args, registry=DEFAULT_REGISTRY)
     if args.command == "dump-edges":
         return _run_dump_edges(args)
@@ -577,7 +578,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     reaudit.add_argument(
         "--limit",
-        type=int,
+        type=_positive_int,
         default=None,
         help=(
             "Only reaudit the first N entries surviving the other filters. "
@@ -3010,10 +3011,10 @@ def _run_reaudit(args: argparse.Namespace) -> int:
         tool_scope = build_readonly_tool_scope(root=args.root.resolve(), allowlist_dir=allowlist_dir)
 
     if args.render_incomplete_run_id is not None:
-        sidecar_path = sidecar_path_for(allowlist_dir, args.render_incomplete_run_id)
         try:
+            sidecar_path = sidecar_path_for(allowlist_dir, args.render_incomplete_run_id)
             loaded = load_sidecar(sidecar_path)
-        except ReauditError as exc:
+        except (ValueError, ReauditError) as exc:
             sys.stderr.write(f"reaudit error: {exc}\n")
             return 2
         report = report_from_loaded_sidecar(loaded)
@@ -3057,7 +3058,11 @@ def _run_reaudit(args: argparse.Namespace) -> int:
         from datetime import UTC as _UTC
         from datetime import datetime as _datetime
 
-        sidecar_path = sidecar_path_for(allowlist_dir, args.resume_run_id)
+        try:
+            sidecar_path = sidecar_path_for(allowlist_dir, args.resume_run_id)
+        except ValueError as exc:
+            sys.stderr.write(f"reaudit error: {exc}\n")
+            return 2
         run_id = args.resume_run_id
         # Placeholder header — never written. Resume mode (append=True)
         # never writes a header line; the constructor needs a non-None
@@ -3069,6 +3074,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
             total_entries=0,
             allowlist_path=str(allowlist_dir.resolve()),
             allowlist_hash="",
+            judge_transport=transport,
             rule_filter=args.rule,
             since_iso=since_iso_for_header,
             limit=args.limit,
@@ -3086,6 +3092,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
             validate_header_for_resume(
                 header=loaded.header,
                 allowlist_dir=allowlist_dir,
+                judge_transport=transport,
                 rule_filter=args.rule,
                 since_iso=since_iso_for_header,
                 limit=args.limit,
@@ -3143,6 +3150,7 @@ def _run_reaudit(args: argparse.Namespace) -> int:
             total_entries=len(filtered_preview),
             allowlist_path=str(allowlist_dir.resolve()),
             allowlist_hash=compute_allowlist_hash(allowlist_dir),
+            judge_transport=transport,
             rule_filter=args.rule,
             since_iso=since_iso_for_header,
             limit=args.limit,

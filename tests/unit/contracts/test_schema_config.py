@@ -396,6 +396,21 @@ class TestSchemaConfigSerialization:
         assert roundtrip.mode == "observed"
         assert roundtrip.fields is None
 
+    def test_empty_guaranteed_fields_roundtrip_preserves_explicit_zero_guarantees(self) -> None:
+        """guaranteed_fields=() remains an explicit empty guarantee declaration."""
+        from elspeth.contracts.schema import SchemaConfig
+
+        config = SchemaConfig(mode="observed", fields=None, guaranteed_fields=())
+
+        serialized = config.to_dict()
+        roundtrip = SchemaConfig.from_dict(serialized)
+
+        assert serialized["guaranteed_fields"] == []
+        assert roundtrip.guaranteed_fields == ()
+        assert roundtrip.declares_guaranteed_fields is True
+        assert roundtrip.participates_in_propagation is True
+        assert roundtrip.get_effective_guaranteed_fields() == frozenset()
+
     def test_fixed_schema_to_dict(self) -> None:
         """Fixed schema with fields serializes correctly."""
         from elspeth.contracts.schema import SchemaConfig

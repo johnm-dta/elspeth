@@ -55,6 +55,19 @@ def test_matches_scope_stable_drift() -> None:
     assert got is entry
 
 
+def test_already_matched_entry_skipped() -> None:
+    entry = _v2(key="m.py:R6:C:f:fp=old", ast_path="body[0]/body[0]/value")
+    entry.matched = True
+    got = find_scope_fallback_entry(
+        [entry],
+        canonical_key="m.py:R6:C:f:fp=new",
+        scope_fingerprint=SCOPE,
+        ast_path="body[1]/body[0]/value",
+        scope_depth=1,
+    )
+    assert got is None
+
+
 def test_two_same_rule_findings_in_one_scope_bind_to_their_own_entry() -> None:
     a = _v2(key="m.py:R6:C:f:fp=a", ast_path="body[0]/body[0]/value")
     b = _v2(key="m.py:R6:C:f:fp=b", ast_path="body[0]/body[1]/value")

@@ -247,6 +247,47 @@ def test_component_type_aliased_base_with_declared_type_is_clean() -> None:
     assert findings == []
 
 
+def test_component_type_known_literal_base_not_suppressed_by_alias_target() -> None:
+    # elspeth-81fb854e58: a literal known untyped base keeps the CT1 reporting
+    # decision even if the import alias map also has a stale typed target for
+    # the same local name.
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import SourceDataConfig as DataPluginConfig
+
+            class DataPluginConfig:
+                pass
+
+            class AliasTargetShouldNotSuppress(DataPluginConfig):
+                path: str
+            """),
+            Path("bad.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == ["CT1"]
+    assert "AliasTargetShouldNotSuppress" in findings[0].message
+
+
+def test_component_type_accepts_non_known_alias_to_typed_base() -> None:
+    findings = list(
+        COMPONENT_TYPE_RULE.analyze(
+            _tree("""
+            from elspeth.plugins.infrastructure.config_base import SourceDataConfig as SourceBase
+
+            class AliasInheritedType(SourceBase):
+                path: str
+            """),
+            Path("good.py"),
+            RuleContext(root=Path(".")),
+        )
+    )
+
+    assert findings == []
+
+
 def test_component_type_flags_invalid_component_type_value() -> None:
     # elspeth-a2b240c29b: an out-of-contract string label must be flagged, not
     # silently accepted. The documented contract allows only source/sink/transform.
@@ -289,7 +330,7 @@ def test_plugin_hashes_reports_missing_source_file_hash(tmp_path: Path) -> None:
     _write(
         tmp_path / "plugins" / "sources" / "missing_hash.py",
         """
-        class MissingHashSource:
+        class MissingHashSource(BaseSource):
             name = "missing-hash"
             plugin_version = "1.0.0"
         """,
@@ -313,7 +354,7 @@ def test_plugin_hashes_reports_missing_hash_for_module_constant_name(tmp_path: P
         """
         PLUGIN_NAME = "dynamic"
 
-        class DynamicSource:
+        class DynamicSource(BaseSource):
             name = PLUGIN_NAME
             plugin_version = "1.0.0"
             source_file_hash = None
@@ -324,6 +365,27 @@ def test_plugin_hashes_reports_missing_hash_for_module_constant_name(tmp_path: P
 
     assert [finding.rule_id for finding in findings] == ["PH2"]
     assert "DynamicSource" in findings[0].message
+
+
+def test_plugin_hashes_resolves_module_constants_for_version_and_hash(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "plugins" / "sources" / "constant_metadata.py",
+        """
+        PLUGIN_VERSION = "1.2.3"
+        PLUGIN_HASH = "sha256:1111222233334444"
+
+        class ConstantMetadataSource(BaseSource):
+            name = "constant-metadata"
+            plugin_version = PLUGIN_VERSION
+            source_file_hash = PLUGIN_HASH
+        """,
+    )
+
+    findings = scan_plugin_hashes_root(tmp_path, min_plugins=0)
+
+    assert [finding.rule_id for finding in findings] == ["PH3"]
+    assert "stale source_file_hash" in findings[0].message
+    assert "ConstantMetadataSource" in findings[0].message
 
 
 def test_plugin_hashes_passes_on_correct_hashes(tmp_path: Path) -> None:
@@ -346,7 +408,7 @@ def test_plugin_hashes_reports_missing_plugin_version(tmp_path: Path) -> None:
     _write(
         tmp_path / "plugins" / "sources" / "missing_version.py",
         """
-        class MissingVersionSource:
+        class MissingVersionSource(BaseSource):
             name = "missing-version"
             source_file_hash = "sha256:0000000000000000"
         """,
@@ -405,6 +467,18 @@ def test_plugin_hashes_ignores_excluded_helper_files(tmp_path: Path) -> None:
     assert scan_plugin_hashes_root(tmp_path, min_plugins=0) == []
 
 
+def test_plugin_hashes_ignores_named_helper_classes(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "plugins" / "sources" / "helper.py",
+        """
+        class HelperSpec:
+            name = "not-a-plugin"
+        """,
+    )
+
+    assert scan_plugin_hashes_root(tmp_path, min_plugins=0) == []
+
+
 def test_plugin_hashes_json_mode_succeeds_on_current_codebase(
     elspeth_lints_subprocess_env: dict[str, str],
 ) -> None:
@@ -455,7 +529,7 @@ def _write_hashed_plugin(tmp_path: Path, *, class_name: str, name: str, version:
     _write(
         plugin,
         f'''
-        class {class_name}:
+        class {class_name}(BaseSource):
             name = "{name}"
             plugin_version = "{version}"
             source_file_hash = "sha256:0000000000000000"

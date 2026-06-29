@@ -1054,6 +1054,53 @@ class TestAllowlistMatching:
         assert matched.key == entry.key
         assert entry.matched is True
 
+    def test_scope_fallback_does_not_reuse_exact_matched_entry(self) -> None:
+        """One allowlist entry must not suppress two distinct live findings."""
+        scope_fingerprint = "a" * 64
+        entry = AllowlistEntry(
+            key="src/module.py:R1:process:fp=first",
+            owner="test",
+            reason="test",
+            safety="test",
+            expires=None,
+            ast_path="body[0]/body[0]/value",
+            scope_fingerprint=scope_fingerprint,
+            judge_signature_version=2,
+            judge_verdict=JudgeVerdict.ACCEPTED,
+        )
+        allowlist = Allowlist(entries=[entry])
+
+        first = Finding(
+            rule_id="R1",
+            file_path="src/module.py",
+            line=10,
+            col=0,
+            symbol_context=("process",),
+            fingerprint="first",
+            code_snippet="data.get('first')",
+            message="test",
+            ast_path="body[0]/body[0]/value",
+            scope_fingerprint=scope_fingerprint,
+            scope_depth=1,
+        )
+        second = Finding(
+            rule_id="R1",
+            file_path="src/module.py",
+            line=11,
+            col=0,
+            symbol_context=("process",),
+            fingerprint="second",
+            code_snippet="data.get('second')",
+            message="test",
+            ast_path="body[1]/body[0]/value",
+            scope_fingerprint=scope_fingerprint,
+            scope_depth=1,
+        )
+
+        assert _match_finding(allowlist, first) is entry
+        assert entry.matched is True
+        assert _match_finding(allowlist, second) is None
+
     def test_no_match(self) -> None:
         """Finding without matching allowlist entry should return None."""
         entry = AllowlistEntry(
@@ -1215,6 +1262,42 @@ allow_hits:
         assert allowlist.entries[0].expires == datetime(2026, 6, 1, tzinfo=UTC).date()
         assert allowlist.fail_on_stale is True
         assert allowlist.fail_on_expired is False
+
+    @pytest.mark.parametrize(
+        ("yaml_body", "expected_field"),
+        [
+            (
+                """
+version: 1
+allow_hits:
+  - key: "src/module.py:R1:process:fp=deadbeefcafebabe"
+    owner: "john"
+    reason: "Legacy code"
+    safety: "Will be refactored"
+    expires: 2026-12-31 23:59:59
+""",
+                r"allow_hits\[0\]\.expires",
+            ),
+            (
+                """
+version: 1
+per_file_rules:
+  - pattern: "src/module.py"
+    rules: ["R1"]
+    reason: "Legacy code"
+    expires: 2026-12-31 23:59:59
+""",
+                r"per_file_rules\[0\]\.expires",
+            ),
+        ],
+    )
+    def test_load_rejects_timestamp_expiry_fields(self, temp_dir: Path, yaml_body: str, expected_field: str) -> None:
+        """Expiry fields are date-only; YAML timestamps must not flow through as datetimes."""
+        allowlist_path = temp_dir / "allowlist.yaml"
+        allowlist_path.write_text(dedent(yaml_body))
+
+        with pytest.raises(ValueError, match=rf"{expected_field} must be YYYY-MM-DD"):
+            load_allowlist(allowlist_path)
 
     def test_load_nonexistent_file(self, temp_dir: Path) -> None:
         """Missing allowlist file is Tier-1 audit-data loss."""

@@ -19,6 +19,7 @@ OPTIONAL_PLUGIN_IMPORT_MODULES: frozenset[str] = frozenset(
         "bs4",
         "chromadb",
         "html2text",
+        "jinja2",
     }
 )
 

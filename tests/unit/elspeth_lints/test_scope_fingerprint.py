@@ -8,8 +8,10 @@ from elspeth_lints.rules.trust_tier.tier_model.scope_fingerprint import (
     enclosing_scope_node,
 )
 
+ScopeNode = ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
 
-def _func(src: str) -> ast.AST:
+
+def _func(src: str) -> ScopeNode:
     """Return the first FunctionDef/AsyncFunctionDef/ClassDef in src."""
     tree = ast.parse(src)
     for node in ast.walk(tree):
@@ -31,16 +33,16 @@ def test_reformatting_and_comments_are_free() -> None:
     assert a == b
 
 
-def test_docstring_edit_is_free() -> None:
+def test_docstring_edit_changes_hash() -> None:
     a = compute_scope_fingerprint(_func('def f(x):\n    "old doc"\n    return x.get("a")\n'))
     b = compute_scope_fingerprint(_func('def f(x):\n    "completely different doc"\n    return x.get("a")\n'))
-    assert a == b
+    assert a != b
 
 
-def test_adding_a_docstring_is_free() -> None:
+def test_adding_a_docstring_changes_hash() -> None:
     a = compute_scope_fingerprint(_func('def f(x):\n    return x.get("a")\n'))
     b = compute_scope_fingerprint(_func('def f(x):\n    "now documented"\n    return x.get("a")\n'))
-    assert a == b
+    assert a != b
 
 
 def test_body_change_changes_hash() -> None:
@@ -67,11 +69,16 @@ def test_rename_changes_hash() -> None:
     assert a != b
 
 
-def test_class_scope_first_string_stmt_is_treated_as_docstring() -> None:
-    # The class docstring is dropped; a method body change is not.
+def test_class_docstring_edit_changes_hash() -> None:
     a = compute_scope_fingerprint(_func('class C:\n    "doc"\n    def m(self):\n        return 1\n'))
     b = compute_scope_fingerprint(_func('class C:\n    "other"\n    def m(self):\n        return 1\n'))
-    assert a == b
+    assert a != b
+
+
+def test_module_docstring_edit_changes_hash() -> None:
+    a = compute_scope_fingerprint(None, module=ast.parse('"old doc"\nVALUE = 1\n'))
+    b = compute_scope_fingerprint(None, module=ast.parse('"new doc"\nVALUE = 1\n'))
+    assert a != b
 
 
 def test_module_level_fallback_uses_whole_module() -> None:

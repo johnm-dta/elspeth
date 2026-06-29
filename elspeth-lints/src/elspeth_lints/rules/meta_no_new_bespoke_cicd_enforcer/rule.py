@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,11 +20,12 @@ ACTIVE_STATUSES = frozenset({"pending", "shadow", "cutover"})
 DELETED_STATUS = "deleted"
 KNOWN_STATUSES = ACTIVE_STATUSES | frozenset({DELETED_STATUS})
 LEGACY_INVENTORY_SCRIPT_NAMES = frozenset({"adr019_symbol_inventory.py", "adr019_test_inventory.py"})
+WORKFLOW_CICD_SCRIPT_RE = re.compile(r"(?<![A-Za-z0-9_./-])scripts/cicd/[A-Za-z0-9_.-]+\.py\b")
 
 
 @dataclass(frozen=True, slots=True)
 class NoNewBespokeCicdEnforcerRule:
-    """Fail when an enforce_*.py script is not tracked by the migration manifest."""
+    """Fail when a CI policy script is not tracked by the migration manifest."""
 
     id: str = RULE_ID
     scope: RuleScope = RuleScope.WHOLE_REPO
@@ -119,12 +121,19 @@ def _actual_enforcer_scripts(root: Path) -> tuple[Path, ...]:
     script_dir = root / "scripts/cicd"
     if not script_dir.exists():
         return ()
-    enforce_scripts = set(script_dir.glob("enforce_*.py"))
-    inventory_scripts = {script_dir / name for name in LEGACY_INVENTORY_SCRIPT_NAMES if (script_dir / name).exists()}
-    return tuple(sorted(enforce_scripts | inventory_scripts))
+    scripts = set(script_dir.glob("enforce_*.py"))
+    scripts.update(script_dir / name for name in LEGACY_INVENTORY_SCRIPT_NAMES if (script_dir / name).exists())
+    scripts.update(root / rel_path for rel_path in _workflow_referenced_cicd_script_paths(root) if (root / rel_path).is_file())
+    return tuple(sorted(scripts))
 
 
 def _ci_referenced_paths(root: Path) -> frozenset[str]:
+    actual_paths = {path.relative_to(root).as_posix() for path in _actual_enforcer_scripts(root)}
+    referenced_paths = _workflow_referenced_cicd_script_paths(root)
+    return frozenset(rel_path for rel_path in actual_paths if rel_path in referenced_paths)
+
+
+def _workflow_referenced_cicd_script_paths(root: Path) -> frozenset[str]:
     workflows_dir = root / WORKFLOWS_RELATIVE_PATH
     if not workflows_dir.exists():
         return frozenset()
@@ -134,8 +143,7 @@ def _ci_referenced_paths(root: Path) -> frozenset[str]:
         for path in sorted(workflows_dir.glob(pattern))
         if path.is_file()
     )
-    actual_paths = {path.relative_to(root).as_posix() for path in _actual_enforcer_scripts(root)}
-    return frozenset(rel_path for rel_path in actual_paths if rel_path in workflow_text)
+    return frozenset(WORKFLOW_CICD_SCRIPT_RE.findall(workflow_text))
 
 
 def _load_manifest(root: Path) -> _MigrationManifest:
@@ -158,10 +166,8 @@ def _load_manifest(root: Path) -> _MigrationManifest:
         if status not in KNOWN_STATUSES:
             expected = ", ".join(sorted(KNOWN_STATUSES))
             raise ValueError(f"rules[{index}].status must be one of: {expected}")
-        if not _is_tracked_legacy_script(old_script):
-            raise ValueError(
-                f"rules[{index}].old_script must point at scripts/cicd/enforce_*.py or a tracked scripts/cicd/adr019_*_inventory.py script"
-            )
+        if not _is_tracked_cicd_script(old_script):
+            raise ValueError(f"rules[{index}].old_script must point at a direct scripts/cicd/*.py policy script")
         if status == DELETED_STATUS:
             deleted_paths.add(old_script)
         else:
@@ -176,10 +182,9 @@ def _load_manifest(root: Path) -> _MigrationManifest:
     )
 
 
-def _is_tracked_legacy_script(old_script: str) -> bool:
-    if old_script.startswith("scripts/cicd/enforce_") and old_script.endswith(".py"):
-        return True
-    return Path(old_script).name in LEGACY_INVENTORY_SCRIPT_NAMES and old_script.startswith("scripts/cicd/")
+def _is_tracked_cicd_script(old_script: str) -> bool:
+    parts = Path(old_script).parts
+    return len(parts) == 3 and parts[:2] == ("scripts", "cicd") and parts[2].endswith(".py") and parts[2] != "__init__.py"
 
 
 def _mapping_value(value: object, context: str) -> dict[str, Any]:

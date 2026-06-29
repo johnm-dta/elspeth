@@ -22,7 +22,7 @@ from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.plugin_assistance import PluginAssistance
 from elspeth.contracts.results import ArtifactDescriptor
-from elspeth.contracts.wire_visible_identity import reject_placeholder_value
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.core.canonical import canonical_json
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.clients.dataverse import (
@@ -35,12 +35,12 @@ from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 
-# HTTP status codes that make a single row's PATCH per-row-attributable: the
-# row's payload or alternate key is bad and a retry will not help. These are
-# diverted to on_write_failure (the row is routed away) while the rest of the
-# batch continues. All other DataverseClientError cases — authn/authz (401/403),
-# rate limit (429), any retryable error, 5xx server errors, and any error whose
-# status_code is None (unattributable) — RAISE so the engine retries or aborts.
+# HTTP status codes that may be single-row-attributable when Dataverse also
+# provides a structured row-data classification. These statuses alone are not
+# enough: Dataverse uses the same 4xx family for sink-wide configuration faults
+# such as invalid entity sets, bad API paths, and missing alternate-key setup.
+# Status-only failures must raise so misconfigured sinks cannot silently discard
+# every row via on_write_failure=discard.
 #
 # CLOSED LIST — extend only with a status code that is (a) non-retryable and
 # (b) attributable to the individual row's request, not the batch or the
@@ -48,6 +48,14 @@ from elspeth.plugins.infrastructure.url_validation import validate_credential_sa
 # "Unexpected HTTP status" rather than an explicit client error, because an
 # Unprocessable-Entity response is about this row's payload.
 _DIVERTABLE_STATUS_CODES: frozenset[int] = frozenset({400, 404, 409, 412, 422})
+_ROW_ATTRIBUTABLE_ERROR_CATEGORIES: frozenset[str] = frozenset({"row_data_error"})
+
+
+def _is_row_attributable_write_error(error: DataverseClientError) -> bool:
+    return (
+        not error.retryable and error.status_code in _DIVERTABLE_STATUS_CODES and error.error_category in _ROW_ATTRIBUTABLE_ERROR_CATEGORIES
+    )
+
 
 # An @odata.bind value sits in the UNQUOTED entity-key position of the bind
 # reference (``/entity(value)``), unlike the alternate-key URL where the value
@@ -75,14 +83,14 @@ class LookupConfig(BaseModel):
     def validate_target_entity_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("target_entity cannot be empty")
-        return reject_placeholder_value(v.strip(), field_name="target_entity")
+        return reject_operator_required_placeholder_value(v.strip(), field_name="target_entity")
 
     @field_validator("target_field")
     @classmethod
     def validate_target_field_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("target_field cannot be empty")
-        return reject_placeholder_value(v.strip(), field_name="target_field")
+        return reject_operator_required_placeholder_value(v.strip(), field_name="target_field")
 
 
 class DataverseSinkConfig(DataPluginConfig):
@@ -158,14 +166,14 @@ class DataverseSinkConfig(DataPluginConfig):
     def validate_entity_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("entity cannot be empty")
-        return reject_placeholder_value(v.strip(), field_name="entity")
+        return reject_operator_required_placeholder_value(v.strip(), field_name="entity")
 
     @field_validator("alternate_key")
     @classmethod
     def validate_alternate_key_not_empty(cls, v: str) -> str:
         if not v or not v.strip():
             raise ValueError("alternate_key cannot be empty")
-        return reject_placeholder_value(v.strip(), field_name="alternate_key")
+        return reject_operator_required_placeholder_value(v.strip(), field_name="alternate_key")
 
     @model_validator(mode="after")
     def validate_no_outbound_key_collisions(self) -> Self:
@@ -182,7 +190,7 @@ class DataverseSinkConfig(DataPluginConfig):
         for pipeline_field, dv_column in self.field_mapping.items():
             if not dv_column or not dv_column.strip():
                 raise ValueError(f"field_mapping target for '{pipeline_field}' cannot be empty")
-            reject_placeholder_value(dv_column, field_name=f"field_mapping target for '{pipeline_field}'")
+            reject_operator_required_placeholder_value(dv_column, field_name=f"field_mapping target for '{pipeline_field}'")
             if dv_column in seen:
                 raise ValueError(
                     f"field_mapping collision: pipeline fields '{seen[dv_column]}' and "
@@ -497,6 +505,7 @@ class DataverseSink(BaseSink):
                         "message": str(e),
                         "status_code": e.status_code,
                         "retryable": e.retryable,
+                        "error_category": e.error_category,
                     },
                     latency_ms=latency_ms,
                     provider="dataverse",
@@ -506,28 +515,20 @@ class DataverseSink(BaseSink):
                     assert self._client is not None
                     self._client.reconstruct_credential(self._auth_config)
 
-                # Classify the failure by HTTP semantics:
+                # Classify the failure by structured Dataverse semantics:
                 #
-                #   DIVERT — per-row-attributable: this row's payload or
-                #     alternate key is bad and a retry will not help. These are
-                #     the non-retryable client errors about the request itself:
-                #     400 (bad request), 404 (alternate-key target not found),
-                #     409 (conflict), 412 (precondition failed), 422
-                #     (unprocessable entity). The row is routed to
-                #     on_write_failure and the batch continues. Per-row diversion
-                #     is correct even though earlier rows in this batch were
-                #     already PATCHed — each row's outcome is recorded
-                #     independently and the executor handles routing.
+                #   DIVERT — explicitly row-attributable: this row's payload or
+                #     alternate key is bad and a retry will not help. The row is
+                #     routed to on_write_failure and the batch continues.
                 #
-                #   RAISE — batch-integrity: the failure affects all rows or is
-                #     transient. Authn/authz (401/403), rate limit (429), any
-                #     retryable error (the engine retries the whole batch), and
-                #     5xx server errors. Diverting these would silently drop a
-                #     row a retry could have written.
+                #   RAISE — batch-integrity or unknown: authn/authz (401/403),
+                #     rate limit (429), retryable errors, 5xx server errors, and
+                #     generic 4xx protocol/configuration errors. Diverting these
+                #     can silently drop rows from a misconfigured sink.
                 #
                 # Fail safe: a missing/None status_code cannot be attributed to a
-                # single row, so it falls through to RAISE (not in DIVERTABLE).
-                if not e.retryable and e.status_code in _DIVERTABLE_STATUS_CODES:
+                # single row, so it falls through to RAISE.
+                if _is_row_attributable_write_error(e):
                     self._divert_row(
                         original_row,
                         row_index=row_index,

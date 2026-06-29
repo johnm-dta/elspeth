@@ -866,6 +866,33 @@ def test_transplanted_quartet_across_files_fails_at_load(tmp_path: Path, monkeyp
     assert b_fp in message  # the live (correct) fingerprint
 
 
+@pytest.mark.parametrize("escape_kind", ("parent_traversal", "absolute_path"))
+def test_judge_gated_source_binding_rejects_paths_outside_source_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    escape_kind: str,
+) -> None:
+    """A source-root load must reject judge-gated keys that escape the root."""
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+    outside_path = tmp_path / "outside.py"
+    outside_path.write_text("secret = 'outside source root'\n", encoding="utf-8")
+    outside_fp = hashlib.sha256(outside_path.read_bytes()).hexdigest()
+    key_path = "../outside.py" if escape_kind == "parent_traversal" else outside_path.as_posix()
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key=f"{key_path}:R1:fn:fp=somehash",
+        file_fingerprint=outside_fp,
+        ast_path="body[0]",
+    )
+
+    with pytest.raises(ValueError, match="outside source_root"):
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+
 def test_source_drift_after_judge_verdict_fails_at_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """C8-3 source-drift: editing the source after the verdict invalidates the binding.
 
@@ -934,7 +961,7 @@ def test_judge_excerpt_redactions_round_trip_from_yaml(tmp_path: Path, monkeypat
     file_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
     key = "redacted.py:R1:fn:fp=somehash"
     ast_path = "body[0]"
-    redactions = (
+    redactions: tuple[dict[str, int | str], ...] = (
         {
             "pattern": "aws_access_key",
             "byte_count": 20,

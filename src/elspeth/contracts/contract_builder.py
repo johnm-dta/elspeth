@@ -109,6 +109,11 @@ class ContractBuilder:
         missing_names = tuple(normalized_name for normalized_name in row if normalized_name not in declared_names)
 
         if enforce_field_cap and len(declared_names) + len(missing_names) > _MAX_INFERRED_CONTRACT_FIELDS:
+            if not missing_names:
+                raise ContractFieldLimitExceeded(
+                    f"contract already exceeds maximum inferred schema fields ({_MAX_INFERRED_CONTRACT_FIELDS}); "
+                    f"{len(declared_names)} fields are declared"
+                )
             first_excess_index = max(_MAX_INFERRED_CONTRACT_FIELDS - len(declared_names), 0)
             first_excess_name = missing_names[first_excess_index]
             raise ContractFieldLimitExceeded(
@@ -157,13 +162,14 @@ class ContractBuilder:
             Locked SchemaContract with all field types defined
 
         Raises:
-            ValueError: If row contains NaN or Infinity values
+            ContractFieldLimitExceeded: If the first row exceeds the inferred field cap.
+            ValueError: If row contains NaN or Infinity values.
         """
         # Already locked - nothing to do
         if self._contract.locked:
             return self._contract
 
-        updated = self._infer_missing_fields(row, field_resolution)
+        updated = self._infer_missing_fields(row, field_resolution, enforce_field_cap=True)
 
         # Lock the contract
         updated = updated.with_locked()

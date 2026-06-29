@@ -117,6 +117,11 @@ def _is_mutable_container_annotation(annotation: ast.expr) -> bool:
     ``Mapping[str, list]``) stays flagged as before. ``frozenset``/``tuple``/
     ``Sequence``/``Mapping`` carry no mutable name and remain clean.
     """
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        try:
+            annotation = ast.parse(annotation.value, mode="eval").body
+        except SyntaxError:
+            return False
     for node in ast.walk(annotation):
         if isinstance(node, ast.Name) and node.id in _MUTABLE_CONTAINER_NAMES:
             return True

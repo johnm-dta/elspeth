@@ -59,6 +59,7 @@ ALL_RULE_ROOTS: tuple[tuple[str, str], ...] = (
 )
 ALL_RULE_IDS: tuple[str, ...] = tuple(rid for rid, _ in ALL_RULE_ROOTS)
 RAW_FINGERPRINT_RULES: frozenset[str] = frozenset({"trust_tier.tier_model"})
+EXPECTED_RULE_EXIT_CODES: frozenset[int] = frozenset({0, 1})
 
 
 def _run_rule(rule_id: str, root: str, *, allowlist_dir: Path | None = None) -> list[dict[str, object]]:
@@ -105,11 +106,42 @@ def _run_rule_command(rule_id: str, command: list[str], env: dict[str, str]) -> 
         cwd=str(REPO_ROOT),
     )
     stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    if result.returncode not in EXPECTED_RULE_EXIT_CODES:
+        detail = f"{rule_id}: elspeth-lints failed with exit code {result.returncode}"
+        if stderr:
+            detail = f"{detail}; stderr={stderr!r}"
+        if stdout:
+            detail = f"{detail}; stdout={stdout!r}"
+        raise AssertionError(detail)
     if not stdout:
-        return []
+        detail = f"{rule_id}: empty JSON stdout from elspeth-lints; expected [] for a clean rule run"
+        if stderr:
+            detail = f"{detail}; stderr={stderr!r}"
+        raise AssertionError(detail)
     parsed = json.loads(stdout)
     assert isinstance(parsed, list), f"{rule_id}: expected JSON array, got {type(parsed).__name__}"
     return parsed
+
+
+def test_run_rule_command_rejects_crashed_rule_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=["python", "-m", "elspeth_lints.core.cli"], returncode=2, stdout="", stderr="boom")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(AssertionError, match=r"demo.rule.*exit code 2.*boom"):
+        _run_rule_command("demo.rule", ["python", "-m", "elspeth_lints.core.cli"], {})
+
+
+def test_run_rule_command_rejects_empty_json_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=["python", "-m", "elspeth_lints.core.cli"], returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(AssertionError, match=r"demo.rule.*empty JSON stdout"):
+        _run_rule_command("demo.rule", ["python", "-m", "elspeth_lints.core.cli"], {})
 
 
 def capture_all(*, allowlist_dir: Path | None = None) -> dict[str, list[dict[str, str]]]:

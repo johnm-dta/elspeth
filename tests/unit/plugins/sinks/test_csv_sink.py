@@ -658,16 +658,26 @@ class _UnstringifiableValue:
         raise RuntimeError("value cannot be reprified")
 
 
+class _ValueErrorStringificationValue:
+    """A broken object whose str() raises ValueError specifically."""
+
+    def __str__(self) -> str:
+        raise ValueError("value cannot be stringified")
+
+    def __repr__(self) -> str:
+        return "_ValueErrorStringificationValue()"
+
+
 class TestCSVSinkPerRowDiversion:
     """Per-row write faults are diverted, not batch-aborting.
 
-    A failure attributable to ONE row's value — a row whose fields cannot be
-    staged by csv.DictWriter (an extra field after the column lock, or a value
-    whose str() raises) — is a per-row Tier-2 data fault. With on_write_failure
-    configured the offending row is diverted (recorded + routed) and the
-    remaining rows are written, rather than aborting the whole batch. With no
-    on_write_failure configured the sink fails closed (the framework refuses to
-    guess the operator's discard-vs-preserve intent).
+    A failure attributable to one row's CSV shape or target encoding is a
+    per-row Tier-2 data fault. With on_write_failure configured the offending
+    row is diverted (recorded + routed) and the remaining rows are written,
+    rather than aborting the whole batch. With no on_write_failure configured
+    the sink fails closed (the framework refuses to guess the operator's
+    discard-vs-preserve intent). A value whose own str() raises is an upstream
+    bug and must propagate instead of being diverted.
 
     Batch-integrity failures (file open/permission, disk-full, rollback) remain
     raises — they are not attributable to a single row.
@@ -757,6 +767,23 @@ class TestCSVSinkPerRowDiversion:
                 [
                     {"id": "1", "name": "alice"},
                     {"id": "2", "name": _UnstringifiableValue()},
+                ],
+                ctx,
+            )
+        sink.close()
+
+    def test_value_error_from_stringification_crashes_not_diverts(self, tmp_path: Path, ctx: PluginContext) -> None:
+        """ValueError from a value's str() is an upstream bug, not a row diversion."""
+        from elspeth.plugins.sinks.csv_sink import CSVSink
+
+        output_file = tmp_path / "output.csv"
+        sink = inject_write_failure(CSVSink({"path": str(output_file), "schema": {"mode": "observed"}}))
+
+        with pytest.raises(ValueError, match="cannot be stringified"):
+            sink.write(
+                [
+                    {"id": "1", "name": "alice"},
+                    {"id": "2", "name": _ValueErrorStringificationValue()},
                 ],
                 ctx,
             )

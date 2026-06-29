@@ -305,6 +305,7 @@ class _Pattern:
 
 
 _PEM_PRIVATE_KEY_BLOCK_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----")
+_SPLITLINES_BOUNDARY_RE = re.compile(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]")
 
 
 _SECRET_PATTERNS: tuple[_Pattern, ...] = (
@@ -572,6 +573,11 @@ def _redaction_digest(redacted_segment: str, salt_bytes: bytes) -> str:
     return hashlib.sha256(redacted_segment.encode("utf-8") + salt_bytes).hexdigest()[:16]
 
 
+def _splitlines_line_number(text: str, offset: int) -> int:
+    """Return the 1-based line number at ``offset`` under ``str.splitlines`` rules."""
+    return sum(1 for _ in _SPLITLINES_BOUNDARY_RE.finditer(text, 0, offset)) + 1
+
+
 def scrub_secrets(
     text: str,
     *,
@@ -694,8 +700,8 @@ def _redact_pem_private_key_blocks_in_window(
     records: list[RedactionRecord] = []
     salt_bytes = salt.encode("utf-8")
     for match in _PEM_PRIVATE_KEY_BLOCK_RE.finditer(full_text):
-        block_start_line = full_text.count("\n", 0, match.start()) + 1
-        block_end_line = full_text.count("\n", 0, match.end()) + 1
+        block_start_line = _splitlines_line_number(full_text, match.start())
+        block_end_line = _splitlines_line_number(full_text, match.end())
         if block_start_line > end_line or block_end_line < start_line:
             continue
 

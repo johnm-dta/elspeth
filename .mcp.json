@@ -57,13 +57,15 @@
       "type": "stdio"
     },
     "wardline": {
-      "type": "stdio",
-      "command": "/home/john/.local/bin/wardline",
       "args": [
         "mcp",
         "--root",
-        "."
-      ]
+        ".",
+        "--loomweave-url",
+        "http://127.0.0.1:10251"
+      ],
+      "command": "/home/john/.local/bin/wardline",
+      "type": "stdio"
     },
     "warpline": {
       "args": [],

@@ -308,17 +308,12 @@ config/cicd/**/.*.lock
 # outputs and bulky font source trees are not.
 docs/release/*
 !docs/release/pdf/output/
-
+docs-archive/
 
 ## Internal tooling
 # Filigree issue tracker
 .filigree/
 .mcp.json
-
-# Clarion
-clarion
-clarion.yaml
-.clarion
 docs/audit/triage/
 notes/resign/*
 
@@ -349,3 +344,8 @@ error.log
 
 # Codex panel review writes model-authored raw findings here; never commit them
 /docs/quality-audit/findings-panel-raw/
+# Wardline scan artifacts
+findings.jsonl
+
+# Local debugging screenshots — not part of the repo
+/images/

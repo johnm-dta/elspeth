@@ -323,7 +323,7 @@ class LandscapeExporter:
             yield operation_record
 
             # External calls for this operation (from pre-loaded dict)
-            for call in op_calls_by_operation[operation.operation_id]:
+            for call in op_calls_by_operation.get(operation.operation_id, ()):
                 op_call_record: CallExportRecord = {
                     "record_type": "call",
                     "run_id": run_id,
@@ -457,7 +457,7 @@ class LandscapeExporter:
             yield row_record
 
             # Tokens for this row (from pre-loaded dict)
-            for token in tokens_by_row[row.row_id]:
+            for token in tokens_by_row.get(row.row_id, ()):
                 token_record: TokenExportRecord = {
                     "record_type": "token",
                     "run_id": run_id,
@@ -473,7 +473,7 @@ class LandscapeExporter:
                 yield token_record
 
                 # Token parents (from pre-loaded dict)
-                for parent in parents_by_token[token.token_id]:
+                for parent in parents_by_token.get(token.token_id, ()):
                     token_parent_record: TokenParentExportRecord = {
                         "record_type": "token_parent",
                         "run_id": run_id,
@@ -484,7 +484,7 @@ class LandscapeExporter:
                     yield token_parent_record
 
                 # Token outcomes (from pre-loaded dict)
-                for outcome in outcomes_by_token[token.token_id]:
+                for outcome in outcomes_by_token.get(token.token_id, ()):
                     token_outcome_record: TokenOutcomeExportRecord = {
                         "record_type": "token_outcome",
                         "run_id": run_id,
@@ -506,7 +506,7 @@ class LandscapeExporter:
                     yield token_outcome_record
 
                 # Scheduler transition events (from pre-loaded dict)
-                for event in scheduler_events_by_token[token.token_id]:
+                for event in scheduler_events_by_token.get(token.token_id, ()):
                     scheduler_event_record: SchedulerEventExportRecord = {
                         "record_type": "scheduler_event",
                         "run_id": run_id,
@@ -532,7 +532,7 @@ class LandscapeExporter:
                     yield scheduler_event_record
 
                 # Node states for this token (from pre-loaded dict)
-                for state in states_by_token[token.token_id]:
+                for state in states_by_token.get(token.token_id, ()):
                     # Handle discriminated union types
                     node_state_record: NodeStateExportRecord
                     if isinstance(state, NodeStateOpen):
@@ -618,7 +618,7 @@ class LandscapeExporter:
                     yield node_state_record
 
                     # Routing events for this state (from pre-loaded dict)
-                    for event in events_by_state[state.state_id]:
+                    for event in events_by_state.get(state.state_id, ()):
                         routing_event_record: RoutingEventExportRecord = {
                             "record_type": "routing_event",
                             "run_id": run_id,
@@ -635,7 +635,7 @@ class LandscapeExporter:
                         yield routing_event_record
 
                     # External calls for this state (from pre-loaded dict)
-                    for call in calls_by_state[state.state_id]:
+                    for call in calls_by_state.get(state.state_id, ()):
                         state_call_record: CallExportRecord = {
                             "record_type": "call",
                             "run_id": run_id,
@@ -681,7 +681,7 @@ class LandscapeExporter:
             yield batch_record
 
             # Batch members (from pre-loaded dict)
-            for member in members_by_batch[batch.batch_id]:
+            for member in members_by_batch.get(batch.batch_id, ()):
                 batch_member_record: BatchMemberExportRecord = {
                     "record_type": "batch_member",
                     "run_id": member.run_id,

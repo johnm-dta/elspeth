@@ -235,6 +235,12 @@ identical GET sequence and terminate identically. (Poll sleeps still elapse
 during replay; skipping them under replay is a documented v1.1 latency
 optimisation, not a correctness issue.)
 
+**Resume caveat:** resume re-executes only rows that did not complete. A run
+with widespread `poll_timeout` failures, resumed while the Azure DI service is
+still degraded, re-incurs the full `poll_timeout_seconds` budget per failed row
+(worst case `K × poll_timeout_seconds` of blocking wait). Confirm service
+recovery before resuming such a run.
+
 ## 6. Output / enrichment contract
 
 Mirrors `web_scrape`. `_build_output_schema_config` merges
@@ -267,6 +273,16 @@ No audit-only *row* fields are added, so no `*_AUDIT_FIELDS` constant is needed
   not), so no SSRF pinning; we only check it is a well-formed `http(s)` URL. A
   SAS token embedded in `urlSource` is recorded in the audited request blob —
   documented in the plugin docstring.
+- **`base64Source` records the document verbatim.** The full document is
+  embedded in the JSON request body and stored in the audited request blob
+  (~1.33× the document size after base64). Operators processing PII-sensitive
+  documents should evaluate their audit-retention/deletion policy accordingly.
+- **`endpoint` is operator config and is NOT gated by
+  `web/provider_config_policy.py`.** A web-authored node can therefore direct
+  the server-held `api_key` to any HTTPS host. This is pre-existing accepted
+  Azure debt (the same gap exists for Azure Blob / Content Safety / Prompt
+  Shield — "Azure endpoint still open"); DI inherits it and closing it is
+  deferred to that shared remediation, NOT implemented in v1.
 - **Tier-3 zero-trust:** every response parsed with `parse_json_strict`,
   structure/type validated, fail-closed (`MalformedResponseError`) on anything
   unexpected — never fabricate absent fields.

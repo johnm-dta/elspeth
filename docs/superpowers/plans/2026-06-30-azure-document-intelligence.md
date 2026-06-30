@@ -241,7 +241,7 @@ class AzureDocumentIntelligenceConfig(TransformDataConfig):
     poll_timeout_seconds: float = Field(300.0, gt=0, description="Outer bound on the poll sequence.")
     request_timeout_seconds: float = Field(60.0, gt=0, description="Per HTTP call timeout.")
     max_response_body_bytes: int = Field(50_000_000, gt=0, description="Cap on the analyzeResult response body.")
-    max_capacity_retry_seconds: int = Field(3600, gt=0, description="Per-call 429/503 retry budget.")
+    max_capacity_retry_seconds: int = Field(300, gt=0, description="Per-call 429/503 retry budget. Default 300 (not 3600) bounds web-worker hold time when stacked on poll_timeout (R7).")
     batch_wait_timeout_seconds: int = Field(3600, gt=0, description="Batch-mixin per-row wait timeout.")
 
     @field_validator("endpoint")
@@ -837,7 +837,6 @@ def _row(url="https://x/y.pdf"):
 def _run_with_fake(t, fake, row=None):
     row = row or _row()
     # poll fast in tests
-    object.__setattr__  # no-op import guard
     t._poll_interval_seconds = 0.0
     t._poll_max_interval_seconds = 0.0
     with t._http_clients_lock:
@@ -925,7 +924,8 @@ def test_base64_too_large():
     contract = _row().contract
     big = PipelineRow({"doc_b64": "AAAAAAAA"}, contract)
     result = _run_with_fake(t, _FakeClient(_Resp(202), []), row=big)
-    assert result.reason["reason"] == "base64_too_large"
+    assert result.reason["reason"] == "invalid_input"
+    assert result.reason["error_type"] == "base64_too_large"
 ```
 
 > Note: confirm `TransformResult` accessor names (`is_success`, `row`, `error_data`) against `infrastructure/results.py` during implementation and adjust the test accessors to the real API before Step 4.
@@ -1037,6 +1037,16 @@ Add to the class (full code):
                 response = do_call()
                 response.raise_for_status()
                 return response
+            except HTTPResponseBodyTooLargeError as e:
+                # CRITICAL: distinct exception class (subclass of httpx.HTTPError, NOT of
+                # HTTPStatusError/RequestError). AuditedHTTPClient raises it when a response
+                # body exceeds max_response_body_bytes. If it escaped here it would propagate
+                # past the executor and CANCEL THE WHOLE BATCH (every sibling row). Convert to
+                # a per-row body_too_large error. Mirrors web_scrape's BodyTooLargeError handling.
+                return TransformResult.error(
+                    {"reason": "body_too_large", "body_size": e.body_size, "max_body_bytes": e.max_body_bytes},
+                    retryable=False,
+                )
             except httpx.HTTPStatusError as e:
                 status_code = e.response.status_code
                 if not is_capacity_error(status_code):
@@ -1488,3 +1498,43 @@ Then PAUSE and surface to the operator for the release-branch merge decision (do
 3. Contract-test probe/ctx construction (Task 5 Step 1) — copy from `test_azure_prompt_shield_contract.py`.
 
 **Resolved during planning (verified against source):** `TransformResult` accessors are `.status` / `.row` / `.reason` (not `is_success`/`error_data`); error `reason` values must be valid `TransformErrorCategory` members → Step 0 adds four DI categories; `TransformErrorReason` extra keys must be declared (`error_type`, `cause`, `message`, `status_code`, `field`, `actual_type`, `elapsed_seconds`, `max_seconds`); `AuditCharacteristic.CREDENTIALS` and `PluginAssistance(plugin_name, issue_code, summary, composer_hints)` confirmed; PipelineRow accepts nested dict/list facet values (round-trip tested).
+
+---
+
+## Post-Review Resolutions (4 plan-review agents: reality, architecture, quality, systems)
+
+Reviewer verdicts: reality = "implementable as written with one fix" (0 hallucinated symbols); architecture = "Sound" (0 blocking); quality = High-confidence test-gap list; systems = 3 critical (1 prod bug + 2 CI failures). All findings resolved below; these deltas are AUTHORITATIVE over earlier inline sketches.
+
+### CRITICAL — must be in the implementation
+- **R1 (systems F1): catch `HTTPResponseBodyTooLargeError`.** `AuditedHTTPClient` raises it (subclass of `httpx.HTTPError`, NOT `HTTPStatusError`/`RequestError`) when a response exceeds `max_response_body_bytes`; uncaught it escapes the executor and cancels the WHOLE batch. `_http_call_with_capacity_retry` now catches it FIRST → per-row `{"reason": "body_too_large", "body_size": e.body_size, "max_body_bytes": e.max_body_bytes}` (valid category; keys declared). Import `HTTPResponseBodyTooLargeError` from `elspeth.plugins.infrastructure.clients.http`. **Add a test** feeding an oversized-body raise.
+- **R2 (systems F2): bump `EXPECTED_TRANSFORM_COUNT` 26→27** in `tests/unit/plugins/test_discovery.py` (Task 7). Strict equality; guaranteed CI failure otherwise.
+- **R3 (systems F3): enroll the config in `tests/unit/plugins/test_validation_path_agreement.py`** — `AzureDocumentIntelligenceConfig` has a `@model_validator`, so add a rejection case to `_TRANSFORM_REJECTION_CASES` (fold into Task 1; reuse one invalid-config case from Task 1's tests). Guaranteed CI failure otherwise.
+- **R4 (reality/quality/systems): base64 test assertion** — fixed to `reason=="invalid_input"` + `error_type=="base64_too_large"` (done in Task 4 Step 1). Do NOT add `base64_too_large` to the category Literal.
+- **R5 (quality B2): the ADR-009 contract test (Task 5) MUST be concrete**, not a `...` stub (a stub passes vacuously). Template: `test_content_safety.py::test_forward_probe_preserves_baseline` (lines ~351-368), NOT the prompt_shield batch helper. Assert `result.status == "success"` and `content_field` present in `result.row`.
+
+### HIGH/MEDIUM — design decisions made explicit
+- **R6 (systems F5): single rate limiter is RETAINED** (one Azure-resource RPS quota covers submit+poll; splitting would let total RPS exceed quota). The starvation feedback loop is mitigated by the existing exponential poll backoff (1.5×, cap 10s) which sheds poll pressure over time. Document this in `_poll`'s docstring.
+- **R7 (systems F6): lower `max_capacity_retry_seconds` default 3600 → 300.** Stacked on `poll_timeout` (300) the old default let one web-authored node hold a worker ~65 min under sustained 429s. 300 caps worst-case ~10 min. (Operators can raise it for batch/CLI runs.) Update Task 1 config default + the §4.5 table value.
+- **R8 (systems F7): `endpoint` is NOT gated by `web/provider_config_policy.py`** — a web-authored node can point the server-held api_key at any HTTPS host. This is pre-existing accepted Azure debt ("Azure endpoint still open"); DI inherits it. Add a spec §7 note that closing it is deferred alongside the existing Azure-endpoint gap; do NOT implement the web gate in v1 (out of scope).
+- **R9 (systems F8): skip-rate budget** — DI is PROBEABLE (`probe_config` + `execute_forward_invariant_probe` with a fake client), so it does not join the unprobeable skip set. Verify empirically in Task 5/7 by running `tests/invariants/test_pass_through_invariants.py` (and `test_transform_probe_coverage.py` if present).
+
+### Test coverage additions (quality W1-W6) — fold into Task 4 unless noted
+- **R10:** add error-path tests for the categories not yet covered: `non_string_field`; invalid urlSource (`invalid_input`/`invalid_document_url`); submit non-202 (`api_error`/`submit_rejected`); poll GET non-2xx (`api_error`/`poll_request_failed`); `malformed_response` ×3 (bad JSON, unknown status, missing analyzeResult); `retry_timeout` (capacity budget exhausted); `shutdown_requested` (set `t._shutdown` then process); `body_too_large` (R1).
+- **R11:** add a full `accept()`→batch-drain test (FIFO order, `_process_row` finally-cleanup, `close()` without batch-init + idempotence). Templates in `test_content_safety.py` (lines ~1046, ~1389).
+- **R12:** add a credential/URL test that exercises the REAL client path (patch `httpx.Client`/`AuditedHTTPClient`, not the `_http_clients` fake) and asserts the POST URL (incl. `_overload=analyzeDocument`, `api-version`, comma-joined `features`), the `Ocp-Apim-Subscription-Key` header value, and the JSON body. Template: `test_content_safety.py::test_api_called_with_correct_endpoint_and_headers` (~line 990).
+- **R13:** host-mismatch test asserts NO GET was issued (e.g. the fake's GET list is left unconsumed / a get-call counter == 0) — the security claim is "api_key never reaches the attacker host".
+- **R14:** capacity-retry tests: 429-then-success recovery, and `retry_timeout` after budget exhaustion (use a fake that raises `HTTPStatusError(429)`).
+- **R15:** assert `success_reason["metadata"]` fields (`operation_id`, `page_count`, `model_id`, `api_version`, `result_status`) on the happy path.
+- **R16 (Task 1):** add config tests for the `pages` pattern, the `poll_max_interval_seconds >= poll_interval_seconds` rule, and `string_index_type` pattern.
+
+### Doc-comment additions (architecture LOW)
+- **R17:** docstring on `_process_single_with_state` — `capacity_deadline` is a single per-row total-budget anchor shared by submit+poll (NOT per-phase); note `_http_call_with_capacity_retry`'s `deadline` may be `min(capacity_deadline, poll_deadline)` from `_poll`.
+- **R18:** comment on `execute_forward_invariant_probe` — inserts the fake into `_http_clients` so `_get_http_client` returns it without creating a real client; depends on `_get_http_client` checking the cache first.
+- **R19:** docstring note on the `result_field` config field — stores the entire analyzeResult (~5-50 MB for large docs); prefer specific facets/`content_field` for normal use.
+
+### Spec notes (systems F9/F13)
+- **R20:** spec §7/§9 — `base64Source` records the document verbatim in the audited request blob (~1.33× size); operators with PII-sensitive documents should evaluate audit retention. (Symmetric to the existing SAS-token-in-urlSource note.)
+- **R21:** spec §5.4 — resuming a run with widespread `poll_timeout` failures while Azure DI is still degraded re-incurs the full poll budget per failed row; confirm service recovery before resuming.
+
+### Minor plan-doc drift (reality) — cosmetic
+- **R22:** remove `CapacityError` from Task 4 "Consumes" prose (the code uses `is_capacity_error`, not the class). Self-review's `error_reason` should read `error_type`.

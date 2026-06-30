@@ -34,7 +34,12 @@ from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError, In
 from elspeth.web.composer.guided.prompts import _summarize_sample_row, load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
-from elspeth.web.composer.llm_response_parsing import attach_llm_calls, build_llm_call_record
+from elspeth.web.composer.llm_response_parsing import (
+    apply_anthropic_cache_markers,
+    attach_llm_calls,
+    build_llm_call_record,
+    supports_anthropic_prompt_cache_markers,
+)
 from elspeth.web.composer.service import _litellm_acompletion
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools._dispatch import get_discovery_tool_definitions
@@ -862,6 +867,16 @@ async def solve_step_chat(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message},
     ]
+    # Anthropic-family routes honor an explicit ``cache_control`` marker on the
+    # stable skill head (the freeform pattern; ``service.py``). Mark BEFORE
+    # kwargs so the SAME marked list feeds both the wire call and the audit
+    # ``build_llm_call_record(messages=messages)`` in the finally block — the
+    # recorded ``messages_hash`` stays truthful to what was sent. ``solve_step_chat``
+    # attaches no tools, so the tools half is ``None``. Below-floor stages
+    # (STEP_2_SINK ~915 tok, STEP_4_WIRE ~749 tok) are marked here too but the
+    # marker is an inert no-op below Anthropic's 1024-token cache floor.
+    if supports_anthropic_prompt_cache_markers(model):
+        messages, _ = apply_anthropic_cache_markers(messages, None)
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,

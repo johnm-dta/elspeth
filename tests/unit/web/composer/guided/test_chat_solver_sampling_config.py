@@ -75,3 +75,51 @@ async def test_step_1_source_resolution_sends_configured_sampling(monkeypatch: p
     assert result is None
     assert captured["temperature"] == 0.0
     assert captured["seed"] == 42
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_marks_system_message_for_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An Anthropic-family route gets ``cache_control`` on the stable skill head."""
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _text_response("reply")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    await chat_solver.solve_step_chat(
+        model="openrouter/anthropic/claude-sonnet-4-6",
+        step=GuidedStep.STEP_1_SOURCE,
+        user_message="hi",
+        temperature=None,
+        seed=None,
+    )
+
+    assert captured["messages"][0]["role"] == "system"
+    assert captured["messages"][0]["cache_control"] == {"type": "ephemeral"}
+    # The user message must NOT be marked.
+    assert "cache_control" not in captured["messages"][1]
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_no_marker_for_non_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-Anthropic route carries no ``cache_control`` marker."""
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _text_response("reply")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    await chat_solver.solve_step_chat(
+        model="openrouter/openai/gpt-5.5",
+        step=GuidedStep.STEP_1_SOURCE,
+        user_message="hi",
+        temperature=None,
+        seed=None,
+    )
+
+    assert "cache_control" not in captured["messages"][0]
+    assert "cache_control" not in captured["messages"][1]

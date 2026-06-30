@@ -276,10 +276,32 @@ No audit-only *row* fields are added, so no `*_AUDIT_FIELDS` constant is needed
   status / SSE. Network errors re-raise as `PluginRetryableError`; structural
   failures return non-retryable `TransformResult.error` with a reason dict.
 
-Error reason vocabulary (closed): `missing_field`, `non_string_field`,
-`invalid_url`, `base64_too_large`, `submit_rejected`, `operation_location_missing`,
-`operation_location_host_mismatch`, `analysis_failed`, `poll_timeout`,
-`malformed_response`, `retry_timeout`, `shutdown_requested`.
+**Error categories.** `TransformResult.error(reason)` requires `reason["reason"]`
+to be a member of the closed `TransformErrorCategory` Literal
+(`contracts/errors.py`) — a Tier-1 audit-write guard crashes on an invalid
+category. The transform therefore **adds four DI-specific categories** to that
+Literal (the established pattern — cf. web_scrape's `non_text_content_type`,
+batch_replicate's `invalid_copies`): `analysis_failed`, `poll_timeout`,
+`operation_location_missing`, `operation_location_untrusted`. All other states
+map onto existing categories, carrying specificity in declared
+`TransformErrorReason` keys (`error_type`, `cause`, `status_code`, `message`,
+`field`, `actual_type`, `elapsed_seconds`, `max_seconds`):
+
+| State | category | extra keys |
+|-------|----------|-----------|
+| source field absent | `missing_field` | `field` |
+| source field non-string | `non_string_field` | `field`, `actual_type` |
+| malformed `urlSource` | `invalid_input` | `field`, `error_type="invalid_document_url"` |
+| base64 over size cap | `invalid_input` | `field`, `error_type="base64_too_large"`, `message` |
+| submit non-202 | `api_error` | `error_type="submit_rejected"`, `status_code` |
+| 202 lacks Operation-Location | `operation_location_missing` *(new)* | — |
+| Operation-Location host ≠ endpoint | `operation_location_untrusted` *(new)* | — |
+| poll GET non-2xx | `api_error` | `error_type="poll_request_failed"`, `status_code` |
+| Azure status `failed` | `analysis_failed` *(new)* | `cause`=Azure `error.code` (bounded token; **no** raw `error.message`) |
+| LRO exceeds `poll_timeout` | `poll_timeout` *(new)* | `elapsed_seconds` |
+| bad JSON / unknown status / missing analyzeResult | `malformed_response` | `error_type` |
+| capacity (429/503) budget exhausted | `retry_timeout` | `status_code`, `elapsed_seconds`, `max_seconds` |
+| shutdown during backoff/poll | `shutdown_requested` | `elapsed_seconds` |
 
 ## 8. Audit & provenance
 

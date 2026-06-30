@@ -27,6 +27,9 @@ import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
 import { latestAssistantRationale } from "./guided/guidedRationale";
+import { PipelineGloss } from "./guided/PipelineGloss";
+import { PipelineValidationSummary } from "./guided/PipelineValidationSummary";
+import { GraphMiniView } from "@/components/sidebar/GraphMiniView";
 import {
   AcknowledgementLiveRegion,
   AcknowledgementStack,
@@ -1452,6 +1455,19 @@ export function ChatPanel({
               }
             }}
           />
+          {/* Guided verification surface (Slice C): the canonical "what I built"
+              column. The plain-language gloss + the plain validation status lead;
+              the per-step rationale prose below (in the decision section) is now
+              supporting context. The graph THUMBNAIL is tutorial-only — live-guided
+              already renders GraphMiniView in the SideRail (App.tsx), so adding it
+              here would duplicate the thumbnail. Both surfaces expand into the
+              SAME App-root GraphModal (no second modal is mounted here), where the
+              full per-node validation markers live. */}
+          <section className="guided-graph-panel" aria-label="Pipeline so far">
+            <PipelineGloss compositionState={compositionState} />
+            <PipelineValidationSummary />
+            {isTutorial && <GraphMiniView />}
+          </section>
           {/* Tutorial de-emphasis applies ONLY to Send-driven steps — those with
               a locked chat prompt (source / sink / transforms). Confirm-only steps
               (wire) have an empty locked prompt: Send is disabled there and the

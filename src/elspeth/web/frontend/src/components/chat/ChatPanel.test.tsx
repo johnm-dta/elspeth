@@ -622,6 +622,139 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeInTheDocument();
   });
 
+  // ── Slice C: the guided verification panel ────────────────────────────────
+  //
+  // The panel (gloss + plain validation summary) leads the guided column for
+  // BOTH surfaces; the graph THUMBNAIL is tutorial-only (live-guided already
+  // renders GraphMiniView in the SideRail, so the column would otherwise
+  // duplicate it). No second GraphModal is mounted here — both surfaces expand
+  // into the App-root GraphModal.
+  function sourceLlmCsvComposition() {
+    return makeComposition(1, {
+      sources: { source: { plugin: "text", options: {} } },
+      nodes: [
+        {
+          id: "rater",
+          node_type: "transform",
+          plugin: "llm",
+          input: "source",
+          on_success: null,
+          on_error: null,
+          options: {},
+        },
+      ],
+      outputs: [{ name: "out", plugin: "csv", options: {} }],
+    });
+  }
+
+  it("mounts the guided verification panel (gloss + validation summary) and does NOT add a second graph thumbnail in live-guided", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // The verification panel leads the column.
+    expect(
+      screen.getByRole("region", { name: "Pipeline so far" }),
+    ).toBeInTheDocument();
+    // Gloss renders a plain-language sentence from the composition.
+    expect(screen.getByTestId("pipeline-gloss")).toHaveTextContent(
+      /this pipeline will read your data, rate each row, and write a csv\./i,
+    );
+    // Validation summary root is always present (neutral here — no result yet).
+    expect(
+      screen.getByTestId("pipeline-validation-summary"),
+    ).toBeInTheDocument();
+    // Live-guided: the column does NOT add a GraphMiniView (the SideRail owns
+    // the thumbnail); only the tutorial gets the in-column thumbnail.
+    expect(
+      screen.queryByRole("button", {
+        name: "Pipeline graph (click to expand)",
+      }),
+    ).toBeNull();
+    expect(container.querySelector(".graph-mini")).toBeNull();
+    // No second GraphModal is mounted in the column (App-root one serves both).
+    expect(screen.queryByTestId("graph-modal-backdrop")).toBeNull();
+    expect(container.querySelector(".graph-modal")).toBeNull();
+  });
+
+  it("renders the in-column graph thumbnail in the tutorial (which has no SideRail)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // Panel + gloss + summary present in the tutorial too.
+    expect(
+      screen.getByRole("region", { name: "Pipeline so far" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-gloss")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("pipeline-validation-summary"),
+    ).toBeInTheDocument();
+    // The tutorial gets the in-column thumbnail (populated → the expand button).
+    expect(
+      screen.getByRole("button", {
+        name: "Pipeline graph (click to expand)",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("retains the per-step rationale prose below the verification panel (demoted, not deleted)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "assistant",
+            content: "Source created as a 3-row CSV.",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "t",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+
+    render(<ChatPanel />);
+
+    // The rationale prose is RETAINED as the decision heading...
+    const rationale = screen.getByRole("heading", {
+      level: 2,
+      name: /source created as a 3-row csv/i,
+    });
+    expect(rationale).toBeInTheDocument();
+    // ...but the verification panel now LEADS it (the graph/summary is the
+    // canonical "what I built"; the prose is supporting context below).
+    const panel = screen.getByRole("region", { name: "Pipeline so far" });
+    expect(
+      panel.compareDocumentPosition(rationale) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
   it("scrolls the guided log into view when the active step advances", () => {
     const scrollSpy = vi.fn();
     Element.prototype.scrollIntoView = scrollSpy;

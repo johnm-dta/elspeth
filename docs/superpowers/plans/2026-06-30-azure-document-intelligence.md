@@ -593,7 +593,7 @@ class AzureDocumentIntelligence(BaseTransform, BatchTransformMixin):
     name = "azure_document_intelligence"
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
-    source_file_hash: str | None = None  # set in Task 7
+    source_file_hash: str | None = "sha256:pending"  # recomputed in Task 7 (placeholder must be a sha256: literal for the hash normalizer to match)
     config_model = AzureDocumentIntelligenceConfig
     passes_through_input = True
     creates_tokens = False
@@ -1384,11 +1384,27 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 2: Generate the golden knob schema**
 
-Find the golden-generation command (search `tests/golden/web/catalog` tooling / a `conftest`/`Makefile`/`scripts` target that regenerates `knob_schema/*.json`). Run it so `transform__azure_document_intelligence.json` is produced, then run the golden test.
+The golden test `tests/unit/web/catalog/test_knob_schema_golden.py` builds each plugin's payload from the live catalog and (line 40-41) asserts the golden directory's file set equals the live set — so a new plugin REQUIRES a matching golden file. Generate it with the exact same lowering the test uses:
 
-Run (after locating the generator): the catalog golden regeneration command, then
-`.venv/bin/python -m pytest tests/golden/web/catalog -q -k azure_document_intelligence`
-Expected: PASS (golden present and matching).
+```bash
+.venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+from elspeth.plugins.infrastructure.manager import get_shared_plugin_manager
+from elspeth.web.catalog.service import CatalogServiceImpl
+
+svc = CatalogServiceImpl(get_shared_plugin_manager())
+info = svc._schema_cache[("transform", "azure_document_intelligence")]
+payload = {"plugin_kind": "transform", "plugin_name": "azure_document_intelligence", "knob_schema": info.knob_schema}
+out = Path("tests/golden/web/catalog/knob_schema/transform__azure_document_intelligence.json")
+out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print("wrote", out)
+PY
+```
+
+Then run the golden test:
+`.venv/bin/python -m pytest tests/unit/web/catalog/test_knob_schema_golden.py -q`
+Expected: PASS (golden present and matching the live catalog).
 
 - [ ] **Step 3: Commit**
 
@@ -1407,7 +1423,21 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 
 - [ ] **Step 1: Compute and set `source_file_hash`**
 
-Locate `scripts/cicd/plugin_hash*` (per project memory the PH3 plugin-hash gate). Run it to compute the hash for the new plugin and set `source_file_hash = "sha256:…"` on the class. Re-run the plugin-hash check to confirm green.
+`scripts/cicd/plugin_hash.py` is a library (no CLI). The placeholder line must already be a `"sha256:..."` literal (Task 3 set `"sha256:pending"`) so the normalizer matches it. Compute + rewrite in place:
+
+```bash
+.venv/bin/python - <<'PY'
+from pathlib import Path
+from scripts.cicd.plugin_hash import compute_source_file_hash, fix_source_file_hash
+
+p = Path("src/elspeth/plugins/transforms/azure/document_intelligence.py")
+h = compute_source_file_hash(p)
+fix_source_file_hash(p, "AzureDocumentIntelligence", h)
+print("set source_file_hash to", h)
+PY
+```
+
+Then run the plugin-hash CI test to confirm green (find it: `grep -rl plugin_hash tests/`; it is the test that imports `compute_source_file_hash` and asserts each plugin's declared hash matches). Run that test module with `.venv/bin/python -m pytest <that_module> -q`.
 
 - [ ] **Step 2: Full local gates**
 

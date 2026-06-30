@@ -3508,14 +3508,9 @@ async def _dispatch_guided_respond(
                     advance_reason="user_advanced",
                 )
                 return handler_result.state, guided, next_turn
-            if chosen == ["reject"]:
-                raise HTTPException(
-                    status_code=501,
-                    detail=("Step 3 chain rejection is not yet implemented. Use exit-to-freeform to drop to freeform mode."),
-                )
             raise HTTPException(
                 status_code=400,
-                detail=f"propose_chain response must have chosen=['accept'] or chosen=['reject'], got {chosen!r}.",
+                detail=f"propose_chain response must have chosen=['accept'], got {chosen!r}.",
             )
         if current_turn_type is TurnType.SCHEMA_FORM:
             if guided.step_3_proposal is None:

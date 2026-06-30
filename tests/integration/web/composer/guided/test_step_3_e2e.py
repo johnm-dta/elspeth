@@ -7,8 +7,9 @@ COMPLETED terminal with rendered YAML.  The LLM is stubbed by patching
 ``_litellm_acompletion`` on
 the chain_solver module the same way the dedicated chain-solver tests do.
 
-Reject and clarifying-question paths are not implemented in this endpoint;
-they raise ``HTTPException`` 501, which the second test exercises.
+An unsupported ``chosen=['reject']`` response is not a valid propose_chain
+reply; it falls through to the standard invalid-``chosen`` 400, which the
+second test exercises.
 """
 
 from __future__ import annotations
@@ -238,8 +239,15 @@ class TestStep3ChainAccept:
 
 
 class TestStep3RejectNotImplemented:
-    def test_csv_to_json_step_3_reject_returns_501(self, composer_test_client: TestClient) -> None:
-        """Rejecting the chain proposal returns 501 with the freeform escape hatch."""
+    def test_csv_to_json_step_3_reject_returns_400(self, composer_test_client: TestClient) -> None:
+        """An unsupported ``chosen=['reject']`` falls through to the standard 400.
+
+        The dead pre-mutation 501 ('not yet implemented') branch was removed:
+        ``chosen=['reject']`` is not a valid propose_chain response, so it lands
+        on the generic invalid-``chosen`` 400, whose message no longer advertises
+        ``reject`` as an accepted value. Rejecting the chain is done via
+        ``control_signal='reject'`` (re-roll) or exit-to-freeform, not this path.
+        """
         session_id = _create_session(composer_test_client)
 
         with patch(
@@ -254,7 +262,7 @@ class TestStep3RejectNotImplemented:
                 json={"chosen": ["reject"]},
             )
 
-        assert resp.status_code == 501
+        assert resp.status_code == 400
         detail = resp.json()["detail"]
-        assert "not yet implemented" in detail
-        assert "exit-to-freeform" in detail
+        assert "chosen=['accept']" in detail
+        assert "or chosen=['reject']" not in detail

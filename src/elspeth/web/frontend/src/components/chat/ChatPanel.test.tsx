@@ -17,6 +17,8 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
+import { useExecutionStore } from "@/stores/executionStore";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { resetStore } from "@/test/store-helpers";
 import { useComposer } from "@/hooks/useComposer";
 import { makeComposition } from "@/test/composerFixtures";
@@ -389,6 +391,9 @@ describe("ChatPanel mode discriminator", () => {
     // interpretation-card block; reset it so a seeded card does not leak into
     // sibling tests and spuriously disable their guided turn.
     resetStore(useInterpretationEventsStore);
+    // Slice C: the verification-panel tests seed validationResult; reset the
+    // execution store so a seeded result does not leak into sibling tests.
+    resetStore(useExecutionStore);
     (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
       sendMessage: vi.fn(),
       retryMessage: vi.fn(),
@@ -753,6 +758,125 @@ describe("ChatPanel mode discriminator", () => {
       panel.compareDocumentPosition(rationale) &
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
+  });
+
+  // Shared validation-readiness stub (PipelineValidationSummary ignores it).
+  const READINESS = {
+    authoring_valid: true,
+    execution_ready: true,
+    completion_ready: true,
+    blockers: [],
+  };
+
+  it("D1: renders the guided verification panel from the store only — no source-DATA fetch", () => {
+    // Scope the spies to SOURCE-DATA endpoints (blob content / upload). The
+    // mode-agnostic auto-validate fires api.validatePipeline, which is
+    // metadata-only and D1-safe — it is intentionally NOT spied (a blanket
+    // api.* spy would false-fail). getBlobMetadata + previewBlobContent are
+    // already vi.fn() stubs from the module mock above.
+    const uploadSpy = vi.spyOn(apiClient, "uploadBlob");
+    const previewSnippetSpy = vi.spyOn(apiClient, "previewBlobContentSnippet");
+    const downloadSpy = vi.spyOn(apiClient, "downloadBlobContent");
+
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [],
+        readiness: READINESS,
+      },
+    } as never);
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The panel is built purely from compositionState + validationResult.
+    expect(screen.getByTestId("pipeline-gloss")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("pipeline-validation-summary"),
+    ).toHaveTextContent(/looks good/i);
+    expect(
+      screen.getByRole("button", {
+        name: "Pipeline graph (click to expand)",
+      }),
+    ).toBeInTheDocument();
+
+    // Zero source-DATA reads — D1 (consumable source, zero rows).
+    expect(uploadSpy).not.toHaveBeenCalled();
+    expect(previewSnippetSpy).not.toHaveBeenCalled();
+    expect(downloadSpy).not.toHaveBeenCalled();
+    expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
+    expect(apiClient.getBlobMetadata).not.toHaveBeenCalled();
+  });
+
+  it("tutorial parity: the in-column validation summary reflects validationResult, and the thumbnail expands the App-root modal", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+    // validationResult populates in the tutorial too (the auto-validate
+    // subscription is version-keyed / mode-agnostic), so the in-column signal
+    // shows there — pin it.
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [
+          {
+            component_id: "rater",
+            component_type: "transform",
+            message: "Review the prompt wording",
+            suggestion: null,
+          },
+        ],
+        readiness: READINESS,
+      },
+    } as never);
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // (a) the summary reflects validationResult, with the PLAIN node name
+    // mapped from the finding's component_id (not the raw id).
+    const summary = screen.getByTestId("pipeline-validation-summary");
+    expect(summary).toHaveTextContent(/rate each row/);
+    expect(summary).toHaveTextContent(/review the prompt wording/i);
+
+    // (b) clicking the thumbnail dispatches OPEN_GRAPH_MODAL_EVENT, caught by
+    // the App-root GraphModal — no second modal is mounted in the column. The
+    // per-node MARKER assertion targets the modal GraphView (GraphView.test.tsx
+    // marker coverage), NOT GraphMiniView (which has no markers).
+    const openSpy = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, openSpy);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Pipeline graph (click to expand)",
+      }),
+    );
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, openSpy);
+    expect(openSpy).toHaveBeenCalledTimes(1);
   });
 
   it("scrolls the guided log into view when the active step advances", () => {

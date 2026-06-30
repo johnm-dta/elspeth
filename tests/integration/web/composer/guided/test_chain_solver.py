@@ -173,7 +173,10 @@ async def test_repair_context_appears_in_system_prompt() -> None:
 
     assert len(captured_calls) == 1
     messages = captured_calls[0]["messages"]
-    system_content = messages[0]["content"]
+    # The system prompt is SPLIT (stable skill head + dynamic context/addenda),
+    # so join every system message to assert the addendum reaches the LLM
+    # regardless of which system message carries it.
+    system_content = "\n".join(m["content"] for m in messages if m["role"] == "system")
     # The repair addendum must be present verbatim.
     assert "REPAIR ATTEMPT" in system_content
     assert repair_error in system_content
@@ -288,7 +291,11 @@ async def test_revise_context_appears_in_system_prompt() -> None:
         )
 
     assert len(captured_calls) == 1
-    system_content = captured_calls[0]["messages"][0]["content"]
+    # The system prompt is SPLIT (stable skill head + dynamic context/addenda),
+    # so join every system message to assert the addendum reaches the LLM
+    # regardless of which system message carries it.
+    messages = captured_calls[0]["messages"]
+    system_content = "\n".join(m["content"] for m in messages if m["role"] == "system")
     # The REVISE addendum is present; the REPAIR addendum is NOT.
     assert "REVISE REQUEST" in system_content
     assert revise_instruction in system_content

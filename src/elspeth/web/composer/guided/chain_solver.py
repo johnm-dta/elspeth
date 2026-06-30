@@ -30,8 +30,10 @@ from elspeth.web.composer.guided.state_machine import (
     SourceResolved,
 )
 from elspeth.web.composer.llm_response_parsing import (
+    apply_anthropic_cache_markers,
     attach_llm_calls,
     build_llm_call_record,
+    supports_anthropic_prompt_cache_markers,
 )
 from elspeth.web.composer.service import _litellm_acompletion
 from elspeth.web.composer.state import CompositionState
@@ -236,18 +238,25 @@ async def solve_chain(
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
-    skill = load_guided_skill()
-    context_block = build_step_3_context_block(source=source, sink=sink)
+    # SPLIT the system prompt so the stable, per-process skill is an isolable,
+    # byte-stable, markable head (messages[0]) and the dynamic server-resolved
+    # context + repair/revise addenda ride in a SECOND system message
+    # (messages[1]). This is what makes Anthropic prompt caching effective
+    # cross-turn: the cache breakpoint sits at the end of messages[0], so the
+    # ~3768-token skill prefix is reused while the context below it varies.
     # Additive, branch-total render: repair_context and revise_context are
     # mutually exclusive by call-site, but appending each independently keeps the
-    # function total (a raise here would 500 and brick the phase). Neither-set and
-    # repair-only render byte-identically to the prior nested form.
-    system_prompt = f"{skill}\n\n{context_block}"
+    # function total (a raise here would 500 and brick the phase).
+    skill = load_guided_skill()
+    context_parts = [build_step_3_context_block(source=source, sink=sink)]
     if repair_context is not None:
-        system_prompt = f"{system_prompt}\n\n{build_repair_addendum(validation_error=repair_context)}"
+        context_parts.append(build_repair_addendum(validation_error=repair_context))
     if revise_context is not None:
-        system_prompt = f"{system_prompt}\n\n{build_revise_addendum(revise_instruction=revise_context)}"
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        context_parts.append(build_revise_addendum(revise_instruction=revise_context))
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": skill},  # stable, markable head
+        {"role": "system", "content": "\n\n".join(context_parts)},  # dynamic context + addenda
+    ]
     # The originating transform request rides as a USER-role message — the freeform
     # mirror. Freeform feeds the frozen prompt as the final user message
     # (composer/prompts.py:401); the guided sink resolver already does the same
@@ -282,6 +291,17 @@ async def solve_chain(
         # row records exactly what was sent even as the loop appends tool results
         # for the next round.
         request_messages = list(messages)
+        # Mark AFTER the per-round snapshot and BEFORE kwargs so the SAME marked
+        # objects feed both the wire call and the audit record built in finally
+        # (request_messages / tools below). apply_anthropic_cache_markers returns
+        # NEW lists/dicts — it never mutates the growing ``messages`` list, so the
+        # per-round audit stays hash-truthful. Re-marking each round is idempotent
+        # ({**msg, "cache_control": ...}); the trailing tool gets the tools-array
+        # marker. Gated on THIS call's model.
+        if supports_anthropic_prompt_cache_markers(model):
+            request_messages, marked_tools = apply_anthropic_cache_markers(request_messages, tools)
+            if marked_tools is not None:
+                tools = marked_tools
         kwargs: dict[str, Any] = {"model": model, "messages": request_messages, "tools": tools}
         kwargs["tool_choice"] = "required" if discovery_enabled else {"type": "function", "function": {"name": "emit_turn"}}
         if temperature is not None:

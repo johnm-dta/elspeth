@@ -144,6 +144,21 @@
   background-color: var(--color-surface);
 }
 
+/* Operator request: the current decision reads as part of the bottom dock with
+   the composer below it. It is the last child of .guided-scroll (right above the
+   docked chat), so here it sheds the centred 64rem sheet cap and the card chrome
+   to go full-width, edge-to-edge, with the SAME top-divider treatment as the
+   docked composer. Net surface: a centred pipeline summary up top, then a
+   full-width decision + chat zone across the bottom. (The pipeline gloss keeps
+   the centred sheet cap from `.guided-scroll > *`.) */
+.guided-scroll > .guided-current-decision {
+  max-width: none;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  border-radius: 0;
+}
+
 .guided-current-decision-copy {
   margin-bottom: var(--space-md);
 }

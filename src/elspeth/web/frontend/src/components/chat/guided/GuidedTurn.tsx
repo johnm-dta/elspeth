@@ -153,6 +153,36 @@ export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = fals
               control_signal: null,
             })
           }
+          onAskAdvisor={() =>
+            guardedSubmit({
+              chosen: null,
+              edited_values: null,
+              custom_inputs: null,
+              accepted_step_index: null,
+              edit_step_index: null,
+              control_signal: "request_advisor",
+            })
+          }
+          onExitToFreeform={() =>
+            guardedSubmit({
+              chosen: null,
+              edited_values: null,
+              custom_inputs: null,
+              accepted_step_index: null,
+              edit_step_index: null,
+              control_signal: "exit_to_freeform",
+            })
+          }
+          onCompleteWithoutSignoff={() =>
+            guardedSubmit({
+              chosen: ["complete_without_signoff"],
+              edited_values: null,
+              custom_inputs: null,
+              accepted_step_index: null,
+              edit_step_index: null,
+              control_signal: null,
+            })
+          }
         />
       );
     default: {

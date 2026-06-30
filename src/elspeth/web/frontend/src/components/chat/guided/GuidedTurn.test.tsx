@@ -180,8 +180,8 @@ const WIRE_STAGE_PAYLOAD: WireStageData = {
   ],
   semantic_contracts: [],
   warnings: [],
-  advisor_findings: "No prompt-shield warnings.",
-  signoff_outcome: "approved",
+  // Initial confirm_wiring turn shape: no advisor pass has run, so signoff_outcome
+  // is absent and the dispatcher routes to the actionable "Confirm wiring" action.
 };
 
 /** Build a TurnPayload with the given type and typed payload. */

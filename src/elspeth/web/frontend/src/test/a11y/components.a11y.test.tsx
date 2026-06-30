@@ -212,75 +212,109 @@ describe("UserMenu", () => {
 });
 
 describe("WireStageTurn", () => {
-  it("has no axe violations", async () => {
-    const data: WireStageData = {
-      topology: {
-        sources: {
-          source: {
-            id: "source",
-            plugin: "inline_blob",
-            on_success: "chain_in",
-            on_validation_failure: "discard",
-          },
+  const wireBase: WireStageData = {
+    topology: {
+      sources: {
+        source: {
+          id: "source",
+          plugin: "inline_blob",
+          on_success: "chain_in",
+          on_validation_failure: "discard",
         },
-        nodes: [
-          {
-            id: "scrape",
-            node_type: "transform",
-            plugin: "web_scrape",
-            input: "chain_in",
-            on_success: "scraped",
-            on_error: "scrape_error",
-            routes: null,
-            fork_to: null,
-            branches: null,
-          },
-          {
-            id: "mapper",
-            node_type: "transform",
-            plugin: "field_mapper",
-            input: "scraped",
-            on_success: "jsonl_out",
-            on_error: null,
-            routes: null,
-            fork_to: null,
-            branches: null,
-          },
-        ],
-        outputs: [
-          {
-            id: "output:jsonl_out",
-            sink_name: "jsonl_out",
-            plugin: "json",
-            on_write_failure: "discard",
-          },
-        ],
       },
-      edge_contracts: [
+      nodes: [
         {
-          from: "scrape",
-          to: "mapper",
-          producer_guarantees: ["body"],
-          consumer_requires: ["body"],
-          missing_fields: [],
-          satisfied: true,
+          id: "scrape",
+          node_type: "transform",
+          plugin: "web_scrape",
+          input: "chain_in",
+          on_success: "scraped",
+          on_error: "scrape_error",
+          routes: null,
+          fork_to: null,
+          branches: null,
+        },
+        {
+          id: "mapper",
+          node_type: "transform",
+          plugin: "field_mapper",
+          input: "scraped",
+          on_success: "jsonl_out",
+          on_error: null,
+          routes: null,
+          fork_to: null,
+          branches: null,
         },
       ],
-      semantic_contracts: [],
-      warnings: [
+      outputs: [
         {
-          type: "prompt_shield",
-          message: "Prompt shield advisory: source text was reviewed.",
+          id: "output:jsonl_out",
+          sink_name: "jsonl_out",
+          plugin: "json",
+          on_write_failure: "discard",
         },
       ],
-      advisor_findings: "Reviewed.",
-      signoff_outcome: "approved",
-    };
+    },
+    edge_contracts: [
+      {
+        from: "scrape",
+        to: "mapper",
+        producer_guarantees: ["body"],
+        consumer_requires: ["body"],
+        missing_fields: [],
+        satisfied: true,
+      },
+    ],
+    semantic_contracts: [],
+    warnings: [
+      {
+        type: "prompt_shield",
+        message: "Prompt shield advisory: source text was reviewed.",
+      },
+    ],
+  };
+
+  // Initial confirm turn (no outcome): the bare "Confirm wiring" action area.
+  it("has no axe violations (initial confirm)", async () => {
+    const { container } = render(
+      <WireStageTurn data={wireBase} onConfirm={() => {}} confirmDisabled={false} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // Revise: findings block + the cost-disclosing Ask-advisor button + Exit.
+  it("has no axe violations (revise: findings + Ask advisor + Exit)", async () => {
     const { container } = render(
       <WireStageTurn
-        data={data}
+        data={{
+          ...wireBase,
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED: tighten the source allowlist.",
+          passes_remaining: 2,
+        }}
         onConfirm={() => {}}
         confirmDisabled={false}
+        onAskAdvisor={() => {}}
+        onExitToFreeform={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // Escape: the complete-without-sign-off button (only emitted here) + Exit.
+  it("has no axe violations (escape_unavailable: complete-without-signoff + Exit)", async () => {
+    const { container } = render(
+      <WireStageTurn
+        data={{
+          ...wireBase,
+          signoff_outcome: "escape_unavailable",
+          advisor_findings: "Advisor unreachable.",
+          passes_remaining: 0,
+        }}
+        onConfirm={() => {}}
+        confirmDisabled={false}
+        onCompleteWithoutSignoff={() => {}}
+        onExitToFreeform={() => {}}
       />,
     );
     expect(await axe(container)).toHaveNoViolations();

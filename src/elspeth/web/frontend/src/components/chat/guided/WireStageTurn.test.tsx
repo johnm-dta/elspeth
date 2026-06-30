@@ -128,8 +128,9 @@ function canonicalData(): WireStageData {
     ],
     semantic_contracts: [],
     warnings: [],
-    advisor_findings: "No prompt-shield warnings.",
-    signoff_outcome: "approved",
+    // Initial turn shape: no advisor pass has run, so signoff_outcome /
+    // advisor_findings are absent and the action area is the actionable
+    // "Confirm wiring". Per-outcome cases below override these explicitly.
   };
 }
 
@@ -366,5 +367,263 @@ describe("WireStageTurn", () => {
     await user.keyboard("{Enter}");
 
     expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Outcome → affordance contract (slice B) ──────────────────────────────────
+//
+// One row of the table per case: the action area switches on signoff_outcome,
+// the findings always show on a flag/block, the cost copy gates on
+// passes_remaining, and "Complete without sign-off" appears ONLY on
+// escape_unavailable. The default branch is a safe escape (never empty, never a
+// bypassing confirm).
+
+function outcomeData(overrides: Partial<WireStageData>): WireStageData {
+  return { ...canonicalData(), ...overrides };
+}
+
+const ALL_HANDLERS = {
+  onConfirm: () => {},
+  confirmDisabled: false,
+  onAskAdvisor: () => {},
+  onExitToFreeform: () => {},
+  onCompleteWithoutSignoff: () => {},
+};
+
+describe("WireStageTurn — outcome → affordance", () => {
+  it("revise: findings + Ask advisor with disclosed cost + Exit, no bare Confirm", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED: tighten the source allowlist.",
+          passes_remaining: 2,
+        })}
+      />,
+    );
+
+    expect(screen.getByText(/tighten the source allowlist/)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Ask advisor (spends 1 of 2)" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Exit to freeform" }),
+    ).toBeTruthy();
+    // The silent repeat-burn fix: no bare Confirm after a flag.
+    expect(
+      screen.queryByRole("button", { name: "Confirm wiring" }),
+    ).toBeNull();
+  });
+
+  it("blocked_flagged: findings + Exit, no budget-burning or bypass button", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "blocked_flagged",
+          advisor_findings: "Advisor sign-off budget exhausted.",
+          passes_remaining: 0,
+        })}
+      />,
+    );
+
+    expect(screen.getByText(/budget exhausted/)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Exit to freeform" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Ask advisor/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Confirm wiring" })).toBeNull();
+  });
+
+  it("blocked_unavailable: explanation + Exit", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "blocked_unavailable",
+          advisor_findings: "Advisor sign-off service is not configured.",
+        })}
+      />,
+    );
+
+    expect(screen.getByText(/cannot be completed here/)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Exit to freeform" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Confirm wiring" })).toBeNull();
+  });
+
+  it("escape_unavailable: Complete without sign-off is offered (only here) + Exit", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "escape_unavailable",
+          advisor_findings: "Advisor unreachable.",
+          passes_remaining: 0,
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Complete without sign-off" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Exit to freeform" }),
+    ).toBeTruthy();
+  });
+
+  it("complete: re-emitted clean verdict still offers an actionable Confirm", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "complete",
+          advisor_findings: "No sign-off concerns.",
+        })}
+      />,
+    );
+
+    // Backend does not auto-complete a clean re-emit, so Confirm must remain
+    // actionable (not a dead-end).
+    const confirm = screen.getByRole("button", { name: "Confirm wiring" });
+    expect(confirm).toBeTruthy();
+    expect(confirm).not.toBeDisabled();
+  });
+
+  it("unknown outcome: safe default — explanation + Exit, never an empty area, never Confirm", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({ signoff_outcome: "some_future_status" })}
+      />,
+    );
+
+    expect(screen.getByText(/does not recognise/)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Exit to freeform" }),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Confirm wiring" })).toBeNull();
+  });
+
+  it("governance: Complete without sign-off is ABSENT on revise and blocked_flagged", () => {
+    const { rerender } = render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED",
+          passes_remaining: 1,
+        })}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Complete without sign-off" }),
+    ).toBeNull();
+
+    rerender(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "blocked_flagged",
+          advisor_findings: "exhausted",
+          passes_remaining: 0,
+        })}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: "Complete without sign-off" }),
+    ).toBeNull();
+  });
+
+  it("cost copy: present when passes_remaining is defined, absent when undefined (tutorial-honesty)", () => {
+    const { rerender } = render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED",
+          passes_remaining: 3,
+        })}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Ask advisor (spends 1 of 3)" }),
+    ).toBeTruthy();
+
+    // Advisor-off / no-budget snapshot: the button must NOT advertise a cost.
+    rerender(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({ signoff_outcome: "revise", advisor_findings: "FLAGGED" })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Ask advisor" })).toBeTruthy();
+    expect(screen.queryByText(/spends 1 of/)).toBeNull();
+  });
+
+  it("disable-at-0: Ask advisor is disabled when passes_remaining is 0 (defensive guard)", () => {
+    render(
+      <WireStageTurn
+        {...ALL_HANDLERS}
+        data={outcomeData({
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED",
+          passes_remaining: 0,
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Ask advisor (spends 1 of 0)" }),
+    ).toBeDisabled();
+  });
+
+  it("forwards the exact control-signal bodies for each affordance", async () => {
+    const user = userEvent.setup();
+    const onAskAdvisor = vi.fn();
+    const onExitToFreeform = vi.fn();
+    const onCompleteWithoutSignoff = vi.fn();
+
+    const { rerender } = render(
+      <WireStageTurn
+        data={outcomeData({
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED",
+          passes_remaining: 2,
+        })}
+        onConfirm={vi.fn()}
+        confirmDisabled={false}
+        onAskAdvisor={onAskAdvisor}
+        onExitToFreeform={onExitToFreeform}
+        onCompleteWithoutSignoff={onCompleteWithoutSignoff}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Ask advisor (spends 1 of 2)" }),
+    );
+    expect(onAskAdvisor).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Exit to freeform" }));
+    expect(onExitToFreeform).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <WireStageTurn
+        data={outcomeData({
+          signoff_outcome: "escape_unavailable",
+          advisor_findings: "Advisor unreachable.",
+          passes_remaining: 0,
+        })}
+        onConfirm={vi.fn()}
+        confirmDisabled={false}
+        onAskAdvisor={onAskAdvisor}
+        onExitToFreeform={onExitToFreeform}
+        onCompleteWithoutSignoff={onCompleteWithoutSignoff}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Complete without sign-off" }),
+    );
+    expect(onCompleteWithoutSignoff).toHaveBeenCalledTimes(1);
   });
 });

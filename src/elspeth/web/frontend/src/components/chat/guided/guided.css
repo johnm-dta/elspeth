@@ -128,12 +128,13 @@
   overflow-y: auto;
 }
 
-/* "Describe what you want" docked at the bottom of the panel. Pinned
-   (flex-shrink:0) and chrome-light (surface fill + a top divider rather than a
-   full card), but now CAPPED + centred to the same 64rem sheet as the decision
-   and summary cards above, so its content shares their left edge instead of
-   running full-bleed. The top divider spans the centred column. Inherits the
-   base rule's padding. */
+/* "Describe what you want" — a direct child of .chat-panel--guided. In LIVE
+   guided it DOCKS at the bottom (flex-shrink:0 against the full-height panel +
+   flex:1 scroll region — the classic chat layout). In the TUTORIAL the panel is
+   content-height single-document flow (see tutorial.css `.tutorial-shell--guided`),
+   so it simply flows LAST in the stack and flex-shrink:0 is inert there. Either
+   way: chrome-light (dashed surface + top divider, not a full card) and CAPPED +
+   centred to the same 64rem sheet as the decision + summary cards. */
 .chat-panel--guided > .guided-step-chat {
   flex-shrink: 0;
   /* width:100% is REQUIRED for a flex-column item: `margin-inline:auto` alone
@@ -162,15 +163,16 @@
   margin: var(--space-md) auto;
 }
 
-/* Tutorial: the decision is lifted OUT of .guided-scroll and docked at the
-   bottom alongside the composer (ChatPanel renders it as a direct child of
-   .chat-panel--guided in tutorial mode), so the two travel together and the
-   short-content slack opens above the summary rather than between the decision
-   and the composer. As a flex-column child it needs an explicit width to fill
-   the 64rem cap before the auto margins centre it (same reason as
-   .guided-step-chat). flex-shrink:0 pins it; the small bottom margin groups it
-   with the composer just below. Card chrome (solid border / radius / surface) is
-   inherited from the base rule, matching the summary card. */
+/* Tutorial: the decision renders OUT of .guided-scroll (ChatPanel places it as a
+   direct child of .chat-panel--guided in tutorial mode), so it flows in document
+   order after the summary and directly above the composer — one continuous stack
+   on the single-document tutorial layout (see tutorial.css `.tutorial-shell--guided`).
+   As a flex-column child it needs an explicit width to fill the 64rem cap before
+   the auto margins centre it (same reason as .guided-step-chat). The small bottom
+   margin groups it with the composer below. Card chrome (solid border / radius /
+   surface) is inherited from the base rule, matching the summary card.
+   (flex-shrink:0 is inert here — the tutorial panel is content-height — but kept
+   for parity with the composer rule.) */
 .chat-panel--guided > .guided-current-decision {
   flex-shrink: 0;
   width: 100%;
@@ -1522,7 +1524,11 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
-  margin: var(--space-md);
+  /* `auto` inline margins centre this in the 64rem sheet inherited from
+     `.guided-scroll > *`. A bare `margin` shorthand (same-specificity-but-later)
+     clobbers `margin-inline:auto` and pins it hard left — the same trap fixed on
+     .guided-graph-panel; only visible once prior-step history exists. */
+  margin: var(--space-md) auto;
   padding: var(--space-md);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -1564,7 +1570,13 @@
    Style the role+step as a muted header line above each turn's content.
    --------------------------------------------------------------------------- */
 .guided-chat-history {
-  margin: var(--space-md);
+  /* `auto` inline margins centre the transcript in the 64rem sheet it inherits
+     from `.guided-scroll > *`; a bare `margin` shorthand was clobbering
+     `margin-inline:auto` and pinning it hard left, misaligned with the centred
+     cards (the YOU/ASSISTANT transcript rendered in a far-left column). Same trap
+     as .guided-graph-panel / .guided-history; only surfaces once a turn has been
+     sent. */
+  margin: var(--space-md) auto;
 }
 
 .guided-chat-history-list {

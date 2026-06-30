@@ -383,6 +383,13 @@ export interface WireStageData {
   warnings: Array<Record<string, unknown>>;
   advisor_findings?: string;
   signoff_outcome?: string;
+  /**
+   * Advisor sign-off passes left AFTER the pass that produced this turn. Present
+   * only on a RE-EMITTED wire turn (the two sites where the pass budget is in
+   * scope); ABSENT on the initial turn and the advisor-off tutorial, so the
+   * wire-stage cost copy gates on `passes_remaining !== undefined`.
+   */
+  passes_remaining?: number;
 }
 
 /**

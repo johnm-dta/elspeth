@@ -3700,6 +3700,10 @@ async def _dispatch_guided_respond(
                 catalog=catalog,
                 advisor_findings=on_demand_blocked_findings or decision.findings_text,
                 signoff_outcome=decision.outcome.value,
+                # Budget left after this pass (``guided`` is post-run_wire_signoff,
+                # so the counter is already incremented). Disclosed so the revise
+                # turn can render the "spends 1 of N" cost on the explicit re-ask.
+                passes_remaining=max_passes - guided.advisor_checkpoint_passes_used,
             )
             guided, next_turn = _emit_wire_turn(
                 state=state,
@@ -3855,6 +3859,10 @@ async def _dispatch_guided_respond(
             catalog=catalog,
             advisor_findings=blocked_findings or decision.findings_text,
             signoff_outcome=decision.outcome.value,
+            # Budget left after this pass (``guided`` is post-run_wire_signoff,
+            # so the counter is already incremented). Disclosed so a REVISE turn
+            # can render the "spends 1 of N" cost copy.
+            passes_remaining=max_passes - guided.advisor_checkpoint_passes_used,
         )
         new_record = TurnRecord(
             step=GuidedStep.STEP_4_WIRE,

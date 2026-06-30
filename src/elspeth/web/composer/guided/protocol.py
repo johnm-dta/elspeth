@@ -121,6 +121,7 @@ class WireStageData(TypedDict):
     warnings: Sequence[Mapping[str, Any]]
     advisor_findings: NotRequired[str]
     signoff_outcome: NotRequired[str]
+    passes_remaining: NotRequired[int]
 
 
 class ControlSignal(StrEnum):

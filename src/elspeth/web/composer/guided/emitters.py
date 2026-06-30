@@ -420,8 +420,15 @@ def build_step_4_wire_turn(
     catalog: CatalogServiceProtocol | None = None,
     advisor_findings: str | None = None,
     signoff_outcome: str | None = None,
+    passes_remaining: int | None = None,
 ) -> Turn:
-    """Build a ``confirm_wiring`` Turn from topology and validation reads."""
+    """Build a ``confirm_wiring`` Turn from topology and validation reads.
+
+    ``passes_remaining`` is the advisor sign-off budget left AFTER the pass that
+    produced this turn. The emitter stays dumb — it folds the caller-computed
+    value only when not None (the re-emit sites supply it; the initial turn does
+    not, so its absence is what keeps the advisor-off tutorial cost-copy-free).
+    """
     del catalog  # Reserved for future catalog-backed presentation enrichment.
     validation = state.validate()
     payload: WireStageData = {
@@ -434,6 +441,8 @@ def build_step_4_wire_turn(
         payload["advisor_findings"] = advisor_findings
     if signoff_outcome is not None:
         payload["signoff_outcome"] = signoff_outcome
+    if passes_remaining is not None:
+        payload["passes_remaining"] = passes_remaining
     return Turn(
         type=TurnType.CONFIRM_WIRING.value,
         step_index=_step_index(GuidedStep.STEP_4_WIRE),

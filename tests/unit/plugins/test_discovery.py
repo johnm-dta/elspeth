@@ -247,7 +247,7 @@ class TestDiscoverAllPlugins:
 
         # Expected counts verified during migration from hookimpl files
         EXPECTED_SOURCE_COUNT = 6  # csv, json, null, azure_blob, dataverse, text
-        EXPECTED_TRANSFORM_COUNT = 26  # 22 standard transforms + 2 azure safety + llm + rag_retrieval
+        EXPECTED_TRANSFORM_COUNT = 27  # 22 standard transforms + 2 azure safety + azure_document_intelligence + llm + rag_retrieval
         EXPECTED_SINK_COUNT = 6  # csv, json, database, azure_blob, dataverse, chroma_sink
 
         discovered = discover_all_plugins()

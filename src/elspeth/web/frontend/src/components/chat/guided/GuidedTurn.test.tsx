@@ -352,6 +352,98 @@ describe("GuidedTurn dispatcher — onSubmit forwarding", () => {
     });
   });
 
+  it("confirm_wiring Ask advisor forwards the request_advisor body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", {
+          ...WIRE_STAGE_PAYLOAD,
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED: review",
+          passes_remaining: 2,
+        })}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Ask advisor (spends 1 of 2)" }),
+    );
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: "request_advisor",
+    });
+  });
+
+  it("confirm_wiring Exit to freeform forwards the exit_to_freeform body", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", {
+          ...WIRE_STAGE_PAYLOAD,
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED: review",
+          passes_remaining: 2,
+        })}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Exit to freeform" }));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: null,
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: "exit_to_freeform",
+    });
+  });
+
+  it("confirm_wiring Complete without sign-off forwards chosen=['complete_without_signoff']", async () => {
+    // Governance-critical: chosen is string[], so this literal is NOT
+    // type-checked. The forwarded body must match the backend escape guard
+    // (_helpers.py: chosen in (['confirm'], ['complete_without_signoff'])); a
+    // typo here would silently 400 the only sanctioned advisor-unreachable exit.
+    const user = userEvent.setup();
+    const onSubmit = vi.fn();
+    render(
+      <GuidedTurn
+        turn={makeTurn("confirm_wiring", {
+          ...WIRE_STAGE_PAYLOAD,
+          signoff_outcome: "escape_unavailable",
+          advisor_findings: "Advisor unreachable.",
+          passes_remaining: 0,
+        })}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Complete without sign-off" }),
+    );
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).toHaveBeenCalledWith({
+      chosen: ["complete_without_signoff"],
+      edited_values: null,
+      custom_inputs: null,
+      accepted_step_index: null,
+      edit_step_index: null,
+      control_signal: null,
+    });
+  });
+
   it("confirm_wiring disabled mode does not submit", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();

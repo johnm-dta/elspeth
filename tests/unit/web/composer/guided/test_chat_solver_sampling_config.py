@@ -7,7 +7,10 @@ from typing import Any
 
 import pytest
 
+from elspeth.core.canonical import stable_hash
+from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided import chat_solver
+from elspeth.web.composer.guided.prompts import load_step_chat_skill
 from elspeth.web.composer.guided.protocol import GuidedStep
 
 
@@ -123,3 +126,101 @@ async def test_solve_step_chat_no_marker_for_non_anthropic(monkeypatch: pytest.M
 
     assert "cache_control" not in captured["messages"][0]
     assert "cache_control" not in captured["messages"][1]
+
+
+@pytest.mark.asyncio
+async def test_step_1_source_splits_skill_head_and_marks_for_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The step_1 source prompt is SPLIT: messages[0] is the stable step skill
+    (the markable head), messages[1] holds the dynamic hint/revise block + tool
+    instructions, messages[2] is the user message. Anthropic routes mark the
+    skill head AND the trailing tool; the dynamic block stays unmarked."""
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _text_response("advice")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    await chat_solver.maybe_resolve_step_1_source_chat(
+        model="openrouter/anthropic/claude-sonnet-4-6",
+        user_message="make a csv of urls",
+        plugin_hint="csv",
+        temperature=None,
+        seed=None,
+    )
+
+    msgs = captured["messages"]
+    # Stable, markable skill head — byte-stable so a future dynamic insertion
+    # into the cache prefix fails this guard loudly.
+    assert msgs[0]["role"] == "system"
+    assert msgs[0]["content"] == load_step_chat_skill(GuidedStep.STEP_1_SOURCE).rstrip()
+    assert msgs[0]["cache_control"] == {"type": "ephemeral"}
+    # Dynamic block: hint + tool instructions, unmarked.
+    assert msgs[1]["role"] == "system"
+    assert "The current source plugin selected in the wizard is 'csv'." in msgs[1]["content"]
+    assert "call `resolve_source`" in msgs[1]["content"]
+    assert "cache_control" not in msgs[1]
+    # User message follows, unmarked.
+    assert msgs[2]["role"] == "user"
+    assert msgs[2]["content"] == "make a csv of urls"
+    assert "cache_control" not in msgs[2]
+    # Trailing tool carries the tools-array marker.
+    assert captured["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
+async def test_step_1_source_no_marker_for_non_anthropic(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-Anthropic route is split the same way but carries no marker."""
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _text_response("advice")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    await chat_solver.maybe_resolve_step_1_source_chat(
+        model="openrouter/openai/gpt-5.5",
+        user_message="make a csv of urls",
+        plugin_hint="csv",
+        temperature=None,
+        seed=None,
+    )
+
+    msgs = captured["messages"]
+    assert msgs[0]["content"] == load_step_chat_skill(GuidedStep.STEP_1_SOURCE).rstrip()
+    assert "cache_control" not in msgs[0]
+    assert "cache_control" not in msgs[1]
+    for tool in captured["tools"]:
+        assert "cache_control" not in tool
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_audit_hash_matches_marked_wire_messages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Audit truthfulness: the recorded ``messages_hash`` is the stable hash of
+    the EXACT marked list sent to the wire (the same-object invariant). If the
+    marker were ever applied to a copy that diverged from the audited list, this
+    fails."""
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeResponse:
+        captured.update(kwargs)
+        return _text_response("reply")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    recorder = BufferingRecorder()
+    await chat_solver.solve_step_chat(
+        model="openrouter/anthropic/claude-sonnet-4-6",
+        step=GuidedStep.STEP_1_SOURCE,
+        user_message="hi",
+        temperature=None,
+        seed=None,
+        recorder=recorder,
+    )
+
+    # The wire payload IS marked (precondition for a meaningful hash check).
+    assert captured["messages"][0]["cache_control"] == {"type": "ephemeral"}
+    assert len(recorder.llm_calls) == 1
+    assert recorder.llm_calls[0].messages_hash == stable_hash(captured["messages"])

@@ -178,12 +178,19 @@ def _record_llm_call(
         attach_llm_calls(current_exc, recorder)
 
 
-def _build_step_1_source_tool_prompt(
+def _build_step_1_source_dynamic_block(
     *,
     plugin_hint: str | None,
     current_source: SourceResolved | None = None,
 ) -> str:
-    """Compose the Step-1 source/data-schema tool prompt."""
+    """Compose the DYNAMIC Step-1 source block (hint + revise context + tool instructions).
+
+    Split out of the per-step skill so the stable ``load_step_chat_skill(STEP_1_SOURCE)``
+    can be an isolable, byte-stable, markable cache head (``messages[0]``); this
+    dynamic block rides in ``messages[1]``. The static tool-instructions tail is
+    intentionally part of THIS block (after the dynamic hint/revise content),
+    not the marked head — only the ~1199-token skill is in the cached prefix.
+    """
     hint = (
         f"The current source plugin selected in the wizard is {plugin_hint!r}."
         if plugin_hint is not None
@@ -199,7 +206,6 @@ def _build_step_1_source_tool_prompt(
             f"{json.dumps(_source_revision_context_for_llm(current_source), sort_keys=True)}\n"
         )
     return (
-        f"{load_step_chat_skill(GuidedStep.STEP_1_SOURCE).rstrip()}\n\n"
         "## Step 1 Source/Data Schema Tool\n\n"
         f"{hint}\n"
         f"{revise_block}"
@@ -407,10 +413,15 @@ async def maybe_resolve_step_1_source_chat(
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
+    # SPLIT the system prompt: the stable per-step skill is the byte-stable,
+    # markable head (messages[0]); the dynamic hint/revise context + tool
+    # instructions ride in messages[1]. Only the ~1199-token skill is in the
+    # marked cache prefix.
     messages: list[dict[str, Any]] = [
+        {"role": "system", "content": load_step_chat_skill(GuidedStep.STEP_1_SOURCE).rstrip()},
         {
             "role": "system",
-            "content": _build_step_1_source_tool_prompt(
+            "content": _build_step_1_source_dynamic_block(
                 plugin_hint=plugin_hint,
                 current_source=current_source,
             ),
@@ -418,6 +429,13 @@ async def maybe_resolve_step_1_source_chat(
         {"role": "user", "content": user_message},
     ]
     tools = [_STEP_1_SOURCE_TOOL]
+    # Mark BEFORE kwargs so the SAME marked objects feed both the wire call and
+    # the audit record (messages / tools below, read in the finally block).
+    # Gated on THIS call's model.
+    if supports_anthropic_prompt_cache_markers(model):
+        messages, marked_tools = apply_anthropic_cache_markers(messages, tools)
+        if marked_tools is not None:
+            tools = marked_tools
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,

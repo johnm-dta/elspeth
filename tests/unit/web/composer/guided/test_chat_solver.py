@@ -19,7 +19,7 @@ import pytest
 from elspeth.web.composer.guided import chat_solver
 from elspeth.web.composer.guided.chat_solver import (
     Step1SourceChatResolution,
-    _build_step_1_source_tool_prompt,
+    _build_step_1_source_dynamic_block,
     _build_step_2_sink_tool_prompt,
     _parse_step_1_source_tool_arguments,
     solve_step_chat,
@@ -213,7 +213,7 @@ def test_step_1_revision_prompt_uses_llm_safe_source_context() -> None:
         on_validation_failure="quarantine",
     )
 
-    prompt = _build_step_1_source_tool_prompt(plugin_hint="csv", current_source=current_source)
+    prompt = _build_step_1_source_dynamic_block(plugin_hint="csv", current_source=current_source)
 
     assert "person@example.test" not in prompt
     assert "https://example.test/private" not in prompt

@@ -73,13 +73,17 @@ async def test_source_driver_includes_current_source_in_prompt() -> None:
 
     assert result is not None
     assert result.plugin == "json"
-    system_prompt = captured["messages"][0]["content"]
+    # The system prompt is SPLIT: messages[0] is the stable skill head (the
+    # markable cache prefix), and the dynamic block — including the current-source
+    # revision JSON — rides in messages[1]. Relocation, not a regression: the
+    # current source is still threaded, still redacted.
+    dynamic_block = captured["messages"][1]["content"]
     # The current applied source MUST be threaded so "add" resolves relative to it,
     # without leaking literal sample values into the prompt.
-    assert '"plugin": "json"' in system_prompt
-    assert '"observed_columns": ["url"]' in system_prompt
-    assert '"url": "<sample:url>"' in system_prompt
-    assert "https://example.test/a" not in system_prompt
+    assert '"plugin": "json"' in dynamic_block
+    assert '"observed_columns": ["url"]' in dynamic_block
+    assert '"url": "<sample:url>"' in dynamic_block
+    assert "https://example.test/a" not in dynamic_block
 
 
 @pytest.mark.asyncio

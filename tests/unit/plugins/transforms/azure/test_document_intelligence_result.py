@@ -56,6 +56,16 @@ def test_host_match_rejects_http_scheme() -> None:
     assert not operation_location_host_matches("http://di.cognitiveservices.azure.com/x", _ENDPOINT)
 
 
+def test_host_match_rejects_same_host_different_port() -> None:
+    # api-key must not be sent to a same-host attacker port (F1).
+    assert not operation_location_host_matches("https://di.cognitiveservices.azure.com:8443/analyzeResults/abc", _ENDPOINT)
+
+
+def test_host_match_accepts_explicit_default_port() -> None:
+    # An explicit :443 matches an endpoint with no port (both normalize to 443).
+    assert operation_location_host_matches("https://di.cognitiveservices.azure.com:443/analyzeResults/abc", _ENDPOINT)
+
+
 def test_host_match_rejects_garbage() -> None:
     assert not operation_location_host_matches("not a url", _ENDPOINT)
 

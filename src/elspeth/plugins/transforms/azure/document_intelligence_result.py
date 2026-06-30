@@ -41,12 +41,13 @@ def count_pages(analyze_result: Mapping[str, Any]) -> int:
 
 
 def operation_location_host_matches(operation_url: str, endpoint: str) -> bool:
-    """True iff operation_url is a well-formed HTTPS URL on the same host as endpoint.
+    """True iff operation_url is a well-formed HTTPS URL on the same host AND port as endpoint.
 
     Guards against the polled Operation-Location (which carries our api-key header)
-    being pointed at an attacker host by a malformed/compromised 202 response. We
-    refuse to follow it unless its host matches the operator-configured endpoint,
-    so the api-key is never sent anywhere the operator did not configure.
+    being pointed elsewhere by a malformed/compromised 202 response. We refuse to
+    follow it unless its scheme is https and its host AND port both match the
+    operator-configured endpoint, so the api-key is never sent to a different
+    origin (host:port) than the operator configured.
     """
     try:
         op = urlparse(operation_url)
@@ -55,7 +56,13 @@ def operation_location_host_matches(operation_url: str, endpoint: str) -> bool:
         return False
     if op.scheme != "https" or not op.hostname:
         return False
-    return op.hostname.lower() == (ep.hostname or "").lower()
+    if op.hostname.lower() != (ep.hostname or "").lower():
+        return False
+    # Compare effective ports, normalizing the https default (443) so an explicit
+    # ":443" matches an absent port. A same-host but attacker-port URL is rejected.
+    op_port = op.port if op.port is not None else 443
+    ep_port = ep.port if ep.port is not None else 443
+    return op_port == ep_port
 
 
 def operation_id_from_url(operation_url: str) -> str | None:

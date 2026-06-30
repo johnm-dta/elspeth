@@ -439,6 +439,42 @@ def test_facet_wrong_type_is_malformed() -> None:
     assert result.reason["reason"] == "malformed_response"
 
 
+def test_malformed_pages_with_content_only_config_fails_closed() -> None:
+    """Regression: a malformed `pages` (present-but-not-a-list) must fail the row closed even
+    when neither page_count_field nor a pages facet is configured. Previously the unguarded
+    success-metadata count_pages() raised past the executor and crashed the whole batch."""
+    t = _t_for_lro()  # default BASE config: content_field only, no page_count_field, no pages facet
+    done = _Resp(200, body={"status": "succeeded", "analyzeResult": {"content": "x", "pages": "not-a-list"}})
+    result = _run_with_fake(t, _FakeClient(_post_202(), [done]))
+    assert result.status == "error"
+    assert result.reason["reason"] == "malformed_response"
+
+
+def test_success_reason_includes_warning_count() -> None:
+    t = _t_for_lro()
+    done = _Resp(
+        200,
+        body={"status": "succeeded", "analyzeResult": {"content": "x", "warnings": [{"code": "w1"}, {"code": "w2"}]}},
+    )
+    result = _run_with_fake(t, _FakeClient(_post_202(), [done]))
+    assert result.status == "success"
+    assert result.success_reason["metadata"]["warning_count"] == 2
+
+
+def test_analysis_failed_error_code_is_length_capped() -> None:
+    t = _t_for_lro()
+    long_code = "X" * 500
+    failed = _Resp(200, body={"status": "failed", "error": {"code": long_code, "message": "leak"}})
+    result = _run_with_fake(t, _FakeClient(_post_202(), [failed]))
+    assert result.reason["reason"] == "analysis_failed"
+    assert len(result.reason["cause"]) == 128
+
+
+def test_declared_input_fields_includes_source_field() -> None:
+    t = _transform(source_field="my_doc_ref")
+    assert "my_doc_ref" in t.declared_input_fields
+
+
 # ── Capacity retry (R14) ───────────────────────────────────────────────────
 
 

@@ -16,7 +16,8 @@ SECURITY:
   blob (~1.33x size). Operators with PII-sensitive documents should weigh their
   audit-retention policy.
 - The polled ``Operation-Location`` URL carries our api-key header; we refuse to
-  follow it unless its host matches the configured ``endpoint`` host.
+  follow it unless its scheme is https and its host AND port match the configured
+  ``endpoint``.
 """
 
 from __future__ import annotations
@@ -239,6 +240,12 @@ class AzureDocumentIntelligenceConfig(TransformDataConfig):
         names.extend(self.configured_output_fields().values())
         return names
 
+    @property
+    def declared_input_fields(self) -> frozenset[str]:
+        """Declare ``source_field`` as required input so a missing reference is caught at
+        DAG/compose validation, not per-row at runtime (mirrors web_scrape's url_field)."""
+        return super().declared_input_fields | frozenset({self.source_field})
+
 
 class AzureDocumentIntelligence(BaseTransform, BatchTransformMixin):
     """Enrich rows with Azure Document Intelligence extraction (async analyze LRO).
@@ -253,7 +260,7 @@ class AzureDocumentIntelligence(BaseTransform, BatchTransformMixin):
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
     # Placeholder must be a sha256: literal so the hash normalizer matches it; recomputed by scripts/cicd/plugin_hash.
-    source_file_hash: str | None = "sha256:4799f6bfb0d43e52"
+    source_file_hash: str | None = "sha256:a1208f244b0a1522"
     config_model = AzureDocumentIntelligenceConfig
     passes_through_input = True
     creates_tokens = False
@@ -587,10 +594,10 @@ class AzureDocumentIntelligence(BaseTransform, BatchTransformMixin):
     ) -> Mapping[str, Any] | TransformResult:
         client = self._get_http_client(state_id, token_id=token_id)
         poll_deadline = started_at + self._poll_timeout_seconds
-        interval = min(
-            retry_after if retry_after is not None else self._poll_interval_seconds,
-            self._poll_max_interval_seconds,
-        )
+        # Floor the interval at poll_interval_seconds so a Tier-3 ``Retry-After: 0`` (or any
+        # value below the configured floor) cannot spin a hot poll loop; cap at poll_max.
+        initial_interval = retry_after if retry_after is not None else self._poll_interval_seconds
+        interval = min(max(initial_interval, self._poll_interval_seconds), self._poll_max_interval_seconds)
 
         while True:
             if self._shutdown.is_set():
@@ -620,7 +627,9 @@ class AzureDocumentIntelligence(BaseTransform, BatchTransformMixin):
                 if isinstance(error_obj, dict):
                     code = error_obj.get("code")
                     if isinstance(code, str):
-                        error_code = code
+                        # Azure error.code is a bounded enum token; cap length as Tier-3
+                        # egress defense-in-depth in case a compromised response inflates it.
+                        error_code = code[:128]
                 # Carry only the bounded Azure error.code token; never the raw error.message (Tier-3 egress).
                 return TransformResult.error({"reason": "analysis_failed", "cause": error_code}, retryable=False)
             if status in ("notStarted", "running"):
@@ -671,12 +680,18 @@ class AzureDocumentIntelligence(BaseTransform, BatchTransformMixin):
         )
 
     def _build_enriched_result(self, row: PipelineRow, analyze_result: Mapping[str, Any], *, operation_url: str) -> TransformResult:
+        # ALL Tier-3 reads of analyze_result must stay inside this guard so a malformed
+        # response fails the row closed rather than raising past the executor (which would
+        # cancel the whole batch). page_count/warning_count are computed once here and
+        # reused in the success metadata below — never re-parsed outside the guard.
         try:
             output = row.to_dict()
+            page_count = count_pages(analyze_result)
+            warning_count = len(extract_facet_list(analyze_result, "warnings"))
             if self._content_field is not None:
                 output[self._content_field] = extract_content(analyze_result)
             if self._page_count_field is not None:
-                output[self._page_count_field] = count_pages(analyze_result)
+                output[self._page_count_field] = page_count
             if self._result_field is not None:
                 output[self._result_field] = dict(analyze_result)
             for azure_key, field_name in self._facet_fields.items():
@@ -698,7 +713,8 @@ class AzureDocumentIntelligence(BaseTransform, BatchTransformMixin):
                     "model_id": model_id_val if isinstance(model_id_val, str) else self._model_id,
                     "api_version": self._api_version,
                     "operation_id": operation_id_from_url(operation_url),
-                    "page_count": count_pages(analyze_result),
+                    "page_count": page_count,
+                    "warning_count": warning_count,
                     "content_format": self._output_content_format,
                     "features": list(self._cfg.features),
                     "result_status": "succeeded",

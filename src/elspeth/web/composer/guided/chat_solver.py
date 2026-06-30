@@ -719,6 +719,12 @@ async def maybe_resolve_step_2_sink_chat(
     actor = user_id or "guided-composer"
     iteration_cap = max_discovery_iters if max_discovery_iters is not None else _DEFAULT_MAX_DISCOVERY_ITERS
 
+    # NO Anthropic prompt-cache marker here (deliberate skip, not an oversight):
+    # the step_2 sink skill is ~915 tokens, below Anthropic's 1024-token cache
+    # floor, so a cache_control marker on it would be an inert no-op. Marking the
+    # tool array / a cumulative prefix would cache something, but the win is
+    # marginal at this size and the discovery-loop tool churn complicates the
+    # breakpoint — deferred. Revisit if the step_2 skill grows past the floor.
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _build_step_2_sink_tool_prompt(current_sink=current_sink)},
         {"role": "user", "content": user_message},

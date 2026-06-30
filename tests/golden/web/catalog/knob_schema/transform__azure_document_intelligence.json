@@ -1,0 +1,245 @@
+{
+  "knob_schema": {
+    "fields": [
+      {
+        "description": "Schema configuration for data validation. Use 'schema: {mode: observed}' to infer types from data, or provide explicit field definitions with mode (fixed/flexible).",
+        "kind": "json-value",
+        "label": "Schema",
+        "name": "schema",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": null,
+        "description": "Fields this transform requires in input. Used for DAG validation to catch missing field errors at config time. For templates, use elspeth.core.templates.extract_jinja2_fields() to discover fields.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Required Input Fields",
+        "name": "required_input_fields",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "description": "Azure Document Intelligence endpoint URL (HTTPS).",
+        "kind": "text",
+        "label": "Endpoint",
+        "name": "endpoint",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Document Intelligence API key (Ocp-Apim-Subscription-Key).",
+        "kind": "text",
+        "label": "API Key",
+        "name": "api_key",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": "2024-11-30",
+        "description": "REST api-version (GA 2024-11-30 only in v1).",
+        "kind": "text",
+        "label": "API Version",
+        "name": "api_version",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Prebuilt or custom model id, e.g. prebuilt-layout, prebuilt-invoice.",
+        "kind": "text",
+        "label": "Model ID",
+        "name": "model_id",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "How the document reference is read: 'url' or 'base64'.",
+        "kind": "text",
+        "label": "Source Mode",
+        "name": "source_mode",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "description": "Row field holding the document URL (url mode) or base64 string (base64 mode).",
+        "kind": "text",
+        "label": "Source Field",
+        "name": "source_field",
+        "nullable": false,
+        "required": true
+      },
+      {
+        "default": 8000000,
+        "description": "Max length of a base64 source string (bounds the audited request blob).",
+        "kind": "number-int",
+        "label": "Max Base64 Chars",
+        "name": "max_base64_chars",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Row field for the full text/markdown content.",
+        "kind": "text",
+        "label": "Content Field",
+        "name": "content_field",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": "text",
+        "description": "outputContentFormat: text or markdown.",
+        "kind": "text",
+        "label": "Output Content Format",
+        "name": "output_content_format",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Facet -> output-field-name map.",
+        "kind": "json-object",
+        "label": "Extract",
+        "name": "extract",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Row field for the analyzed page count (int).",
+        "kind": "text",
+        "label": "Page Count Field",
+        "name": "page_count_field",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Row field for the entire analyzeResult object (max fidelity). Stores the full result (~5-50 MB for large documents) as a row value; prefer content_field or specific extract facets for normal use.",
+        "kind": "text",
+        "label": "Result Field",
+        "name": "result_field",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "1-based page range, e.g. '1-3,5,7-9'.",
+        "kind": "text",
+        "label": "Pages",
+        "name": "pages",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": null,
+        "description": "Locale hint, e.g. 'en-US'.",
+        "kind": "text",
+        "label": "Locale",
+        "name": "locale",
+        "nullable": true,
+        "required": false
+      },
+      {
+        "default": "textElements",
+        "description": "stringIndexType: textElements, unicodeCodePoint, or utf16CodeUnit.",
+        "kind": "text",
+        "label": "String Index Type",
+        "name": "string_index_type",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Add-on analysis features.",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Features",
+        "name": "features",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "description": "Additional fields to extract (requires queryFields feature).",
+        "item_kind": "text",
+        "kind": "string-list",
+        "label": "Query Fields",
+        "name": "query_fields",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 1.0,
+        "description": "Initial poll delay.",
+        "kind": "number-float",
+        "label": "Poll Interval Seconds",
+        "name": "poll_interval_seconds",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 1.5,
+        "description": "Exponential poll backoff factor.",
+        "kind": "number-float",
+        "label": "Poll Backoff Multiplier",
+        "name": "poll_backoff_multiplier",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 10.0,
+        "description": "Poll backoff cap.",
+        "kind": "number-float",
+        "label": "Poll Max Interval Seconds",
+        "name": "poll_max_interval_seconds",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 300.0,
+        "description": "Outer bound on the poll sequence.",
+        "kind": "number-float",
+        "label": "Poll Timeout Seconds",
+        "name": "poll_timeout_seconds",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 60.0,
+        "description": "Per HTTP call timeout.",
+        "kind": "number-float",
+        "label": "Request Timeout Seconds",
+        "name": "request_timeout_seconds",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 50000000,
+        "description": "Cap on the analyzeResult response body.",
+        "kind": "number-int",
+        "label": "Max Response Body Bytes",
+        "name": "max_response_body_bytes",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 300,
+        "description": "Per-call 429/503 retry budget (default 300 bounds web-worker hold time).",
+        "kind": "number-int",
+        "label": "Max Capacity Retry Seconds",
+        "name": "max_capacity_retry_seconds",
+        "nullable": false,
+        "required": false
+      },
+      {
+        "default": 3600,
+        "description": "Batch-mixin per-row wait timeout.",
+        "kind": "number-int",
+        "label": "Batch Wait Timeout Seconds",
+        "name": "batch_wait_timeout_seconds",
+        "nullable": false,
+        "required": false
+      }
+    ]
+  },
+  "plugin_kind": "transform",
+  "plugin_name": "azure_document_intelligence"
+}

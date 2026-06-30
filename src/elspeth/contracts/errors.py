@@ -409,6 +409,11 @@ TransformErrorCategory = Literal[
     "transport_exception",  # HTTP transport error during batch retrieval
     # Replication errors
     "invalid_copies",  # Invalid copies value in batch_replicate transform
+    # Azure Document Intelligence (async analyze long-running operation)
+    "analysis_failed",  # Azure analyze operation reported status=failed
+    "poll_timeout",  # async analyze operation did not reach a terminal status within budget
+    "operation_location_missing",  # 202 response lacked the Operation-Location header
+    "operation_location_untrusted",  # Operation-Location host != configured endpoint (security)
 ]
 
 

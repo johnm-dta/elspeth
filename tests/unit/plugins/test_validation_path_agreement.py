@@ -29,6 +29,22 @@ def _make_observed_schema() -> dict[str, str]:
 # ── Invalid configs that both paths must reject ─────────────────────────
 
 _TRANSFORM_REJECTION_CASES = [
+    # ── azure_document_intelligence ──────────────────────────────────────
+    pytest.param(
+        "azure_document_intelligence",
+        {
+            "schema": _make_observed_schema(),
+            "endpoint": "https://di.cognitiveservices.azure.com",
+            "api_key": "k",
+            "model_id": "prebuilt-layout",
+            "source_mode": "url",
+            "source_field": "doc_url",
+            "content_field": "dup",
+            "extract": {"tables": "dup"},  # collides with content_field output name
+        },
+        "Duplicate output field names",
+        id="azure_document_intelligence-duplicate-output-fields",
+    ),
     # ── batch_stats ───────────────────────────────────────────────────────
     pytest.param(
         "batch_stats",

@@ -34,6 +34,18 @@ pytest tests/unit/web/composer/guided tests/integration/web/composer/guided test
 
 > Verify the exact npm script names against `src/elspeth/web/frontend/package.json` at slice start — substitute if they differ. Do not run `pytest -o addopts=""` (forces slow/stress → phantom fails); plain `pytest <paths>` is CI-equivalent.
 
+## Baseline (captured 2026-06-30 on a clean tree at `87e75e54d` — the reference frame for every gate run)
+
+- **Frontend gate: FULLY GREEN** (`test`, `lint`, `lint:css`, `build`). ⇒ ANY frontend red after a slice is THAT slice's regression — fix it before the slice lands.
+- **Backend gate: `539 passed, 5 PRE-EXISTING failures`** — owed 0.7.0 baseline reds, NOT caused by this work. **Do NOT fix them in A/B/C** (separate debt), and **do NOT let them mask a new regression.** The five:
+  1. `test_auto_drop.py::TestRepairSucceeds::test_first_fails_repair_succeeds_returns_confirm_wiring_then_completed`
+  2. `test_step_3_e2e.py::TestStep3ChainAccept::test_csv_to_json_step_3_accept_returns_confirm_wiring_then_completes_session`
+  3. `test_step_chat_sink_driver.py::test_sink_driver_revise_threads_current_sink`
+  4. `test_step_chat_source_driver.py::test_source_driver_includes_current_source_in_prompt`
+  5. `test_wire_dispatch.py::test_confirm_wiring_stamps_completed_terminal`
+
+**"Backend gate green" for a slice means:** exactly these 5 fail, everything else passes. A 6th failure = a regression to fix before landing. Note #2 is in `test_step_3_e2e.py` — Slice A2 edits the *reject* test in that file, a DIFFERENT test from this failing *accept* one; do not conflate. Note #5 is in the wire area Slice B works in (the advisor-unavailable→`blocked_unavailable` completion path) — pre-existing; Slice B (frontend render + `passes_remaining` at `:3703`/`:3858`) does not touch it.
+
 ## Commit discipline
 
 - One atomic commit per task (per the implementation-planning skill). Conventional messages; end each with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.

@@ -22,10 +22,6 @@ export type TurnType =
   | "schema_form"
   | "propose_chain"
   | "recipe_offer"
-  // Phase 5b: guided-mode interpretation-review widget.  Dispatched from
-  // GuidedTurn.tsx (the freeform variant uses InterpretationReviewInlineMessage
-  // — different file, different component, no shared widget).
-  | "interpretation_review"
   | "confirm_wiring";
 
 export type ControlSignal =

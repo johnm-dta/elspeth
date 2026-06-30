@@ -137,13 +137,6 @@ export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = fals
           isTutorial={isTutorial}
         />
       );
-    case "interpretation_review":
-      // Dead dispatch path: interpretation events are surfaced through the
-      // AcknowledgementStack (driven by the pendingBySession store
-      // projection), not through the guided /respond turn stream.  The
-      // TurnType vocab is retained, but this case renders nothing — the
-      // stack is mounted by ChatPanel above the guided turn surface.
-      return null;
     case "confirm_wiring":
       return (
         <WireStageTurn

@@ -24,7 +24,7 @@ import type {
 type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
 
 describe("guided protocol types", () => {
-  it("TurnType union has exactly 8 values", () => {
+  it("TurnType union has exactly 7 values", () => {
     const _exact: Equals<
       TurnType,
       | "inspect_and_confirm"
@@ -33,7 +33,6 @@ describe("guided protocol types", () => {
       | "schema_form"
       | "propose_chain"
       | "recipe_offer"
-      | "interpretation_review"
       | "confirm_wiring"
     > = true;
     const all: TurnType[] = [
@@ -43,11 +42,10 @@ describe("guided protocol types", () => {
       "schema_form",
       "propose_chain",
       "recipe_offer",
-      "interpretation_review",
       "confirm_wiring",
     ];
     expect(_exact).toBe(true);
-    expect(all).toHaveLength(8);
+    expect(all).toHaveLength(7);
   });
 
   it("ControlSignal union has 3 values", () => {

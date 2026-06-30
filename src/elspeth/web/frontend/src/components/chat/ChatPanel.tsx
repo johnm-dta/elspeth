@@ -1471,93 +1471,94 @@ export function ChatPanel({
         {error && (
           <GuidedErrorBanner error={error} onDismiss={clearError} />
         )}
-        {/* Scrollable content region (mirrors the freeform body's
-            `.chat-panel-messages`): everything between the stepper and the
-            bottom-docked composer scrolls here, capped + centred to the sheet
-            width. `min-height:0` (in CSS) lets it shrink so a non-tutorial
-            composer stays pinned at the bottom. */}
-        <div className="guided-scroll">
-          {/*
-            aria-live region scope (mirrors the freeform body's
-            `<div className="chat-panel-messages">` region).
+        {/* "What just happened / what to do" surfaces.
 
-            Only the live turn surface (<GuidedTurn>) lives inside the role="log"
-            region.  Rationale:
+            Live guided keeps the classic chat layout: a single scroll region
+            (.guided-scroll) above a bottom-docked composer.
 
-            * GuidedHistory is historical context — already-resolved turns that
-              were announced when they first arrived.  Replaying them through the
-              live region on every step transition would create redundant SR
-              chatter; keep it outside.
-            * GuidedTurn replaces in place when a new step's payload arrives.
-              That replacement IS the "new content" event that SRs need to hear
-              about — hence the wrapping log region.
+            The TUTORIAL uses a two-column WORKSPACE — a hybrid of the guided +
+            freeform modes, intended to graduate into a first-class interface: the
+            conversation stream + composer on the LEFT, and the pipeline-so-far +
+            current-decision cards pinned (sticky) at the TOP-RIGHT so the thing to
+            act on stays in view as the conversation grows. Both arrangements reuse
+            the SAME content pieces, just placed differently. */}
+        {(() => {
+          // Conversation stream (shared). aria-live rationale: each piece owns its
+          // OWN live region — GuidedChatHistory (role=log), AcknowledgementLive-
+          // Region (role=status) — announcing independently of wizard advances.
+          // GuidedHistory is resolved-history context and stays OUTSIDE any live
+          // region (replaying it per step would be redundant SR chatter). The live
+          // TURN surface lives in decisionSection's own role=log wrapper —
+          // load-bearing for InspectAndConfirmTurn, which omits its own warnings
+          // live region under the convention that the parent wraps turn content.
+          const conversationStream = (
+            <>
+              <GuidedHistory
+                history={guidedSession.history}
+                currentStep={guidedSession.step}
+              />
+              <GuidedChatHistory chatHistory={guidedSession.chat_history} />
+              <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
+              <AcknowledgementStack
+                sessionId={activeSessionId ?? ""}
+                isTutorial={isTutorial}
+                onResolved={(newState) => {
+                  if (newState !== null) {
+                    useSessionStore.setState({ compositionState: newState });
+                  }
+                }}
+              />
+            </>
+          );
+          // The canonical "what I built" verification card (gloss + validation).
+          // The graph THUMBNAIL is tutorial-only — live guided shows it in the
+          // SideRail; both expand the SAME App-root GraphModal.
+          const summaryCard = (
+            <section className="guided-graph-panel" aria-label="Pipeline so far">
+              <PipelineGloss compositionState={compositionState} />
+              <PipelineValidationSummary />
+              {isTutorial && <GraphMiniView />}
+            </section>
+          );
 
-            Load-bearing for `InspectAndConfirmTurn.tsx` — search for the
-            "Warnings accessibility" comment block (the widget's warnings <aside>
-            deliberately omits its own aria-live region under the convention that
-            the parent ChatPanel wraps turn content in one).
-          */}
-          <GuidedHistory
-            history={guidedSession.history}
-            currentStep={guidedSession.step}
-          />
-          {/*
-            Per-step chat log (Phase A slice 6). GuidedChatHistory carries its
-            OWN role="log" + aria-live so new chat turns are announced
-            independently of wizard turn advances. Empty-state returns null; no
-            DOM contribution before the first chat exchange.
-          */}
-          <GuidedChatHistory chatHistory={guidedSession.chat_history} />
-          {/*
-            Pending LLM approvals (interpretation reviews) render ABOVE the
-            decision: the learner must approve them before advancing. The
-            persistent count announcer is mounted regardless of pending count so
-            the role="status" region pre-exists its content — the 0→1 appearance
-            is then a reliable content mutation (see AcknowledgementLiveRegion).
-          */}
-          <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
-          <AcknowledgementStack
-            sessionId={activeSessionId ?? ""}
-            isTutorial={isTutorial}
-            onResolved={(newState) => {
-              if (newState !== null) {
-                useSessionStore.setState({ compositionState: newState });
-              }
-            }}
-          />
-          {/* Guided verification surface (Slice C): the canonical "what I built"
-              column. The plain-language gloss + the plain validation status lead;
-              the per-step rationale prose below (in the decision section) is now
-              supporting context. The graph THUMBNAIL is tutorial-only — live-guided
-              already renders GraphMiniView in the SideRail (App.tsx), so adding it
-              here would duplicate the thumbnail. Both surfaces expand into the
-              SAME App-root GraphModal (no second modal is mounted here), where the
-              full per-node validation markers live. */}
-          <section className="guided-graph-panel" aria-label="Pipeline so far">
-            <PipelineGloss compositionState={compositionState} />
-            <PipelineValidationSummary />
-            {isTutorial && <GraphMiniView />}
-          </section>
-          {/* Live guided: the decision renders INSIDE the scroll region (the
-              active decision can be a tall interactive widget that must scroll).
-              The tutorial docks the SAME section at the bottom instead (below the
-              scroll region), so the decision + composer travel together. */}
-          {!isTutorial && decisionSection}
-          <InlineRunResults />
-        </div>
-        {/* Tutorial: the decision docks here, OUT of the scroll region, so it
-            sits directly above the composer as one bottom unit — the two travel
-            together and the short-content slack opens ABOVE (inside the scroll
-            region), not between the decision and the composer. Live guided keeps
-            the decision in the scroll region (above). */}
-        {isTutorial && decisionSection}
-        {/* "Describe what you want" docked at the BOTTOM of the panel — the
-            primary chat affordance (mirrors freeform's ChatInput docked below the
-            message log). Every session docks here, tutorial included: the
-            tutorial's locked prompt + "Sent" line ride this same slot, and the
-            focus effect brings the just-built decision (above) into view after
-            Send so the passive reading order survives. */}
-        {stepComposer}
+          if (isTutorial) {
+            return (
+              <div className="guided-workspace">
+                {/* LEFT: the conversation + the composer (the freeform half). */}
+                <div className="guided-workspace-stream">
+                  {conversationStream}
+                  <InlineRunResults />
+                  {stepComposer}
+                </div>
+                {/* RIGHT: the structured cards, pinned (sticky) top-right (the
+                    guided half). Its own scroll if taller than the viewport so
+                    the decision's forward button is always reachable. */}
+                <aside
+                  className="guided-workspace-decision"
+                  aria-label="Pipeline so far and current decision"
+                >
+                  {summaryCard}
+                  {decisionSection}
+                </aside>
+              </div>
+            );
+          }
+
+          // Live guided: single scroll region + bottom-docked composer. The
+          // decision renders INSIDE the scroll (it can be a tall interactive
+          // widget that must scroll with the log).
+          return (
+            <>
+              <div className="guided-scroll">
+                {conversationStream}
+                {summaryCard}
+                {decisionSection}
+                <InlineRunResults />
+              </div>
+              {stepComposer}
+            </>
+          );
+        })()}
       </div>
     );
   }

@@ -72,49 +72,26 @@
   width: 100%;
 }
 
-/* ── Guided step: single-document layout (Fix: the void + clipped forward action)
-   The bookend turns (welcome/run/audit/graduation) are short centred cards on
-   the base `.tutorial-shell` document scroll. The guided step previously borrowed
-   the freeform CHAT model — a `flex:1` inner scroll region that FILLS the viewport
-   plus a bottom-docked composer/decision — but a wizard step's content is normally
-   SHORTER than the viewport. That model produced a ~550px void when content
-   under-flowed (the WQHD top/bottom split) and a clipped, unreachable forward
-   button when it over-flowed (post-Send / later steps / short laptops, where the
-   `flex-shrink:0` dock spilled past `.chat-panel{overflow:hidden}` with no
-   scrollbar to reach it). A chat log is built to overflow; a wizard step is built
-   to under-flow. So the guided step now uses the SAME single document scroll as
-   the bookends, and vertically CENTRES the short stack.
+/* ── Guided step: two-column WORKSPACE on a single document scroll ─────────────
+   The bookend turns (welcome/run/audit/graduation) are short centred cards on the
+   base `.tutorial-shell` document scroll. The guided step renders the two-column
+   WORKSPACE (guided.css `.guided-workspace`) — conversation + composer on the
+   left, the pipeline-so-far + current-decision cards pinned sticky top-right — on
+   that SAME single document scroll. The sticky right column replaces the old
+   bottom dock; top-aligned so the cards sit at the top-right as requested.
 
-   Everything here is scoped under `.tutorial-shell--guided` (live-guided +
-   freeform never render under `.tutorial-shell`), so the shared `.chat-panel` /
-   `.guided-scroll` dock-and-fill base rules — correct for a real chat log — are
-   left untouched. The class is still applied by HelloWorldTutorial when
-   state.step === "guided"; with no `overflow:hidden` override the base
-   `.tutorial-shell{overflow-y:auto}` governs (one document scroll). */
+   (History: the guided step once borrowed the freeform chat model — a flex:1
+   inner scroll that FILLS the viewport + a flex-shrink:0 bottom dock — which
+   produced a ~550px void when content under-flowed and a clipped, unreachable
+   forward button when it over-flowed.)
 
-/* Centre the [dots … guided-shell] cluster when it is shorter than the viewport;
-   collapse to top-aligned (no clip) when it overflows so the outer shell scrolls
-   as ONE document. Auto margins on the first + last flex child are the
-   overflow-safe way to do this — `justify-content:center` clips the top of an
-   overflowing flex column. */
-.tutorial-shell--guided .tutorial-progress {
-  margin-top: auto;
-}
-
-.tutorial-shell--guided .tutorial-guided-shell {
-  margin-bottom: auto;
-}
-
-/* Let the panel be its natural content height and stop being an inner scroll
-   container — the page (not a nested region) scrolls. */
+   Scoped under `.tutorial-shell--guided` (live-guided + freeform never render
+   under `.tutorial-shell`), so the shared `.chat-panel` / `.guided-scroll`
+   dock-and-fill base rules — correct for a real chat log — stay untouched. With no
+   `overflow:hidden` override the base `.tutorial-shell{overflow-y:auto}` governs
+   (one document scroll); the workspace's right column is sticky against it. */
 .tutorial-shell--guided .chat-panel {
   height: auto;
-  overflow: visible;
-}
-
-.tutorial-shell--guided .guided-scroll {
-  flex: 0 0 auto;
-  min-height: auto;
   overflow: visible;
 }
 

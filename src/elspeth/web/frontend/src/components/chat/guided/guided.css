@@ -180,6 +180,73 @@
   margin: var(--space-md) auto var(--space-sm);
 }
 
+/* ── Two-column WORKSPACE (tutorial; the future first-class hybrid layout) ─────
+   Conversation stream + composer on the LEFT (the freeform half); the
+   pipeline-so-far + current-decision cards pinned sticky TOP-RIGHT (the guided
+   half). Lives inside the single-document tutorial flow (tutorial.css
+   `.tutorial-shell--guided` — the PAGE scrolls). The right column is sticky so
+   the cards stay in view as the conversation grows, and takes its OWN scroll when
+   it is taller than the viewport so the decision's forward button is always
+   reachable. Built with general `.guided-workspace*` classes (not tutorial-only)
+   so it can be promoted to a first-class mode later. */
+.guided-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-lg);
+  align-items: start;
+  width: 100%;
+  max-width: 90rem;
+  margin-inline: auto;
+  padding-inline: var(--space-md);
+}
+
+.guided-workspace-stream {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.guided-workspace-decision {
+  position: sticky;
+  top: var(--space-md);
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+  /* Own scroll when the cards exceed the viewport — Continue stays reachable
+     without scrolling the whole page to its very bottom. */
+  max-height: calc(100vh - 8rem);
+  overflow-y: auto;
+}
+
+/* Each column owns its vertical rhythm via `gap`; reset the pieces' own block
+   margins (they centre in a 64rem sheet in the single-column layout) and let them
+   fill their column. The chat narration keeps its readable 70ch measure via
+   .guided-chat-history-content. */
+.guided-workspace-stream > *,
+.guided-workspace-decision > * {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+/* Narrow screens: collapse to one column (one document scroll, no sticky). Keep
+   the conversation + composer first so Send stays near the top; the cards follow. */
+@media (max-width: 900px) {
+  .guided-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 64rem;
+  }
+
+  .guided-workspace-decision {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
 .guided-current-decision-copy {
   margin-bottom: var(--space-md);
 }

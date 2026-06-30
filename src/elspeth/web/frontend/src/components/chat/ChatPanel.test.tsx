@@ -1141,7 +1141,7 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeInTheDocument();
   });
 
-  it("tutorial guided: docks the intent box BELOW the decision (aligned with the live composer)", () => {
+  it("tutorial guided: two-column workspace — composer in the conversation column, decision in the sticky cards column", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -1157,20 +1157,19 @@ describe("ChatPanel mode discriminator", () => {
       />,
     );
 
-    const intent = container.querySelector(".guided-step-chat");
-    const form = container.querySelector(".guided-current-decision");
-    expect(intent).not.toBeNull();
-    expect(form).not.toBeNull();
-    // The tutorial now uses the SAME docked layout as the live composer: the
-    // intent box docks at the BOTTOM, AFTER the decision (mirroring the
-    // non-tutorial test above). The passive "press Send → confirm what it built"
-    // reading order is preserved by the step-advance/type focus effect, which
-    // scrolls the just-built decision into view — not by putting the box on top.
-    // `intent` follows `form`.
-    expect(
-      form!.compareDocumentPosition(intent!) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    // The tutorial renders the two-column WORKSPACE (the future first-class
+    // hybrid): the composer lives in the LEFT conversation column, the decision
+    // cards in the RIGHT sticky column — not a single bottom dock.
+    const stream = container.querySelector(".guided-workspace-stream");
+    const cards = container.querySelector(".guided-workspace-decision");
+    expect(stream).not.toBeNull();
+    expect(cards).not.toBeNull();
+    expect(stream!.querySelector(".guided-step-chat")).not.toBeNull();
+    expect(cards!.querySelector(".guided-current-decision")).not.toBeNull();
+    // The decision is NOT in the conversation stream, and the composer is NOT in
+    // the cards column — they are genuinely separate columns.
+    expect(stream!.querySelector(".guided-current-decision")).toBeNull();
+    expect(cards!.querySelector(".guided-step-chat")).toBeNull();
     // Tutorial suppresses the exit affordance, so there is no header/exit.
     expect(
       screen.queryByRole("button", { name: "Exit to freeform" }),

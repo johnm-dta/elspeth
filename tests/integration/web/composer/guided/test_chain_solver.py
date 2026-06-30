@@ -226,7 +226,11 @@ async def test_solve_chain_without_repair_context_has_no_repair_section() -> Non
         )
 
     assert len(captured_calls) == 1
-    system_content = captured_calls[0]["messages"][0]["content"]
+    # The system prompt is SPLIT (stable skill head + dynamic context/addenda),
+    # so join every system message: the negative guard must span messages[1]
+    # (where the repair addendum would land), not just the byte-stable head.
+    messages = captured_calls[0]["messages"]
+    system_content = "\n".join(m["content"] for m in messages if m["role"] == "system")
     assert "REPAIR ATTEMPT" not in system_content
 
 

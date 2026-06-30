@@ -208,6 +208,44 @@
   line-height: 1.45;
 }
 
+/* ── Guided verification panel pieces (Slice C) ───────────────────────────────
+   The plain-language gloss + the in-column validation status. The gloss is the
+   canonical "what I built" line; the status is the novice-register verification
+   signal (the column thumbnail has no per-node markers — those are on expand).
+   Status body text stays --color-text-secondary (AA on the panel surface,
+   gated in colorContrast.test.ts); only the aria-hidden, redundant glyph is
+   tinted by tone, so colour is never the sole signal. */
+.pipeline-gloss {
+  margin: 0;
+  font-size: var(--font-size-base);
+  line-height: 1.4;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.pipeline-validation-summary {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.pipeline-validation-summary-glyph {
+  font-weight: 700;
+}
+
+.pipeline-validation-summary--ok .pipeline-validation-summary-glyph {
+  color: var(--color-success);
+}
+
+.pipeline-validation-summary--warning .pipeline-validation-summary-glyph {
+  color: var(--color-warning);
+}
+
+.pipeline-validation-summary--error .pipeline-validation-summary-glyph {
+  color: var(--color-error);
+}
+
 .guided-step-chat {
   border-style: dashed;
   background-color: var(--color-surface-elevated);

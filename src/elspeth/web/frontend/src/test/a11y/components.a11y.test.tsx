@@ -51,6 +51,8 @@ const AUDITED_COMPONENTS = [
   "WireStageTurn",
   "SchemaFormTurn",
   "ModeSwitchButton",
+  "PipelineGloss",
+  "PipelineValidationSummary",
 ] as const;
 
 const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
@@ -69,6 +71,8 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "InlineSourceDisambiguationTurn",
   "InlineSourceFallbackPrompt",
   "ModeSwitchButton",
+  "PipelineGloss",
+  "PipelineValidationSummary",
   "PluginCard",
   "ReadinessRowDetail",
   "SchemaFormTurn",
@@ -141,6 +145,8 @@ import { ShortcutsHelp } from "@/components/common/ShortcutsHelp";
 import { WireStageTurn } from "@/components/chat/guided/WireStageTurn";
 import { SchemaFormTurn } from "@/components/chat/guided/SchemaFormTurn";
 import { ModeSwitchButton } from "@/components/chat/guided/ModeSwitchButton";
+import { PipelineGloss } from "@/components/chat/guided/PipelineGloss";
+import { PipelineValidationSummary } from "@/components/chat/guided/PipelineValidationSummary";
 
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -630,6 +636,41 @@ describe("ModeSwitchButton", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Exit to freeform" }),
     );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("PipelineGloss", () => {
+  it("has no axe violations", async () => {
+    const { container } = render(
+      <PipelineGloss
+        compositionState={useSessionStore.getState().compositionState}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("PipelineValidationSummary", () => {
+  it("has no axe violations (warning state with a tinted glyph)", async () => {
+    // Exercise the richest DOM (glyph + plain status text), not the neutral
+    // null state, so the axe pass covers the aria-hidden glyph + role=status.
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [
+          {
+            component_id: "select_columns",
+            component_type: "transform",
+            message: "Review the optional mapping",
+            suggestion: null,
+          },
+        ],
+      },
+    } as never);
+    const { container } = render(<PipelineValidationSummary />);
     expect(await axe(container)).toHaveNoViolations();
   });
 });

@@ -1372,6 +1372,76 @@ export function ChatPanel({
         )}
       </section>
     );
+
+    // The "current decision" panel (eyebrow + per-step rationale + the turn
+    // widget). Extracted so it can be PLACED PER MODE: inside the flex-grow
+    // scroll region for live guided (where the active decision can be a tall
+    // interactive widget that must scroll), or DOCKED at the bottom WITH the
+    // composer for the tutorial (where it collapses to a caption, so the
+    // decision and composer travel together — no gap opens between them on tall
+    // viewports).
+    const decisionSection = (() => {
+      const stepIsSendDriven =
+        isTutorial && (lockedChatPrompt?.[guidedSession.step] ?? "") !== "";
+      // Lead the decision with the dynamic build rationale (the LLM's "what I
+      // built" summary for this step); fall back to the static step purpose when
+      // no assistant turn exists yet so the headline is never blank.
+      const rationale = latestAssistantRationale(guidedSession);
+      return (
+        <section
+          className={
+            stepIsSendDriven
+              ? "guided-current-decision guided-current-decision--tutorial"
+              : "guided-current-decision"
+          }
+          aria-labelledby="guided-current-decision-heading"
+        >
+          <div className="guided-current-decision-copy">
+            <p className="guided-current-decision-eyebrow" aria-hidden="true">
+              Current decision
+            </p>
+            <h2
+              id="guided-current-decision-heading"
+              className="guided-current-decision-rationale"
+            >
+              {rationale ?? GUIDED_STEP_PURPOSES[guidedSession.step]}
+            </h2>
+            {stepIsSendDriven && !tutorialStepBuilt && (
+              <p className="guided-current-decision-tutorial-note">
+                You don't need to fill this in by hand — press{" "}
+                <strong>Send</strong> below and the assistant builds this step.
+                Then confirm the decision to continue.
+              </p>
+            )}
+          </div>
+          <div
+            ref={guidedLogRef}
+            className="chat-panel-guided-log"
+            role="log"
+            aria-label="Guided wizard step"
+            aria-live="polite"
+            aria-relevant="additions"
+          >
+            {/* Interpretation reviews moved above the intent box (approve-before-
+                advance); the turn widget remains here as the current decision. */}
+            {guidedNextTurn && (
+              <GuidedTurn
+                turn={guidedNextTurn}
+                onSubmit={(body) => void respondGuided(body)}
+                disabled={guidedResponsePending || hasPendingGuidedInterpretations}
+                isTutorial={isTutorial}
+              />
+            )}
+          </div>
+          {guidedResponsePending && (
+            <p className="guided-current-decision-pending" role="status">
+              Saving decision...
+            </p>
+          )}
+        </section>
+      );
+    })();
+
     return (
       <div
         id="chat-main"
@@ -1468,81 +1538,25 @@ export function ChatPanel({
             <PipelineValidationSummary />
             {isTutorial && <GraphMiniView />}
           </section>
-          {/* Tutorial de-emphasis applies ONLY to Send-driven steps — those with
-              a locked chat prompt (source / sink / transforms). Confirm-only steps
-              (wire) have an empty locked prompt: Send is disabled there and the
-              manual widget IS the path, so they keep full emphasis and no
-              "press Send" note (which would point at a disabled button). */}
-          {(() => {
-            const stepIsSendDriven =
-              isTutorial && (lockedChatPrompt?.[guidedSession.step] ?? "") !== "";
-            // Lead the decision with the dynamic build rationale (the LLM's
-            // "what I built" summary for this step); fall back to the static
-            // step purpose when no assistant turn exists yet (server-emitted /
-            // empty cases) so the headline is never blank.
-            const rationale = latestAssistantRationale(guidedSession);
-            return (
-          <section
-            className={
-              stepIsSendDriven
-                ? "guided-current-decision guided-current-decision--tutorial"
-                : "guided-current-decision"
-            }
-            aria-labelledby="guided-current-decision-heading"
-          >
-            <div className="guided-current-decision-copy">
-              <p className="guided-current-decision-eyebrow" aria-hidden="true">
-                Current decision
-              </p>
-              <h2
-                id="guided-current-decision-heading"
-                className="guided-current-decision-rationale"
-              >
-                {rationale ?? GUIDED_STEP_PURPOSES[guidedSession.step]}
-              </h2>
-              {stepIsSendDriven && !tutorialStepBuilt && (
-                <p className="guided-current-decision-tutorial-note">
-                  You don't need to fill this in by hand — press{" "}
-                  <strong>Send</strong> below and the assistant builds this step.
-                  Then confirm the decision to continue.
-                </p>
-              )}
-            </div>
-            <div
-              ref={guidedLogRef}
-              className="chat-panel-guided-log"
-              role="log"
-              aria-label="Guided wizard step"
-              aria-live="polite"
-              aria-relevant="additions"
-            >
-              {/* Interpretation reviews moved above the intent box (approve-before-
-                  advance); the turn widget remains here as the current decision. */}
-              {guidedNextTurn && (
-                <GuidedTurn
-                  turn={guidedNextTurn}
-                  onSubmit={(body) => void respondGuided(body)}
-                  disabled={guidedResponsePending || hasPendingGuidedInterpretations}
-                  isTutorial={isTutorial}
-                />
-              )}
-            </div>
-            {guidedResponsePending && (
-              <p className="guided-current-decision-pending" role="status">
-                Saving decision...
-              </p>
-            )}
-          </section>
-            );
-          })()}
+          {/* Live guided: the decision renders INSIDE the scroll region (the
+              active decision can be a tall interactive widget that must scroll).
+              The tutorial docks the SAME section at the bottom instead (below the
+              scroll region), so the decision + composer travel together. */}
+          {!isTutorial && decisionSection}
           <InlineRunResults />
         </div>
-        {/* "Describe what you want" docked at the BOTTOM of the panel, full
-            width — the primary chat affordance (mirrors freeform's ChatInput
-            docked below the message log). Every session docks here, tutorial
-            included: the tutorial's locked prompt + "Sent" line ride this same
-            slot, and the focus effect brings the just-built decision (above)
-            into view after Send so the passive reading order survives. */}
+        {/* Tutorial: the decision docks here, OUT of the scroll region, so it
+            sits directly above the composer as one bottom unit — the two travel
+            together and the short-content slack opens ABOVE (inside the scroll
+            region), not between the decision and the composer. Live guided keeps
+            the decision in the scroll region (above). */}
+        {isTutorial && decisionSection}
+        {/* "Describe what you want" docked at the BOTTOM of the panel — the
+            primary chat affordance (mirrors freeform's ChatInput docked below the
+            message log). Every session docks here, tutorial included: the
+            tutorial's locked prompt + "Sent" line ride this same slot, and the
+            focus effect brings the just-built decision (above) into view after
+            Send so the passive reading order survives. */}
         {stepComposer}
       </div>
     );

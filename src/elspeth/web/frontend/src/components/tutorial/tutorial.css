@@ -49,11 +49,20 @@
 }
 
 .tutorial-kicker {
-  margin: 0 0 var(--space-sm);
+  /* Align the kicker's left edge with the 64rem centred sheet that the stepper
+     and pipeline gloss sit in (was full-width-left, which left it misaligned
+     with the centred stepper below it). Centre the 64rem block; text stays
+     left-aligned inside it. */
+  margin: 0 auto var(--space-sm);
+  max-width: 64rem;
+  width: 100%;
   color: var(--color-info);
   font-size: var(--font-size-sm);
   font-weight: 700;
-  text-transform: uppercase;
+  /* Sentence case (was uppercase): the welcome copy read as a second shouty
+     eyebrow competing with the uppercase "CURRENT DECISION" micro-label. One
+     uppercase eyebrow per column; the kicker is the quieter, friendlier one. */
+  letter-spacing: 0.01em;
 }
 
 /* Guided-shell bridge wrapper (TutorialGuidedShell): the embedded ChatPanel
@@ -61,6 +70,36 @@
    column; the kicker sits above it. */
 .tutorial-guided-shell {
   width: 100%;
+}
+
+/* ── Guided step: full-height dock (Fix: dead-space below the composer) ──────
+   The bookend turns (welcome/run/audit/graduation) are short centred cards, so
+   the base `.tutorial-shell` is a scrolling, content-height column — correct for
+   them. The GUIDED step is different: ChatPanel is a flex column whose composer
+   is meant to dock at the BOTTOM (`.guided-scroll{flex:1}` absorbs the slack).
+   That dock needs a *definite* height to resolve against; the base wrapper gave
+   the guided-shell only `width:100%` (content height), so `.chat-panel{height:
+   100%}` collapsed and the composer floated mid-viewport with a dead band below.
+   This modifier (applied only when state.step === "guided") turns the wrapper
+   into a growing flex column so the panel fills the remaining height and the
+   composer reaches the bottom. Scoped so the bookend cards keep their centred
+   layout. */
+.tutorial-shell--guided {
+  /* The inner `.guided-scroll` owns scrolling now; suppress the outer shell's
+     scroll so there is no double scrollbar. */
+  overflow: hidden;
+}
+
+.tutorial-shell--guided .tutorial-guided-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.tutorial-shell--guided .tutorial-guided-shell > .chat-panel {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .tutorial-sample-loading {
@@ -524,8 +563,20 @@
   background: var(--color-border-strong);
 }
 
+/* Completed steps: filled (reached), no ring. */
+.tutorial-progress-dot--complete {
+  background: var(--color-state-positive);
+}
+
+/* Current step: filled AND ringed. The halo is a SHAPE cue (not colour alone),
+   so "you are here" is distinguishable from the identically-filled completed
+   dots even without colour perception. Previously complete and current shared a
+   single `--active` class and were visually indistinguishable. */
 .tutorial-progress-dot--active {
   background: var(--color-state-positive);
+  box-shadow:
+    0 0 0 2px var(--color-bg),
+    0 0 0 4px var(--color-state-positive);
 }
 
 @media (max-width: 760px) {

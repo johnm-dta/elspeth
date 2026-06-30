@@ -66,7 +66,18 @@ export function HelloWorldTutorial(): JSX.Element {
     state.sourceDataHash !== null;
 
   return (
-    <main className="tutorial-shell" aria-label="First-run tutorial">
+    <main
+      className={
+        // The guided step embeds the full-height ChatPanel, whose composer docks
+        // at the bottom; that dock needs the wrapper to be a growing flex column
+        // (see `.tutorial-shell--guided` in tutorial.css). The bookend turns are
+        // short centred cards and keep the base scrolling-column layout.
+        state.step === "guided"
+          ? "tutorial-shell tutorial-shell--guided"
+          : "tutorial-shell"
+      }
+      aria-label="First-run tutorial"
+    >
       <nav
         className="tutorial-progress"
         role="group"
@@ -83,14 +94,20 @@ export function HelloWorldTutorial(): JSX.Element {
           // assistive tech. Don't add aria-current here: it would be
           // ignored anyway (aria-hidden removes the element from the AT
           // tree) and the dual-encoding is misleading to future readers.
+          //
+          // Current and completed get DISTINCT classes (ringed vs plain fill):
+          // collapsing both to `--active` made "you are here" indistinguishable
+          // from "already done".
           return (
             <span
               key={key}
               aria-hidden="true"
               className={
-                isActive || isComplete
+                isActive
                   ? "tutorial-progress-dot tutorial-progress-dot--active"
-                  : "tutorial-progress-dot"
+                  : isComplete
+                    ? "tutorial-progress-dot tutorial-progress-dot--complete"
+                    : "tutorial-progress-dot"
               }
               title={label}
             />
@@ -169,7 +186,12 @@ const TUTORIAL_STEP_LABELS: ReadonlyArray<{ key: string; label: string }> = [
   { key: "guided", label: "Build" },
   { key: "run", label: "Run" },
   { key: "audit", label: "Audit" },
-  { key: "graduation", label: "Ready" },
+  // "Graduate" (was "Ready"): this macro phase IS the graduation turn. The inner
+  // guided stepper's terminal step is also labelled "Ready" (an assembled,
+  // ready-to-run pipeline); two different "Ready"s in nested progress trackers
+  // read as a collision. Rename the macro one — "Ready" stays the product term
+  // for a finished pipeline on the stepper.
+  { key: "graduation", label: "Graduate" },
 ];
 
 function stepIndex(step: string): number {

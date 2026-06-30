@@ -128,35 +128,54 @@
   overflow-y: auto;
 }
 
-/* Non-tutorial: "Describe what you want" docked at the bottom of the panel as a
-   full-width chat input. Only the DOCKED instance is a direct child of
-   .chat-panel--guided (the tutorial renders the composer inside .guided-scroll,
-   where it keeps the dashed-card chrome from the base rule above), so this
-   selector targets the docked one alone: full width (NOT sheet-capped), pinned
-   (flex-shrink:0), with a top divider replacing the card border. Inherits the
+/* "Describe what you want" docked at the bottom of the panel. Pinned
+   (flex-shrink:0) and chrome-light (surface fill + a top divider rather than a
+   full card), but now CAPPED + centred to the same 64rem sheet as the decision
+   and summary cards above, so its content shares their left edge instead of
+   running full-bleed. The top divider spans the centred column. Inherits the
    base rule's padding. */
 .chat-panel--guided > .guided-step-chat {
   flex-shrink: 0;
-  margin: 0;
-  border: 0;
-  border-top: 1px solid var(--color-border);
-  border-radius: 0;
-  background-color: var(--color-surface);
+  /* width:100% is REQUIRED for a flex-column item: `margin-inline:auto` alone
+     makes a flex item shrink-to-content and centre narrow (it overrides the
+     default align-items:stretch). With an explicit width the item fills to the
+     64rem cap, then the auto margins centre it — matching the summary/decision
+     cards (which fill 64rem because they live in the block-flow .guided-scroll,
+     not in this flex column). */
+  width: 100%;
+  max-width: 64rem;
+  margin: 0 auto var(--space-md);
+  /* Card chrome (dashed border, elevated surface) inherited from the base
+     .guided-step-chat rule — the dashed "input zone" affordance sets the compose
+     box apart from the solid summary/decision cards while sharing their column. */
 }
 
-/* Operator request: the current decision reads as part of the bottom dock with
-   the composer below it. It is the last child of .guided-scroll (right above the
-   docked chat), so here it sheds the centred 64rem sheet cap and the card chrome
-   to go full-width, edge-to-edge, with the SAME top-divider treatment as the
-   docked composer. Net surface: a centred pipeline summary up top, then a
-   full-width decision + chat zone across the bottom. (The pipeline gloss keeps
-   the centred sheet cap from `.guided-scroll > *`.) */
+/* Operator request (revised): align the current decision with the pipeline
+   summary card above it — both share the centred 64rem sheet so their left edges
+   line up. (Earlier this went full-width edge-to-edge; the two-zone split read as
+   misaligned against the centred summary, so it's now a matching centred card.)
+   Only the cap + centred margin are set here; the card chrome (border / radius /
+   surface / padding) falls back to the base `.guided-current-decision` rule, so
+   it visually matches `.guided-graph-panel`. */
 .guided-scroll > .guided-current-decision {
-  max-width: none;
-  margin: 0;
-  border: 0;
-  border-top: 1px solid var(--color-border);
-  border-radius: 0;
+  max-width: 64rem;
+  margin: var(--space-md) auto;
+}
+
+/* Tutorial: the decision is lifted OUT of .guided-scroll and docked at the
+   bottom alongside the composer (ChatPanel renders it as a direct child of
+   .chat-panel--guided in tutorial mode), so the two travel together and the
+   short-content slack opens above the summary rather than between the decision
+   and the composer. As a flex-column child it needs an explicit width to fill
+   the 64rem cap before the auto margins centre it (same reason as
+   .guided-step-chat). flex-shrink:0 pins it; the small bottom margin groups it
+   with the composer just below. Card chrome (solid border / radius / surface) is
+   inherited from the base rule, matching the summary card. */
+.chat-panel--guided > .guided-current-decision {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 64rem;
+  margin: var(--space-md) auto var(--space-sm);
 }
 
 .guided-current-decision-copy {
@@ -232,7 +251,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
-  margin: var(--space-md);
+  /* `auto` inline margins restore the centred 64rem sheet this panel inherits
+     from `.guided-scroll > *` (line ~115). A bare `margin: var(--space-md)`
+     shorthand here is same-specificity-but-later than that rule, so it silently
+     overrode `margin-inline:auto` and pinned the panel hard left — contradicting
+     the "centred sheet cap" the comment above promised. Keep the vertical rhythm
+     (top/bottom var(--space-md)); centre horizontally. */
+  margin: var(--space-md) auto;
   padding: var(--space-md);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);

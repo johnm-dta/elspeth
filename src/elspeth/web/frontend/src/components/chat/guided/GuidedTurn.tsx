@@ -78,6 +78,16 @@ export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = fals
   const turnInstanceKey = guidedTurnInstanceKey(turn);
   switch (turn.type) {
     case "single_select":
+      // Tutorial is a PASSIVE teaching device: the learner advances by pressing
+      // Send (the locked prompt builds the step), never by picking from this
+      // menu. The chips are a live, submit-on-click RIVAL driver whose options
+      // don't even include the scripted source (the source step builds a
+      // web_scrape; the menu lists azure_blob/csv/dataverse/json/text), so
+      // clicking ANY chip submits an off-script choice and derails the scripted
+      // build. Omit the pick widget in tutorial mode — the decision collapses to
+      // its heading + "press Send" caption. Live guided KEEPS the menu (there it
+      // is the real path for both audiences).
+      if (isTutorial) return null;
       return (
         <SingleSelectTurn
           key={turnInstanceKey}

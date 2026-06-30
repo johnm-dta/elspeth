@@ -1177,6 +1177,46 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeNull();
   });
 
+  it("tutorial: pins the decision into the bottom dock (out of the scroll region) and suppresses the rival source chips", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The decision exists, but is lifted OUT of the flex-grow scroll region so
+    // it docks at the bottom WITH the composer (they travel together; the
+    // short-content gap opens above the summary instead of between the decision
+    // and the composer).
+    expect(container.querySelector(".guided-current-decision")).not.toBeNull();
+    expect(
+      container.querySelector(".guided-scroll .guided-current-decision"),
+    ).toBeNull();
+
+    // The live, submit-on-click source chips are suppressed in the tutorial — a
+    // passive learner's only action is Send. (singleSelectTurn() asks
+    // "Which source plugin should we use?" with CSV / API options; clicking one
+    // would submit an off-script source and derail the scripted build.)
+    expect(
+      screen.queryByText("Which source plugin should we use?"),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "CSV" })).toBeNull();
+
+    // The "press Send" coaching note still leads the decision.
+    expect(
+      container.querySelector(".guided-current-decision-tutorial-note"),
+    ).not.toBeNull();
+  });
+
   it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {
     const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
@@ -1623,12 +1663,15 @@ describe("ChatPanel mode discriminator", () => {
 
     render(<ChatPanel isTutorial />);
 
-    // The form still renders (manual path is never gated)...
+    // The rival source-pick widget is SUPPRESSED in the tutorial — a passive
+    // learner advances via Send, not by picking from a live submit-on-click menu
+    // (whose options don't even include the scripted source). So the chip group
+    // is gone...
     expect(
-      screen.getByRole("group", { name: "Which source plugin should we use?" }),
-    ).toBeInTheDocument();
-    // ...but the freeform exit affordance is gone — a tutorial must never
-    // expose a switch-to-freeform path (spec §"Frontend" concern B).
+      screen.queryByRole("group", { name: "Which source plugin should we use?" }),
+    ).toBeNull();
+    // ...as is the freeform exit affordance — a tutorial must never expose a
+    // switch-to-freeform path (spec §"Frontend" concern B).
     expect(
       screen.queryByRole("button", { name: "Exit to freeform" }),
     ).toBeNull();

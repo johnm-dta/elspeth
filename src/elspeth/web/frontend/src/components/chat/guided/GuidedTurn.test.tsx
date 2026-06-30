@@ -232,6 +232,24 @@ describe("GuidedTurn dispatcher — routing", () => {
     ).toBeTruthy();
   });
 
+  it("single_select + isTutorial: suppresses the pick widget entirely", () => {
+    // The chip menu is a live, submit-on-click RIVAL to the one action a passive
+    // learner has (Send). Its options don't even include the scripted source, so
+    // clicking any chip derails the tutorial into an unscripted build. In
+    // tutorial mode the pick widget is omitted; the decision collapses to its
+    // heading + "press Send" caption (rendered by ChatPanel, not here).
+    const { container } = render(
+      <GuidedTurn
+        turn={makeTurn("single_select", SINGLE_SELECT_PAYLOAD)}
+        onSubmit={vi.fn()}
+        isTutorial
+      />,
+    );
+    expect(screen.queryByText("Which data source should we use?")).toBeNull();
+    expect(screen.queryByRole("button", { name: "CSV File" })).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+  });
+
   it("inspect_and_confirm: renders InspectAndConfirmTurn ('Looks right' button)", () => {
     render(
       <GuidedTurn

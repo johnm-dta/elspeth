@@ -93,6 +93,12 @@ def _describe_transform(node: NodeSpec) -> str:
             f"safety analysis request and verdict recorded. External call "
             f"to Azure AI Services."
         )
+    if plugin == "azure_document_intelligence":
+        return (
+            f"- {name} (Azure Document Intelligence) — for each row: the "
+            f"document analysis request and the extracted content hash "
+            f"recorded. External call to Azure AI Services."
+        )
     return f"- {name} ({plugin} transform) — input row hash, output row hash, and per-row outcome recorded."
 
 

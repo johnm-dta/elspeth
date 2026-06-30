@@ -322,8 +322,11 @@ class LandscapeExporter:
             }
             yield operation_record
 
-            # External calls for this operation (from pre-loaded dict)
-            for call in op_calls_by_operation[operation.operation_id]:
+            # External calls for this operation (from pre-loaded dict). An
+            # explicit `in` guard (not `.get(key, default)`, which trips R1)
+            # avoids defaultdict inflating itself with a throwaway empty list
+            # for every operation that has no calls.
+            for call in op_calls_by_operation[operation.operation_id] if operation.operation_id in op_calls_by_operation else ():
                 op_call_record: CallExportRecord = {
                     "record_type": "call",
                     "run_id": run_id,
@@ -456,8 +459,11 @@ class LandscapeExporter:
             }
             yield row_record
 
-            # Tokens for this row (from pre-loaded dict)
-            for token in tokens_by_row[row.row_id]:
+            # Tokens for this row (from pre-loaded dict). An explicit `in`
+            # guard (not `.get(key, default)`, which trips R1) avoids
+            # defaultdict inflating itself with a throwaway empty list for
+            # every row that has no tokens.
+            for token in tokens_by_row[row.row_id] if row.row_id in tokens_by_row else ():
                 token_record: TokenExportRecord = {
                     "record_type": "token",
                     "run_id": run_id,
@@ -472,8 +478,11 @@ class LandscapeExporter:
                 }
                 yield token_record
 
-                # Token parents (from pre-loaded dict)
-                for parent in parents_by_token[token.token_id]:
+                # Token parents (from pre-loaded dict). An explicit `in`
+                # guard (not `.get(key, default)`, which trips R1) avoids
+                # defaultdict inflating itself with a throwaway empty list for
+                # every token that has no parents.
+                for parent in parents_by_token[token.token_id] if token.token_id in parents_by_token else ():
                     token_parent_record: TokenParentExportRecord = {
                         "record_type": "token_parent",
                         "run_id": run_id,
@@ -483,8 +492,11 @@ class LandscapeExporter:
                     }
                     yield token_parent_record
 
-                # Token outcomes (from pre-loaded dict)
-                for outcome in outcomes_by_token[token.token_id]:
+                # Token outcomes (from pre-loaded dict). An explicit `in`
+                # guard (not `.get(key, default)`, which trips R1) avoids
+                # defaultdict inflating itself with a throwaway empty list for
+                # every token that has no outcomes.
+                for outcome in outcomes_by_token[token.token_id] if token.token_id in outcomes_by_token else ():
                     token_outcome_record: TokenOutcomeExportRecord = {
                         "record_type": "token_outcome",
                         "run_id": run_id,
@@ -505,8 +517,11 @@ class LandscapeExporter:
                     }
                     yield token_outcome_record
 
-                # Scheduler transition events (from pre-loaded dict)
-                for event in scheduler_events_by_token[token.token_id]:
+                # Scheduler transition events (from pre-loaded dict). An
+                # explicit `in` guard (not `.get(key, default)`, which trips
+                # R1) avoids defaultdict inflating itself with a throwaway
+                # empty list for every token that has no scheduler events.
+                for event in scheduler_events_by_token[token.token_id] if token.token_id in scheduler_events_by_token else ():
                     scheduler_event_record: SchedulerEventExportRecord = {
                         "record_type": "scheduler_event",
                         "run_id": run_id,
@@ -531,8 +546,11 @@ class LandscapeExporter:
                     }
                     yield scheduler_event_record
 
-                # Node states for this token (from pre-loaded dict)
-                for state in states_by_token[token.token_id]:
+                # Node states for this token (from pre-loaded dict). An
+                # explicit `in` guard (not `.get(key, default)`, which trips
+                # R1) avoids defaultdict inflating itself with a throwaway
+                # empty list for every token that has no node states.
+                for state in states_by_token[token.token_id] if token.token_id in states_by_token else ():
                     # Handle discriminated union types
                     node_state_record: NodeStateExportRecord
                     if isinstance(state, NodeStateOpen):
@@ -617,8 +635,12 @@ class LandscapeExporter:
                         }
                     yield node_state_record
 
-                    # Routing events for this state (from pre-loaded dict)
-                    for event in events_by_state[state.state_id]:
+                    # Routing events for this state (from pre-loaded dict).
+                    # An explicit `in` guard (not `.get(key, default)`, which
+                    # trips R1) avoids defaultdict inflating itself with a
+                    # throwaway empty list for every state that has no
+                    # routing events.
+                    for event in events_by_state[state.state_id] if state.state_id in events_by_state else ():
                         routing_event_record: RoutingEventExportRecord = {
                             "record_type": "routing_event",
                             "run_id": run_id,
@@ -634,8 +656,11 @@ class LandscapeExporter:
                         }
                         yield routing_event_record
 
-                    # External calls for this state (from pre-loaded dict)
-                    for call in calls_by_state[state.state_id]:
+                    # External calls for this state (from pre-loaded dict).
+                    # An explicit `in` guard (not `.get(key, default)`, which
+                    # trips R1) avoids defaultdict inflating itself with a
+                    # throwaway empty list for every state that has no calls.
+                    for call in calls_by_state[state.state_id] if state.state_id in calls_by_state else ():
                         state_call_record: CallExportRecord = {
                             "record_type": "call",
                             "run_id": run_id,
@@ -680,8 +705,11 @@ class LandscapeExporter:
             }
             yield batch_record
 
-            # Batch members (from pre-loaded dict)
-            for member in members_by_batch[batch.batch_id]:
+            # Batch members (from pre-loaded dict). An explicit `in` guard
+            # (not `.get(key, default)`, which trips R1) avoids defaultdict
+            # inflating itself with a throwaway empty list for every batch
+            # that has no members.
+            for member in members_by_batch[batch.batch_id] if batch.batch_id in members_by_batch else ():
                 batch_member_record: BatchMemberExportRecord = {
                     "record_type": "batch_member",
                     "run_id": member.run_id,

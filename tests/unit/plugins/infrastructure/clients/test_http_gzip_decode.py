@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
+from elspeth.contracts.audit_protocols import CallRecorder
 from elspeth.plugins.infrastructure.clients.http import (
     AuditedHTTPClient,
     HTTPResponseBodyTooLargeError,
@@ -26,7 +27,7 @@ from elspeth.plugins.infrastructure.clients.http import (
 
 
 def _make_client(*, max_response_body_bytes: int = 10 * 1024 * 1024) -> AuditedHTTPClient:
-    recorder = MagicMock()
+    recorder = MagicMock(spec=CallRecorder)
     recorder.allocate_call_index.return_value = 0
     return AuditedHTTPClient(
         execution=recorder,

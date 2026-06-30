@@ -990,6 +990,23 @@
   min-width: 0;
 }
 
+.guided-schema-summary-value .code-block {
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin: 4px 0 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.guided-schema-summary-value .code-block code {
+  background: none;
+  padding: 0;
+}
+
 /* Validation-failure caveat, demoted to a small note beside its summary row
    (role=note) instead of a full-width paragraph above Continue. */
 .guided-schema-summary-caveat {

@@ -1053,6 +1053,42 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
   });
 
+  it("shows the ComposingIndicator while guidedChatPending=true and keeps the input disabled (409-race pin)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // Silent-compute affordance: the "thinking" indicator appears during a
+    // /guided/chat build (queried by class — `.composing-indicator` is unique
+    // vs the other role="status" nodes on the guided surface).
+    expect(container.querySelector(".composing-indicator")).not.toBeNull();
+    // Regression pin (sits next to the guided-resend 409 fix): the input must
+    // STAY disabled while the build is in flight so a second send cannot race.
+    expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
+  });
+
+  it("does not show the ComposingIndicator on the guided surface when guidedChatPending=false", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: false,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    expect(container.querySelector(".composing-indicator")).toBeNull();
+  });
+
   it("renders CompletionSummary surface when terminal.kind === 'completed'", () => {
     const completedHistory: TurnRecord[] = [
       {

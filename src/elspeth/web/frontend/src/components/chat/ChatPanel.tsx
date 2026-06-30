@@ -1353,6 +1353,20 @@ export function ChatPanel({
             readOnly={isTutorial === true}
           />
         )}
+        {/* Silent-compute affordance: while a /guided/chat build is in flight the
+            input is disabled (above) with no "thinking" feedback. Reuse the
+            freeform ComposingIndicator so the guided surface shows the same
+            working view. `latestRequest` is null: the just-sent message is not
+            yet in chat_history (server-emitted on response), so deriving the last
+            user turn would surface stale text — null falls back cleanly to the
+            compositionState-driven heuristic working view. */}
+        {guidedChatPending && (
+          <ComposingIndicator
+            latestRequest={null}
+            compositionState={compositionState}
+            composerProgress={composerProgress}
+          />
+        )}
       </section>
     );
     return (

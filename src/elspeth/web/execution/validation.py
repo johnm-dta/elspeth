@@ -46,6 +46,7 @@ from elspeth.core.dag.models import EdgeContractError, GraphValidationError, Gra
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
+    redact_secret_refs_for_validation,
     resolve_secret_refs,
     secret_env_ref_name,
 )
@@ -1583,6 +1584,23 @@ def validate_pipeline(
                 env_ref_names=env_ref_names,
             )
             settings_yaml = yaml.dump(resolved_dict, default_flow_style=False)
+        elif secret_service is None:
+            # No-resolver path (YAML-export preflight withholds the resolver so
+            # resolved secret values can never reach plugin error prose). A wired
+            # {secret_ref: NAME} marker is valid wiring, but plugin config models
+            # type credential fields as ``str`` (e.g. OpenRouter ``api_key: str``)
+            # — an unsubstituted marker dict fails instantiation with "Input
+            # should be a valid string" and false-rejects an exportable pipeline.
+            # Substitute a benign placeholder so structural validation proceeds.
+            # The export YAML is generated separately from the original state
+            # (generate_public_yaml), so the real marker is preserved on the wire
+            # — the placeholder lives only in this loader-local copy.
+            config_dict = yaml.safe_load(pipeline_yaml)
+            if isinstance(config_dict, dict):
+                settings_yaml = yaml.dump(
+                    redact_secret_refs_for_validation(config_dict),
+                    default_flow_style=False,
+                )
 
         # Web-authored pipeline YAML must never expand host ${VAR} placeholders
         # (parity with the execution path). Known secret inventory names are

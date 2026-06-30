@@ -440,6 +440,12 @@ async def get_state_yaml(
         source="yaml_export",
     )
     if not runtime_validation.is_valid:
+        # Deliberately a generic message: the YAML-export 409 must not echo
+        # preflight error prose (commit "fix: prevent YAML export secret
+        # leaks"). With secret_service=None the fabricated-secret check is
+        # skipped, so a literally-typed credential is not redacted and could
+        # otherwise surface through plugin validation prose. See
+        # test_get_state_yaml_does_not_echo_preflight_error_messages.
         detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
         raise HTTPException(status_code=409, detail=detail)
     yaml_str = generate_public_yaml(state)

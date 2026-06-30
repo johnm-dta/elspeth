@@ -1758,6 +1758,140 @@ class TestValidatePipelineSuccess:
         assert graph_check.affected_nodes == ("t_a",)
 
 
+class TestValidatePipelineExportNoResolverSecretRef:
+    """Export-YAML preflight runs ``validate_pipeline`` with ``secret_service=None``.
+
+    A credential field wired as a ``{secret_ref: NAME}`` marker must not cause a
+    plugin-instantiation false-failure in the no-resolver path. Regression guard
+    for the bug where the YAML-export button reported "Current composition state
+    failed runtime preflight" for a pipeline that *ran successfully*: run
+    preflight resolves the secret, but export preflight (no resolver, by design,
+    so resolved secret values can never reach error prose) tried to instantiate
+    the LLM plugin from an unresolved ``{secret_ref}`` dict and hit
+    ``api_key: Input should be a valid string``.
+    """
+
+    def _secret_ref_llm_state(self, tmp_path: Path) -> CompositionState:
+        from elspeth.contracts.hashing import stable_hash
+
+        # Source paths must resolve under data_dir/blobs, sink paths under
+        # data_dir/outputs (allowed_source_directories / allowed_sink_directories).
+        blobs_dir = tmp_path / "blobs"
+        blobs_dir.mkdir()
+        text_path = blobs_dir / "input.txt"
+        text_path.write_text("hello world\n", encoding="utf-8")
+        prompt_template = "Summarise: {{ row.text }}"
+        model = "openai/gpt-4o-mini"
+        # An LLM node with a prompt_template and a model carries resolved
+        # prompt-template and model-choice review requirements once the guided
+        # composer has surfaced them — mirror that so interpretation_review
+        # passes and validation reaches the plugin-instantiation step (where the
+        # secret-marker bug lives).
+        interpretation_requirements = [
+            {
+                "id": "prompt_template_review:llm",
+                "kind": "llm_prompt_template",
+                "user_term": "llm_prompt_template:llm",
+                "status": "resolved",
+                "draft": prompt_template,
+                "event_id": "evt-prompt",
+                "accepted_value": prompt_template,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(prompt_template),
+            },
+            {
+                "id": "model_choice_review:llm",
+                "kind": "llm_model_choice",
+                "user_term": "llm_model_choice:llm",
+                "status": "resolved",
+                "draft": model,
+                "event_id": "evt-model",
+                "accepted_value": model,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(model),
+            },
+        ]
+        return CompositionState(
+            source=SourceSpec(
+                plugin="text",
+                on_success="llm_in",
+                options={"path": str(text_path), "column": "text", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="llm",
+                    node_type="transform",
+                    plugin="llm",
+                    input="llm_in",
+                    on_success="main",
+                    on_error="discard",
+                    options={
+                        "provider": "openrouter",
+                        "model": model,
+                        "prompt_template": prompt_template,
+                        "response_field": "summary",
+                        "required_input_fields": ["text"],
+                        # The credential is wired as a secret_ref marker, exactly
+                        # as the guided composer persists an LLM api_key.
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "schema": {"mode": "observed", "guaranteed_fields": ["summary"]},
+                        INTERPRETATION_REQUIREMENTS_KEY: interpretation_requirements,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="main",
+                    plugin="json",
+                    options={"path": "outputs/out.json", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+    def test_unresolved_secret_ref_does_not_block_export_preflight(self, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        from elspeth.web.composer import yaml_generator as composer_yaml_generator
+
+        state = self._secret_ref_llm_state(tmp_path)
+        result = validate_pipeline(
+            state,
+            SimpleNamespace(data_dir=tmp_path),
+            composer_yaml_generator,
+            secret_service=None,
+            user_id=None,
+        )
+
+        api_key_errors = [e for e in result.errors if "api_key" in (e.message or "")]
+        assert not api_key_errors, f"export preflight false-failed on a wired secret_ref marker: {[e.message for e in api_key_errors]}"
+        checks = {c.name: c for c in result.checks}
+        assert checks["plugin_instantiation"].passed is True, checks["plugin_instantiation"].detail
+
+    def test_export_yaml_still_serializes_the_secret_ref_marker(self, tmp_path: Path) -> None:
+        """Leak invariant: the placeholder substituted for preflight must never
+        reach the exported YAML, which is generated separately from the original
+        state and must keep the real ``{secret_ref}`` marker.
+        """
+        from elspeth.core.secrets import SECRET_REF_VALIDATION_PLACEHOLDER
+        from elspeth.web.composer.yaml_generator import generate_public_yaml
+
+        state = self._secret_ref_llm_state(tmp_path)
+        public_yaml = generate_public_yaml(state)
+        assert "secret_ref: OPENROUTER_API_KEY" in public_yaml
+        assert SECRET_REF_VALIDATION_PLACEHOLDER not in public_yaml
+
+
 class TestValidatePipelineSettingsFailure:
     def test_file_backed_template_options_fail_during_web_settings_load_before_plugins(self) -> None:
         pipeline_yaml = """

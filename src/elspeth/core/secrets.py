@@ -97,6 +97,52 @@ def _is_secret_ref(value: Any) -> str | None:
     return None
 
 
+# A non-empty, obviously-non-secret stand-in substituted for wired
+# ``{secret_ref: NAME}`` markers when a config is validated WITHOUT a secret
+# resolver (the YAML-export preflight, which deliberately withholds the
+# resolver so resolved secret values can never reach plugin error prose).
+# Long enough not to trip a plausible credential-field min-length check, and
+# self-describing so it can never be mistaken for a real credential.
+SECRET_REF_VALIDATION_PLACEHOLDER = "elspeth-preflight-secret-placeholder"
+
+
+def redact_secret_refs_for_validation(config: dict[str, Any]) -> dict[str, Any]:
+    """Return a deep copy of ``config`` with every wired ``{secret_ref: NAME}``
+    marker replaced by :data:`SECRET_REF_VALIDATION_PLACEHOLDER`.
+
+    For validation paths that run without a secret resolver. An unresolved
+    marker is *valid wiring*, not a config error — but plugin config models
+    type credential fields as ``str`` (e.g. OpenRouter ``api_key: str``), so an
+    unsubstituted marker dict fails instantiation with "Input should be a valid
+    string". Substituting a placeholder lets such a path validate pipeline
+    *structure* without the real secret. The original ``config`` is not mutated;
+    the caller serialises this copy for the settings loader only.
+    """
+    result = deepcopy(config)
+    _walk_redact(result)
+    return result
+
+
+def _walk_redact(obj: Any) -> None:
+    """Recursively replace ``{secret_ref: NAME}`` markers with the placeholder.
+
+    Mirrors :func:`_walk`'s traversal. After ``deepcopy`` every Mapping is a
+    plain ``dict``, so in-place ``obj[key] = ...`` assignment is safe.
+    """
+    if isinstance(obj, Mapping):
+        for key in list(obj.keys()):
+            if _is_secret_ref(obj[key]) is not None:
+                obj[key] = SECRET_REF_VALIDATION_PLACEHOLDER  # type: ignore[index]  # safe: deepcopy produces dict
+            else:
+                _walk_redact(obj[key])
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            if _is_secret_ref(item) is not None:
+                obj[i] = SECRET_REF_VALIDATION_PLACEHOLDER
+            else:
+                _walk_redact(item)
+
+
 def _is_secret_env_ref(value: Any, env_ref_names: Collection[str]) -> str | None:
     """If value is an exact ${NAME} string for a declared secret, return NAME."""
     if not isinstance(value, str) or not env_ref_names:

@@ -395,9 +395,20 @@ class AuditedHTTPClient(AuditedClientBase):
                 )
             chunks.append(chunk)
 
+        # ``iter_bytes()`` above has ALREADY applied content-decoding
+        # (gzip/deflate/br) to the body. Reconstructing the Response with the
+        # original ``Content-Encoding`` header makes httpx re-decode the
+        # already-decoded body on read -> DecodingError ("incorrect header
+        # check"). Drop the now-inaccurate content-encoding/length so the
+        # reconstructed body is treated as identity. (iter_bytes is kept
+        # deliberately: the body cap is measured on the DECODED size, which is
+        # the decompression-bomb-relevant size.)
+        decoded_headers = httpx.Headers(
+            [(key, value) for key, value in response.headers.multi_items() if key.lower() not in ("content-encoding", "content-length")]
+        )
         return httpx.Response(
             response.status_code,
-            headers=response.headers,
+            headers=decoded_headers,
             content=b"".join(chunks),
             request=response.request,
             extensions=response.extensions,

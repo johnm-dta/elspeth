@@ -38,7 +38,7 @@ def test_release_pdf_make_dry_run_resolves_source_dependencies() -> None:
 
 def test_release_pdf_tokens_source_is_not_gitignored() -> None:
     """tokens.typ is source, not generated output, so .gitignore must not hide it."""
-    assert _git_check_ignore_pattern("docs/release/pdf/tokens.typ") == "!docs/release/pdf/**"
+    assert _git_check_ignore_pattern("docs/release/pdf/tokens.typ") == "!docs/release/pdf/*.typ"
 
 
 def test_release_pdf_generated_outputs_remain_gitignored() -> None:

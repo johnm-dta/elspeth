@@ -28,10 +28,14 @@ from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 # ---------------------------------------------------------------------------
 
 
-def _create_session(client: TestClient) -> str:
+def _create_session(client: TestClient, *, profile: str | None = None) -> str:
     resp = client.post("/api/sessions", json={"title": "step-3-e2e"})
     assert resp.status_code == 201, resp.json()
-    return resp.json()["id"]
+    session_id = resp.json()["id"]
+    if profile is not None:
+        start_resp = client.post(f"/api/sessions/{session_id}/guided/start", json={"profile": profile})
+        assert start_resp.status_code == 200, start_resp.json()
+    return session_id
 
 
 def _get_guided(client: TestClient, session_id: str) -> dict:
@@ -194,7 +198,7 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
 class TestStep3ChainAccept:
     def test_csv_to_json_step_3_accept_returns_confirm_wiring_then_completes_session(self, composer_test_client: TestClient) -> None:
         """End-to-end: Step 3 ACCEPT → confirm_wiring → terminal=COMPLETED."""
-        session_id = _create_session(composer_test_client)
+        session_id = _create_session(composer_test_client, profile="tutorial")
 
         # Drive Steps 1 + 2 + the step_3 transforms-prompt chat that builds the
         # proposal (with chain-solver stubbed across the whole helper).

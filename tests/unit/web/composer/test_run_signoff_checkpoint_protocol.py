@@ -8,7 +8,6 @@ from elspeth.web.composer.protocol import ComposerService
 
 
 def test_protocol_declares_run_signoff_checkpoint() -> None:
-    assert hasattr(ComposerService, "run_signoff_checkpoint")
     sig = inspect.signature(ComposerService.run_signoff_checkpoint)
     params = sig.parameters
     # keyword-only contract (verbatim names)

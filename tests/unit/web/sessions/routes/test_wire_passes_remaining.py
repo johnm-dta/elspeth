@@ -51,13 +51,13 @@ _ASK_ADVISOR_BODY: dict[str, Any] = {
 
 
 def _flagging_service() -> MagicMock:
-    svc = MagicMock()
+    svc = MagicMock(spec_set=["run_signoff_checkpoint"])
     svc.run_signoff_checkpoint = AsyncMock(return_value=AdvisorCheckpointVerdict(ok=True, blocking=True, findings_text="FLAGGED: review"))
     return svc
 
 
 async def _dispatch(session, state, svc, *, turn_response, max_passes=3):
-    payload_store = MagicMock()
+    payload_store = MagicMock(spec_set=["store"])
     payload_store.store.return_value = "payload-id"
     return await _dispatch_guided_respond(
         state=state,
@@ -65,13 +65,13 @@ async def _dispatch(session, state, svc, *, turn_response, max_passes=3):
         current_step=GuidedStep.STEP_4_WIRE,
         current_turn_type=TurnType.CONFIRM_WIRING,
         turn_response=turn_response,
-        catalog=MagicMock(),
+        catalog=MagicMock(spec_set=[]),
         recorder=BufferingRecorder(),
         user_id="u1",
         data_dir=None,
         session_engine=None,
         session_id="s1",
-        blob_service=MagicMock(),
+        blob_service=MagicMock(spec_set=[]),
         payload_store=payload_store,
         model="m",
         temperature=None,

@@ -327,6 +327,11 @@ docs/release/pdf/out/**
 docs/release/pdf/output/
 docs/release/pdf/output/**
 docs-archive/
+!docs-archive/
+docs-archive/*
+!docs-archive/2026-05-19-docs-cleanout/
+docs-archive/2026-05-19-docs-cleanout/*
+!docs-archive/2026-05-19-docs-cleanout/MANIFEST.md
 
 ## Internal tooling
 # Filigree issue tracker

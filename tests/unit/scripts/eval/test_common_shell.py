@@ -486,6 +486,14 @@ write_body() {{
   fi
 }}
 
+write_data_file() {{
+  if [[ "$data" == @* ]]; then
+    cat "${{data#@}}" > "$1"
+  else
+    printf '%s' "$data" > "$1"
+  fi
+}}
+
 case "$url" in
   */api/auth/login)
     write_body '{{"access_token":"header.eyJleHAiOjQxMDI0NDQ4MDB9.signature"}}'
@@ -500,7 +508,7 @@ case "$url" in
     printf '201'
     ;;
   */api/sessions/session-1/state/yaml)
-    printf '%s' "$data" > "{body_path}"
+    write_data_file "{body_path}"
     write_body '{{"detail":"import rejected"}}'
     printf '{import_http}'
     ;;

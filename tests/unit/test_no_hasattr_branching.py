@@ -17,7 +17,6 @@ tests/unit/contracts/test_config.py:91
 tests/unit/contracts/test_engine_contracts.py:35
 tests/unit/contracts/test_enums.py:21
 tests/unit/contracts/test_enums.py:22
-tests/unit/contracts/test_errors.py:167
 tests/unit/contracts/test_pipeline_row.py:193
 tests/unit/contracts/test_pipeline_row.py:194
 tests/unit/contracts/test_secrets.py:75
@@ -46,7 +45,6 @@ tests/unit/plugins/llm/test_pooled_executor.py:741
 tests/unit/plugins/llm/test_pooled_executor.py:742
 tests/unit/plugins/llm/test_pooled_executor.py:743
 tests/unit/plugins/llm/test_provider_protocol.py:45
-tests/unit/plugins/llm/test_transform.py:646
 tests/unit/plugins/sinks/test_csv_sink.py:325
 tests/unit/plugins/sources/test_csv_source.py:46
 tests/unit/plugins/sources/test_csv_source.py:159
@@ -98,7 +96,6 @@ tests/unit/plugins/test_results.py:417
 tests/unit/plugins/test_results.py:434
 tests/unit/plugins/test_validation_integration.py:48
 tests/unit/plugins/transforms/azure/test_blob_sink.py:120
-tests/unit/plugins/transforms/test_field_mapper.py:304
 tests/unit/plugins/transforms/test_passthrough.py:34
 tests/unit/plugins/transforms/test_passthrough.py:35
 tests/unit/plugins/transforms/test_passthrough.py:110

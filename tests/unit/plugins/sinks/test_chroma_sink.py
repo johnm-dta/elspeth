@@ -72,7 +72,7 @@ class TestChromaSinkCompletionTelemetry:
 
     def test_telemetry_failure_does_not_fail_completion(self) -> None:
         sink = ChromaSink(_make_config())
-        sink._telemetry_emit = MagicMock(side_effect=RuntimeError("telemetry transport down"))
+        sink._telemetry_emit = MagicMock(spec_set=lambda *args, **kwargs: None, side_effect=RuntimeError("telemetry transport down"))
         sink.on_complete(_make_lifecycle_ctx())  # must not raise
         sink._telemetry_emit.assert_called_once()
 

@@ -9,6 +9,7 @@ we add concurrency in a later task.
 from __future__ import annotations
 
 import socket
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, Mock, patch
@@ -124,6 +125,10 @@ def _create_http_response() -> httpx.Response:
     )
 
 
+def _set_stream_response(client: Mock, response: httpx.Response) -> None:
+    client.stream.return_value = nullcontext(response)
+
+
 def _create_audit_call() -> Call:
     return Call(
         call_id="test-call-id",
@@ -157,7 +162,7 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         ):
             mock_response = _create_http_response()
             mock_client_instance = MagicMock(spec_set=_HTTPX_CLIENT_CLASS)
-            mock_client_instance.get.return_value = mock_response
+            _set_stream_response(mock_client_instance, mock_response)
             mock_client_instance.__enter__.return_value = mock_client_instance
             mock_client_instance.__exit__.return_value = False
             mock_client_class.return_value = mock_client_instance
@@ -316,7 +321,7 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         # store, and httpx client must not see this request.
         _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
         _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
-        mock_httpx.return_value.get.assert_not_called()
+        mock_httpx.return_value.stream.assert_not_called()
 
     def test_response_without_request_crashes_before_payload_storage(
         self,
@@ -373,7 +378,7 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         _context_mock(ctx.landscape, "landscape").record_call.assert_not_called()
         _context_mock(ctx.payload_store, "payload_store").store.assert_not_called()
         _context_mock(ctx.rate_limit_registry, "rate limit registry").get_limiter.assert_not_called()
-        mock_httpx.return_value.get.assert_not_called()
+        mock_httpx.return_value.stream.assert_not_called()
 
     def test_response_request_without_host_crashes_before_payload_storage(
         self,
@@ -449,10 +454,13 @@ class TestWebScrapeContract(TransformContractPropertyTestBase):
         error_type: str,
     ) -> None:
         """Non-retryable HTTP failures are audited fetches, not successful rows."""
-        mock_httpx.return_value.get.return_value = httpx.Response(
-            status_code,
-            content=b"<html><body>not ok</body></html>",
-            request=httpx.Request("GET", "https://93.184.216.34/contract-test"),
+        _set_stream_response(
+            mock_httpx.return_value,
+            httpx.Response(
+                status_code,
+                content=b"<html><body>not ok</body></html>",
+                request=httpx.Request("GET", "https://93.184.216.34/contract-test"),
+            ),
         )
 
         result = transform.process(make_pipeline_row({"url": "https://example.com"}), ctx)

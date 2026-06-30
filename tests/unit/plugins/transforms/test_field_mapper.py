@@ -331,7 +331,7 @@ class TestFieldMapper:
             }
         )
 
-        assert not hasattr(transform, "validate_input")
+        assert "validate_input" not in dir(transform)
 
     def test_dynamic_schema_accepts_any_types(self, ctx: PluginContext) -> None:
         """Dynamic schema imposes no type constraints on input.

@@ -187,7 +187,8 @@ class TestCoalesceFailureReasonSchema:
             branches_arrived=("a",),
             merge_policy="union",
         )
-        assert not hasattr(instance, "__dict__"), "Slots dataclass should not have __dict__"
+        with pytest.raises(TypeError, match="vars\\(\\) argument must have __dict__ attribute"):
+            vars(instance)
 
     def test_to_dict_required_only(self) -> None:
         """to_dict() omits None-valued optional fields."""

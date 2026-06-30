@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE
 from elspeth.web.composer.guided.protocol import GuidedStep, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
@@ -70,7 +71,7 @@ def _proposal() -> ChainProposal:
 
 def _step3_ready_session() -> tuple[CompositionState, GuidedSession, Any, MockPayloadStore]:
     state = _empty_state()
-    session = GuidedSession.initial()
+    session = GuidedSession.initial(profile=TUTORIAL_PROFILE)
     catalog = create_catalog_service()
 
     step_1 = handle_step_1_source(

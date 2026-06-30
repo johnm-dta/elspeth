@@ -285,7 +285,7 @@ class TestResumeFinalizesAsFailed:
     def test_resume_partial_failure_ceremony_reports_cumulative_audit_counters(self) -> None:
         """Partial-result resume failures must not emit resume-local-only counters."""
         db = make_landscape_db()
-        event_bus = MagicMock()
+        event_bus = MagicMock(spec_set=["emit"])
         emitted_events: list[object] = []
         event_bus.emit.side_effect = emitted_events.append
         orch = Orchestrator(db, event_bus=event_bus)

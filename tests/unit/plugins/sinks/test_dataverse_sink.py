@@ -70,7 +70,7 @@ def _plugin_context_for_operation_calls(*, telemetry_emit: Any) -> Any:
     """Build a real PluginContext configured for sink operation call recording."""
     from elspeth.contracts.plugin_context import PluginContext
 
-    landscape = MagicMock()
+    landscape = MagicMock(spec_set=["record_operation_call"])
     landscape.record_operation_call.return_value = SimpleNamespace(
         request_hash="req-hash",
         response_hash="resp-hash",

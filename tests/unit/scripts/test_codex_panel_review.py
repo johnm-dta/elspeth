@@ -229,12 +229,12 @@ def test_gate_rewrites_sidecar_last_so_not_stale(tmp_path):
     # Reproduces the mtime trap: run_codex_once writes the .md AFTER the sidecar,
     # so the fresh sidecar looks stale until the gate rewrites it.
     import json
-    import time
+    import os
 
     try:
-        from codex_audit_common import _structured_findings, structured_output_path_for_report
+        from codex_audit_common import STRUCTURED_SIDECAR_STALE_GRACE_S, _structured_findings, structured_output_path_for_report
     except ModuleNotFoundError:
-        from scripts.codex_audit_common import _structured_findings, structured_output_path_for_report
+        from scripts.codex_audit_common import STRUCTURED_SIDECAR_STALE_GRACE_S, _structured_findings, structured_output_path_for_report
 
     md = tmp_path / "src__y.md"
     sidecar = structured_output_path_for_report(md)
@@ -255,8 +255,9 @@ def test_gate_rewrites_sidecar_last_so_not_stale(tmp_path):
         ),
         encoding="utf-8",
     )
-    time.sleep(0.02)
     md.write_text("narration\n", encoding="utf-8")  # .md now newer -> sidecar looks stale
+    stale_time = md.stat().st_mtime - STRUCTURED_SIDECAR_STALE_GRACE_S - 1.0
+    os.utime(sidecar, (stale_time, stale_time))
     assert _structured_findings(md) is None  # trap confirmed
     cpr.apply_panel_evidence_gate(sidecar, lens="security-architect")  # rewrites sidecar last
     findings = _structured_findings(md)

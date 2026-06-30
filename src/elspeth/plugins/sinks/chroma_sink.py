@@ -176,7 +176,7 @@ class ChromaSink(BaseSink):
     name = "chroma_sink"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:76723bd7e35c4f2f"
+    source_file_hash: str | None = "sha256:6520cfa82797f8e6"
     config_model = ChromaSinkConfig
     supports_resume = False
 

@@ -74,8 +74,12 @@ async def test_source_driver_includes_current_source_in_prompt() -> None:
     assert result is not None
     assert result.plugin == "json"
     system_prompt = captured["messages"][0]["content"]
-    # The current applied source MUST be threaded so "add" resolves relative to it.
-    assert "https://example.test/a" in system_prompt
+    # The current applied source MUST be threaded so "add" resolves relative to it,
+    # without leaking literal sample values into the prompt.
+    assert '"plugin": "json"' in system_prompt
+    assert '"observed_columns": ["url"]' in system_prompt
+    assert '"url": "<sample:url>"' in system_prompt
+    assert "https://example.test/a" not in system_prompt
 
 
 @pytest.mark.asyncio

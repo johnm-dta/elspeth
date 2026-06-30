@@ -664,7 +664,7 @@ class TestTemplateTierPolicy:
 
         # Strategy should have pre-compiled template
         strategy = transform._strategy
-        assert hasattr(strategy, "_query_templates")
+        assert "_query_templates" in dir(strategy)
         assert "quality" in strategy._query_templates
 
     def test_pre_compiled_per_query_template_renders_correctly(self) -> None:

@@ -1352,7 +1352,7 @@ class TestJournalPathGuards:
 
     def test_from_url_dump_to_jsonl_requires_explicit_path_for_non_sqlite(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Non-SQLite URLs must provide dump_to_jsonl_path explicitly."""
-        mock_create_engine = Mock(return_value=Mock())
+        mock_create_engine = Mock(spec_set=database_module.create_engine, return_value=Mock(spec_set=[]))
         monkeypatch.setattr(database_module, "create_engine", mock_create_engine)
 
         with pytest.raises(ValueError, match="dump_to_jsonl requires dump_to_jsonl_path for non-SQLite databases"):

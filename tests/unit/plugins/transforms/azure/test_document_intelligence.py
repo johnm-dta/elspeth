@@ -10,8 +10,9 @@ import httpx
 import pytest
 import respx
 
-from elspeth.contracts import Determinism
+from elspeth.contracts import CallType, Determinism
 from elspeth.contracts.call_data import HTTPCallResponse
+from elspeth.contracts.events import ExternalCallCompleted
 from elspeth.contracts.schema_contract import FieldContract, PipelineRow, SchemaContract
 from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.plugins.infrastructure.clients.http import HTTPResponseBodyTooLargeError
@@ -154,7 +155,7 @@ def test_probe_config_instantiates() -> None:
 def test_process_raises_use_accept() -> None:
     t = _transform()
     with pytest.raises(NotImplementedError):
-        t.process(Mock(), Mock())
+        t.process(Mock(spec_set=PipelineRow), Mock(spec_set=["state_id", "token"]))
 
 
 # ── Credential + URL construction (R12) ────────────────────────────────────
@@ -186,7 +187,7 @@ def test_analyze_url_includes_overload_and_params() -> None:
 
 def test_get_http_client_builds_real_client_with_header_and_cap() -> None:
     t = _transform()
-    t._recorder = Mock()
+    t._recorder = Mock(spec_set=ExecutionRepository)
     t._run_id = "run-1"
     client = t._get_http_client("state-1")
     try:
@@ -529,7 +530,7 @@ def test_process_row_cleans_up_client() -> None:
     fake = _FakeClient(_post_202(), [_Resp(200, body={"status": "succeeded", "analyzeResult": {"content": "x"}})])
     with t._http_clients_lock:
         t._http_clients["state-9"] = fake
-    ctx = Mock()
+    ctx = Mock(spec_set=["state_id", "token"])
     ctx.state_id = "state-9"
     ctx.token = None
     result = t._process_row(_row(), ctx)
@@ -555,10 +556,11 @@ def test_real_client_streaming_lro_sends_apikey_and_overload() -> None:
     the poll GET completes, and the real POST carried the api-key header and _overload param."""
     t = _t_for_lro(extract={"tables": "di_tables"})
     recorder = Mock(spec=ExecutionRepository)
-    recorder.record_call = Mock()
+    recorder.record_call = Mock(spec_set=lambda *args, **kwargs: None)
     t._recorder = recorder
     t._run_id = "run-1"
-    t._telemetry_emit = Mock()
+    events: list[object] = []
+    t._telemetry_emit = events.append
     t._poll_interval_seconds = 0.0
     t._poll_max_interval_seconds = 0.0
 
@@ -582,6 +584,8 @@ def test_real_client_streaming_lro_sends_apikey_and_overload() -> None:
         assert "_overload=analyzeDocument" in str(post_request.url)
         assert "api-version=2024-11-30" in str(post_request.url)
         assert respx.calls[-1].request.method == "GET"
+        http_events = [event for event in events if isinstance(event, ExternalCallCompleted) and event.call_type == CallType.HTTP]
+        assert http_events
     finally:
         with t._http_clients_lock:
             client = t._http_clients.pop("s-real", None)

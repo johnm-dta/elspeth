@@ -38,10 +38,14 @@ from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 # ---------------------------------------------------------------------------
 
 
-def _create_session(client: TestClient) -> str:
+def _create_session(client: TestClient, *, profile: str | None = None) -> str:
     resp = client.post("/api/sessions", json={"title": "auto-drop-test"})
     assert resp.status_code == 201, resp.json()
-    return resp.json()["id"]
+    session_id = resp.json()["id"]
+    if profile is not None:
+        start_resp = client.post(f"/api/sessions/{session_id}/guided/start", json={"profile": profile})
+        assert start_resp.status_code == 200, start_resp.json()
+    return session_id
 
 
 def _get_guided(client: TestClient, session_id: str) -> dict:
@@ -368,7 +372,7 @@ class TestAutoDropOnSolverExhausted:
 class TestRepairSucceeds:
     def test_first_fails_repair_succeeds_returns_confirm_wiring_then_completed(self, composer_test_client: TestClient) -> None:
         """First chain fails, repair succeeds → confirm_wiring, then completed."""
-        session_id = _create_session(composer_test_client)
+        session_id = _create_session(composer_test_client, profile="tutorial")
 
         # Drive Steps 1 + 2 to reach PROPOSE_CHAIN (initial solve: bad plugin).
         with patch(

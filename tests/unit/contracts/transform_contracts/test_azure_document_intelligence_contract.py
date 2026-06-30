@@ -35,7 +35,7 @@ def test_forward_invariant_probe_enriches_and_passes_through() -> None:
     rows = t.forward_invariant_probe_rows(probe)
     assert len(rows) == 1
 
-    ctx = Mock()
+    ctx = Mock(spec_set=["state_id", "token"])
     ctx.state_id = "probe-state"
     ctx.token = None
 
@@ -53,7 +53,7 @@ def test_forward_invariant_probe_enriches_and_passes_through() -> None:
 def test_forward_invariant_probe_success_reason_action() -> None:
     t = _probe_transform()
     rows = t.forward_invariant_probe_rows(make_pipeline_row({}))
-    ctx = Mock()
+    ctx = Mock(spec_set=["state_id", "token"])
     ctx.state_id = "probe-state"
     ctx.token = None
     result = t.execute_forward_invariant_probe(rows, ctx)

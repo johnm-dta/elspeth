@@ -39,6 +39,8 @@ def _make_mock_recorder() -> MagicMock:
         token_id="merged_001",
         join_group_id="join_001",
     )
+    recorder.has_completed_row_for_node.return_value = False
+    recorder.get_completed_row_ids_for_nodes.return_value = []
     # Mock begin_node_state to return state with state_id
     recorder.begin_node_state.return_value = Mock(state_id="state_001")
     return recorder

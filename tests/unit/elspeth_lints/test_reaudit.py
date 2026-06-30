@@ -140,7 +140,7 @@ def _mock_judge_call(
         prompt_tokens=prompt_tokens,
         cached_tokens=cached_tokens,
     )
-    fake_client = MagicMock()
+    fake_client = MagicMock(spec_set=["chat"])
     fake_client.chat.completions.create.return_value = fake_completion
     with (
         patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key"}, clear=False),

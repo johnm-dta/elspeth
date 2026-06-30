@@ -122,7 +122,11 @@ async def test_sink_driver_revise_threads_current_sink() -> None:
             temperature=None,
             seed=None,
         )
-    assert "old.jsonl" in captured["messages"][0]["content"]
+    system_prompt = captured["messages"][0]["content"]
+    assert '"plugin": "json"' in system_prompt
+    assert '"schema_mode": "observed"' in system_prompt
+    assert '"option_count": 1' in system_prompt
+    assert "old.jsonl" not in system_prompt
 
 
 @pytest.mark.asyncio

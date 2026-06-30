@@ -75,6 +75,15 @@ def _freeze_schema_value(value: Any) -> Any:
     return value
 
 
+def _json_schema_value(value: Any) -> Any:
+    """Return a JSON-serializable copy of a frozen schema value."""
+    if isinstance(value, Mapping):
+        return {key: _json_schema_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_json_schema_value(child) for child in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class _ArgSpec:
     """Declarative schema for one MCP tool's arguments."""
@@ -656,7 +665,7 @@ def create_server(database_url: str, *, passphrase: str | None = None) -> Server
                 description=defn.description,
                 inputSchema={
                     "type": "object",
-                    "properties": dict(defn.schema_properties),
+                    "properties": _json_schema_value(defn.schema_properties),
                     **({"required": list(defn.args.required_str)} if defn.args.required_str else {}),
                 },
             )

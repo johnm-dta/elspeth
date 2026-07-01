@@ -23,6 +23,7 @@ from concurrent.futures import Future
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -265,7 +266,14 @@ def mock_session_service() -> MagicMock:
     svc.create_run = AsyncMock(return_value=MagicMock(id=uuid4()))
     svc.get_run = AsyncMock(return_value=MagicMock(status="pending"))
     svc.update_run_status = AsyncMock()
-    svc.append_run_event = AsyncMock()
+    next_event_sequence = 0
+
+    async def append_run_event(**_kwargs: Any) -> SimpleNamespace:
+        nonlocal next_event_sequence
+        next_event_sequence += 1
+        return SimpleNamespace(sequence=next_event_sequence)
+
+    svc.append_run_event = AsyncMock(side_effect=append_run_event)
     svc.list_run_events = AsyncMock(return_value=[])
     return svc
 
@@ -1510,7 +1518,7 @@ sinks:
     @patch("elspeth.web.execution.service.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.service.LandscapeDB")
     @patch("elspeth.web.execution.service.FilesystemPayloadStore")
-    def test_hash_mismatch_increments_zero_threshold_counter(
+    def test_hash_mismatch_increments_zero_threshold_counter_without_run_id_label(
         self,
         mock_payload_cls: MagicMock,
         mock_landscape_cls: MagicMock,
@@ -1570,7 +1578,7 @@ sinks:
         with pytest.raises(BlobIntegrityError):
             service._run_pipeline(str(run_id), pipeline_yaml, threading.Event())
 
-        hash_counter.add.assert_called_once_with(1, {"run_id": str(run_id)})
+        hash_counter.add.assert_called_once_with(1)
         mock_load.assert_not_called()
         mock_orch_cls.assert_not_called()
 
@@ -4550,6 +4558,33 @@ class TestTransformProviderConfigPathRestriction:
     escaping the data_dir sandbox.
     """
 
+    @staticmethod
+    def _resolved_llm_reviews(*, node_id: str, prompt_template: str, model: str) -> list[dict[str, object]]:
+        return [
+            {
+                "id": f"prompt_template_review:{node_id}",
+                "kind": "llm_prompt_template",
+                "user_term": f"llm_prompt_template:{node_id}",
+                "status": "resolved",
+                "draft": prompt_template,
+                "event_id": f"prompt-template-accepted:{node_id}",
+                "accepted_value": prompt_template,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(prompt_template),
+            },
+            {
+                "id": f"model_choice_review:{node_id}",
+                "kind": "llm_model_choice",
+                "user_term": f"llm_model_choice:{node_id}",
+                "status": "resolved",
+                "draft": model,
+                "event_id": f"model-choice-accepted:{node_id}",
+                "accepted_value": model,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(model),
+            },
+        ]
+
     @pytest.mark.asyncio
     async def test_transform_persist_directory_outside_allowed_dirs_raises(
         self,
@@ -4639,6 +4674,141 @@ class TestTransformProviderConfigPathRestriction:
                 "options": {
                     "provider": "chroma",
                     "provider_config": {"persist_directory": "/tmp/elspeth_data/outputs/chroma"},
+                },
+            }
+        ]
+        state.edges = None
+
+        with patch.object(service, "_run_pipeline"):
+            run_id = await service.execute(session_id=uuid4())
+        assert isinstance(run_id, UUID)
+
+    @pytest.mark.asyncio
+    async def test_azure_search_managed_identity_provider_config_rejected_before_run(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Web execution must not run user-authored RAG configs with server managed identity."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "azure_search",
+                    "provider_config": {
+                        "endpoint": "https://tenant-b.search.windows.net",
+                        "index": "payroll",
+                        "use_managed_identity": True,
+                    },
+                },
+            }
+        ]
+        state.edges = None
+
+        with (
+            patch.object(service, "_run_pipeline") as run_pipeline,
+            pytest.raises(PipelineValidationError, match="managed identity"),
+        ):
+            await service.execute(session_id=uuid4())
+
+        run_pipeline.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sequential_multi_query_llm_default_retry_budget_rejected_before_run(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Web execution must not run LLM configs that inherit the hour-long sequential retry default."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        node_id = "llm_review"
+        prompt_template = "Classify {{ text }}."
+        model = "openai/gpt-4o-mini"
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": node_id,
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": model,
+                    "api_key": "test-key",
+                    "prompt_template": prompt_template,
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": [],
+                    "queries": [{"name": "classify", "input_fields": {"text": "body"}}],
+                    INTERPRETATION_REQUIREMENTS_KEY: self._resolved_llm_reviews(
+                        node_id=node_id,
+                        prompt_template=prompt_template,
+                        model=model,
+                    ),
+                },
+            }
+        ]
+        state.edges = None
+
+        with (
+            patch.object(service, "_run_pipeline") as run_pipeline,
+            pytest.raises(PipelineValidationError, match="sequential multi-query LLM"),
+        ):
+            await service.execute(session_id=uuid4())
+
+        run_pipeline.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_pooled_multi_query_llm_numeric_string_pool_size_reaches_run_submission(
+        self,
+        service: ExecutionServiceImpl,
+        mock_session_service: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """Exact integer strings accepted by LLMConfig must not be blocked by the retry policy."""
+        mock_settings.data_dir = "/tmp/elspeth_data"
+        state = mock_session_service.get_current_state.return_value
+        node_id = "llm_review"
+        prompt_template = "Classify {{ text }}."
+        model = "openai/gpt-4o-mini"
+        state.source = None
+        state.outputs = None
+        state.nodes = [
+            {
+                "id": node_id,
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "transform_in",
+                "on_success": "results",
+                "on_error": "discard",
+                "options": {
+                    "provider": "openrouter",
+                    "model": model,
+                    "api_key": "test-key",
+                    "prompt_template": prompt_template,
+                    "schema": {"mode": "observed"},
+                    "required_input_fields": [],
+                    "queries": [{"name": "classify", "input_fields": {"text": "body"}}],
+                    "pool_size": "2.0",
+                    INTERPRETATION_REQUIREMENTS_KEY: self._resolved_llm_reviews(
+                        node_id=node_id,
+                        prompt_template=prompt_template,
+                        model=model,
+                    ),
                 },
             }
         ]

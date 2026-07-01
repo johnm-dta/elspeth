@@ -161,9 +161,17 @@ def _base_field(
     kind: FieldKind,
     nullable: bool,
 ) -> KnobField:
+    # Lower the knob under the field's user-facing ALIAS when it has one. The
+    # knob is a user-facing surface like JSON Schema / YAML, which Pydantic keys
+    # by alias (e.g. the data-plugin ``schema_config`` field is exposed as
+    # ``schema``). The composer's ``prefilled`` and committed plugin options are
+    # also keyed by alias, so a knob lowered under the internal field name would
+    # never be populated by them. ``populate_by_name`` lets the form resubmit by
+    # alias regardless.
+    wire_name = info.alias if info.alias is not None else name
     field: KnobField = {
-        "name": name,
-        "label": info.title or name,
+        "name": wire_name,
+        "label": info.title or wire_name,
         "kind": kind,
         "required": info.is_required(),
         "nullable": nullable,

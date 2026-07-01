@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 from elspeth.web.composer.guided.state_machine import TerminalReason, TerminalState
+from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -124,8 +125,15 @@ def _seed_persisted_step1(client: TestClient, session_id: str) -> None:
 
 
 def _fake_llm_reply(text: str) -> SimpleNamespace:
-    """LiteLLM-shaped response carrying a plain assistant message (no tool calls)."""
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text))])
+    """LiteLLM-shaped response carrying a plain assistant message (no tool calls).
+
+    ``tool_calls=None`` mirrors a real LiteLLM message, which always carries the
+    attribute (None when the model did not call a tool). The STEP_2/STEP_3 chat
+    apply branches drive their step solver first; that solver reads
+    ``message.tool_calls or ()`` and classifies a None as advisory prose, so a
+    faithful mock must present the attribute rather than omit it.
+    """
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=text, tool_calls=None))])
 
 
 def _fake_source_resolution_tool_call(arguments: dict) -> SimpleNamespace:
@@ -170,6 +178,39 @@ def _llm_call_audit_bodies(client: TestClient, session_id: str) -> list[dict]:
         if content.get("_kind") == "llm_call_audit":
             rows.append(content)
     return rows
+
+
+def _fake_resolve_source_response_csv() -> SimpleNamespace:
+    """Canonical zero-arg CSV source resolution stub for phase-entry and refresh tests."""
+    source_content = (
+        "colour,teal_fit\n"
+        "White,good\n"
+        "Navy blue,good\n"
+        "Coral,good\n"
+        "Gold,good\n"
+        "Soft gray,good\n"
+        "Neon green,bad\n"
+        "Bright orange,bad\n"
+        "Cherry red,bad\n"
+        "Mud brown,bad\n"
+        "Fluorescent yellow,bad\n"
+    )
+    return _fake_source_resolution_tool_call(
+        {
+            "resolution": "source",
+            "plugin": "csv",
+            "filename": "teal_colours.csv",
+            "mime_type": "text/csv",
+            "content": source_content,
+            "options": {"schema": {"mode": "observed"}},
+            "observed_columns": ["colour", "teal_fit"],
+            "sample_rows": [
+                {"colour": "White", "teal_fit": "good"},
+                {"colour": "Neon green", "teal_fit": "bad"},
+            ],
+            "assistant_message": "I set this up as a CSV source.",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +473,7 @@ class TestStep1SourceResolution:
         assert resp.status_code == 200, resp.json()
         assert resp.json()["next_turn"]["type"] == "schema_form"
 
-    def test_step_1_chat_can_commit_generated_csv_source_and_emit_step_2(
+    def test_step_1_chat_commits_source_in_place_and_rerenders_form(
         self,
         composer_test_client: TestClient,
     ) -> None:
@@ -443,44 +484,15 @@ class TestStep1SourceResolution:
         guided chat box received a generic color-list answer and left
         ``CompositionState.source`` null.  The Step-1 chat path should instead
         resolve the source, persist it through the normal Step-1 handler, and
-        return the Step-2 turn so the UI can advance.
+        re-render the Step-1 form in place so the user can revise or advance
+        explicitly.
         """
         session_id = _create_session(composer_test_client)
         self._drive_to_step_1_schema_form(composer_test_client, session_id)
 
-        source_content = (
-            "colour,teal_fit\n"
-            "White,good\n"
-            "Navy blue,good\n"
-            "Coral,good\n"
-            "Gold,good\n"
-            "Soft gray,good\n"
-            "Neon green,bad\n"
-            "Bright orange,bad\n"
-            "Cherry red,bad\n"
-            "Mud brown,bad\n"
-            "Fluorescent yellow,bad\n"
-        )
         with patch(
             "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
-            new=AsyncMock(
-                return_value=_fake_source_resolution_tool_call(
-                    {
-                        "resolution": "source",
-                        "plugin": "csv",
-                        "filename": "teal_colours.csv",
-                        "mime_type": "text/csv",
-                        "content": source_content,
-                        "options": {"schema": {"mode": "observed"}},
-                        "observed_columns": ["colour", "teal_fit"],
-                        "sample_rows": [
-                            {"colour": "White", "teal_fit": "good"},
-                            {"colour": "Neon green", "teal_fit": "bad"},
-                        ],
-                        "assistant_message": "I set this up as a CSV source.",
-                    }
-                )
-            ),
+            new=AsyncMock(return_value=_fake_resolve_source_response_csv()),
         ):
             status, body = _post_chat(
                 composer_test_client,
@@ -491,16 +503,129 @@ class TestStep1SourceResolution:
 
         assert status == 200, body
         assert body["assistant_message"] == "I set this up as a CSV source."
-        assert body["guided_session"]["step"] == "step_2_sink"
-        assert body["next_turn"]["type"] == "single_select"
-        assert body["next_turn"]["step_index"] == 1
+        # Apply-in-place: the phase stays STEP_1 (revise model), and the form
+        # re-renders populated from the committed source.
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["next_turn"]["type"] == "schema_form"
+        assert body["next_turn"]["step_index"] == 0
+        # The re-rendered form is POPULATED from the committed source (the whole
+        # point of LLM-primary: the form shows what was just built).
+        assert body["next_turn"]["payload"]["plugin"] == "csv"
+        # Security: the re-rendered form masks the blob-backed source's absolute
+        # storage_path behind a blob:<ref> sentinel (handle_step_1_source re-resolves
+        # it on commit), so the deploy path + OS username never reach the wire.
+        assert body["next_turn"]["payload"]["prefilled"]["path"].startswith("blob:")
+        assert not body["next_turn"]["payload"]["prefilled"]["path"].endswith("_teal_colours.csv")
         assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
         source_options = body["composition_state"]["sources"]["source"]["options"]
         assert source_options["schema"]["mode"] == "observed"
-        assert source_options["path"].endswith("_teal_colours.csv")
+        # composition_state is ALSO an egress surface, on two channels the
+        # source-keyed B4 redaction misses for guided blob sources (the committed
+        # source carries no blob_ref). redact_guided_snapshot_storage_paths closes
+        # both, cross-referencing the GuidedSession snapshot's retained blob_ref:
+        #   1. the committed source path, and
+        #   2. the composer_meta GuidedSession snapshot path.
+        assert source_options["path"] == REDACTED_BLOB_SOURCE_PATH
+        snapshot_options = body["composition_state"]["composer_meta"]["guided_session"]["step_1_result"]["options"]
+        assert snapshot_options["path"] == REDACTED_BLOB_SOURCE_PATH
+        # The snapshot keeps blob_ref (it is the redaction signal, not sensitive).
+        assert snapshot_options["blob_ref"]
+        # Belt-and-braces: the absolute blob path appears NOWHERE in the response
+        # body, at any depth or field.
+        assert "_teal_colours.csv" not in json.dumps(body)
         audits = _llm_call_audit_bodies(composer_test_client, session_id)
         assert len(audits) == 1, audits
         assert audits[0]["status"] == "success"
+
+    def test_step_1_chat_drives_source_from_phase_entry(self, composer_test_client) -> None:
+        """A chat submit at STEP_1 entry (no manual plugin pick) drives the source."""
+        client = composer_test_client
+        session_id = _create_session(client)
+        # Seed a persisted composition_state so GET /guided can record the
+        # initial SINGLE_SELECT TurnRecord (GET only records when a
+        # state_record already exists — non-mutating on a truly fresh session).
+        _seed_persisted_step1(client, session_id)
+        # GET records the initial SINGLE_SELECT turn; NO _respond plugin pick.
+        entry = _seed_guided_session(client, session_id)
+        assert entry["guided_session"]["step"] == "step_1_source"
+        assert entry["next_turn"]["type"] == "single_select"
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_resolve_source_response_csv()),
+        ):
+            status, body = _post_chat(
+                client,
+                session_id,
+                message="make a csv source with a text column",
+                step_index="step_1_source",
+            )
+        assert status == 200, body
+        # Drove the phase from entry: committed in place, stayed STEP_1, populated form.
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["next_turn"]["type"] == "schema_form"
+        assert body["next_turn"]["step_index"] == 0
+        assert body["next_turn"]["payload"]["plugin"] == "csv"
+        assert body["composition_state"]["sources"]["source"]["plugin"] == "csv"
+        # M6: the SINGLE_SELECT entry record, resolved via chat, carries a DISPLAY
+        # summary so "Decisions so far" reads "Configured: csv" instead of a bare
+        # "Decided". response_hash stays None — the chat IS the answer (recorded as
+        # a ChatTurn), not a widget response, so we do not fabricate one.
+        step1_single_selects = [
+            r for r in body["guided_session"]["history"] if r["step"] == "step_1_source" and r["turn_type"] == "single_select"
+        ]
+        assert step1_single_selects, body["guided_session"]["history"]
+        assert step1_single_selects[-1]["summary"] == "Configured: csv"
+        assert step1_single_selects[-1]["response_hash"] is None
+
+    def test_step_1_chat_advisory_prose_at_phase_entry_does_not_mutate_source(self, composer_test_client) -> None:
+        """Prose-only chat at STEP_1 phase entry (SINGLE_SELECT) stays advisory.
+
+        Hardening for the guard-widening in Task 3 (2a): SINGLE_SELECT is now
+        a valid entry type for ``resolve_step_1_source_chat_with_auto_drop``.
+        When the resolver returns no tool call (``source_resolution is None``)
+        the route MUST remain advisory:
+          (a) ``next_turn`` is None — no re-render
+          (b) ``guided.step`` is unchanged (still ``step_1_source``)
+          (c) no source committed (``step_1_result`` unmutated)
+          (d) the reply lands in ``chat_history``, NOT wizard ``history``
+
+        The pin catches a regression where ``if source_resolution is not None:``
+        is removed: the route would then crash at ``source_resolution.filename``
+        with AttributeError → 500, failing assertion (a).
+        """
+        client = composer_test_client
+        session_id = _create_session(client)
+        # Phase-entry precondition: same setup as test_step_1_chat_drives_source_from_phase_entry.
+        _seed_persisted_step1(client, session_id)
+        entry = _seed_guided_session(client, session_id)
+        history_before = entry["guided_session"]["history"]
+        assert len(history_before) == 1, "expected exactly 1 TurnRecord after seeded GET"
+
+        # _fake_llm_reply has no tool_calls attribute; maybe_resolve_step_1_source_chat
+        # hits AttributeError on message.tool_calls, which resolve_step_1_source_chat_with_auto_drop
+        # catches and maps to the synthetic-unavailable fallback
+        # (source_resolution=None, fallback_chat=StepChatResult(synthetic_message)).
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("Try using the wizard plugin picker.")),
+        ):
+            status, body = _post_chat(
+                client,
+                session_id,
+                message="what should I do?",
+                step_index="step_1_source",
+            )
+        assert status == 200, body
+        # (a) advisory: no re-render
+        assert body["next_turn"] is None
+        # (b) step unchanged
+        assert body["guided_session"]["step"] == "step_1_source"
+        # (c) no source committed
+        source_slot = (body["composition_state"]["sources"] or {}).get("source")
+        assert source_slot is None, f"expected no committed source, got {source_slot!r}"
+        # (d) reply in chat_history (user+assistant), wizard history unchanged
+        assert len(body["guided_session"]["chat_history"]) == 2
+        assert body["guided_session"]["history"] == history_before
 
 
 class TestStepChatRejections:
@@ -952,7 +1077,7 @@ class TestStepChatServerInvariants:
         Python would otherwise let that secondary logger exception replace
         the in-flight HTTPException from the ``finally`` block.
         """
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _seed_persisted_step1(composer_test_client, session_id)

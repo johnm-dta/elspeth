@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
@@ -11,15 +12,17 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError as PydanticValidationError
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.pool import StaticPool
 
 from elspeth.contracts.enums import CreationModality
 from elspeth.contracts.freeze import deep_thaw
+from elspeth.contracts.hashing import stable_hash
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSchemaInfo,
+    PluginSecretRequirement,
     PluginSummary,
 )
 from elspeth.web.composer.state import (
@@ -465,6 +468,30 @@ class TestSetSource:
         assert second.updated_state.sources["orders"].plugin == "json"
         assert "source:orders" in second.affected_nodes
 
+    @pytest.mark.parametrize("source_name", ("Orders", "on_success", " "))
+    def test_set_source_invalid_source_name_raises_arg_error(self, source_name: str) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "set_source",
+                {
+                    "source_name": source_name,
+                    "plugin": "csv",
+                    "on_success": "rows",
+                    "options": {"path": "/data/orders.csv", "schema": {"mode": "observed"}},
+                    "on_validation_failure": "discard",
+                },
+                state,
+                catalog,
+            )
+
+        assert exc_info.value.argument == "source_name"
+        assert isinstance(exc_info.value.__cause__, ValueError)
+
     def test_named_source_patch_and_clear_target_only_selected_source(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -815,9 +842,8 @@ class TestUpsertNode:
             catalog,
         )
 
-        # Advisory, not blocking (elspeth-abb2cb0931): the node is accepted because
-        # shield availability is not yet testable. The missing prompt-shield surfaces
-        # as a non-blocking validation warning rather than rejecting the upsert.
+        # Advisory, not blocking: the missing prompt-shield surfaces as a
+        # non-blocking validation warning rather than rejecting the upsert.
         assert result.success is True
         warning_text = " ".join(w.message for w in result.updated_state.validate().warnings)
         assert PROMPT_SHIELD_USER_TERM in warning_text
@@ -1619,6 +1645,151 @@ class TestRemoveEdge:
         assert r2.success is True
         assert len(r2.updated_state.edges) == 0
 
+    @pytest.mark.parametrize(
+        ("edge_type", "field_name"),
+        [
+            ("on_success", "on_success"),
+            ("on_error", "on_error"),
+        ],
+    )
+    def test_remove_sink_edge_clears_node_runtime_route(self, edge_type: str, field_name: str) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with_node = execute_tool(
+            "upsert_node",
+            {
+                "id": "t1",
+                "node_type": "transform",
+                "plugin": "passthrough",
+                "input": "in",
+                "on_success": "normal_rows",
+                "on_error": "discard",
+                "options": {"schema": {"mode": "observed"}},
+            },
+            state,
+            catalog,
+        )
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            with_node.updated_state,
+            catalog,
+        )
+        routed = execute_tool(
+            "upsert_edge",
+            {"id": "e1", "from_node": "t1", "to_node": "main", "edge_type": edge_type},
+            with_output.updated_state,
+            catalog,
+        )
+        assert routed.success is True
+        assert getattr(next(n for n in routed.updated_state.nodes if n.id == "t1"), field_name) == "main"
+
+        result = execute_tool("remove_edge", {"id": "e1"}, routed.updated_state, catalog)
+
+        assert result.success is True
+        assert len(result.updated_state.edges) == 0
+        assert getattr(next(n for n in result.updated_state.nodes if n.id == "t1"), field_name) is None
+
+    def test_remove_sink_edge_clears_source_runtime_route(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        with_source = execute_tool(
+            "set_source",
+            {
+                "plugin": "csv",
+                "on_success": "rows",
+                "options": {"path": "/data/blobs/input.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            with_source.updated_state,
+            catalog,
+        )
+        routed = execute_tool(
+            "upsert_edge",
+            {"id": "e1", "from_node": "source", "to_node": "main", "edge_type": "on_success"},
+            with_output.updated_state,
+            catalog,
+        )
+        assert routed.success is True
+        assert _default_source(routed.updated_state).on_success == "main"
+
+        result = execute_tool("remove_edge", {"id": "e1"}, routed.updated_state, catalog)
+
+        assert result.success is True
+        assert len(result.updated_state.edges) == 0
+        assert _default_source(result.updated_state).on_success == "discard"
+
+    def test_remove_gate_sink_edges_clears_route_and_fork_runtime_routes(self) -> None:
+        state = _empty_state().with_node(
+            NodeSpec(
+                id="g1",
+                node_type="gate",
+                plugin=None,
+                input="in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="row['flag']",
+                routes={"true": "old_true", "false": "old_false"},
+                fork_to=("existing",),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        catalog = _mock_catalog()
+        with_output = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "csv",
+                "options": {"path": "/data/outputs/out.csv", "schema": {"mode": "observed"}},
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+        with_route = execute_tool(
+            "upsert_edge",
+            {"id": "route_edge", "from_node": "g1", "to_node": "main", "edge_type": "route_true"},
+            with_output.updated_state,
+            catalog,
+        )
+        with_fork = execute_tool(
+            "upsert_edge",
+            {"id": "fork_edge", "from_node": "g1", "to_node": "main", "edge_type": "fork"},
+            with_route.updated_state,
+            catalog,
+        )
+        gate = next(n for n in with_fork.updated_state.nodes if n.id == "g1")
+        assert dict(gate.routes or {}) == {"true": "main", "false": "old_false"}
+        assert gate.fork_to == ("existing", "main")
+
+        without_route = execute_tool("remove_edge", {"id": "route_edge"}, with_fork.updated_state, catalog)
+        without_fork = execute_tool("remove_edge", {"id": "fork_edge"}, without_route.updated_state, catalog)
+
+        assert without_fork.success is True
+        assert len(without_fork.updated_state.edges) == 0
+        gate = next(n for n in without_fork.updated_state.nodes if n.id == "g1")
+        assert dict(gate.routes or {}) == {"false": "old_false"}
+        assert gate.fork_to == ("existing",)
+
     def test_remove_nonexistent_fails(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -1862,6 +2033,34 @@ class TestSetOutput:
         assert "ANY_SECRET" in result.data["error"]
         assert "only credential-bearing fields" in result.data["error"]
 
+    def test_set_output_rejects_literal_database_url_credentials(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        literal_url = "postgresql://db.example.invalid/elspeth"
+
+        result = execute_tool(
+            "set_output",
+            {
+                "sink_name": "main",
+                "plugin": "database",
+                "options": {
+                    "url": literal_url,
+                    "table": "events",
+                    "schema": {"mode": "observed"},
+                },
+                "on_write_failure": "discard",
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert "main:url" in result.data["credential_fields"]
+        assert literal_url not in repr(result.to_dict())
+        assert "secret_ref" in result.data["error"]
+
 
 class TestRemoveOutput:
     def test_removes_output(self) -> None:
@@ -2075,6 +2274,145 @@ class TestDiscoveryTools:
         assert result.success is True
         catalog.get_schema.assert_called_once_with("source", "csv")
 
+    def test_list_transforms_hides_secret_required_plugin_without_declared_candidate(self) -> None:
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="azure_prompt_shield",
+                description="Prompt injection shield",
+                plugin_type="transform",
+                config_fields=[
+                    ConfigFieldSummary(name="api_key", type="string", required=True),
+                    ConfigFieldSummary(name="endpoint", type="string", required=True),
+                ],
+                secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+            ),
+        ]
+        secret_service = MagicMock()
+        secret_service.list_refs.return_value = [
+            SecretInventoryItem(name="OPENROUTER_API_KEY", scope="user", available=True),
+        ]
+        secret_service.has_ref.side_effect = lambda _user_id, name: name == "OPENROUTER_API_KEY"
+
+        result = execute_tool(
+            "list_transforms",
+            {},
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        assert result.success is True
+        names = {item.name for item in result.data}
+        assert "passthrough" in names
+        assert "azure_prompt_shield" not in names
+
+    def test_list_transforms_shows_secret_required_plugin_when_declared_candidate_available(self) -> None:
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="azure_prompt_shield",
+                description="Prompt injection shield",
+                plugin_type="transform",
+                config_fields=[
+                    ConfigFieldSummary(name="api_key", type="string", required=True),
+                    ConfigFieldSummary(name="endpoint", type="string", required=True),
+                ],
+                secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+            ),
+        ]
+        secret_service = MagicMock()
+        secret_service.list_refs.return_value = [
+            SecretInventoryItem(name="AZURE_CONTENT_SAFETY_KEY", scope="server", available=True),
+        ]
+        secret_service.has_ref.side_effect = lambda _user_id, name: name == "AZURE_CONTENT_SAFETY_KEY"
+
+        result = execute_tool(
+            "list_transforms",
+            {},
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        assert result.success is True
+        names = {item.name for item in result.data}
+        assert "azure_prompt_shield" in names
+
+    def test_get_plugin_schema_rejects_secret_required_plugin_without_declared_candidate(self) -> None:
+        catalog = _mock_catalog()
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="azure_prompt_shield",
+            plugin_type="transform",
+            description="Prompt injection shield",
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string"},
+                    "endpoint": {"type": "string"},
+                },
+                "required": ["api_key", "endpoint"],
+            },
+            knob_schema={"fields": []},
+            secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+        )
+        secret_service = MagicMock()
+        secret_service.has_ref.return_value = False
+
+        result = execute_tool(
+            "get_plugin_schema",
+            {"plugin_type": "transform", "name": "azure_prompt_shield"},
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert "azure_prompt_shield" in result.data["error"]
+        assert "AZURE_CONTENT_SAFETY_KEY" in result.data["error"]
+
+    def test_get_plugin_assistance_rejects_secret_required_plugin_without_declared_candidate(self) -> None:
+        catalog = _mock_catalog()
+        catalog.get_schema.return_value = PluginSchemaInfo(
+            name="azure_prompt_shield",
+            plugin_type="transform",
+            description="Prompt injection shield",
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "api_key": {"type": "string"},
+                    "endpoint": {"type": "string"},
+                },
+                "required": ["api_key", "endpoint"],
+            },
+            knob_schema={"fields": []},
+            secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
+        )
+        secret_service = MagicMock()
+        secret_service.has_ref.return_value = False
+
+        result = execute_tool(
+            "get_plugin_assistance",
+            {"plugin_type": "transform", "plugin_name": "azure_prompt_shield"},
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+
+        assert result.success is False
+        assert "azure_prompt_shield" in result.data["error"]
+        assert "AZURE_CONTENT_SAFETY_KEY" in result.data["error"]
+
     def test_get_expression_grammar_is_static(self) -> None:
         grammar = get_expression_grammar()
         assert "row" in grammar
@@ -2121,6 +2459,16 @@ class TestToolDefinitions:
             assert "built-in quarantine" not in lowered, tool_name
             assert "discard" in description, tool_name
             assert "Any other value, including 'quarantine', must match a configured output/sink name." in description, tool_name
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        ["list_blobs", "list_composer_blobs", "get_blob_metadata", "inspect_source"],
+    )
+    def test_blob_discovery_schemas_forbid_extra_arguments(self, tool_name: str) -> None:
+        """Blob discovery tools persist arguments; their LLM-facing schemas must reject extra keys."""
+        definition = next(defn for defn in get_tool_definitions() if defn["name"] == tool_name)
+
+        assert definition["parameters"]["additionalProperties"] is False
 
     def test_upsert_node_trigger_schema_documents_end_of_source_only_shape(self) -> None:
         """Aggregation trigger schema must expose the end-of-source-only shape."""
@@ -3156,6 +3504,65 @@ class TestBlobTools:
         assert result.success is True
         assert "storage_path" not in result.data
 
+    def test_get_blob_metadata_uses_allowlist_response_contract(self) -> None:
+        """Metadata response must not default-expose prose or provenance fields."""
+        from elspeth.web.sessions.models import blobs_table
+
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.update().where(blobs_table.c.id == self.blob_id).values(source_description="customer export sk-test-secret")
+            )
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        assert set(result.data) == {"id", "filename", "mime_type", "size_bytes", "content_hash", "status"}
+        assert "source_description" not in result.data
+        assert "creation_modality" not in result.data
+        assert "created_from_message_id" not in result.data
+        assert "sk-test-secret" not in str(result.data)
+
+    def test_get_blob_metadata_rejects_invalid_blob_id_without_echoing_value(self) -> None:
+        sentinel = "sk-test-secret-not-a-uuid"
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": sentinel},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert "not a valid UUID" in result.data["error"]
+        assert sentinel not in result.data["error"]
+
+    def test_get_blob_metadata_not_found_does_not_echo_blob_id(self) -> None:
+        from uuid import uuid4
+
+        missing_blob_id = str(uuid4())
+
+        result = execute_tool(
+            "get_blob_metadata",
+            {"blob_id": missing_blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is False
+        assert "not found" in result.data["error"].lower()
+        assert missing_blob_id not in result.data["error"]
+
     def test_get_blob_metadata_wrong_session_returns_failure(self) -> None:
         """IDOR at tool layer: blob belongs to session A, caller is session B."""
         state = _empty_state()
@@ -3268,6 +3675,35 @@ class TestBlobTools:
         assert result.updated_state.sources["orders"].plugin == "csv"
         assert result.updated_state.sources["orders"].options["blob_ref"] == self.blob_id
         assert result.affected_nodes == ("source:orders",)
+
+    @pytest.mark.parametrize(
+        "source_name",
+        ("Orders", "on_success", " "),
+    )
+    def test_set_source_from_blob_invalid_source_name_raises_arg_error(self, source_name: str) -> None:
+        """Invalid blob source names are LLM argument errors, not plugin crashes."""
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        with pytest.raises(ToolArgumentError) as exc_info:
+            execute_tool(
+                "set_source_from_blob",
+                {
+                    "blob_id": self.blob_id,
+                    "source_name": source_name,
+                    "on_success": "orders_rows",
+                    "options": {"schema": {"mode": "observed"}},
+                },
+                state,
+                catalog,
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+
+        assert exc_info.value.argument == "source_name"
+        assert isinstance(exc_info.value.__cause__, ValueError)
 
     def test_set_source_from_plain_text_blob_uses_text_source(self) -> None:
         """text/plain blob should auto-resolve to the 'text' source plugin."""
@@ -4068,6 +4504,64 @@ class TestUpdateBlobQuota:
                     status="ready",
                 )
             )
+
+    def test_check_blob_quota_locks_session_before_sum(self, monkeypatch) -> None:
+        """Composer blob writers use the same session row serialization guard."""
+        from elspeth.web.composer.tools import blobs as composer_blob_tools
+
+        locked_sessions: list[str] = []
+        original_lock = composer_blob_tools._lock_session_for_blob_quota
+
+        def recording_lock(conn, session_id: str) -> None:
+            locked_sessions.append(session_id)
+            original_lock(conn, session_id)
+
+        monkeypatch.setattr(composer_blob_tools, "_lock_session_for_blob_quota", recording_lock)
+
+        with self.engine.begin() as conn:
+            quota_error = composer_blob_tools._check_blob_quota(
+                conn,
+                self.session_id,
+                additional_bytes=1,
+                quota_bytes=100,
+            )
+
+        assert quota_error is None
+        assert locked_sessions == [self.session_id]
+
+    def test_update_locks_session_before_current_size_delta_read(self, monkeypatch) -> None:
+        """The quota lock must cover the current-size read used for update deltas."""
+        from elspeth.web.composer.tools import blobs as composer_blob_tools
+
+        events: list[str] = []
+        original_lock = composer_blob_tools._lock_session_for_blob_quota
+
+        def recording_lock(conn, session_id: str) -> None:
+            events.append("lock")
+            original_lock(conn, session_id)
+
+        def record_size_read(_conn, _cursor, statement: str, _parameters, _context, _executemany) -> None:
+            normalized = " ".join(statement.lower().split())
+            if normalized.startswith("select blobs.size_bytes") and "from blobs" in normalized:
+                events.append("size_read")
+
+        monkeypatch.setattr(composer_blob_tools, "_lock_session_for_blob_quota", recording_lock)
+        event.listen(self.engine, "before_cursor_execute", record_size_read)
+        try:
+            result = execute_tool(
+                "update_blob",
+                {"blob_id": self.blob_id, "content": "larger content"},
+                _empty_state(),
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+                **_verbatim_blob_context(self.engine, self.session_id, "larger content"),
+            )
+        finally:
+            event.remove(self.engine, "before_cursor_execute", record_size_read)
+
+        assert result.success is True
+        assert events[:2] == ["lock", "size_read"]
 
     def test_update_within_quota_succeeds(self) -> None:
         state = _empty_state()
@@ -4987,6 +5481,42 @@ class TestSecretTools:
             "reason": "fingerprint_resolver_not_configured",
         }
 
+    def test_validate_secret_ref_uses_bounded_resolvability_check_for_inventory_hits(self) -> None:
+        """validate_secret_ref must not trust cheap inventory availability."""
+        from elspeth.contracts.secrets import SecretInventoryItem
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        svc = MagicMock()
+        svc.has_ref.return_value = False
+        svc.list_refs.return_value = [
+            SecretInventoryItem(
+                name="OPENROUTER_API_KEY",
+                scope="user",
+                available=True,
+                source_kind="user_store",
+            )
+        ]
+
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": "OPENROUTER_API_KEY"},
+            state,
+            catalog,
+            secret_service=svc,
+            user_id="test-user",
+        )
+
+        svc.has_ref.assert_called_once_with("test-user", "OPENROUTER_API_KEY")
+        assert result.success is True
+        assert dict(result.data) == {
+            "name": "OPENROUTER_API_KEY",
+            "available": False,
+            "scope": "user",
+            "source_kind": "user_store",
+            "reason": "value_decryption_failed",
+        }
+
     def test_validate_secret_ref_without_service_returns_failure(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -5314,17 +5844,12 @@ class TestSecretTools:
 
 
 class TestSecretToolsArgumentValidation:
-    """Tier-3 shape contract for the secret-ref handlers.
+    """Tier-3 shape contract for secret-ref dispatch.
 
     Pairs with ``TestSecretTools`` (semantic / state-mutation paths).  These
-    tests exercise the Pydantic argument-model layer that converts shape
-    failures into :class:`ToolArgumentError` — the same dispatch-layer
-    contract sources/blobs/outputs/sessions already satisfy.  Without this
-    layer, a malformed LLM call (wrong type, extra field, unknown ``target``
-    enum) would escape ``execute_tool`` as a bare exception and be
-    laundered by the compose loop's catch-all into
-    :class:`ComposerPluginCrashError` → HTTP 500, denying the LLM the
-    recoverable ARG_ERROR payload it needs to self-correct.
+    tests exercise the central JSON Schema dispatcher guard. Malformed LLM
+    calls (wrong type, extra field, unknown ``target`` enum) must fail before
+    handler dispatch without echoing attacker-controlled values.
     """
 
     def _svc(self) -> MagicMock:
@@ -5338,89 +5863,96 @@ class TestSecretToolsArgumentValidation:
         return svc
 
     def test_validate_secret_ref_wrong_type_for_name(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "validate_secret_ref",
-                {"name": 42},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": 42},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'validate_secret_ref'" in result.data["error"]
+        assert "type" in result.data["error"]
+        assert "42" not in result.data["error"]
 
     def test_validate_secret_ref_rejects_extra_field(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "validate_secret_ref",
-                {"name": "OPENROUTER_API_KEY", "bogus": "value"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "validate_secret_ref",
+            {"name": "OPENROUTER_API_KEY", "bogus": "value"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'validate_secret_ref'" in result.data["error"]
+        assert "unsupported" in result.data["error"]
+        assert "OPENROUTER_API_KEY" not in result.data["error"]
+        assert "value" not in result.data["error"]
 
     def test_wire_secret_ref_wrong_type_for_name(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {"name": 42, "target": "source", "option_key": "api_key"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {"name": 42, "target": "source", "option_key": "api_key"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "type" in result.data["error"]
+        assert "42" not in result.data["error"]
 
     def test_wire_secret_ref_unknown_target_enum(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {"name": "OPENROUTER_API_KEY", "target": "global", "option_key": "api_key"},
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {"name": "OPENROUTER_API_KEY", "target": "global", "option_key": "api_key"},
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "declared values" in result.data["error"]
+        assert "global" not in result.data["error"]
 
     def test_wire_secret_ref_rejects_extra_field(self) -> None:
-        from elspeth.web.composer.protocol import ToolArgumentError
-
         state = _empty_state()
         catalog = _mock_catalog()
-        with pytest.raises(ToolArgumentError) as exc_info:
-            execute_tool(
-                "wire_secret_ref",
-                {
-                    "name": "OPENROUTER_API_KEY",
-                    "target": "source",
-                    "option_key": "api_key",
-                    "bogus": "value",
-                },
-                state,
-                catalog,
-                secret_service=self._svc(),
-                user_id="test-user",
-            )
-        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+        result = execute_tool(
+            "wire_secret_ref",
+            {
+                "name": "OPENROUTER_API_KEY",
+                "target": "source",
+                "option_key": "api_key",
+                "bogus": "value",
+            },
+            state,
+            catalog,
+            secret_service=self._svc(),
+            user_id="test-user",
+            tool_arguments_hash="0" * 64,
+        )
+        assert result.success is False
+        assert "Invalid arguments for tool 'wire_secret_ref'" in result.data["error"]
+        assert "unsupported" in result.data["error"]
+        assert "OPENROUTER_API_KEY" not in result.data["error"]
+        assert "value" not in result.data["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -6038,6 +6570,20 @@ class TestTransformProviderConfigPathSecurity:
             "query_field": "text",
         }
 
+    @staticmethod
+    def _azure_search_managed_identity_options() -> dict[str, Any]:
+        return {
+            "provider": "azure_search",
+            "provider_config": {
+                "endpoint": "https://tenant-b.search.windows.net",
+                "index": "payroll",
+                "use_managed_identity": True,
+            },
+            "schema": {"mode": "observed"},
+            "output_prefix": "rag_",
+            "query_field": "text",
+        }
+
     def test_helper_rejects_persist_directory_outside_allowed(self) -> None:
         from elspeth.web.composer.tools._common import _validate_transform_provider_config_path
 
@@ -6074,6 +6620,135 @@ class TestTransformProviderConfigPathSecurity:
             data_dir="/data",
         )
         assert error is None
+
+    def test_helper_rejects_azure_search_managed_identity(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(self._azure_search_managed_identity_options())
+        assert error is not None
+        assert "managed identity" in error.lower()
+
+    def test_helper_rejects_string_true_managed_identity(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        options = self._azure_search_managed_identity_options()
+        options["provider_config"]["use_managed_identity"] = "true"
+
+        error = _validate_transform_provider_config_policy(options)
+        assert error is not None
+        assert "managed identity" in error.lower()
+
+    def test_upsert_node_rejects_azure_search_managed_identity(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "rows",
+                "on_success": "retrieved",
+                "on_error": "discard",
+                "options": self._azure_search_managed_identity_options(),
+            },
+            state,
+            catalog,
+            data_dir="/data",
+        )
+        assert result.success is False
+        assert "managed identity" in result.data["error"].lower()
+
+    def test_patch_node_options_rejects_azure_search_managed_identity(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "rag",
+                "node_type": "transform",
+                "plugin": "rag_retrieval",
+                "input": "rows",
+                "on_success": "retrieved",
+                "on_error": "discard",
+                "options": self._rag_options("/data/outputs/chroma"),
+            },
+            state,
+            catalog,
+            data_dir="/data",
+        )
+        assert created.success is True
+
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "rag",
+                "patch": {
+                    "provider": "azure_search",
+                    "provider_config": {
+                        "endpoint": "https://tenant-b.search.windows.net",
+                        "index": "payroll",
+                        "use_managed_identity": True,
+                    },
+                },
+            },
+            created.updated_state,
+            catalog,
+            data_dir="/data",
+        )
+
+        assert result.success is False
+        assert "managed identity" in result.data["error"].lower()
+
+    def test_set_pipeline_rejects_azure_search_managed_identity(self) -> None:
+        state = _empty_state()
+        catalog = self._catalog_with_rag()
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "source_out",
+                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            "nodes": [
+                {
+                    "id": "rag",
+                    "node_type": "transform",
+                    "plugin": "rag_retrieval",
+                    "input": "source_out",
+                    "on_success": "main",
+                    "on_error": "discard",
+                    "options": self._azure_search_managed_identity_options(),
+                }
+            ],
+            "edges": [{"id": "e1", "from_node": "source", "to_node": "rag", "edge_type": "on_success", "label": None}],
+            "outputs": [
+                {
+                    "sink_name": "main",
+                    "plugin": "csv",
+                    "options": {
+                        "path": "/data/outputs/out.csv",
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+        result = execute_tool("set_pipeline", args, state, catalog, data_dir="/data")
+        assert result.success is False
+        assert "managed identity" in result.data["error"].lower()
+
+    def test_helper_allows_azure_search_api_key(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        options = self._azure_search_managed_identity_options()
+        options["provider_config"] = {
+            "endpoint": "https://tenant-a.search.windows.net",
+            "index": "docs",
+            "api_key": "test-key",
+        }
+        assert _validate_transform_provider_config_policy(options) is None
 
     def test_upsert_node_rejects_persist_directory_outside_allowed(self) -> None:
         state = _empty_state()
@@ -6186,6 +6861,168 @@ class TestTransformProviderConfigPathSecurity:
         assert "persist_directory" in result.data["error"]
 
 
+class TestTransformLlmRetryBudgetPolicy:
+    """Composer must not persist unsafe sequential multi-query LLM retry budgets."""
+
+    @staticmethod
+    def _catalog_with_llm() -> MagicMock:
+        catalog = _mock_catalog()
+        catalog.list_transforms.return_value = [
+            *catalog.list_transforms.return_value,
+            PluginSummary(
+                name="llm",
+                description="LLM transform",
+                plugin_type="transform",
+                config_fields=[],
+            ),
+        ]
+        return catalog
+
+    @staticmethod
+    def _llm_multi_query_options(**overrides: Any) -> dict[str, Any]:
+        options = _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"})
+        options.update(
+            {
+                "prompt_template": "Classify {{ text }}.",
+                "required_input_fields": [],
+                "queries": [
+                    {
+                        "name": "classify",
+                        "input_fields": {"text": "body"},
+                    }
+                ],
+            }
+        )
+        options.update(overrides)
+        return options
+
+    def test_helper_rejects_default_sequential_multi_query_retry_budget(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(
+            self._llm_multi_query_options(),
+            plugin="llm",
+        )
+        assert error is not None
+        assert "sequential multi-query llm" in error.lower()
+
+    def test_helper_allows_small_sequential_multi_query_retry_budget(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(
+            self._llm_multi_query_options(max_capacity_retry_seconds=30.0),
+            plugin="llm",
+        )
+        assert error is None
+
+    def test_helper_allows_pooled_multi_query_default_retry_budget(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(
+            self._llm_multi_query_options(pool_size="2.0"),
+            plugin="llm",
+        )
+        assert error is None
+
+    def test_helper_rejects_fractional_multi_query_pool_size(self) -> None:
+        from elspeth.web.composer.tools._common import _validate_transform_provider_config_policy
+
+        error = _validate_transform_provider_config_policy(
+            self._llm_multi_query_options(pool_size="2.5"),
+            plugin="llm",
+        )
+        assert error is not None
+        assert "sequential multi-query llm" in error.lower()
+
+    def test_upsert_node_rejects_default_sequential_multi_query_retry_budget(self) -> None:
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "llm_review",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "reviewed",
+                "on_error": "discard",
+                "options": self._llm_multi_query_options(),
+            },
+            _empty_state(),
+            self._catalog_with_llm(),
+            data_dir="/data",
+        )
+        assert result.success is False
+        assert "sequential multi-query llm" in result.data["error"].lower()
+
+    def test_patch_node_options_rejects_oversized_sequential_multi_query_retry_budget(self) -> None:
+        catalog = self._catalog_with_llm()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "llm_review",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "rows",
+                "on_success": "reviewed",
+                "on_error": "discard",
+                "options": self._llm_multi_query_options(max_capacity_retry_seconds=30),
+            },
+            _empty_state(),
+            catalog,
+            data_dir="/data",
+        )
+        assert created.success is True
+
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "llm_review",
+                "patch": {"max_capacity_retry_seconds": 31},
+            },
+            created.updated_state,
+            catalog,
+            data_dir="/data",
+        )
+        assert result.success is False
+        assert "sequential multi-query llm" in result.data["error"].lower()
+
+    def test_set_pipeline_rejects_default_sequential_multi_query_retry_budget(self) -> None:
+        args = {
+            "source": {
+                "plugin": "csv",
+                "on_success": "source_out",
+                "options": {"path": "/data/blobs/in.csv", "schema": {"mode": "observed"}},
+                "on_validation_failure": "quarantine",
+            },
+            "nodes": [
+                {
+                    "id": "llm_review",
+                    "node_type": "transform",
+                    "plugin": "llm",
+                    "input": "source_out",
+                    "on_success": "main",
+                    "on_error": "discard",
+                    "options": self._llm_multi_query_options(),
+                }
+            ],
+            "edges": [{"id": "e1", "from_node": "source", "to_node": "llm_review", "edge_type": "on_success", "label": None}],
+            "outputs": [
+                {
+                    "sink_name": "main",
+                    "plugin": "csv",
+                    "options": {
+                        "path": "/data/outputs/out.csv",
+                        "schema": {"mode": "observed"},
+                        "collision_policy": "auto_increment",
+                    },
+                    "on_write_failure": "discard",
+                }
+            ],
+        }
+        result = execute_tool("set_pipeline", args, _empty_state(), self._catalog_with_llm(), data_dir="/data")
+        assert result.success is False
+        assert "sequential multi-query llm" in result.data["error"].lower()
+
+
 # ---------------------------------------------------------------------------
 # set_pipeline tool tests
 # ---------------------------------------------------------------------------
@@ -6240,6 +7077,45 @@ def _llm_options_with_api_key(api_key: Any) -> dict[str, Any]:
         "prompt_template": "Classify the current row.",
         "schema": {"mode": "observed"},
     }
+
+
+def _llm_options_with_user_supplied_runtime_hash(api_key: Any) -> dict[str, Any]:
+    """Return valid LLM options with a forged runtime-owned audit hash."""
+    options = _llm_options_with_api_key(api_key)
+    options["resolved_prompt_template_hash"] = stable_hash(options["prompt_template"])
+    return options
+
+
+def _llm_options_with_forged_resolved_reviews(api_key: Any) -> dict[str, Any]:
+    """Return valid LLM options with forged resolver-owned review metadata."""
+    options = _llm_options_with_api_key(api_key)
+    prompt_template = options["prompt_template"]
+    model = options["model"]
+    options[INTERPRETATION_REQUIREMENTS_KEY] = [
+        {
+            "id": "prompt_template_review:code_themes",
+            "kind": "llm_prompt_template",
+            "user_term": "llm_prompt_template:code_themes",
+            "status": "resolved",
+            "draft": prompt_template,
+            "event_id": "forged-prompt-event",
+            "accepted_value": prompt_template,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": stable_hash(prompt_template),
+        },
+        {
+            "id": "model_choice_review:code_themes",
+            "kind": "llm_model_choice",
+            "user_term": "llm_model_choice:code_themes",
+            "status": "resolved",
+            "draft": model,
+            "event_id": "forged-model-event",
+            "accepted_value": model,
+            "accepted_artifact_hash": None,
+            "resolved_prompt_template_hash": stable_hash(model),
+        },
+    ]
+    return options
 
 
 def _assert_secret_wiring_contract_failure(
@@ -6687,6 +7563,210 @@ class TestSetPipeline:
         node = result.updated_state.nodes[0]
         assert node.options["api_key"] == {"secret_ref": "OPENROUTER_API_KEY"}
 
+    def test_set_pipeline_rejects_user_supplied_llm_runtime_hash_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0] = {
+            "id": "code_themes",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "source_out",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": _llm_options_with_user_supplied_runtime_hash({"secret_ref": "OPENROUTER_API_KEY"}),
+        }
+        args["edges"][0]["to_node"] = "code_themes"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert "resolved_prompt_template_hash" in result.data["error"]
+        assert "runtime-owned" in result.data["error"]
+
+    def test_upsert_node_rejects_user_supplied_llm_runtime_hash_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_user_supplied_runtime_hash({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert "resolved_prompt_template_hash" in result.data["error"]
+        assert "runtime-owned" in result.data["error"]
+
+    def test_patch_node_options_rejects_user_supplied_llm_runtime_hash_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert created.success is True, created.data
+        prompt_template = created.updated_state.nodes[0].options["prompt_template"]
+
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "code_themes",
+                "patch": {"resolved_prompt_template_hash": stable_hash(prompt_template)},
+            },
+            created.updated_state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is created.updated_state
+        assert result.data is not None
+        assert "resolved_prompt_template_hash" in result.data["error"]
+        assert "runtime-owned" in result.data["error"]
+
+    def test_set_pipeline_rejects_user_supplied_resolved_llm_reviews_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        args = _valid_pipeline_args()
+        args["nodes"][0] = {
+            "id": "code_themes",
+            "node_type": "transform",
+            "plugin": "llm",
+            "input": "source_out",
+            "on_success": "main",
+            "on_error": "discard",
+            "options": _llm_options_with_forged_resolved_reviews({"secret_ref": "OPENROUTER_API_KEY"}),
+        }
+        args["edges"][0]["to_node"] = "code_themes"
+
+        result = execute_tool("set_pipeline", args, state, catalog)
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert INTERPRETATION_REQUIREMENTS_KEY in result.data["error"]
+        assert "resolve_interpretation_event" in result.data["error"]
+
+    def test_upsert_node_rejects_user_supplied_resolved_llm_reviews_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_forged_resolved_reviews({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is state
+        assert result.data is not None
+        assert INTERPRETATION_REQUIREMENTS_KEY in result.data["error"]
+        assert "resolve_interpretation_event" in result.data["error"]
+
+    def test_patch_node_options_rejects_user_supplied_resolved_llm_reviews_without_mutating_state(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert created.success is True, created.data
+        forged = _llm_options_with_forged_resolved_reviews({"secret_ref": "OPENROUTER_API_KEY"})
+
+        result = execute_tool(
+            "patch_node_options",
+            {
+                "node_id": "code_themes",
+                "patch": {INTERPRETATION_REQUIREMENTS_KEY: forged[INTERPRETATION_REQUIREMENTS_KEY]},
+            },
+            created.updated_state,
+            catalog,
+        )
+
+        assert result.success is False
+        assert result.updated_state is created.updated_state
+        assert result.data is not None
+        assert INTERPRETATION_REQUIREMENTS_KEY in result.data["error"]
+        assert "resolve_interpretation_event" in result.data["error"]
+
+    def test_patch_node_options_preserves_existing_resolved_llm_reviews_on_unrelated_patch(self) -> None:
+        state = _empty_state()
+        catalog = _mock_catalog()
+        created = execute_tool(
+            "upsert_node",
+            {
+                "id": "code_themes",
+                "node_type": "transform",
+                "plugin": "llm",
+                "input": "source_out",
+                "on_success": "main",
+                "on_error": "discard",
+                "options": _llm_options_with_api_key({"secret_ref": "OPENROUTER_API_KEY"}),
+            },
+            state,
+            catalog,
+        )
+        assert created.success is True, created.data
+        resolved_options = _llm_options_with_forged_resolved_reviews({"secret_ref": "OPENROUTER_API_KEY"})
+        resolved_options["resolved_prompt_template_hash"] = stable_hash(resolved_options["prompt_template"])
+        resolved_node = replace(created.updated_state.nodes[0], options=resolved_options)
+        resolved_state = created.updated_state.with_node(resolved_node)
+
+        result = execute_tool(
+            "patch_node_options",
+            {"node_id": "code_themes", "patch": {"temperature": 0.1}},
+            resolved_state,
+            catalog,
+        )
+
+        assert result.success is True, result.data
+        patched_options = result.updated_state.nodes[0].options
+        assert patched_options["temperature"] == 0.1
+        assert patched_options["resolved_prompt_template_hash"] == stable_hash(patched_options["prompt_template"])
+        assert deep_thaw(patched_options[INTERPRETATION_REQUIREMENTS_KEY]) == resolved_options[INTERPRETATION_REQUIREMENTS_KEY]
+
     def test_set_pipeline_rejects_secret_ref_in_non_credential_field(self) -> None:
         state = _empty_state()
         catalog = _mock_catalog()
@@ -6993,6 +8073,138 @@ class TestSetPipeline:
         assert _default_source(result.updated_state) is None
         assert "header-only inline CSV" in result.data["error"]
         assert uploaded_id in result.data["error"]
+
+    def test_set_pipeline_header_only_inline_csv_check_does_not_read_full_candidate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Custody check should stream/prefix-read candidate headers, not use read_text()."""
+        from datetime import UTC, datetime
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        uploaded_content = "name,email\n" + "\n".join(f"User {idx},user{idx}@example.com" for idx in range(2000))
+        uploaded_path = tmp_path / "blobs" / session_id / f"{uploaded_id}_contacts.csv"
+        uploaded_path.parent.mkdir(parents=True)
+        uploaded_path.write_text(uploaded_content, encoding="utf-8")
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=uploaded_id,
+                    session_id=session_id,
+                    filename="contacts.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(uploaded_content.encode("utf-8")),
+                    content_hash=_STUB_SHA256,
+                    storage_path=str(uploaded_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description="uploaded contact rows",
+                    status="ready",
+                )
+            )
+
+        original_read_text = Path.read_text
+
+        def _forbid_read_text(path: Path, *args: Any, **kwargs: Any) -> str:
+            if path == uploaded_path:
+                raise AssertionError("header-only custody check must not read candidate CSVs in full")
+            return original_read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _forbid_read_text)
+
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": "name,email\n",
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        result = execute_tool(
+            "set_pipeline",
+            args,
+            state,
+            catalog,
+            data_dir=str(tmp_path),
+            session_engine=engine,
+            session_id=session_id,
+            **_verbatim_blob_context(engine, session_id, "name,email\n"),
+        )
+
+        assert result.success is False
+        assert "header-only inline CSV" in result.data["error"]
+        assert uploaded_id in result.data["error"]
+
+    def test_set_pipeline_header_only_inline_csv_decode_failure_escalates(self, tmp_path: Path) -> None:
+        """Non-UTF-8 ready CSV candidates should raise audit integrity, not UnicodeDecodeError."""
+        from datetime import UTC, datetime
+
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        state = _empty_state()
+        catalog = _mock_catalog()
+        engine, session_id = _session_engine_with_session()
+        uploaded_id = str(uuid4())
+        uploaded_content = b"name,email\nAlice,\xff\n"
+        uploaded_path = tmp_path / "blobs" / session_id / f"{uploaded_id}_contacts.csv"
+        uploaded_path.parent.mkdir(parents=True)
+        uploaded_path.write_bytes(uploaded_content)
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                blobs_table.insert().values(
+                    id=uploaded_id,
+                    session_id=session_id,
+                    filename="contacts.csv",
+                    mime_type="text/csv",
+                    size_bytes=len(uploaded_content),
+                    content_hash=_STUB_SHA256,
+                    storage_path=str(uploaded_path),
+                    created_at=now,
+                    created_by="user",
+                    source_description="uploaded contact rows",
+                    status="ready",
+                )
+            )
+
+        args = _valid_pipeline_args()
+        args["source"] = {
+            "plugin": "csv",
+            "on_success": "source_out",
+            "options": {"schema": {"mode": "observed"}},
+            "inline_blob": {
+                "filename": "contacts.csv",
+                "mime_type": "text/csv",
+                "content": "name,email\n",
+            },
+            "on_validation_failure": "quarantine",
+        }
+        args["outputs"][0]["options"]["path"] = str(tmp_path / "outputs" / "out.csv")
+        args["outputs"][0]["options"]["mode"] = "write"
+        args["outputs"][0]["options"]["collision_policy"] = "auto_increment"
+
+        with pytest.raises(AuditIntegrityError, match="could not be decoded"):
+            execute_tool(
+                "set_pipeline",
+                args,
+                state,
+                catalog,
+                data_dir=str(tmp_path),
+                session_engine=engine,
+                session_id=session_id,
+                **_verbatim_blob_context(engine, session_id, "name,email\n"),
+            )
 
     def test_set_pipeline_unknown_source_plugin_fails(self) -> None:
         state = _empty_state()
@@ -8209,6 +9421,7 @@ class TestGetPluginAssistance:
         assert "A validator-valid direct route from web_scrape or an LLM to the sink is still incomplete" in hints
         assert "If scraped public internet content flows into an LLM" in hints
         assert "azure_prompt_shield" in hints
+        assert "only when discovery lists it" in hints
         assert "prompt_injection_shield_recommendation" in hints
 
     def test_field_mapper_discovery_explains_cleanup_whitelist_semantics(self) -> None:
@@ -8272,10 +9485,11 @@ class TestGetPluginAssistance:
         payload = result.to_dict()["data"]
         assert payload["issue_code"] is None
         hints = " ".join(payload["composer_hints"])
-        assert "internet content" in hints
-        assert "prompt-injection shielding is important" in hints
+        assert "reviewed for EVERY LLM node" in hints
+        assert "surfaced as an advisory (never blocking)" in hints
         assert "azure_prompt_shield" in hints
-        assert "surface this to the user as a strong recommendation" in hints
+        assert "only when discovery lists it" in hints
+        assert "whenever no authorized shield is upstream (State B/C)" in hints
         assert "recommendation is not permission to add a node" in hints
         assert "do not add passthrough, placeholder, no-op, or renamed utility nodes" in hints
         assert "copying it verbatim" in hints
@@ -9394,6 +10608,42 @@ class TestUpdateBlobTypeGuard:
         # __cause__ chain MUST preserve the structured Pydantic detail.
         assert isinstance(exc_info.value.__cause__, PydanticValidationError)
 
+    def test_unpaired_surrogate_content_raises_tool_argument_error(self) -> None:
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        catalog = _mock_catalog()
+        state = _empty_state()
+
+        create_result = execute_tool(
+            "create_blob",
+            {"filename": "a.txt", "mime_type": "text/plain", "content": "initial"},
+            state,
+            catalog,
+            data_dir=str(self.data_dir),
+            session_engine=self.engine,
+            session_id=self.session_id,
+            **_verbatim_blob_context(self.engine, self.session_id, "initial"),
+        )
+        blob_id = create_result.data["blob_id"]
+        user_message_id = _insert_user_message(self.engine, self.session_id, "Please update the blob.")
+
+        with pytest.raises(ToolArgumentError, match="valid UTF-8"):
+            execute_tool(
+                "update_blob",
+                {"blob_id": blob_id, "content": "bad\ud800"},
+                create_result.updated_state,
+                catalog,
+                data_dir=str(self.data_dir),
+                session_engine=self.engine,
+                session_id=self.session_id,
+                user_message_id=user_message_id,
+                composer_model_identifier="test-model",
+                composer_model_version="test-model-2026-06-28",
+                composer_provider="test-provider",
+                composer_skill_hash="a" * 64,
+                tool_arguments_hash="b" * 64,
+            )
+
 
 # ---------------------------------------------------------------------------
 # set_source_from_blob Tier-3 type guard
@@ -10497,7 +11747,9 @@ class TestInspectSourceTool:
         )
         assert result.success is True
         assert result.data["source_kind"] == "text"
-        assert tuple(result.data["url_candidates"]) == ("https://example.com/api",)
+        # url_candidates are redacted to scheme + host (+ port): userinfo and path
+        # are dropped because they can carry credentials / reset tokens / PII.
+        assert tuple(result.data["url_candidates"]) == ("https://example.com",)
         assert any("web_scrape" in w for w in result.data["warnings"])
 
     def test_pending_blob_refused(self) -> None:
@@ -10536,6 +11788,59 @@ class TestInspectSourceTool:
             _mock_catalog(),
         )
         assert result.success is False
+
+    def test_missing_blob_id_raises_tool_argument_error(self) -> None:
+        from pydantic import ValidationError as PydanticValidationError
+
+        from elspeth.web.composer.protocol import ToolArgumentError
+
+        with pytest.raises(
+            ToolArgumentError,
+            match=r"'inspect_source arguments' must be object conforming to InspectSourceArgumentsModel, got ValidationError",
+        ) as exc_info:
+            execute_tool(
+                "inspect_source",
+                {},
+                _empty_state(),
+                _mock_catalog(),
+                session_engine=self.engine,
+                session_id=self.session_id,
+            )
+        assert isinstance(exc_info.value.__cause__, PydanticValidationError)
+
+    def test_inspect_source_does_not_use_unbounded_read_bytes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        large_content = b"order_id,customer,price\n" + (b"O-1,Alice,49.95\n" * 2048)
+        self.storage_path.write_bytes(large_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                blobs_table.update()
+                .where(blobs_table.c.id == self.blob_id)
+                .values(size_bytes=len(large_content), content_hash=_content_hash(large_content))
+            )
+
+        original_read_bytes = Path.read_bytes
+
+        def _forbid_storage_read_bytes(path: Path) -> bytes:
+            if path == self.storage_path:
+                raise AssertionError("inspect_source must not slurp the full blob with Path.read_bytes")
+            return original_read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", _forbid_storage_read_bytes)
+
+        result = execute_tool(
+            "inspect_source",
+            {"blob_id": self.blob_id},
+            _empty_state(),
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        assert result.success is True
+        assert result.data["byte_range_inspected"][1] <= 8 * 1024
 
     def test_hash_mismatch_raises_blob_integrity_error(self) -> None:
         """Tier-1 invariant — corrupted blob must escalate, not return facts."""
@@ -11128,6 +12433,100 @@ class TestPreviewProofStep:
                     node_type="transform",
                     plugin="value_transform",
                     input="rows",
+                    on_success="classified_rows",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "operations": [{"target": "financial_only", "expression": "row['financial_barrier']"}],
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+            .with_node(
+                NodeSpec(
+                    id="summarize",
+                    node_type="aggregation",
+                    plugin="batch_stats",
+                    input="classified_rows",
+                    on_success="out",
+                    on_error="discard",
+                    options={
+                        "schema": {"mode": "observed"},
+                        "value_field": "financial_barrier",
+                        "group_by": "community",
+                        "compute_mean": True,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                )
+            )
+        )
+
+        result = execute_tool(
+            "preview_pipeline",
+            {},
+            state,
+            _mock_catalog(),
+            session_engine=self.engine,
+            session_id=self.session_id,
+        )
+
+        diagnostics = result.data["proof_diagnostics"]
+        mismatch = [d for d in diagnostics if d["code"] == "aggregation_numeric_value_field_type_mismatch_against_source_schema"]
+        assert mismatch, diagnostics
+        assert mismatch[0]["severity"] == "blocking"
+        assert mismatch[0]["evidence_locator"]["node_id"] == "summarize"
+        assert mismatch[0]["evidence_locator"]["field"] == "financial_barrier"
+        assert mismatch[0]["evidence_locator"]["observed_type"] == "str"
+        assert result.data["is_valid"] is False
+
+    def test_observed_named_csv_batch_stats_string_value_field_blocks_through_transform(self) -> None:
+        """Named CSV sources must participate in source-field proof walk-back."""
+        from sqlalchemy import update
+
+        from elspeth.web.blobs.service import content_hash as _content_hash
+        from elspeth.web.sessions.models import blobs_table
+
+        csv_content = b"respondent_id,community,financial_barrier\nR-1,Community-A,yes\nR-2,Community-B,no\n"
+        self.csv_storage_path.write_bytes(csv_content)
+        with self.engine.begin() as conn:
+            conn.execute(
+                update(blobs_table)
+                .where(blobs_table.c.id == self.csv_blob_id)
+                .values(
+                    size_bytes=len(csv_content),
+                    content_hash=_content_hash(csv_content),
+                )
+            )
+
+        base_state = self._state_with_csv_source(schema_mode="observed")
+        named_csv_source = SourceSpec(
+            plugin="csv",
+            on_success="survey_rows",
+            options={
+                "blob_ref": self.csv_blob_id,
+                "schema": {"mode": "observed"},
+            },
+            on_validation_failure="discard",
+        )
+        state = (
+            base_state.without_source()
+            .with_named_source("survey_csv", named_csv_source)
+            .with_node(
+                NodeSpec(
+                    id="classify",
+                    node_type="transform",
+                    plugin="value_transform",
+                    input="survey_rows",
                     on_success="classified_rows",
                     on_error="discard",
                     options={

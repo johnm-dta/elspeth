@@ -70,6 +70,19 @@ class Widget:
 '''
 
 
+_DRIFTED_AFTER_SCAN_SOURCE = '''\
+"""Synthetic module used in justify tests."""
+
+
+class Widget:
+    def lookup(self, payload: dict) -> str:
+        # R1: dict.get on Tier-2 data — the kind of finding an agent
+        # might want to suppress with judge approval.
+        return payload.get("name", "anonymous")
+        unreachable = "source changed after the scanner selected the finding"
+'''
+
+
 # ---------- helpers ----------
 
 
@@ -108,7 +121,7 @@ def _set_operator_override_authority(monkeypatch: pytest.MonkeyPatch, *, token: 
     monkeypatch.setenv(_OVERRIDE_TOKEN_SHA256_ENV, hashlib.sha256(token.encode("utf-8")).hexdigest())
 
 
-def test_justify_symbol_help_names_unique_current_finding_requirement(capsys: object) -> None:
+def test_justify_symbol_help_names_unique_current_finding_requirement(capsys: pytest.CaptureFixture[str]) -> None:
     """`--symbol` help must explain the uniqueness contract before runtime failure."""
     with pytest.raises(SystemExit) as exc:
         main(["justify", "--help"])
@@ -645,6 +658,48 @@ def test_justify_accepted_writes_entry_with_judge_metadata(tmp_path: Path) -> No
     assert entry.judge_confidence == pytest.approx(0.91)
     assert entry.judge_recorded_at is not None
     assert entry.judge_recorded_at.tzinfo is not None
+
+
+def test_justify_refuses_when_excerpt_snapshot_differs_from_scanner_snapshot(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from elspeth_lints.core import source_excerpt as source_excerpt_module
+
+    root, target = _build_source_tree(tmp_path)
+    allowlist_dir = _build_allowlist_dir(tmp_path)
+    real_extract_safe_excerpt = source_excerpt_module.extract_safe_excerpt
+
+    def drift_then_extract(**kwargs: Any) -> Any:
+        target.write_text(_DRIFTED_AFTER_SCAN_SOURCE, encoding="utf-8")
+        return real_extract_safe_excerpt(**kwargs)
+
+    argv = [
+        "justify",
+        "--root",
+        str(root),
+        "--allowlist-dir",
+        str(allowlist_dir),
+        "--file-path",
+        "plugins/widget.py",
+        "--symbol",
+        "Widget.lookup",
+        "--rationale",
+        "payload is Tier-3 external data from upstream tool-call",
+        "--owner",
+        "test-agent-snapshot-drift",
+    ]
+    with (
+        patch("elspeth_lints.core.source_excerpt.extract_safe_excerpt", side_effect=drift_then_extract),
+        _mock_judge_call(verdict="ACCEPTED", rationale="judge saw the drifted source") as client_class,
+    ):
+        exit_code = main(argv)
+
+    assert exit_code == 2
+    client_class.assert_not_called()
+    assert not (allowlist_dir / "plugins.yaml").exists()
+    captured = capsys.readouterr()
+    assert "changed between scanner and judge excerpt" in captured.err
 
 
 def test_justify_writes_judge_transport(tmp_path: Path) -> None:
@@ -2798,10 +2853,9 @@ def test_justify_rule_default_package_id_remains_no_op(tmp_path: Path) -> None:
 # =============================================================================
 #
 # The justify writer is the only production producer of judge-gated allowlist
-# entries. To close the C8-3 quartet-transplant attack we need the writer to
-# emit both binding fields (file_fingerprint + ast_path) so the loader can
-# verify the binding still holds at every subsequent load. These tests pin
-# the writer-side half of that contract; the loader-side tests live in
+# entries. To close the v2 quartet-transplant attack we need the writer to emit
+# scope_fingerprint + ast_path and sign them into the v2 payload. These tests pin
+# the writer-side half of that contract; the loader/match-side tests live in
 # test_allowlist_judge_metadata_integrity.py under the "C8-3" header.
 # =============================================================================
 

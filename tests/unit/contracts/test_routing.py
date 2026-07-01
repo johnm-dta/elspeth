@@ -152,6 +152,15 @@ class TestRoutingAction:
                 mode=RoutingMode.COPY,
             )
 
+    def test_continue_with_divert_mode_raises(self) -> None:
+        """CONTINUE kind must use MOVE mode, not DIVERT."""
+        with pytest.raises(ValueError, match="CONTINUE must use MOVE mode"):
+            RoutingAction(
+                kind=RoutingKind.CONTINUE,
+                destinations=(),
+                mode=RoutingMode.DIVERT,
+            )
+
     def test_fork_to_paths_with_move_mode_raises(self) -> None:
         """FORK_TO_PATHS kind with MOVE mode raises ValueError.
 
@@ -163,6 +172,15 @@ class TestRoutingAction:
                 kind=RoutingKind.FORK_TO_PATHS,
                 destinations=("path_a", "path_b"),
                 mode=RoutingMode.MOVE,
+            )
+
+    def test_fork_to_paths_with_empty_destinations_raises(self) -> None:
+        """FORK_TO_PATHS direct construction must reject empty destinations."""
+        with pytest.raises(ValueError, match="at least one destination"):
+            RoutingAction(
+                kind=RoutingKind.FORK_TO_PATHS,
+                destinations=(),
+                mode=RoutingMode.COPY,
             )
 
     def test_route_with_zero_destinations_raises(self) -> None:

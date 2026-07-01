@@ -9,6 +9,7 @@ import pytest
 
 from elspeth.contracts.enums import RunStatus
 from elspeth.contracts.errors import DependencyFailedError
+from elspeth.contracts.run_result import RunResult
 from elspeth.core.dependency_config import DependencyConfig
 from elspeth.engine.dependency_resolver import _hash_settings_file, _load_depends_on, detect_cycles, resolve_dependencies
 from tests.fixtures.audit_hashing import assert_prefixed_canonical_sha256
@@ -206,6 +207,36 @@ class TestResolveDependencies:
         assert len(results) == 1
         assert results[0].name == "index"
         assert results[0].run_id == "dep-run-123"
+
+    def test_dependency_result_hashes_settings_before_runner_side_effects(self, tmp_path: Path) -> None:
+        """Dependency audit hash must describe the config handed to the runner."""
+        dep = DependencyConfig(name="index", settings="./index.yaml")
+        parent_path = tmp_path / "query.yaml"
+        dep_path = tmp_path / "index.yaml"
+        dep_path.write_text("source:\n  plugin: before\n", encoding="utf-8")
+        before_hash = _hash_settings_file(dep_path)
+
+        def mutate_after_execution(settings_path: Path) -> RunResult:
+            assert settings_path == dep_path
+            settings_path.write_text("source:\n  plugin: after\n", encoding="utf-8")
+            return RunResult(
+                run_id="dep-run-123",
+                status=RunStatus.COMPLETED,
+                rows_processed=1,
+                rows_succeeded=1,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+            )
+
+        results = resolve_dependencies(
+            depends_on=[dep],
+            parent_settings_path=parent_path,
+            runner=mutate_after_execution,
+        )
+
+        assert _hash_settings_file(dep_path) != before_hash
+        assert results[0].settings_hash == before_hash
 
     def test_dependency_failure_raises(self, tmp_path: Path) -> None:
         dep = DependencyConfig(name="index", settings="./index.yaml")

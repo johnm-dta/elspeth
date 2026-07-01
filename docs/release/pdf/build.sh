@@ -3,8 +3,6 @@
 #
 # Output:
 #   out/elspeth-executive-summary.pdf      (PDF/UA-1)
-#   out/elspeth-progress-rc1-to-rc5.pdf    (PDF/UA-1)
-#   out/elspeth-velocity-rc1-to-rc5.pdf    (PDF/UA-1)
 #   out/elspeth-architecture.pdf           (PDF/UA-1)
 #   out/elspeth-composer.pdf               (PDF/UA-1)
 #   out/elspeth-guarantees.pdf             (PDF/UA-1)
@@ -160,12 +158,10 @@ else
   fi
 fi
 
-for stem in executive-summary progress velocity architecture composer guarantees data-trust; do
+for stem in executive-summary architecture composer guarantees data-trust; do
   src="${stem}.typ"
   case "$stem" in
     executive-summary) out_name="elspeth-executive-summary";;
-    progress)          out_name="elspeth-progress-rc1-to-rc5";;
-    velocity)          out_name="elspeth-velocity-rc1-to-rc5";;
     architecture)      out_name="elspeth-architecture";;
     composer)          out_name="elspeth-composer";;
     guarantees)        out_name="elspeth-guarantees";;

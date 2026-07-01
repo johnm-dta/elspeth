@@ -150,6 +150,13 @@ class TestAzureBlobSourceConfig:
         with pytest.raises(PluginConfigError, match="placeholder"):
             _make_source(cfg)
 
+    @pytest.mark.parametrize("container", ["todo", "unknown", "unset", "required"])
+    def test_plain_placeholder_words_can_be_container_names(self, container: str) -> None:
+        from elspeth.plugins.sources.azure_blob_source import AzureBlobSourceConfig
+
+        cfg = AzureBlobSourceConfig.from_dict(_base_config(container=container))
+        assert cfg.container == container
+
     def test_empty_blob_path_raises(self) -> None:
         """Empty blob_path raises PluginConfigError."""
         cfg = _base_config(blob_path="")
@@ -161,6 +168,13 @@ class TestAzureBlobSourceConfig:
         cfg = _base_config(blob_path=blob_path)
         with pytest.raises(PluginConfigError, match="placeholder"):
             _make_source(cfg)
+
+    @pytest.mark.parametrize("blob_path", ["todo", "unknown", "unset", "required"])
+    def test_plain_placeholder_words_can_be_blob_paths(self, blob_path: str) -> None:
+        from elspeth.plugins.sources.azure_blob_source import AzureBlobSourceConfig
+
+        cfg = AzureBlobSourceConfig.from_dict(_base_config(blob_path=blob_path))
+        assert cfg.blob_path == blob_path
 
     def test_columns_rejected_for_json(self) -> None:
         """columns option rejected for JSON format."""
@@ -575,7 +589,7 @@ class TestAzureBlobSourceJSON:
             "Customer Name": "customer_name",
             "Order ID": "order_id",
         }
-        assert normalization_version == "1.0.0"
+        assert normalization_version == "1.0.1"
 
     def test_json_field_mapping_overrides_normalized_keys(self, ctx: PluginContext) -> None:
         """JSON field_mapping can override names after source-boundary normalization."""
@@ -614,25 +628,32 @@ class TestAzureBlobSourceJSON:
         assert len(quarantined) == 1
         assert "Expected JSON object" in quarantined[0].quarantine_error
 
-    def test_json_field_mapping_collision_crashes_not_quarantines(self, ctx: PluginContext) -> None:
-        """A field_mapping that collapses two distinct fields into one final name is a
-        CONFIG fault (ours), not bad source data: it must crash, not be quarantined.
-
-        Here field_mapping maps 'a' -> 'x' while the row also carries a passthrough
-        'x', so resolve_field_names raises a plain ValueError ('field_mapping creates
-        collision'). After narrowing _validate_and_yield to catch only the Tier-3
-        ExternalHeaderError marker, this config ValueError propagates and crashes —
-        mirroring the CSV header path (which lets the same plain ValueError escape).
-        Previously the broad `except ValueError` masked it as a per-row quarantine.
+    @pytest.mark.parametrize(
+        ("data", "quarantine_index"),
+        [
+            ([{"a": 1, "x": 2}, {"a": 3}], 0),
+            ([{"a": 1}, {"a": 2, "x": 3}, {"a": 4}], 1),
+        ],
+    )
+    def test_json_field_mapping_collision_quarantines_not_crashes(
+        self,
+        data: list[dict[str, int]],
+        quarantine_index: int,
+        ctx: PluginContext,
+    ) -> None:
+        """Azure Blob JSON rows are external data, so row-created mapping collisions
+        must route through on_validation_failure instead of aborting the run.
         """
-        data = [{"a": 1, "x": 2}]
         source = _make_source(_base_config(format="json", field_mapping={"a": "x"}))
 
-        with (
-            patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())),
-            pytest.raises(ValueError, match="collision"),
-        ):
-            list(source.load(ctx))
+        with patch(PATCH_AUTH, return_value=_mock_blob_download(json.dumps(data).encode())):
+            rows = list(source.load(ctx))
+
+        assert len(rows) == len(data)
+        assert rows[quarantine_index].is_quarantined is True
+        assert rows[quarantine_index].quarantine_error is not None
+        assert "field_mapping creates collision" in rows[quarantine_index].quarantine_error
+        assert [row.row for row in rows if not row.is_quarantined] == [{"x": row["a"]} for row in data if "x" not in row]
 
 
 # ---------------------------------------------------------------------------

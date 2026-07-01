@@ -14,6 +14,7 @@ forgets to pass telemetry_emit, these tests fail.
 from __future__ import annotations
 
 import ast
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
@@ -241,13 +242,11 @@ class TestWebScrapeTelemetryWiring:
             patch("httpx.Client") as mock_httpx_cls,
         ):
             mock_httpx = mock_httpx_cls.return_value
-            # httpx.Client is used as a context manager in get_ssrf_safe():
-            #   with httpx.Client(...) as ssrf_client:
-            # MagicMock.__enter__ returns a nested Mock by default, NOT self.
-            # We must make it return the same mock so .get() is the one we configured.
+            # httpx.Client is used as a context manager in get_ssrf_safe(), then
+            # the audited client streams because WebScrapeTransform sets a body cap.
             mock_httpx.__enter__ = Mock(return_value=mock_httpx)
             mock_httpx.__exit__ = Mock(return_value=False)
-            mock_httpx.get.return_value = mock_response
+            mock_httpx.stream.return_value = nullcontext(mock_response)
             transform.process(row, process_ctx)
 
         # telemetry_emit must have been invoked with an HTTP call event
@@ -270,6 +269,7 @@ _KNOWN_AUDITED_CLIENT_USERS: set[str] = {
     "src/elspeth/plugins/transforms/llm/providers/azure.py",
     "src/elspeth/plugins/transforms/llm/providers/openrouter.py",
     "src/elspeth/plugins/transforms/azure/base.py",
+    "src/elspeth/plugins/transforms/azure/document_intelligence.py",
     "src/elspeth/plugins/transforms/web_scrape.py",
     # Batch APIs — use file uploads, not per-row audited clients
     "src/elspeth/plugins/transforms/llm/azure_batch.py",

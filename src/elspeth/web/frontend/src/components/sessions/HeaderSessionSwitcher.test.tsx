@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HeaderSessionSwitcher } from "./HeaderSessionSwitcher";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -397,5 +397,23 @@ describe("HeaderSessionSwitcher", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toMatch(/please try again/i);
     expect(alert.textContent).not.toContain("not-an-error-instance");
+  });
+
+  it("keeps the menu open on Shift+Tab so filter controls stay reachable (C4, elspeth-0730f27017)", async () => {
+    render(<HeaderSessionSwitcher />);
+    await userEvent.click(screen.getByRole("button", { name: /first/i }));
+    // The filter input was previously keyboard-unreachable because Tab/Shift+Tab
+    // both closed the menu. It must remain present after a Shift+Tab.
+    expect(screen.getByRole("textbox", { name: /find a session/i })).toBeInTheDocument();
+    const item = screen.getByRole("menuitem", { name: /^first$/i });
+    fireEvent.keyDown(item, { key: "Tab", shiftKey: true });
+    expect(
+      screen.queryByRole("textbox", { name: /find a session/i }),
+    ).toBeInTheDocument();
+    // Plain (forward) Tab still dismisses the menu.
+    fireEvent.keyDown(item, { key: "Tab" });
+    expect(
+      screen.queryByRole("textbox", { name: /find a session/i }),
+    ).not.toBeInTheDocument();
   });
 });

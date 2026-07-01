@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["markdown_report", "findings"],
+  "properties": {
+    "markdown_report": {
+      "type": "string",
+      "description": "Human-readable narration of what this lens reviewed and concluded."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["priority", "lens", "category", "confidence", "effort", "impact", "summary", "evidence", "suggested_fix", "target_file", "gate_note"],
+        "properties": {
+          "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+          "lens": {"type": "string"},
+          "category": {
+            "type": "string",
+            "enum": ["bug", "correctness", "smell", "efficiency", "improvement", "easy-win", "security", "design"]
+          },
+          "confidence": {"type": ["string", "null"], "enum": ["high", "medium", "low", null]},
+          "effort": {"type": ["string", "null"], "enum": ["trivial", "small", "medium", "large", null]},
+          "impact": {"type": ["string", "null"]},
+          "summary": {"type": "string"},
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "line", "claim"],
+              "properties": {
+                "path": {"type": "string"},
+                "line": {"type": ["integer", "null"]},
+                "claim": {"type": "string"}
+              }
+            }
+          },
+          "suggested_fix": {"type": ["string", "null"]},
+          "target_file": {"type": ["string", "null"]},
+          "gate_note": {"type": ["string", "null"]}
+        }
+      }
+    }
+  }
+}

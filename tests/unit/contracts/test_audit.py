@@ -45,6 +45,51 @@ from elspeth.contracts import (
 from elspeth.contracts.enums import _LEGAL_TERMINAL_PAIRS, TerminalOutcome, TerminalPath
 
 
+class TestAuditEnumValidation:
+    """Tests for required vs optional enum validation in audit contracts."""
+
+    def test_required_enum_field_rejects_none(self) -> None:
+        """Required enum fields must reject None, not silently pass."""
+        with pytest.raises(TypeError, match="status must be RunStatus"):
+            Run(
+                run_id="run-1",
+                started_at=datetime.now(UTC),
+                config_hash="a" * 64,
+                settings_json="{}",
+                canonical_version="1.0",
+                status=None,  # type: ignore[arg-type]
+            )
+
+    def test_optional_enum_fields_accept_none(self) -> None:
+        """Optional enum fields keep accepting None after required enum tightening."""
+        run = Run(
+            run_id="run-1",
+            started_at=datetime.now(UTC),
+            config_hash="a" * 64,
+            settings_json="{}",
+            canonical_version="1.0",
+            status=RunStatus.RUNNING,
+            reproducibility_grade=None,
+            export_status=None,
+        )
+
+        assert run.reproducibility_grade is None
+        assert run.export_status is None
+
+    def test_seeded_from_cache_requires_cache_key(self) -> None:
+        """Cache replay runs must carry the cache key they were replayed from."""
+        with pytest.raises(ValueError, match="seeded_from_cache=True requires cache_key"):
+            Run(
+                run_id="run-1",
+                started_at=datetime.now(UTC),
+                config_hash="a" * 64,
+                settings_json="{}",
+                canonical_version="1.0",
+                status=RunStatus.COMPLETED,
+                seeded_from_cache=True,
+            )
+
+
 class TestNodeStateVariants:
     """Tests for NodeState discriminated union."""
 
@@ -2017,6 +2062,18 @@ class TestSecretResolutionInputValidation:
     def test_negative_latency_rejected(self) -> None:
         with pytest.raises(ValueError, match="non-negative"):
             SecretResolutionInput(**self._valid_kwargs(resolution_latency_ms=-1.0))  # type: ignore[arg-type]
+
+    def test_non_finite_timestamp_rejected(self) -> None:
+        with pytest.raises(ValueError, match="timestamp must be a finite number"):
+            SecretResolutionInput(**self._valid_kwargs(timestamp=float("inf")))  # type: ignore[arg-type]
+
+    def test_keyvault_requires_vault_url(self) -> None:
+        with pytest.raises(ValueError, match="vault_url is required"):
+            SecretResolutionInput(**self._valid_kwargs(vault_url=None))  # type: ignore[arg-type]
+
+    def test_keyvault_requires_secret_name(self) -> None:
+        with pytest.raises(ValueError, match="secret_name is required"):
+            SecretResolutionInput(**self._valid_kwargs(secret_name=None))  # type: ignore[arg-type]
 
     def test_zero_latency_accepted(self) -> None:
         """Zero latency is valid (e.g., cached resolution)."""

@@ -1,5 +1,7 @@
 """Tests for SchemaContract factory from SchemaConfig."""
 
+import pytest
+
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract_factory import (
     create_contract_from_config,
@@ -284,3 +286,24 @@ class TestContractWithFieldResolution:
 
         assert mapped.original_name == "Original Header"
         assert unmapped.original_name == "unmapped_field"  # Falls back to normalized
+
+    def test_field_resolution_collision_raises_source_plugin_bug(self) -> None:
+        """Duplicate normalized names are source plugin bugs, not last-wins defaults."""
+        config = SchemaConfig.from_dict(
+            {
+                "mode": "fixed",
+                "fields": ["amount_usd: int"],
+            }
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"field_resolution collision: normalized name 'amount_usd' maps to both 'Amount USD' and 'Amount_USD'",
+        ):
+            create_contract_from_config(
+                config,
+                field_resolution={
+                    "Amount USD": "amount_usd",
+                    "Amount_USD": "amount_usd",
+                },
+            )

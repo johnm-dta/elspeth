@@ -67,6 +67,7 @@ RETRY_MULTIPLIER = 2
 STDERR_TRUNCATE_CHARS = 500
 USAGE_STAT_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens")
 CODEX_RATE_LIMIT_PERIOD_S = 60.0
+STRUCTURED_SIDECAR_STALE_GRACE_S = 60.0
 
 EXCLUDE_DIRS = {
     "__pycache__",
@@ -810,16 +811,20 @@ def _structured_findings(report_path: Path) -> list[dict[str, Any]] | None:
     sidecar = structured_output_path_for_report(report_path)
     if not sidecar.exists():
         return None
-    # Fail closed against stale sidecars: a structured sidecar is authoritative
-    # only when it is at least as new as its Markdown report. A rerun with
-    # --no-structured-output, a manual rewrite, or a partial cleanup can leave an
-    # old sidecar beside fresh Markdown — trusting it would count findings the
-    # current report no longer makes (false positive) or, worse, mask a real
-    # finding behind an empty sidecar (false negative). When the sidecar predates
-    # the report, ignore it and let the caller parse the authoritative Markdown.
-    if report_path.exists() and sidecar.stat().st_mtime < report_path.stat().st_mtime:
+    # Fail closed against genuinely stale sidecars. A normal structured run
+    # writes the JSON sidecar first and then extracts the Markdown report from
+    # it, so the report can be slightly newer even when both files are from the
+    # same run. Larger gaps still indicate a rerun with --no-structured-output,
+    # a manual rewrite, or partial cleanup.
+    if report_path.exists():
+        sidecar_mtime = sidecar.stat().st_mtime
+        report_mtime = report_path.stat().st_mtime
+        sidecar_is_stale = sidecar_mtime + STRUCTURED_SIDECAR_STALE_GRACE_S < report_mtime
+    else:
+        sidecar_is_stale = False
+    if sidecar_is_stale:
         print(
-            f"⚠️  Ignoring stale structured sidecar (older than its report): {sidecar}",
+            f"⚠️  Ignoring stale structured sidecar (older than its report by more than {STRUCTURED_SIDECAR_STALE_GRACE_S:g}s): {sidecar}",
             file=sys.stderr,
         )
         return None

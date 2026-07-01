@@ -1,7 +1,7 @@
 # tests/integration/pipeline/test_eof_flush_quiescence_gating.py
 """ADR-030 §D steps 2-3 — the end-of-input flush is journal-quiescence gated.
 
-Sibling of test_rc6_eof_resume_proof.py, real pipelines end-to-end. The §D
+Sibling of test_eof_resume_proof.py, real pipelines end-to-end. The §D
 rule: the EOF barrier flush may run ONLY when the journal holds zero READY
 rows and zero non-pending-sink LEASED rows — otherwise a still-in-flight work
 item (a slice-4/5 slow follower's claim) could deposit a barrier arrival
@@ -50,6 +50,7 @@ from elspeth.core.landscape.schema import (
 from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.engine.orchestrator import Orchestrator
 from tests.fixtures.base_classes import _TestSourceBase
+from tests.fixtures.landscape import register_test_worker
 from tests.fixtures.plugins import CollectSink, ListSource
 from tests.integration.pipeline.test_aggregation_recovery import (
     _build_eof_aggregation_pipeline,
@@ -151,6 +152,7 @@ class _PeerSimulatingSource(_TestSourceBase):
             row_payload_json=TokenSchedulerRepository.serialize_row_payload(PipelineRow(data, _observed_contract(data))),
             available_at=now,
         )
+        register_test_worker(self._db, run_id=run_id, worker_id=PEER_OWNER)
         claimed = repo.claim_ready(run_id=run_id, lease_owner=PEER_OWNER, lease_seconds=3600, now=now)
         assert claimed is not None and claimed.token_id == token.token_id
         if self._peer_completes_into_barrier:

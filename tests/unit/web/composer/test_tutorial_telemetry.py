@@ -45,35 +45,3 @@ def test_abandon_route_increments_counter(monkeypatch) -> None:
 
     assert response.status_code == 204
     assert counter.calls == [(1, {})]
-
-
-# I6 — silent-failure-hunter remediation. The tutorial cache-store path
-# silently early-returned on any partial failure (a single quarantined
-# row, a routed row, an unfinished status) with no counter. A
-# persistent tutorial degradation (e.g. every live run has one
-# quarantined row) would mean the cache never seeds and every billed
-# live run discards its cache-seed value — billing surge before anyone
-# notices. The counter exposes skip rate per closed-list reason so
-# operators can alert on a non-trivial floor.
-
-
-def test_record_tutorial_cache_skipped_increments_counter_with_skip_reason(monkeypatch) -> None:
-    counter = _RecordingCounter()
-    monkeypatch.setattr(tutorial_telemetry_module, "_TUTORIAL_CACHE_SKIPPED_COUNTER", counter)
-
-    tutorial_telemetry_module.record_tutorial_cache_skipped("rows_quarantined")
-    tutorial_telemetry_module.record_tutorial_cache_skipped("status_not_completed")
-
-    assert counter.calls == [
-        (1, {"skip_reason": "rows_quarantined"}),
-        (1, {"skip_reason": "status_not_completed"}),
-    ]
-
-
-def test_record_tutorial_cache_skipped_rejects_unknown_skip_reason() -> None:
-    try:
-        tutorial_telemetry_module.record_tutorial_cache_skipped("rogue_reason")  # type: ignore[arg-type]
-    except ValueError as exc:
-        assert "skip_reason" in str(exc)
-    else:
-        raise AssertionError("expected ValueError")

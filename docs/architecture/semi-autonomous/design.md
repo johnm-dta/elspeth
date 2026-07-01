@@ -13,9 +13,9 @@ Current source-of-truth documents:
 - [Root architecture](../../../ARCHITECTURE.md) — current system architecture
 - [README web composer path](../../../README.md#web-composer-path) — current
   operator-facing composer flow
-- [Composer UX specification](../../design/composer-ux-spec.md) — current
+- [Composer UX specification](../../../docs-archive/2026-06-28-docs-cleanout/docs/design/composer-ux-spec.md) — current
   composer north-star and execution model
-- [Composer UX redesign set](../../composer/ux-redesign-2026-05/) — RC5.2
+- [Composer UX redesign set](../../../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/) — RC5.2
   composer planning and implementation phase documents
 
 Retained historical points:

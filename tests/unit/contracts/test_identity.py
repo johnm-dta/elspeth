@@ -211,6 +211,14 @@ class TestTokenInfoResumeOffsetInvariant:
         assert t.resume_attempt_offset == 1
         assert t.resume_checkpoint_id == "ck-1"
 
+    def test_bool_offset_rejected(self) -> None:
+        with pytest.raises(TypeError, match=r"TokenInfo\.resume_attempt_offset must be int.*got bool"):
+            TokenInfo(**self._kwargs(resume_attempt_offset=True, resume_checkpoint_id="ck-1"))
+
+    def test_negative_offset_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r"TokenInfo\.resume_attempt_offset must be >= 0.*got -1"):
+            TokenInfo(**self._kwargs(resume_attempt_offset=-1))
+
     def test_zero_offset_without_checkpoint_id_accepted(self) -> None:
         # Ambiguous-but-valid: a run-1 token, OR a never-stepped token re-driven on resume.
         t = TokenInfo(**self._kwargs(resume_attempt_offset=0, resume_checkpoint_id=None))

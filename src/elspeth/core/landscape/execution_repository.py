@@ -746,6 +746,32 @@ class ExecutionRepository:
         rows = self._ops.execute_fetchall(query)
         return {(row.node_id, row.row_id) for row in rows}
 
+    def has_completed_row_for_node(self, *, run_id: str, node_id: str, row_id: str) -> bool:
+        """Return whether one row completed at one node in one run.
+
+        This is the point lookup used by coalesce late-arrival detection.
+        It avoids materializing every completed row for a coalesce node on
+        ordinary cache misses.
+        """
+        query = (
+            select(node_states_table.c.state_id)
+            .select_from(
+                node_states_table.join(
+                    tokens_table,
+                    (node_states_table.c.token_id == tokens_table.c.token_id) & (node_states_table.c.run_id == tokens_table.c.run_id),
+                )
+            )
+            .where(
+                node_states_table.c.run_id == run_id,
+                node_states_table.c.node_id == node_id,
+                node_states_table.c.completed_at.isnot(None),
+                tokens_table.c.run_id == run_id,
+                tokens_table.c.row_id == row_id,
+            )
+            .limit(1)
+        )
+        return self._ops.execute_fetchone(query) is not None
+
     def record_routing_event(
         self,
         state_id: str,

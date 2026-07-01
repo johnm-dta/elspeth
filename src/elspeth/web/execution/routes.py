@@ -15,27 +15,31 @@ run's parent session.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+import hashlib
+import tempfile
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
+from starlette.types import Receive, Scope, Send
 
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.middleware import get_current_user
-from elspeth.web.auth.models import AuthenticationError, AuthProviderUnavailable, UserIdentity
-from elspeth.web.auth.protocol import AuthProvider
+from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.protocol import ComposerService, ComposerServiceError
 from elspeth.web.composer.service import _BadRequestLLMError
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.accounting import load_run_accounting_for_settings
-from elspeth.web.execution.diagnostics import load_run_diagnostics_for_settings
+from elspeth.web.execution.diagnostics import llm_safe_diagnostics_snapshot, load_run_diagnostics_for_settings
 from elspeth.web.execution.errors import (
     BlobSourcePathMismatchError,
     ExecuteRequestValidationError,
@@ -47,11 +51,10 @@ from elspeth.web.execution.errors import (
 from elspeth.web.execution.fanout_guard import FANOUT_GUARD_ERROR_TYPE, ExecutionFanoutGuardRequired
 from elspeth.web.execution.outputs import (
     RunOutputsAuditUnavailableError,
-    hash_and_size_of_file,
+    filesystem_path_candidates,
     load_run_outputs_for_settings,
-    path_or_uri_to_filesystem_path,
 )
-from elspeth.web.execution.preview import build_artifact_preview
+from elspeth.web.execution.preview import DEFAULT_ARTIFACT_PREVIEW_BYTE_CAP, build_artifact_preview_from_head
 from elspeth.web.execution.progress import ProgressBroadcaster
 from elspeth.web.execution.protocol import ExecutionService, StateAccessError
 from elspeth.web.execution.schemas import (
@@ -66,13 +69,17 @@ from elspeth.web.execution.schemas import (
     RunDiagnosticsWorkingView,
     RunEvent,
     RunEventType,
+    RunOutputArtifact,
     RunOutputArtifactPreview,
     RunOutputsResponse,
     RunResultsResponse,
     RunStatusResponse,
     ValidationResult,
+    WebSocketTicketResponse,
 )
+from elspeth.web.execution.websocket_ticket import WebSocketTicketStore
 from elspeth.web.paths import allowed_sink_directories
+from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.ownership import verify_session_ownership
 from elspeth.web.sessions.protocol import (
     RunEventRecord,
@@ -83,6 +90,7 @@ from elspeth.web.sessions.protocol import (
 from elspeth.web.sessions.routes._helpers import _litellm_error_detail
 
 slog = structlog.get_logger()
+_ARTIFACT_SNAPSHOT_CHUNK_SIZE = 1024 * 1024
 
 
 # ── Dependency providers (using app.state, matching existing pattern) ──
@@ -94,6 +102,388 @@ async def _get_execution_service(request: Request) -> ExecutionService:
 
 async def _get_session_service(request: Request) -> SessionServiceProtocol:
     return cast(SessionServiceProtocol, request.app.state.session_service)
+
+
+def _get_websocket_ticket_store(app: Any) -> WebSocketTicketStore:
+    store = getattr(app.state, "websocket_ticket_store", None)
+    if store is None:
+        store = WebSocketTicketStore()
+        app.state.websocket_ticket_store = store
+    return cast(WebSocketTicketStore, store)
+
+
+@dataclass(frozen=True)
+class _ArtifactFileSnapshot:
+    path: Path
+    size_bytes: int
+    content_hash: str
+
+
+@dataclass(frozen=True)
+class _ArtifactPreviewHeadSnapshot:
+    total_size_bytes: int
+    content_hash: str
+    head_bytes: bytes
+
+
+@dataclass(frozen=True)
+class _ByteRange:
+    start: int
+    end_inclusive: int
+
+    @property
+    def length(self) -> int:
+        return self.end_inclusive - self.start + 1
+
+
+def _artifact_content_drift_http(
+    artifact: RunOutputArtifact,
+    *,
+    actual_size_bytes: int,
+) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "error_type": "artifact_content_drift",
+            "path_or_uri": artifact.path_or_uri,
+            "expected_size_bytes": artifact.size_bytes,
+            "actual_size_bytes": actual_size_bytes,
+            "expected_content_hash": artifact.content_hash,
+        },
+    )
+
+
+def _reject_artifact_content_drift(
+    artifact: RunOutputArtifact,
+    *,
+    actual_size_bytes: int,
+    actual_content_hash: str,
+) -> None:
+    if actual_size_bytes != artifact.size_bytes or actual_content_hash != artifact.content_hash:
+        raise _artifact_content_drift_http(
+            artifact,
+            actual_size_bytes=actual_size_bytes,
+        )
+
+
+def _artifact_purged_or_moved_http(artifact: RunOutputArtifact) -> HTTPException:
+    return HTTPException(
+        status_code=410,
+        detail={
+            "error_type": "artifact_purged_or_moved",
+            "path_or_uri": artifact.path_or_uri,
+        },
+    )
+
+
+def _artifact_error_type(exc: HTTPException) -> str | None:
+    if not isinstance(exc.detail, Mapping):
+        return None
+    error_type = exc.detail.get("error_type")
+    return error_type if isinstance(error_type, str) else None
+
+
+def _resolved_allowed_artifact_paths(
+    artifact: RunOutputArtifact,
+    *,
+    data_dir: str | Path,
+    object_store_error_type: str,
+) -> tuple[Path, ...]:
+    fs_paths = filesystem_path_candidates(artifact.path_or_uri)
+    if fs_paths is None:
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "error_type": object_store_error_type,
+                "path_or_uri": artifact.path_or_uri,
+            },
+        )
+
+    allowed = allowed_sink_directories(str(data_dir))
+    resolved_paths: list[Path] = []
+    seen_paths: set[Path] = set()
+    for fs_path in fs_paths:
+        try:
+            resolved = fs_path.resolve()
+        except OSError:
+            continue
+        if resolved in seen_paths:
+            continue
+        if any(resolved.is_relative_to(base) for base in allowed):
+            resolved_paths.append(resolved)
+            seen_paths.add(resolved)
+
+    if not resolved_paths:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error_type": "output_path_outside_allowlist",
+                "path_or_uri": artifact.path_or_uri,
+            },
+        )
+    return tuple(resolved_paths)
+
+
+def _unlink_path(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _download_content_disposition(filename: str) -> str:
+    quoted = quote(filename, safe="")
+    if quoted != filename:
+        return f"attachment; filename*=utf-8''{quoted}"
+    return f'attachment; filename="{filename}"'
+
+
+def _range_not_satisfiable_http(size_bytes: int) -> HTTPException:
+    return HTTPException(
+        status_code=416,
+        detail={"error_type": "range_not_satisfiable"},
+        headers={"Content-Range": f"bytes */{size_bytes}"},
+    )
+
+
+def _parse_single_range(range_header: str | None, *, size_bytes: int) -> _ByteRange | None:
+    if range_header is None:
+        return None
+    if not range_header.startswith("bytes=") or "," in range_header:
+        raise _range_not_satisfiable_http(size_bytes)
+
+    range_spec = range_header.removeprefix("bytes=")
+    start_raw, separator, end_raw = range_spec.partition("-")
+    if separator == "":
+        raise _range_not_satisfiable_http(size_bytes)
+
+    try:
+        if start_raw == "":
+            suffix_length = int(end_raw)
+            if suffix_length <= 0:
+                raise ValueError
+            start = max(size_bytes - suffix_length, 0)
+            end_inclusive = size_bytes - 1
+        else:
+            start = int(start_raw)
+            end_inclusive = size_bytes - 1 if end_raw == "" else int(end_raw)
+    except ValueError:
+        raise _range_not_satisfiable_http(size_bytes) from None
+
+    if size_bytes <= 0 or start < 0 or end_inclusive < start or start >= size_bytes:
+        raise _range_not_satisfiable_http(size_bytes)
+
+    return _ByteRange(
+        start=start,
+        end_inclusive=min(end_inclusive, size_bytes - 1),
+    )
+
+
+def _stream_temp_snapshot(path: Path, *, byte_range: _ByteRange | None = None) -> Iterator[bytes]:
+    try:
+        with path.open("rb") as source:
+            remaining: int | None
+            if byte_range is None:
+                remaining = None
+            else:
+                source.seek(byte_range.start)
+                remaining = byte_range.length
+
+            while remaining is None or remaining > 0:
+                read_size = _ARTIFACT_SNAPSHOT_CHUNK_SIZE if remaining is None else min(_ARTIFACT_SNAPSHOT_CHUNK_SIZE, remaining)
+                chunk = source.read(read_size)
+                if not chunk:
+                    break
+                if remaining is not None:
+                    remaining -= len(chunk)
+                yield chunk
+    finally:
+        _unlink_path(path)
+
+
+class _TempSnapshotStreamingResponse(StreamingResponse):
+    def __init__(
+        self,
+        snapshot_path: Path,
+        *,
+        headers: Mapping[str, str],
+        status_code: int = 200,
+        byte_range: _ByteRange | None = None,
+    ) -> None:
+        self._snapshot_path = snapshot_path
+        super().__init__(
+            _stream_temp_snapshot(snapshot_path, byte_range=byte_range),
+            status_code=status_code,
+            media_type="application/octet-stream",
+            headers=headers,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            _unlink_path(self._snapshot_path)
+
+
+def _copy_artifact_to_temp_snapshot(path: Path, snapshot_dir: Path) -> _ArtifactFileSnapshot:
+    digest = hashlib.sha256()
+    size_bytes = 0
+    temp_path: Path | None = None
+    snapshot_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            prefix="elspeth-run-output-",
+            suffix=".snapshot",
+            delete=False,
+            dir=snapshot_dir,
+        ) as temp_file, path.open("rb") as source:
+            temp_path = Path(temp_file.name)
+            while chunk := source.read(_ARTIFACT_SNAPSHOT_CHUNK_SIZE):
+                size_bytes += len(chunk)
+                digest.update(chunk)
+                temp_file.write(chunk)
+    except Exception:
+        if temp_path is not None:
+            _unlink_path(temp_path)
+        raise
+
+    assert temp_path is not None
+    return _ArtifactFileSnapshot(
+        path=temp_path,
+        size_bytes=size_bytes,
+        content_hash=digest.hexdigest(),
+    )
+
+
+async def _verified_artifact_file_snapshot(
+    resolved: Path,
+    artifact: RunOutputArtifact,
+    *,
+    snapshot_dir: Path,
+) -> _ArtifactFileSnapshot:
+    try:
+        snapshot = await run_sync_in_worker(_copy_artifact_to_temp_snapshot, resolved, snapshot_dir)
+    except FileNotFoundError:
+        raise _artifact_purged_or_moved_http(artifact) from None
+
+    try:
+        _reject_artifact_content_drift(
+            artifact,
+            actual_size_bytes=snapshot.size_bytes,
+            actual_content_hash=snapshot.content_hash,
+        )
+    except HTTPException:
+        _unlink_path(snapshot.path)
+        raise
+
+    return snapshot
+
+
+def _read_artifact_preview_head(path: Path, *, byte_cap: int) -> _ArtifactPreviewHeadSnapshot:
+    digest = hashlib.sha256()
+    total_size_bytes = 0
+    head = bytearray()
+    with path.open("rb") as source:
+        while chunk := source.read(_ARTIFACT_SNAPSHOT_CHUNK_SIZE):
+            total_size_bytes += len(chunk)
+            digest.update(chunk)
+            remaining_head_bytes = byte_cap - len(head)
+            if remaining_head_bytes > 0:
+                head.extend(chunk[:remaining_head_bytes])
+
+    return _ArtifactPreviewHeadSnapshot(
+        total_size_bytes=total_size_bytes,
+        content_hash=digest.hexdigest(),
+        head_bytes=bytes(head),
+    )
+
+
+async def _verified_artifact_preview_head(
+    resolved: Path,
+    artifact: RunOutputArtifact,
+    *,
+    byte_cap: int = DEFAULT_ARTIFACT_PREVIEW_BYTE_CAP,
+) -> _ArtifactPreviewHeadSnapshot:
+    try:
+        snapshot = await run_sync_in_worker(_read_artifact_preview_head, resolved, byte_cap=byte_cap)
+    except FileNotFoundError:
+        raise _artifact_purged_or_moved_http(artifact) from None
+
+    _reject_artifact_content_drift(
+        artifact,
+        actual_size_bytes=snapshot.total_size_bytes,
+        actual_content_hash=snapshot.content_hash,
+    )
+    return snapshot
+
+
+async def _verified_artifact_file_snapshot_from_candidates(
+    artifact: RunOutputArtifact,
+    *,
+    data_dir: str | Path,
+    snapshot_dir: Path,
+) -> tuple[Path, _ArtifactFileSnapshot]:
+    candidates = _resolved_allowed_artifact_paths(
+        artifact,
+        data_dir=data_dir,
+        object_store_error_type="object_store_artifact_not_streamable",
+    )
+    purged_error: HTTPException | None = None
+    drift_error: HTTPException | None = None
+    for resolved in candidates:
+        try:
+            snapshot = await _verified_artifact_file_snapshot(
+                resolved,
+                artifact,
+                snapshot_dir=snapshot_dir,
+            )
+        except HTTPException as exc:
+            error_type = _artifact_error_type(exc)
+            if error_type == "artifact_purged_or_moved":
+                purged_error = exc
+                continue
+            if error_type == "artifact_content_drift":
+                drift_error = exc
+                continue
+            raise
+        return resolved, snapshot
+
+    if drift_error is not None:
+        raise drift_error
+    if purged_error is not None:
+        raise purged_error
+    raise _artifact_purged_or_moved_http(artifact)
+
+
+async def _verified_artifact_preview_head_from_candidates(
+    artifact: RunOutputArtifact,
+    *,
+    data_dir: str | Path,
+) -> tuple[Path, _ArtifactPreviewHeadSnapshot]:
+    candidates = _resolved_allowed_artifact_paths(
+        artifact,
+        data_dir=data_dir,
+        object_store_error_type="object_store_artifact_not_previewable",
+    )
+    purged_error: HTTPException | None = None
+    drift_error: HTTPException | None = None
+    for resolved in candidates:
+        try:
+            snapshot = await _verified_artifact_preview_head(resolved, artifact)
+        except HTTPException as exc:
+            error_type = _artifact_error_type(exc)
+            if error_type == "artifact_purged_or_moved":
+                purged_error = exc
+                continue
+            if error_type == "artifact_content_drift":
+                drift_error = exc
+                continue
+            raise
+        return resolved, snapshot
+
+    if drift_error is not None:
+        raise drift_error
+    if purged_error is not None:
+        raise purged_error
+    raise _artifact_purged_or_moved_http(artifact)
 
 
 # ── Ownership verification helpers ────────────────────────────────────
@@ -296,7 +686,7 @@ def _run_event_from_record(record: RunEventRecord) -> RunEvent:
             "event_type": record.event_type,
             "data": record.data,
         }
-    )
+    ).with_event_sequence(record.sequence)
 
 
 def _counted(label: str, count: int) -> str:
@@ -426,12 +816,27 @@ def create_execution_router() -> APIRouter:
     async def validate_session_pipeline(
         session_id: UUID,
         request: Request,
+        state_id: UUID | None = None,
         user: UserIdentity = Depends(get_current_user),  # noqa: B008
         service: ExecutionService = Depends(_get_execution_service),  # noqa: B008
+        session_service: SessionServiceProtocol = Depends(_get_session_service),  # noqa: B008
     ) -> ValidationResult:
         """Dry-run validation using real engine code paths."""
         await verify_session_ownership(session_id, user, request)
-        result = await service.validate(session_id, user_id=user.user_id)
+        if state_id is None:
+            result = await service.validate(session_id, user_id=user.user_id)
+            return result
+        try:
+            state_record = await session_service.get_state(state_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="State not found") from exc
+        if state_record.session_id != session_id:
+            raise HTTPException(status_code=404, detail="State not found")
+        result = await service.validate_state(
+            state_from_record(state_record),
+            user_id=user.user_id,
+            session_id=session_id,
+        )
         return result
 
     @router.post(
@@ -733,7 +1138,7 @@ def create_execution_router() -> APIRouter:
         composer: ComposerService = request.app.state.composer_service
         settings: WebSettings = request.app.state.settings
         try:
-            explanation = await composer.explain_run_diagnostics(diagnostics.model_dump(mode="json"))
+            explanation = await composer.explain_run_diagnostics(llm_safe_diagnostics_snapshot(diagnostics))
         except _BadRequestLLMError as exc:
             # Provider rejected the request (400-class). Carrier exposes
             # `provider_detail` / `provider_status_code` precisely because
@@ -837,42 +1242,29 @@ def create_execution_router() -> APIRouter:
     async def websocket_run_progress(
         websocket: WebSocket,
         run_id: str,
+        ticket: str | None = None,
         token: str | None = None,
     ) -> None:
         """Stream RunEvent JSON payloads for a specific run.
 
-        AC #12: Authentication via ?token=<jwt> query parameter.
+        Authentication uses a short-lived, single-use ?ticket=<opaque> query
+        parameter minted by POST /api/runs/{run_id}/ws-ticket. Session JWTs
+        are never accepted in the WebSocket URL.
         Close code 4001 on auth failure — client MUST NOT auto-reconnect
-        on 4001 (token must be refreshed or user must re-authenticate).
+        on 4001 (ticket must be refreshed or user must re-authenticate).
         """
         broadcaster: ProgressBroadcaster = websocket.app.state.broadcaster
-        auth_provider: AuthProvider = websocket.app.state.auth_provider
         service: ExecutionService = websocket.app.state.execution_service
 
-        # Auth: validate JWT from query parameter
-        if token is None:
-            await websocket.close(code=4001, reason="Missing authentication token")
+        if token is not None:
+            await websocket.close(code=4001, reason="Use a WebSocket ticket, not a session token")
             return
-        try:
-            user = await auth_provider.authenticate(token)
-        except AuthProviderUnavailable as provider_exc:
-            # Provider availability failure is a distinct outcome from an
-            # invalid token (auth/models.py: AuthProviderUnavailable; the HTTP
-            # path maps it to 503, not 401). The client may hold a VALID token,
-            # so closing 4001 here would wrongly tell it to re-authenticate
-            # instead of backing off (see docstring above). Surface to the
-            # operator and close with the transient/server-side code 1011, the
-            # WebSocket analogue of HTTP 503 used elsewhere in this function.
-            slog.error(
-                "websocket_auth_provider_unavailable",
-                run_id=run_id,
-                phase="authenticate",
-                error=str(provider_exc),
-            )
-            await websocket.close(code=1011, reason="Authentication provider unavailable")
+        if ticket is None:
+            await websocket.close(code=4001, reason="Missing WebSocket ticket")
             return
-        except AuthenticationError:
-            await websocket.close(code=4001, reason="Invalid authentication token")
+        user = _get_websocket_ticket_store(websocket.app).consume(ticket=ticket, run_id=run_id)
+        if user is None:
+            await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
             return
 
         await websocket.accept()
@@ -934,12 +1326,17 @@ def create_execution_router() -> APIRouter:
                 await websocket.close(code=1011, reason="Run status failed internal accounting validation")
                 return
             current = current_snapshot.response
+            max_replayed_sequence = 0
+            replayed_terminal = False
             for persisted in await websocket.app.state.session_service.list_run_events(UUID(run_id)):
                 replay_event = _run_event_from_record(persisted)
                 await websocket.send_json(replay_event.model_dump(mode="json"))
+                max_replayed_sequence = max(max_replayed_sequence, persisted.sequence)
                 if replay_event.event_type in ("completed", "cancelled", "failed"):
-                    await websocket.close(code=1000)
-                    return
+                    replayed_terminal = True
+            if replayed_terminal:
+                await websocket.close(code=1000)
+                return
             if current.status in RUN_STATUS_TERMINAL_VALUES:
                 event = _build_terminal_run_event(current, cancelled_run_record=current_snapshot.record)
                 await websocket.send_json(event.model_dump(mode="json"))
@@ -976,6 +1373,8 @@ def create_execution_router() -> APIRouter:
                         await websocket.send_json(terminal_event.model_dump(mode="json"))
                         await websocket.close(code=1000)
                         break
+                    continue
+                if event.event_sequence is not None and event.event_sequence <= max_replayed_sequence:
                     continue
                 await websocket.send_json(event.model_dump(mode="json"))
                 # "error" events are non-terminal (per-row exceptions).
@@ -1108,48 +1507,7 @@ def create_execution_router() -> APIRouter:
                 detail={"error_type": "artifact_not_found", "artifact_id": artifact_id},
             )
 
-        fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
-        if fs_path is None:
-            # Object-store URI (azure://, dataverse://) — content streaming
-            # is not implemented for these. Audit-evidence retrieval for
-            # remote sinks goes through their own retrieval API.
-            raise HTTPException(
-                status_code=415,
-                detail={
-                    "error_type": "object_store_artifact_not_streamable",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
-
-        try:
-            resolved = fs_path.resolve()
-        except OSError:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error_type": "output_path_outside_allowlist",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            ) from None
         data_dir = request.app.state.settings.data_dir
-        allowed = allowed_sink_directories(data_dir)
-        if not any(resolved.is_relative_to(base) for base in allowed):
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error_type": "output_path_outside_allowlist",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
-
-        if not resolved.exists():
-            raise HTTPException(
-                status_code=410,
-                detail={
-                    "error_type": "artifact_purged_or_moved",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
 
         # Audit-evidence integrity: the artifact row and the on-disk file are
         # read-mutable in principle, so an in-allowlist file can be overwritten
@@ -1160,20 +1518,33 @@ def create_execution_router() -> APIRouter:
         # the whole-file SHA-256 for every file-streamable sink, so a whole-file
         # comparison is correct — and catches same-size byte substitution, which
         # a size check alone would miss.
-        actual_hash, actual_size = await run_sync_in_worker(hash_and_size_of_file, resolved)
-        if actual_size != artifact.size_bytes or actual_hash != artifact.content_hash:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error_type": "artifact_content_drift",
-                    "path_or_uri": artifact.path_or_uri,
-                    "expected_size_bytes": artifact.size_bytes,
-                    "actual_size_bytes": actual_size,
-                    "expected_content_hash": artifact.content_hash,
-                },
-            )
+        resolved, snapshot = await _verified_artifact_file_snapshot_from_candidates(
+            artifact,
+            data_dir=data_dir,
+            snapshot_dir=Path(request.app.state.settings.data_dir) / ".run-output-snapshots",
+        )
+        try:
+            byte_range = _parse_single_range(request.headers.get("range"), size_bytes=snapshot.size_bytes)
+        except HTTPException:
+            _unlink_path(snapshot.path)
+            raise
 
-        return FileResponse(resolved, filename=resolved.name)
+        response_headers = {
+            "Accept-Ranges": "bytes",
+            "Content-Disposition": _download_content_disposition(resolved.name),
+            "Content-Length": str(snapshot.size_bytes if byte_range is None else byte_range.length),
+        }
+        status_code = 200
+        if byte_range is not None:
+            status_code = 206
+            response_headers["Content-Range"] = f"bytes {byte_range.start}-{byte_range.end_inclusive}/{snapshot.size_bytes}"
+
+        return _TempSnapshotStreamingResponse(
+            snapshot.path,
+            headers=response_headers,
+            status_code=status_code,
+            byte_range=byte_range,
+        )
 
     @router.get(
         "/api/runs/{run_id}/outputs/{artifact_id}/preview",
@@ -1238,53 +1609,32 @@ def create_execution_router() -> APIRouter:
                 detail={"error_type": "artifact_not_found", "artifact_id": artifact_id},
             )
 
-        fs_path = path_or_uri_to_filesystem_path(artifact.path_or_uri)
-        if fs_path is None:
-            raise HTTPException(
-                status_code=415,
-                detail={
-                    "error_type": "object_store_artifact_not_previewable",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
-
-        try:
-            resolved = fs_path.resolve()
-        except OSError:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error_type": "output_path_outside_allowlist",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            ) from None
         data_dir = request.app.state.settings.data_dir
-        allowed = allowed_sink_directories(data_dir)
-        if not any(resolved.is_relative_to(base) for base in allowed):
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error_type": "output_path_outside_allowlist",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
 
-        if not resolved.exists():
-            # Manifest/preview race: file existed at manifest-load time
-            # but is gone now (purged, retention, manual delete). Match
-            # the /content endpoint's vocabulary — frontend handles either.
-            raise HTTPException(
-                status_code=410,
-                detail={
-                    "error_type": "artifact_purged_or_moved",
-                    "path_or_uri": artifact.path_or_uri,
-                },
-            )
+        resolved, snapshot = await _verified_artifact_preview_head_from_candidates(
+            artifact,
+            data_dir=data_dir,
+        )
 
-        return await run_sync_in_worker(
-            build_artifact_preview,
+        return build_artifact_preview_from_head(
             resolved,
             artifact_id=artifact_id,
+            total_size_bytes=snapshot.total_size_bytes,
+            head_bytes=snapshot.head_bytes,
         )
+
+    @router.post(
+        "/api/runs/{run_id}/ws-ticket",
+        response_model=WebSocketTicketResponse,
+    )
+    async def create_run_websocket_ticket(
+        run_id: UUID,
+        request: Request,
+        user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    ) -> WebSocketTicketResponse:
+        """Issue a short-lived one-use credential for the progress WebSocket."""
+        await _verify_run_ownership(run_id, user, request)
+        ticket = _get_websocket_ticket_store(request.app).issue(run_id=run_id, user=user)
+        return WebSocketTicketResponse(ticket=ticket.ticket, expires_at=ticket.expires_at)
 
     return router

@@ -93,6 +93,7 @@ _SET_OUTPUT_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["sink_name", "plugin", "options"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -117,6 +118,7 @@ _REMOVE_OUTPUT_DECLARATION = ToolDeclaration(
             "sink_name": {"type": "string", "description": "Sink name to remove."},
         },
         "required": ["sink_name"],
+        "additionalProperties": False,
     },
 )
 
@@ -140,6 +142,8 @@ def _execute_set_output(
         state,
         component_id=validated.sink_name,
         component_type="output",
+        plugin_type="sink",
+        plugin_name=plugin,
         options=sink_options,
     )
     if credential_error is not None:
@@ -221,6 +225,8 @@ def _execute_patch_output_options(
         state,
         component_id=sink_name,
         component_type="output",
+        plugin_type="sink",
+        plugin_name=current.plugin,
         options=new_options,
     )
     if credential_error is not None:
@@ -301,6 +307,7 @@ _PATCH_OUTPUT_OPTIONS_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["sink_name", "patch"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )

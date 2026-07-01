@@ -29,6 +29,7 @@ import type {
   RunDiagnosticsEvaluation,
   RunOutputArtifactPreview,
   RunOutputsResponse,
+  WebSocketTicketResponse,
   SecretInventoryItem,
   Session,
   UserProfile,
@@ -42,6 +43,7 @@ import type {
   GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
+  TutorialSampleResponse,
 } from "@/types/guided";
 import type {
   InterpretationEvent,
@@ -607,6 +609,51 @@ export async function getGuided(
 }
 
 /**
+ * Fetch the runtime-derived synthetic-scrape sample URLs for the active
+ * TUTORIAL session's resolved origin (p4 Task 8a GET surface).
+ *
+ * Consumed by `TutorialGuidedShell`: the URLs are computed server-side from the
+ * resolved base at request time (they cannot ride the frozen profile
+ * constants), so the shell fetches them and appends them to the locked STEP_1
+ * prompt. The synthetic pages are publicly hosted, so the tutorial's web_scrape
+ * node carries no SSRF allowlist (it uses the plugin default `public_only`).
+ */
+export async function getTutorialSample(
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<TutorialSampleResponse> {
+  const response = await fetch(
+    `/api/sessions/${sessionId}/guided/tutorial-sample`,
+    {
+      method: "GET",
+      headers: authHeaders(),
+      signal,
+    },
+  );
+  return parseResponse<TutorialSampleResponse>(response);
+}
+
+/**
+ * Seed a guided session with a server-owned WorkflowProfile.
+ *
+ * The `profileKind` is a closed-enum discriminator ("live" | "tutorial"); the
+ * SERVER constructs the concrete profile object and persists the GuidedSession.
+ * Idempotent (D16): a second call for a session that already has a persisted
+ * guided session returns the existing session unchanged.
+ */
+export async function startGuidedSession(
+  sessionId: string,
+  profileKind: "live" | "tutorial",
+): Promise<GetGuidedResponse> {
+  const response = await fetch(`/api/sessions/${sessionId}/guided/start`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ profile: profileKind }),
+  });
+  return parseResponse<GetGuidedResponse>(response);
+}
+
+/**
  * Post a user response to the active guided turn.
  *
  * Server consumes the response, advances the state machine, and returns
@@ -806,8 +853,14 @@ export async function getPluginSchema(
  */
 export async function validatePipeline(
   sessionId: string,
+  stateId?: string,
 ): Promise<ValidationResult> {
-  const response = await fetch(`/api/sessions/${sessionId}/validate`, {
+  const params = new URLSearchParams();
+  if (stateId) {
+    params.set("state_id", stateId);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  const response = await fetch(`/api/sessions/${sessionId}/validate${query}`, {
     method: "POST",
     headers: authHeaders("application/json"),
   });
@@ -822,7 +875,13 @@ export async function validatePipeline(
 export async function executePipeline(
   sessionId: string,
   fanoutAck?: ExecutionFanoutAck,
+  stateId?: string,
 ): Promise<{ run_id: string }> {
+  const params = new URLSearchParams();
+  if (stateId) {
+    params.set("state_id", stateId);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
   const init: RequestInit = {
     method: "POST",
     headers: authHeaders("application/json"),
@@ -830,7 +889,7 @@ export async function executePipeline(
   if (fanoutAck) {
     init.body = JSON.stringify({ fanout_ack_token: fanoutAck.token });
   }
-  const response = await fetch(`/api/sessions/${sessionId}/execute`, init);
+  const response = await fetch(`/api/sessions/${sessionId}/execute${query}`, init);
   return parseResponse<{ run_id: string }>(response);
 }
 
@@ -849,6 +908,17 @@ export async function cancelRun(runId: string): Promise<CancelRunResponse> {
     headers: authHeaders("application/json"),
   });
   return parseResponse<CancelRunResponse>(response);
+}
+
+/** Issue a short-lived one-use ticket for the run progress WebSocket. */
+export async function createRunWebSocketTicket(
+  runId: string,
+): Promise<WebSocketTicketResponse> {
+  const response = await fetch(`/api/runs/${runId}/ws-ticket`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+  });
+  return parseResponse<WebSocketTicketResponse>(response);
 }
 
 /** Get the results/summary of a completed run. */

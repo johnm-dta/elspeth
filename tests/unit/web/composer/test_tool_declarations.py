@@ -83,6 +83,7 @@ _EXPECTED_CREATE_BLOB_DEFINITION: dict[str, object] = {
             },
         },
         "required": ["filename", "mime_type", "content"],
+        "additionalProperties": False,
     },
 }
 
@@ -103,6 +104,7 @@ _EXPECTED_UPDATE_BLOB_DEFINITION: dict[str, object] = {
             },
         },
         "required": ["blob_id", "content"],
+        "additionalProperties": False,
     },
 }
 
@@ -119,6 +121,7 @@ _EXPECTED_DELETE_BLOB_DEFINITION: dict[str, object] = {
             },
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
 }
 
@@ -146,6 +149,7 @@ _EXPECTED_APPLY_PIPELINE_RECIPE_DEFINITION: dict[str, object] = {
             },
         },
         "required": ["recipe_name", "slots"],
+        "additionalProperties": False,
     },
 }
 
@@ -262,6 +266,7 @@ class TestSetSourceFromBlobMigration:
                     },
                 },
                 "required": ["blob_id", "on_success"],
+                "additionalProperties": False,
             },
         }
         definitions = get_tool_definitions()
@@ -349,21 +354,21 @@ class TestStep3DiscoveryTierMigration:
         assert self._get("list_sources") == {
             "name": "list_sources",
             "description": "List available source plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_list_transforms(self) -> None:
         assert self._get("list_transforms") == {
             "name": "list_transforms",
             "description": "List available transform plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_list_sinks(self) -> None:
         assert self._get("list_sinks") == {
             "name": "list_sinks",
             "description": "List available sink plugins with name and summary.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_get_plugin_schema(self) -> None:
@@ -384,6 +389,7 @@ class TestStep3DiscoveryTierMigration:
                     },
                 },
                 "required": ["plugin_type", "name"],
+                "additionalProperties": False,
             },
         }
 
@@ -391,7 +397,7 @@ class TestStep3DiscoveryTierMigration:
         assert self._get("get_expression_grammar") == {
             "name": "get_expression_grammar",
             "description": "Get the gate expression syntax reference.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_explain_validation_error(self) -> None:
@@ -408,6 +414,7 @@ class TestStep3DiscoveryTierMigration:
                     },
                 },
                 "required": ["error_text"],
+                "additionalProperties": False,
             },
         }
 
@@ -447,6 +454,7 @@ class TestStep3DiscoveryTierMigration:
                     },
                 },
                 "required": ["plugin_type", "plugin_name"],
+                "additionalProperties": False,
             },
         }
 
@@ -473,6 +481,7 @@ class TestStep3DiscoveryTierMigration:
                     },
                 },
                 "required": [],
+                "additionalProperties": False,
             },
         }
 
@@ -490,7 +499,7 @@ class TestStep3DiscoveryTierMigration:
                 "summary to paraphrase. Does NOT return the audit URL/path/DSN — "
                 "that is operator-internal and intentionally not surfaced to the LLM."
             ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_list_recipes(self) -> None:
@@ -503,7 +512,7 @@ class TestStep3DiscoveryTierMigration:
                 "the highest-frequency 'classify CSV with LLM' and 'split rows by threshold' "
                 "patterns; for shapes outside the recipe set, hand-author with set_pipeline."
             ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_get_pipeline_state(self) -> None:
@@ -525,6 +534,7 @@ class TestStep3DiscoveryTierMigration:
                     },
                 },
                 "required": [],
+                "additionalProperties": False,
             },
         }
 
@@ -535,7 +545,7 @@ class TestStep3DiscoveryTierMigration:
             "validation status, source summary, and node/output overview "
             "without executing. Use this to confirm the pipeline is set up "
             "correctly before running.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_diff_pipeline(self) -> None:
@@ -544,7 +554,7 @@ class TestStep3DiscoveryTierMigration:
             "description": "Show what changed since the session was loaded or created. "
             "Returns added, removed, and modified nodes/edges/outputs, "
             "plus warnings introduced or resolved.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_cacheable_subset_is_correct(self) -> None:
@@ -602,6 +612,7 @@ class TestStep3MutationTierMigration:
                     "source_name": {"type": "string", "description": "Source root name to clear. Defaults to 'source'."},
                 },
                 "required": [],
+                "additionalProperties": False,
             },
         }
 
@@ -615,6 +626,7 @@ class TestStep3MutationTierMigration:
                     "id": {"type": "string", "description": "Node ID to remove."},
                 },
                 "required": ["id"],
+                "additionalProperties": False,
             },
         }
 
@@ -628,6 +640,7 @@ class TestStep3MutationTierMigration:
                     "id": {"type": "string", "description": "Edge ID to remove."},
                 },
                 "required": ["id"],
+                "additionalProperties": False,
             },
         }
 
@@ -641,6 +654,7 @@ class TestStep3MutationTierMigration:
                     "sink_name": {"type": "string", "description": "Sink name to remove."},
                 },
                 "required": ["sink_name"],
+                "additionalProperties": False,
             },
         }
 
@@ -661,6 +675,7 @@ class TestStep3MutationTierMigration:
                     },
                 },
                 "required": ["patch"],
+                "additionalProperties": False,
             },
         }
 
@@ -680,6 +695,7 @@ class TestStep3MutationTierMigration:
                     },
                 },
                 "required": ["patch"],
+                "additionalProperties": False,
             },
         }
 
@@ -770,7 +786,7 @@ class TestStep3BlobDiscoveryTierMigration:
         assert self._get("list_blobs") == {
             "name": "list_blobs",
             "description": "List uploaded/created files (blobs) in this session with metadata.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_list_composer_blobs(self) -> None:
@@ -780,7 +796,7 @@ class TestStep3BlobDiscoveryTierMigration:
                 "List ready blobs available for audited inline-content authoring. "
                 "Returns only blob_id, mime_type, size_bytes, content_hash, and filename; never content bytes."
             ),
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_list_composer_blobs_declaration_kind(self) -> None:
@@ -796,6 +812,7 @@ class TestStep3BlobDiscoveryTierMigration:
                     "blob_id": {"type": "string", "description": "Blob ID."},
                 },
                 "required": ["blob_id"],
+                "additionalProperties": False,
             },
         }
 
@@ -812,6 +829,7 @@ class TestStep3BlobDiscoveryTierMigration:
                     },
                 },
                 "required": ["blob_id"],
+                "additionalProperties": False,
             },
         }
 
@@ -836,6 +854,7 @@ class TestStep3BlobDiscoveryTierMigration:
                     },
                 },
                 "required": ["blob_id"],
+                "additionalProperties": False,
             },
         }
 
@@ -875,6 +894,7 @@ class TestStep3BlobDiscoveryTierMigration:
                     },
                 },
                 "required": ["field_path", "blob_id"],
+                "additionalProperties": False,
             },
         }
 
@@ -893,7 +913,7 @@ class TestStep3SecretTierMigration:
         assert self._get("list_secret_refs") == {
             "name": "list_secret_refs",
             "description": "List available secret references (API keys, credentials). Shows names and scopes, never values.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
+            "parameters": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
 
     def test_validate_secret_ref(self) -> None:
@@ -906,6 +926,7 @@ class TestStep3SecretTierMigration:
                     "name": {"type": "string", "description": "Secret reference name (e.g. 'OPENROUTER_API_KEY')."},
                 },
                 "required": ["name"],
+                "additionalProperties": False,
             },
         }
 
@@ -926,6 +947,7 @@ class TestStep3SecretTierMigration:
                     "option_key": {"type": "string", "description": "Config option key to set (e.g. 'api_key')."},
                 },
                 "required": ["name", "target", "option_key"],
+                "additionalProperties": False,
             },
         }
 
@@ -963,7 +985,7 @@ class TestToolDeclarationInvariants:
             "handler": _execute_create_blob,  # any callable with the right signature
             "kind": ToolKind.DISCOVERY,
             "description": "A test tool.",
-            "json_schema": {"type": "object", "properties": {}, "required": []},
+            "json_schema": {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         }
         defaults.update(overrides)
         return ToolDeclaration(**defaults)  # type: ignore[arg-type]
@@ -1029,6 +1051,25 @@ class TestToolDeclarationInvariants:
         with pytest.raises(ValueError, match="is not a valid JSON Schema"):
             self._make(json_schema={"type": "object", "properties": ["wrong"], "required": []})
 
+    def test_json_schema_root_must_be_object(self) -> None:
+        with pytest.raises(ValueError, match="root schema must be an object"):
+            self._make(json_schema={"type": "array", "items": {"type": "string"}})
+
+    def test_json_schema_root_must_be_closed(self) -> None:
+        with pytest.raises(ValueError, match="additionalProperties=false"):
+            self._make(json_schema={"type": "object", "properties": {}, "required": []})
+
+    def test_json_schema_root_rejects_dynamic_additional_properties(self) -> None:
+        with pytest.raises(ValueError, match="additionalProperties=false"):
+            self._make(
+                json_schema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                    "additionalProperties": {"type": "string"},
+                }
+            )
+
     def test_tool_kind_has_no_session_aware_value(self) -> None:
         """SESSION_AWARE was a dead enum value advertising a shape no
         declaration carried — removed by the 2026-05-23 four-agent review
@@ -1049,6 +1090,7 @@ class TestToolDeclarationInvariants:
             "type": "object",
             "properties": {"x": {"type": "string"}},
             "required": ["x"],
+            "additionalProperties": False,
         }
         decl = self._make(json_schema=source)
         # Mutate source post-construction; the declaration must be unaffected.
@@ -1075,6 +1117,7 @@ class TestToolDeclarationInvariants:
                 "type": "object",
                 "properties": {"x": {"type": "string"}},
                 "required": ["x"],
+                "additionalProperties": False,
             }
         )
         emitted = derive_tool_definitions_by_name([decl])[decl.name]

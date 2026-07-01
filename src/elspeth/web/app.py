@@ -71,7 +71,6 @@ from elspeth.web.middleware.rate_limit import ComposerRateLimiter
 from elspeth.web.middleware.request_id import RequestIdMiddleware
 from elspeth.web.preferences.routes import create_preferences_router
 from elspeth.web.preferences.service import CorruptPreferencesError, PreferencesService
-from elspeth.web.preferences.tutorial_cache import TutorialCache
 from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
@@ -610,17 +609,38 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
     pathological memory pressure threshold.
 
     The check is Content-Length-only by design: clients may omit or
-    falsify the header.  Per CLAUDE.md (defensive programming forbidden),
-    the ``int(content_length)`` conversion is *not* wrapped — a malformed
-    header is a client bug and should propagate to Starlette's standard
-    400 handling.  The Pydantic caps remain the contract.
+    falsify the header.  Malformed ``Content-Length`` is rejected here as a
+    deterministic client error before the body is read.  The Pydantic caps
+    remain the contract.
     """
 
     _MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB
 
     async def dispatch(self, request: StarletteRequest, call_next):  # type: ignore[no-untyped-def]
         content_length = request.headers.get("content-length")
-        if content_length is not None and int(content_length) > self._MAX_BODY_BYTES:
+        if content_length is None:
+            return await call_next(request)
+        if not content_length.isascii() or not content_length.isdecimal():
+            return StarletteResponse(
+                content='{"error": "Invalid Content-Length"}',
+                status_code=400,
+                media_type="application/json",
+            )
+        try:
+            content_length_bytes = int(content_length)
+        except ValueError:
+            return StarletteResponse(
+                content='{"error": "Invalid Content-Length"}',
+                status_code=400,
+                media_type="application/json",
+            )
+        if content_length_bytes < 0:
+            return StarletteResponse(
+                content='{"error": "Invalid Content-Length"}',
+                status_code=400,
+                media_type="application/json",
+            )
+        if content_length_bytes > self._MAX_BODY_BYTES:
             return StarletteResponse(
                 content='{"error": "Request body too large (max 10 MB)"}',
                 status_code=413,
@@ -858,10 +878,6 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # tutorial_completed_at).
     # Shares the session engine; preferences live on the same metadata.
     app.state.preferences_service = PreferencesService(session_engine)
-    tutorial_cache_dir = settings.tutorial_cache_dir
-    if tutorial_cache_dir is None:
-        raise RuntimeError("tutorial_cache_dir must be initialised by WebSettings")
-    app.state.tutorial_cache = TutorialCache(cache_dir=tutorial_cache_dir)
 
     # --- Blob service ---
     app.state.blob_service = BlobServiceImpl(
@@ -1141,7 +1157,7 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
     # Backed by the process-level _PROMETHEUS_READER wired at module import;
     # all OTel counters/histograms registered via metrics.get_meter() feed
     # into this endpoint automatically via the global REGISTRY.
-    @app.get("/metrics", include_in_schema=False)
+    @app.get("/metrics", include_in_schema=False, dependencies=[Depends(get_current_user)])
     def _prometheus_metrics() -> Response:
         # ``generate_latest()`` walks the global REGISTRY; a corrupted
         # collector would raise here and Starlette's default 500 handler
@@ -1151,10 +1167,9 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
         # endpoint reads in-memory counter state only, so failure is a
         # telemetry-system failure (operational, not legal) — logged, not
         # audited. A bounded message is safe to log here (unlike the
-        # secret-bearing DB exceptions elsewhere): generate_latest() only
-        # formats global-REGISTRY state, every value of which /metrics
-        # already serves publicly, so the message identifies *which*
-        # collector broke without exposing anything not already public.
+        # secret-bearing DB exceptions elsewhere): the route has already
+        # authenticated before collection, and the bounded message identifies
+        # which collector broke without reading request-controlled input.
         try:
             body = generate_latest()
         except Exception as scrape_exc:

@@ -70,7 +70,7 @@ def _plugin_context_for_operation_calls(*, telemetry_emit: Any) -> Any:
     """Build a real PluginContext configured for sink operation call recording."""
     from elspeth.contracts.plugin_context import PluginContext
 
-    landscape = MagicMock()
+    landscape = MagicMock(spec_set=["record_operation_call"])
     landscape.record_operation_call.return_value = SimpleNamespace(
         request_hash="req-hash",
         response_hash="resp-hash",
@@ -126,10 +126,25 @@ class TestDataverseSinkConfig:
         with pytest.raises(PluginConfigError, match="placeholder"):
             DataverseSinkConfig.from_dict(_config(entity=entity))
 
+    @pytest.mark.parametrize("entity", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_entity_names(self, entity: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(_config(entity=entity))
+        assert cfg.entity == entity
+
     @pytest.mark.parametrize("alternate_key", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
     def test_alternate_key_placeholder_rejected(self, alternate_key: str) -> None:
         with pytest.raises(PluginConfigError, match="placeholder"):
             DataverseSinkConfig.from_dict(_config(alternate_key=alternate_key))
+
+    @pytest.mark.parametrize("alternate_key", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_alternate_keys(self, alternate_key: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(
+            _config(
+                alternate_key=alternate_key,
+                field_mapping={"email": alternate_key, "name": "fullname"},
+            )
+        )
+        assert cfg.alternate_key == alternate_key
 
     def test_field_mapping_required(self) -> None:
         c = _config()
@@ -140,6 +155,11 @@ class TestDataverseSinkConfig:
     def test_field_mapping_target_placeholder_rejected(self) -> None:
         with pytest.raises(PluginConfigError, match="placeholder"):
             DataverseSinkConfig.from_dict(_config(field_mapping={"email": "operator_required", "name": "fullname"}))
+
+    @pytest.mark.parametrize("target", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_field_mapping_targets(self, target: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(_config(alternate_key=target, field_mapping={"email": target}))
+        assert cfg.field_mapping == {"email": target}
 
     def test_https_enforcement(self) -> None:
         with pytest.raises(PluginConfigError, match="HTTPS"):
@@ -180,6 +200,21 @@ class TestDataverseSinkConfig:
                     }
                 )
             )
+
+    @pytest.mark.parametrize("target_entity", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_lookup_target_entities(self, target_entity: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(
+            _config(
+                lookups={
+                    "account_id": {
+                        "target_entity": target_entity,
+                        "target_field": "parentcustomerid",
+                    }
+                }
+            )
+        )
+        assert cfg.lookups is not None
+        assert cfg.lookups["account_id"].target_entity == target_entity
 
     def test_lookup_target_entity_required(self) -> None:
         with pytest.raises(PluginConfigError, match="target_entity"):
@@ -275,6 +310,21 @@ class TestDataverseSinkConfig:
                     }
                 )
             )
+
+    @pytest.mark.parametrize("target_field", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_lookup_target_fields(self, target_field: str) -> None:
+        cfg = DataverseSinkConfig.from_dict(
+            _config(
+                lookups={
+                    "account_id": {
+                        "target_entity": "accounts",
+                        "target_field": target_field,
+                    }
+                }
+            )
+        )
+        assert cfg.lookups is not None
+        assert cfg.lookups["account_id"].target_field == target_field
 
     def test_lookup_config_rejects_extra_fields(self) -> None:
         with pytest.raises(PluginConfigError):
@@ -716,6 +766,7 @@ class TestWriteLifecycle:
             "Bad request (400)",
             retryable=False,
             status_code=400,
+            error_category="row_data_error",
         )
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client
@@ -931,12 +982,13 @@ class TestPerRowWriteFailureRouting:
     @pytest.mark.parametrize("status_code", [400, 404, 409, 412, 422])
     @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
     def test_non_retryable_payload_4xx_diverts(self, _mock_schema: MagicMock, status_code: int) -> None:
-        """Non-retryable 4xx about the row payload/key are diverted."""
+        """Structured row-data 4xx about the row payload/key are diverted."""
         sink, _client = self._make_sink(
             DataverseClientError(
                 f"Client error ({status_code})",
                 retryable=False,
                 status_code=status_code,
+                error_category="row_data_error",
             )
         )
         ctx = self._make_mock_ctx()
@@ -950,6 +1002,31 @@ class TestPerRowWriteFailureRouting:
         # Diverted row's original data is recorded for routing.
         assert result.diversions[0].row_data == {"email": "a@b.com", "name": "Alice"}
         # ERROR audit fired before diverting.
+        assert ctx.record_call.call_args_list[0].kwargs["status"].value == "error"
+
+    @pytest.mark.parametrize("status_code", [400, 404, 409, 412, 422])
+    @patch("elspeth.plugins.sinks.dataverse.create_schema_from_config", return_value=MagicMock())
+    def test_generic_non_retryable_4xx_raises_fail_closed(self, _mock_schema: MagicMock, status_code: int) -> None:
+        """A status-only 4xx is not enough to prove a single-row fault.
+
+        Dataverse uses these same HTTP statuses for sink-wide configuration
+        failures such as invalid entity sets, API paths, schema metadata, or
+        alternate-key setup. With on_write_failure=discard enabled, diverting a
+        generic 4xx would silently drop every row from a misconfigured sink.
+        """
+        sink, _client = self._make_sink(
+            DataverseClientError(
+                f"Generic client error ({status_code})",
+                retryable=False,
+                status_code=status_code,
+            )
+        )
+        ctx = self._make_mock_ctx()
+        rows = [{"email": "a@b.com", "name": "Alice"}]
+
+        with pytest.raises(DataverseClientError):
+            sink.write(rows, ctx)
+
         assert ctx.record_call.call_args_list[0].kwargs["status"].value == "error"
 
     @pytest.mark.parametrize(
@@ -1004,7 +1081,12 @@ class TestPerRowWriteFailureRouting:
         at the correct input-batch position.
         """
         good = _make_204_response()
-        bad = DataverseClientError("Bad request (400)", retryable=False, status_code=400)
+        bad = DataverseClientError(
+            "Bad request (400)",
+            retryable=False,
+            status_code=400,
+            error_category="row_data_error",
+        )
 
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
@@ -1042,7 +1124,12 @@ class TestPerRowWriteFailureRouting:
         describes only what was actually written.
         """
         good = _make_204_response()
-        bad = DataverseClientError("Bad request (400)", retryable=False, status_code=400)
+        bad = DataverseClientError(
+            "Bad request (400)",
+            retryable=False,
+            status_code=400,
+            error_category="row_data_error",
+        )
 
         with patch(
             "elspeth.plugins.sinks.dataverse.create_schema_from_config",
@@ -1147,6 +1234,7 @@ class TestRequestDataRecordsJsonPayload:
             "Bad request (400)",
             retryable=False,
             status_code=400,
+            error_category="row_data_error",
         )
         mock_client.get_auth_headers.return_value = {"Authorization": "Bearer fake-token"}
         sink._client = mock_client

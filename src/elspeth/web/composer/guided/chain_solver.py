@@ -7,59 +7,43 @@ import json
 import sys
 import time
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 from elspeth.contracts.composer_llm_audit import ComposerLLMCallStatus
+from elspeth.contracts.secrets import WebSecretResolver
+from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
+from elspeth.web.composer.guided._discovery import _assistant_tool_calls_message, _execute_discovery_call
+
+# Redundant alias marks this an explicit re-export (mypy no_implicit_reexport):
+# back-compat call sites still do ``from ...chain_solver import ChainSolverResponseShapeError``.
+from elspeth.web.composer.guided.errors import ChainSolverResponseShapeError as ChainSolverResponseShapeError
 from elspeth.web.composer.guided.prompts import (
     build_repair_addendum,
+    build_revise_addendum,
     build_step_3_context_block,
     load_guided_skill,
 )
-from elspeth.web.composer.guided.recipe_match import RecipeMatch
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     SinkResolved,
     SourceResolved,
 )
 from elspeth.web.composer.llm_response_parsing import (
+    apply_anthropic_cache_markers,
     attach_llm_calls,
     build_llm_call_record,
+    supports_anthropic_prompt_cache_markers,
 )
 from elspeth.web.composer.service import _litellm_acompletion
+from elspeth.web.composer.state import CompositionState
+from elspeth.web.composer.tools._dispatch import get_discovery_tool_definitions
 
-
-class ChainSolverResponseShapeError(Exception):
-    """The LLM emitted an emit_turn response that violated the chain solver's
-    contract (wrong tool name, wrong turn_type, missing/malformed payload).
-
-    Distinct from :class:`InvariantError` (server-side bug) and ``ValueError``
-    (client-payload bug): this exception means an *external system* (the LLM)
-    produced an unexpected response shape. ``solve_chain_with_auto_drop``
-    catches this class and routes the request through the SOLVER_EXHAUSTED
-    auto-drop path -- the same bucket as other malformed-response-shape
-    failures (``IndexError`` from empty ``choices``, ``json.JSONDecodeError``
-    on tool-call arguments, etc.).
-
-    NOT a subclass of ``ValueError`` because the auto-drop wrapper docstring
-    explicitly excludes ``ValueError`` to preserve client-payload-bug routing.
-    NOT a subclass of ``InvariantError`` because that class is documented as
-    "server invariant violated" -- the wrong category for "external LLM
-    misbehaved."
-
-    Inside ``solve_chain`` the audit wrap's typed-except clause maps this
-    class to :attr:`ComposerLLMCallStatus.MALFORMED_RESPONSE` -- semantically
-    the LLM did respond, but the response failed contract.
-
-    Spec gap (tracked separately):
-        Spec §5.4 case 1 calls for "reject + grant one retry → second illegal
-        emission triggers auto-drop with reason=protocol_violation."  The
-        current implementation single-shots the auto-drop with
-        reason=solver_exhausted (the existing wrapper's outcome) because
-        wiring the retry state machine is feature work, not a bug fix.  The
-        spec-mandated retry-then-PROTOCOL_VIOLATION flow is filed as a
-        follow-up observation.
-    """
+# ``ChainSolverResponseShapeError`` now lives in ``errors.py`` (the guided
+# exception taxonomy) so the discovery loop (``_discovery``, which this module
+# imports) can raise it on malformed tool-call arguments without a circular
+# import. It is imported above and re-exported here for backward compatibility
+# (existing call sites do ``from ...chain_solver import ChainSolverResponseShapeError``).
 
 
 # CLOSED LIST — turn_type is intentionally restricted to "propose_chain"
@@ -127,16 +111,91 @@ _GUIDED_LLM_TOOLS: list[dict[str, Any]] = [
 ]
 
 
+_STEP_3_TRANSFORM_DISCOVERY_TOOL_NAMES: Final[frozenset[str]] = frozenset({"list_transforms", "get_plugin_schema", "list_models"})
+"""Read-only discovery tools the transform stage offers the composer model.
+
+``list_transforms`` answers "which transform plugins exist", ``get_plugin_schema``
+answers "what options does this transform take" (the authority on the
+``web_scrape`` required fields + ``http.*`` nesting the model otherwise guesses
+wrong), and ``list_models`` answers "which model ids may an ``llm`` step pin" —
+the three facts a model needs to build a valid chain without a hand-maintained
+inventory baked into the prompt. Every name here is asserted
+``<= _DISCOVERY_TOOL_NAMES`` inside :func:`get_discovery_tool_definitions`.
+"""
+
+_DEFAULT_MAX_DISCOVERY_ITERS: Final[int] = 6
+"""Fallback discovery-iteration cap when the route does not pass one.
+
+Production threads ``settings.composer_max_discovery_turns``; this default keeps
+direct callers (and tests) bounded. Reaching the cap raises
+:class:`ChainSolverResponseShapeError` (routed to the auto-drop path), never
+loops forever.
+"""
+
+
+def _parse_emit_turn_call(call: Any) -> ChainProposal:
+    """Validate one ``emit_turn`` tool call into a :class:`ChainProposal`.
+
+    The wire-boundary backstop that previously lived inline in ``solve_chain``:
+    the LLM is an external system (Tier 3) and the JSON tool schema is the
+    contract, but providers vary in how strictly they enforce it. Any shape
+    violation raises :class:`ChainSolverResponseShapeError` (the typed-except
+    clause maps it to ``MALFORMED_RESPONSE`` and the auto-drop wrapper routes
+    it); a ``json.JSONDecodeError`` on ``arguments`` propagates unchanged (also
+    ``MALFORMED_RESPONSE``).
+
+    Error messages carry only the offending value(s) — no LLM response body, no
+    system prompt, no GUIDED CONTEXT. The wrapper's audit emission redacts down
+    to ``type(exc).__name__``; the message text is for slog frame context only.
+    """
+    name = call.function.name
+    if name != "emit_turn":
+        raise ChainSolverResponseShapeError(f"chain solver expected emit_turn, got {name!r}")
+    arguments = json.loads(call.function.arguments)
+    try:
+        turn_type = arguments["turn_type"]
+        payload = arguments["payload"]
+    except (KeyError, TypeError) as exc:
+        raise ChainSolverResponseShapeError(
+            f"chain solver emit_turn arguments missing required keys (turn_type/payload): {type(exc).__name__}"
+        ) from exc
+    if turn_type != "propose_chain":
+        raise ChainSolverResponseShapeError(f"chain solver expected propose_chain turn, got {turn_type!r}")
+    try:
+        steps_raw = payload["steps"]
+        why_raw = payload["why"]
+    except (KeyError, TypeError) as exc:
+        raise ChainSolverResponseShapeError(
+            f"chain solver propose_chain payload missing required keys (steps/why): {type(exc).__name__}"
+        ) from exc
+    try:
+        steps = tuple(dict(s) for s in steps_raw)
+    except (TypeError, ValueError) as exc:
+        # ``tuple(dict(s) for s in steps_raw)`` fails when steps_raw is not
+        # iterable (TypeError), or when an element is not dict-coercible
+        # (TypeError or ValueError). All such failures are LLM shape violations.
+        raise ChainSolverResponseShapeError(
+            f"chain solver propose_chain payload.steps is not a list of dicts: {type(exc).__name__}"
+        ) from exc
+    return ChainProposal(steps=steps, why=str(why_raw))
+
+
 async def solve_chain(
     *,
     model: str,
     source: SourceResolved,
     sink: SinkResolved,
-    recipe_match: RecipeMatch | None = None,
+    intent: str | None = None,
     repair_context: str | None = None,
+    revise_context: str | None = None,
     recorder: BufferingRecorder | None = None,
     temperature: float | None,
     seed: int | None,
+    state: CompositionState | None = None,
+    catalog: CatalogService | None = None,
+    secret_service: WebSecretResolver | None = None,
+    user_id: str | None = None,
+    max_discovery_iters: int | None = None,
 ) -> ChainProposal:
     """Invoke the LLM with the guided skill, expect a propose_chain turn back.
 
@@ -146,9 +205,19 @@ async def solve_chain(
     Args:
         model: LiteLLM model identifier from settings.composer_model.  Required —
             callers must be explicit; no hard-coded default.
+        intent: The user's originating free-text transform request (e.g. the
+            frozen tutorial prompt "scrape these pages and have an LLM extract
+            ..."). Rendered as a USER-role message so the model builds the chain
+            FROM the request — the freeform mirror. ``None`` (legacy callers)
+            reproduces the prior source/sink-contract-only build.
         repair_context: Verbatim validation error text from the failing ToolResult.
             When set, the LLM is asked to correct the named errors rather than
             propose an independent first-pass chain.
+        revise_context: Verbatim user revise instruction. When set, the LLM is
+            asked to UPDATE the current proposal per the instruction (via
+            build_revise_addendum) — distinct from repair_context, which frames the
+            text as a validation-failure to correct. The STEP_3 /guided/chat branch
+            uses this; the genuine validation-repair loop uses repair_context.
         recorder: Optional :class:`BufferingRecorder` to receive a
             :class:`ComposerLLMCall` audit row for the LLM invocation. When
             supplied, exactly one record is appended via ``record_llm_call`` on
@@ -169,189 +238,224 @@ async def solve_chain(
     from litellm.exceptions import AuthenticationError as LiteLLMAuthError
     from litellm.exceptions import BadRequestError as LiteLLMBadRequestError
 
+    # SPLIT the system prompt so the stable, per-process skill is an isolable,
+    # byte-stable, markable head (messages[0]) and the dynamic server-resolved
+    # context + repair/revise addenda ride in a SECOND system message
+    # (messages[1]). This is what makes Anthropic prompt caching effective
+    # cross-turn: the cache breakpoint sits at the end of messages[0], so the
+    # ~3768-token skill prefix is reused while the context below it varies.
+    # Additive, branch-total render: repair_context and revise_context are
+    # mutually exclusive by call-site, but appending each independently keeps the
+    # function total (a raise here would 500 and brick the phase).
     skill = load_guided_skill()
-    context_block = build_step_3_context_block(source=source, sink=sink, recipe_match=recipe_match)
+    context_parts = [build_step_3_context_block(source=source, sink=sink)]
     if repair_context is not None:
-        repair_addendum = build_repair_addendum(validation_error=repair_context)
-        system_prompt = f"{skill}\n\n{context_block}\n\n{repair_addendum}"
+        context_parts.append(build_repair_addendum(validation_error=repair_context))
+    if revise_context is not None:
+        context_parts.append(build_revise_addendum(revise_instruction=revise_context))
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": skill},  # stable, markable head
+        {"role": "system", "content": "\n\n".join(context_parts)},  # dynamic context + addenda
+    ]
+    # The originating transform request rides as a USER-role message — the freeform
+    # mirror. Freeform feeds the frozen prompt as the final user message
+    # (composer/prompts.py:401); the guided sink resolver already does the same
+    # (chat_solver.py:582-585). Without it solve_chain proposed the chain blind
+    # from the source/sink contract alone (the passthrough-instead-of-web_scrape
+    # bug). repair_context/revise_context stay system-prompt addenda — they frame
+    # an EXISTING proposal to correct/change, not the first-pass build request.
+    if intent is not None:
+        messages.append({"role": "user", "content": intent})
+
+    # Discovery is active only when both ``state`` and ``catalog`` are supplied
+    # (the guided routes thread them). Without them the loop runs exactly once
+    # with FORCED ``tool_choice: emit_turn`` and no discovery tools — the prior
+    # single-shot behaviour, byte-identical for every pre-discovery caller/test.
+    # With them, the model may call ``list_transforms`` / ``get_plugin_schema`` /
+    # ``list_models`` (under ``tool_choice: required``, which keeps the chain
+    # solver's "act only via a tool" invariant while letting the model choose
+    # discovery before it commits) and the solver threads results back until the
+    # model emits ``propose_chain``.
+    discovery_enabled = state is not None and catalog is not None
+    discovery_defs = get_discovery_tool_definitions(_STEP_3_TRANSFORM_DISCOVERY_TOOL_NAMES) if discovery_enabled else []
+    allowed_discovery = _STEP_3_TRANSFORM_DISCOVERY_TOOL_NAMES if discovery_enabled else frozenset()
+    tools = [*_GUIDED_LLM_TOOLS, *discovery_defs]
+    actor = user_id or "guided-composer"
+    if discovery_enabled:
+        iteration_cap = max_discovery_iters if max_discovery_iters is not None else _DEFAULT_MAX_DISCOVERY_ITERS
     else:
-        system_prompt = f"{skill}\n\n{context_block}"
-    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "messages": messages,
-        "tools": _GUIDED_LLM_TOOLS,
-        "tool_choice": {"type": "function", "function": {"name": "emit_turn"}},
-    }
-    if temperature is not None:
-        kwargs["temperature"] = temperature
-    if seed is not None:
-        kwargs["seed"] = seed
+        iteration_cap = 1
 
-    # Capture timing bracket BEFORE the call so latency_ms is end-to-end and
-    # the audit row stamps the moment the wire request started, not the moment
-    # the response landed.  Mirrors composer/service.py:3195-3196 and 3337-3338.
-    started_at = datetime.now(UTC)
-    started_ns = time.monotonic_ns()
-    status: ComposerLLMCallStatus | None = None
-    response: Any = None
-    error_class: str | None = None
-    error_message: str | None = None
-    try:
-        response = await _litellm_acompletion(**kwargs)
-        name, arguments = _extract_tool_call(response)
+    for _iteration in range(max(1, iteration_cap)):
+        # Snapshot the messages the wire request carries THIS round, so the audit
+        # row records exactly what was sent even as the loop appends tool results
+        # for the next round.
+        request_messages = list(messages)
+        # Mark AFTER the per-round snapshot and BEFORE kwargs so the SAME marked
+        # objects feed both the wire call and the audit record built in finally
+        # (request_messages / tools below). apply_anthropic_cache_markers returns
+        # NEW lists/dicts — it never mutates the growing ``messages`` list, so the
+        # per-round audit stays hash-truthful. Re-marking each round is idempotent
+        # ({**msg, "cache_control": ...}); the trailing tool gets the tools-array
+        # marker. Gated on THIS call's model.
+        if supports_anthropic_prompt_cache_markers(model):
+            request_messages, marked_tools = apply_anthropic_cache_markers(request_messages, tools)
+            if marked_tools is not None:
+                tools = marked_tools
+        kwargs: dict[str, Any] = {"model": model, "messages": request_messages, "tools": tools}
+        kwargs["tool_choice"] = "required" if discovery_enabled else {"type": "function", "function": {"name": "emit_turn"}}
+        if temperature is not None:
+            kwargs["temperature"] = temperature
+        if seed is not None:
+            kwargs["seed"] = seed
 
-        # Wire-boundary validation of the LLM-produced emit_turn shape.  The
-        # LLM is an external system (Tier 3); the JSON tool schema above is
-        # the contract, but providers vary in how strictly they enforce it.
-        # This block is the consumer-side backstop: any shape violation raises
-        # ``ChainSolverResponseShapeError``, which is caught by the typed-
-        # except clause below and routed through the auto-drop path.
-        #
-        # Error messages carry only the offending value(s) -- no LLM response
-        # body content, no system prompt, no GUIDED CONTEXT.  The wrapper's
-        # audit emission redacts down to ``type(exc).__name__``; the message
-        # text is for slog frame context only.
-        if name != "emit_turn":
-            raise ChainSolverResponseShapeError(f"chain solver expected emit_turn, got {name!r}")
+        # Capture timing bracket BEFORE the call so latency_ms is end-to-end and
+        # the audit row stamps the moment the wire request started, not the moment
+        # the response landed.  Mirrors composer/service.py:3195-3196 and 3337-3338.
+        started_at = datetime.now(UTC)
+        started_ns = time.monotonic_ns()
+        status: ComposerLLMCallStatus | None = None
+        response: Any = None
+        error_class: str | None = None
+        error_message: str | None = None
         try:
-            turn_type = arguments["turn_type"]
-            payload = arguments["payload"]
-        except (KeyError, TypeError) as exc:
-            raise ChainSolverResponseShapeError(
-                f"chain solver emit_turn arguments missing required keys (turn_type/payload): {type(exc).__name__}"
-            ) from exc
-        if turn_type != "propose_chain":
-            raise ChainSolverResponseShapeError(f"chain solver expected propose_chain turn, got {turn_type!r}")
-        try:
-            steps_raw = payload["steps"]
-            why_raw = payload["why"]
-        except (KeyError, TypeError) as exc:
-            raise ChainSolverResponseShapeError(
-                f"chain solver propose_chain payload missing required keys (steps/why): {type(exc).__name__}"
-            ) from exc
-        try:
-            steps = tuple(dict(s) for s in steps_raw)
-        except (TypeError, ValueError) as exc:
-            # ``tuple(dict(s) for s in steps_raw)`` fails when steps_raw is not
-            # iterable (TypeError), or when an element is not dict-coercible
-            # (TypeError or ValueError, depending on the Python version and the
-            # specific malformed shape).  All such failures are LLM shape
-            # violations.
-            raise ChainSolverResponseShapeError(
-                f"chain solver propose_chain payload.steps is not a list of dicts: {type(exc).__name__}"
-            ) from exc
-        proposal = ChainProposal(
-            steps=steps,
-            why=str(why_raw),
-        )
-        # Mark SUCCESS only AFTER all post-call parsing succeeded — any shape
-        # failure between _litellm_acompletion returning and ChainProposal
-        # construction is MALFORMED_RESPONSE, not SUCCESS-with-bad-data.
-        status = ComposerLLMCallStatus.SUCCESS
-        return proposal
-    except TimeoutError:
-        status = ComposerLLMCallStatus.TIMEOUT
-        error_class = "TimeoutError"
-        error_message = "TimeoutError"
-        raise
-    except asyncio.CancelledError as exc:
-        # Client disconnect or task cancellation. Record the call (so the audit
-        # row exists for forensics) but re-raise unchanged — auto-drop wrappers
-        # deliberately do NOT absorb CancelledError per ``solve_chain_with_auto_drop``.
-        status = ComposerLLMCallStatus.CANCELLED
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMAuthError as exc:
-        status = ComposerLLMCallStatus.AUTH_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMBadRequestError as exc:
-        status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except LiteLLMAPIError as exc:
-        # Listed after the more specific Auth/BadRequest subclasses.
-        status = ComposerLLMCallStatus.API_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    except (IndexError, AttributeError, json.JSONDecodeError, ChainSolverResponseShapeError) as exc:
-        # LLM-response shape failures.  This covers two layers:
-        #
-        # - ``_extract_tool_call`` shape failures: empty ``choices``
-        #   (IndexError), missing ``message`` / ``tool_calls`` attribute
-        #   (AttributeError), invalid JSON in ``arguments`` (JSONDecodeError).
-        #
-        # - Consumer-side shape failures: the parser above wraps KeyError /
-        #   TypeError / ValueError on payload / steps access into
-        #   ``ChainSolverResponseShapeError`` and the no-tool_calls branch
-        #   in ``_extract_tool_call`` raises ``ChainSolverResponseShapeError``
-        #   directly.  All such failures classify as MALFORMED_RESPONSE.
-        #
-        # Mirrors the freeform composer mapping at composer/service.py:
-        # 3373-3378 for empty-choices MALFORMED_RESPONSE.
-        status = ComposerLLMCallStatus.MALFORMED_RESPONSE
-        error_class = type(exc).__name__
-        error_message = "malformed_response"
-        raise
-    except Exception as exc:
-        # F5 catch-all (mirrors composer/service.py:3275-3289). Ensures the
-        # audit row lands even for exception classes outside the typed clauses
-        # above — e.g. httpx ConnectionError, codec ValueError, or any other
-        # transport / runtime failure. ``API_ERROR`` is the closest semantic
-        # for "unknown provider-side or server-side failure"; the exception
-        # class name is preserved in ``error_class`` for forensics.
-        status = ComposerLLMCallStatus.API_ERROR
-        error_class = type(exc).__name__
-        error_message = type(exc).__name__
-        raise
-    finally:
-        if recorder is not None and status is not None:
-            recorder.record_llm_call(
-                build_llm_call_record(
-                    model_requested=model,
-                    messages=messages,
-                    tools=_GUIDED_LLM_TOOLS,
-                    status=status,
-                    started_at=started_at,
-                    started_ns=started_ns,
-                    temperature=temperature,
-                    seed=seed,
-                    response=response,
-                    error_class=error_class,
-                    error_message=error_message,
-                )
+            response = await _litellm_acompletion(**kwargs)
+            message = response.choices[0].message
+            tool_calls = message.tool_calls or ()
+
+            # ``emit_turn`` (propose_chain) is terminal — take it regardless of
+            # any sibling discovery call in the same message. ``_parse_emit_turn_call``
+            # carries the exact wire-boundary shape validation (and its messages)
+            # that previously lived inline here.
+            emit_call = next(
+                (tc for tc in tool_calls if tc.function is not None and tc.function.name == "emit_turn"),
+                None,
             )
-            # Attach the buffered call list to the in-flight exception (if any)
-            # so callers further out the stack can recover the audit trail even
-            # when the exception escapes the recorder's drain scope.  Mirrors
-            # composer/service.py:3307-3309 and :3404-3406.
-            current_exc = sys.exc_info()[1]
-            if current_exc is not None:
-                attach_llm_calls(current_exc, recorder)
+            if emit_call is not None:
+                proposal = _parse_emit_turn_call(emit_call)
+                # Mark SUCCESS only AFTER parsing succeeded — any shape failure is
+                # MALFORMED_RESPONSE, not SUCCESS-with-bad-data.
+                status = ComposerLLMCallStatus.SUCCESS
+                return proposal
 
+            if not discovery_enabled:
+                # Single-shot path: forced ``tool_choice`` guarantees a call, so
+                # an empty response or a wrong-named call is a shape violation.
+                # Messages preserved verbatim for the existing test matchers
+                # (``match="emit_turn"`` / empty-tool_calls).
+                if not tool_calls:
+                    raise ChainSolverResponseShapeError("chain solver response had no tool_calls")
+                first = tool_calls[0].function
+                first_name = first.name if first is not None else None
+                raise ChainSolverResponseShapeError(f"chain solver expected emit_turn, got {first_name!r}")
 
-def _extract_tool_call(response: Any) -> tuple[str, dict[str, Any]]:
-    """Extract (name, parsed_arguments) from a LiteLLM response.
+            # Discovery path execution-side safety gate: the only non-terminal
+            # calls we dispatch are allowed read-only discovery tools. ANY other
+            # tool (a hallucinated mutation / secret call) raises WITHOUT
+            # dispatching — ``execute_tool``'s handler union would otherwise
+            # happily run it. The raise routes to the auto-drop path exactly like
+            # today's transient/no-proposal outcome.
+            discovery_calls = [tc for tc in tool_calls if tc.function is not None and tc.function.name in allowed_discovery]
+            if not discovery_calls or len(discovery_calls) != len(tool_calls):
+                raise ChainSolverResponseShapeError(
+                    "chain solver emitted a tool call that is neither emit_turn nor an allowed discovery tool"
+                )
 
-    LiteLLM returns attribute-access objects (not dicts); see _FakeLLMResponse
-    in tests/unit/web/composer/test_compose_loop_llm_audit.py for the shape.
+            # Thread the assistant tool-call request once, then answer every call
+            # id with its result, or the next round 400s.
+            assert state is not None and catalog is not None  # implied by discovery_enabled
+            messages.append(_assistant_tool_calls_message(message, tool_calls))
+            for tool_call in tool_calls:
+                messages.append(
+                    _execute_discovery_call(
+                        tool_call=tool_call,
+                        state=state,
+                        catalog=catalog,
+                        secret_service=secret_service,
+                        user_id=user_id,
+                        actor=actor,
+                        recorder=recorder,
+                    )
+                )
+            status = ComposerLLMCallStatus.SUCCESS
+            # fall through to finally (records this round), then loop again
+        except TimeoutError:
+            status = ComposerLLMCallStatus.TIMEOUT
+            error_class = "TimeoutError"
+            error_message = "TimeoutError"
+            raise
+        except asyncio.CancelledError as exc:
+            # Client disconnect or task cancellation. Record the call (so the audit
+            # row exists for forensics) but re-raise unchanged — auto-drop wrappers
+            # deliberately do NOT absorb CancelledError per ``solve_chain_with_auto_drop``.
+            status = ComposerLLMCallStatus.CANCELLED
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMAuthError as exc:
+            status = ComposerLLMCallStatus.AUTH_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMBadRequestError as exc:
+            status = ComposerLLMCallStatus.BAD_REQUEST_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except LiteLLMAPIError as exc:
+            # Listed after the more specific Auth/BadRequest subclasses.
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        except (IndexError, AttributeError, json.JSONDecodeError, ChainSolverResponseShapeError) as exc:
+            # LLM-response shape failures: empty ``choices`` (IndexError), missing
+            # ``message`` / ``tool_calls`` attribute (AttributeError), invalid JSON
+            # in ``arguments`` (JSONDecodeError), and the consumer-side
+            # ``ChainSolverResponseShapeError`` (wrong tool / turn_type, malformed
+            # payload, gate-trip, no-tool_calls). All classify as MALFORMED_RESPONSE.
+            # Mirrors composer/service.py:3373-3378.
+            status = ComposerLLMCallStatus.MALFORMED_RESPONSE
+            error_class = type(exc).__name__
+            error_message = "malformed_response"
+            raise
+        except Exception as exc:
+            # F5 catch-all (mirrors composer/service.py:3275-3289). Ensures the
+            # audit row lands even for exception classes outside the typed clauses
+            # above — e.g. httpx ConnectionError, codec ValueError, or any other
+            # transport / runtime failure. ``API_ERROR`` is the closest semantic
+            # for "unknown provider-side or server-side failure"; the exception
+            # class name is preserved in ``error_class`` for forensics.
+            status = ComposerLLMCallStatus.API_ERROR
+            error_class = type(exc).__name__
+            error_message = type(exc).__name__
+            raise
+        finally:
+            if recorder is not None and status is not None:
+                recorder.record_llm_call(
+                    build_llm_call_record(
+                        model_requested=model,
+                        messages=request_messages,
+                        tools=tools,
+                        status=status,
+                        started_at=started_at,
+                        started_ns=started_ns,
+                        temperature=temperature,
+                        seed=seed,
+                        response=response,
+                        error_class=error_class,
+                        error_message=error_message,
+                    )
+                )
+                # Attach the buffered call list to the in-flight exception (if any)
+                # so callers further out the stack can recover the audit trail even
+                # when the exception escapes the recorder's drain scope.  Mirrors
+                # composer/service.py:3307-3309 and :3404-3406.
+                current_exc = sys.exc_info()[1]
+                if current_exc is not None:
+                    attach_llm_calls(current_exc, recorder)
 
-    Sibling shape failures from this function (``IndexError`` from empty
-    ``choices``, ``AttributeError`` from missing ``message`` / ``tool_calls``,
-    ``json.JSONDecodeError`` from malformed arguments JSON) are caught by
-    :func:`solve_chain_with_auto_drop`.  The empty-tool_calls branch raises
-    :class:`ChainSolverResponseShapeError` to route through the same path --
-    the LLM responded but skipped the tool, which is an external-system
-    shape failure, not a server invariant violation.
-    """
-    message = response.choices[0].message
-    tool_calls = message.tool_calls
-    if not tool_calls:
-        raise ChainSolverResponseShapeError("chain solver response had no tool_calls")
-    call = tool_calls[0]
-    return call.function.name, json.loads(call.function.arguments)
+    # Discovery iteration cap reached without an ``emit_turn`` — a shape failure
+    # that routes to the auto-drop path (``ChainSolverResponseShapeError`` is in
+    # both transient sets), exactly like a transient/no-proposal outcome.
+    raise ChainSolverResponseShapeError("chain solver discovery loop reached the iteration cap without an emit_turn")

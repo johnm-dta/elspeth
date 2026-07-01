@@ -121,6 +121,7 @@ export function PluginCard({
   const [expanded, setExpanded] = useState(initialExpanded);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const cardId = `${pluginCardIdSegment(plugin.plugin_type)}-${pluginCardIdSegment(plugin.name)}`;
+  const nameId = `plugin-card-name-${cardId}`;
   const detailsPanelId = `plugin-card-details-panel-${cardId}`;
   const schemaPanelId = `plugin-card-schema-panel-${cardId}`;
 
@@ -143,9 +144,12 @@ export function PluginCard({
     plugin.example_use === null;
 
   return (
-    <div className="plugin-card">
+    // role="article" + aria-labelledby promotes the card to a named region
+    // (WCAG 1.3.1): the plugin name reads as the card's accessible name
+    // instead of the name being an undifferentiated bold span.
+    <div className="plugin-card" role="article" aria-labelledby={nameId}>
       <div className="plugin-card-header-row">
-        <span className="plugin-card-name">{plugin.name}</span>
+        <span id={nameId} className="plugin-card-name">{plugin.name}</span>
         <span className="plugin-card-kind">{plugin.plugin_type}</span>
       </div>
 

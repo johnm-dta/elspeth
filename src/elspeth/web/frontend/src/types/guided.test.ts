@@ -16,10 +16,25 @@ import type {
   TurnPayload,
   TurnRecord,
   TurnType,
+  WireStageData,
+  WorkflowProfile,
 } from "./guided";
 
+// Compile-time mutual-extends check.
+type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+
 describe("guided protocol types", () => {
-  it("TurnType union has 6 values", () => {
+  it("TurnType union has exactly 7 values", () => {
+    const _exact: Equals<
+      TurnType,
+      | "inspect_and_confirm"
+      | "single_select"
+      | "multi_select_with_custom"
+      | "schema_form"
+      | "propose_chain"
+      | "recipe_offer"
+      | "confirm_wiring"
+    > = true;
     const all: TurnType[] = [
       "inspect_and_confirm",
       "single_select",
@@ -27,12 +42,13 @@ describe("guided protocol types", () => {
       "schema_form",
       "propose_chain",
       "recipe_offer",
+      "confirm_wiring",
     ];
-    expect(all).toHaveLength(6);
+    expect(_exact).toBe(true);
+    expect(all).toHaveLength(7);
   });
 
   it("ControlSignal union has 3 values", () => {
-    type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
     const _exact: Equals<
       ControlSignal,
       "exit_to_freeform" | "request_advisor" | "reject"
@@ -46,14 +62,24 @@ describe("guided protocol types", () => {
     expect(all).toHaveLength(3);
   });
 
-  it("GuidedStep union has 4 values", () => {
+  it("GuidedStep union has exactly 5 values", () => {
+    const _exact: Equals<
+      GuidedStep,
+      | "step_1_source"
+      | "step_2_sink"
+      | "step_2_5_recipe_match"
+      | "step_3_transforms"
+      | "step_4_wire"
+    > = true;
     const all: GuidedStep[] = [
       "step_1_source",
       "step_2_sink",
       "step_2_5_recipe_match",
       "step_3_transforms",
+      "step_4_wire",
     ];
-    expect(all).toHaveLength(4);
+    expect(_exact).toBe(true);
+    expect(all).toHaveLength(5);
   });
 
   it("TerminalKind union has 2 values", () => {
@@ -81,14 +107,18 @@ describe("guided protocol types", () => {
     expect(payload.step_index).toBe(0);
   });
 
-  it("GuidedSession has exactly step, history, terminal, chat_history, chat_turn_seq — exhaustive", () => {
-    type Equals<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
+  it("GuidedSession has exactly step, history, terminal, chat_history, chat_turn_seq, profile — exhaustive", () => {
     // Compile-time mutual-extends: adding/removing a key in GuidedSession
     // makes this assignment fail tsc.  Slice 5 added chat_history and
-    // chat_turn_seq to the GuidedSession wire shape.
+    // chat_turn_seq; P6.2 added profile (server-owned WorkflowProfile).
     const _exact: Equals<
       keyof GuidedSession,
-      "step" | "history" | "terminal" | "chat_history" | "chat_turn_seq"
+      | "step"
+      | "history"
+      | "terminal"
+      | "chat_history"
+      | "chat_turn_seq"
+      | "profile"
     > = true;
     expect(_exact).toBe(true);
   });
@@ -125,5 +155,94 @@ describe("guided protocol types", () => {
     };
     // Runtime: just confirm the type guard compiles; value is irrelevant.
     expect(check).toBeTypeOf("function");
+  });
+});
+
+describe("WorkflowProfile wire type", () => {
+  it("carries exactly the four wire-visible boolean flags", () => {
+    // Compile-time exhaustive check: the wire profile is exactly these four
+    // behavior flags — adding any other key here would fail tsc.
+    const _exact: Equals<
+      keyof WorkflowProfile,
+      "coaching" | "bookends" | "recipe_match" | "advisor_checkpoints"
+    > = true;
+    const profile: WorkflowProfile = {
+      coaching: true,
+      bookends: true,
+      recipe_match: true,
+      advisor_checkpoints: true,
+    };
+    expect(_exact).toBe(true);
+    expect(profile.advisor_checkpoints).toBe(true);
+  });
+
+  it("rides GuidedSession.profile; null is the empty/live-guided profile", () => {
+    const profile: WorkflowProfile = {
+      coaching: false,
+      bookends: false,
+      recipe_match: false,
+      advisor_checkpoints: false,
+    };
+    const seeded: Pick<GuidedSession, "profile"> = { profile };
+    expect(seeded.profile).not.toBeNull();
+    const empty: Pick<GuidedSession, "profile"> = { profile: null };
+    expect(empty.profile).toBeNull();
+  });
+});
+
+describe("WireStageData wire shape", () => {
+  it("uses topology ids and edge_contracts from/to keys", () => {
+    const data: WireStageData = {
+      topology: {
+        sources: {
+          source: {
+            id: "source",
+            plugin: "inline_blob",
+            on_success: "chain_in",
+            on_validation_failure: "discard",
+          },
+        },
+        nodes: [
+          {
+            id: "scrape",
+            node_type: "transform",
+            plugin: "web_scrape",
+            input: "chain_in",
+            on_success: "scraped",
+            on_error: "scrape_error",
+            routes: { retry: "chain_in" },
+            fork_to: ["audit_stream"],
+            branches: null,
+          },
+        ],
+        outputs: [
+          {
+            id: "output:jsonl_out",
+            sink_name: "jsonl_out",
+            plugin: "json",
+            on_write_failure: "discard",
+          },
+        ],
+      },
+      edge_contracts: [
+        {
+          from: "scrape",
+          to: "output:jsonl_out",
+          producer_guarantees: ["url", "body"],
+          consumer_requires: ["body"],
+          missing_fields: [],
+          satisfied: true,
+        },
+      ],
+      semantic_contracts: [],
+      warnings: [],
+      advisor_findings: "Prompt shield warning reviewed.",
+      signoff_outcome: "approved",
+    };
+
+    expect(data.edge_contracts[0].from).toBe("scrape");
+    expect(data.edge_contracts[0].to).toBe("output:jsonl_out");
+    // @ts-expect-error edge_contracts keys are from/to, NOT from_id.
+    expect(data.edge_contracts[0].from_id).toBeUndefined();
   });
 });

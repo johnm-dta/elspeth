@@ -198,6 +198,15 @@ class ToolDeclaration:
             raise ValueError(
                 f"ToolDeclaration({self.name!r}).json_schema is not a valid JSON Schema (Draft 2020-12): {exc.message}"
             ) from exc
+        if self.json_schema.get("type") != "object":
+            raise ValueError(
+                f"ToolDeclaration({self.name!r}).json_schema root schema must be an object; got type {self.json_schema.get('type')!r}."
+            )
+        if self.json_schema.get("additionalProperties") is not False:
+            raise ValueError(
+                f"ToolDeclaration({self.name!r}).json_schema root object must set additionalProperties=false "
+                "so LLM-authored extra arguments cannot bypass schema guidance or redaction allowlists."
+            )
 
         # blob_store_only invariant — only BLOB_MUTATION may set this.
         if self.blob_store_only and self.kind is not ToolKind.BLOB_MUTATION:

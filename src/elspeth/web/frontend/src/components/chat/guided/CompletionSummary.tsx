@@ -30,17 +30,20 @@ import type { TerminalState } from "@/types/guided";
 
 interface CompletionSummaryProps {
   terminal: TerminalState;
+  // Concern B: in a tutorial the "Open freeform editor" action is suppressed
+  // (the only path out of a tutorial is graduation, never freeform).
+  isTutorial?: boolean;
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export function CompletionSummary({ terminal }: CompletionSummaryProps) {
+export function CompletionSummary({ terminal, isTutorial }: CompletionSummaryProps) {
   // Guard: only render in the completed+yaml-present state.
   if (terminal.kind !== "completed" || terminal.pipeline_yaml === null) {
     return null;
   }
 
-  return <CompletionSummaryInner yaml={terminal.pipeline_yaml} />;
+  return <CompletionSummaryInner yaml={terminal.pipeline_yaml} isTutorial={isTutorial} />;
 }
 
 // ── Inner component (separated so hooks run unconditionally) ──────────────────
@@ -51,9 +54,10 @@ export function CompletionSummary({ terminal }: CompletionSummaryProps) {
 
 interface CompletionSummaryInnerProps {
   yaml: string;
+  isTutorial?: boolean;
 }
 
-function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
+function CompletionSummaryInner({ yaml, isTutorial }: CompletionSummaryInnerProps) {
   const reactId = useId();
   const headingId = `${reactId}-heading`;
   const preId = `${reactId}-pre`;
@@ -108,13 +112,15 @@ function CompletionSummaryInner({ yaml }: CompletionSummaryInnerProps) {
       </div>
 
       <div className="guided-completion-actions">
-        <button
-          type="button"
-          className="guided-completion-save-btn"
-          onClick={handleExit}
-        >
-          Open freeform editor
-        </button>
+        {!isTutorial && (
+          <button
+            type="button"
+            className="guided-completion-save-btn"
+            onClick={handleExit}
+          >
+            Open freeform editor
+          </button>
+        )}
         <button
           type="button"
           className="guided-completion-edit-btn"

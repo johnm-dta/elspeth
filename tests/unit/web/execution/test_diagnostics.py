@@ -313,11 +313,12 @@ def test_diagnostics_surfaces_latest_failed_operation_as_failure_detail(tmp_path
     """When a run has a failed operation, failure_detail must point at it.
 
     Regression test for run 8294aab2 (2026-05-13): a preflight HTTP 400
-    killed the pipeline; ``operations.error_message`` had the full chain
-    (including provider body after the Task #2 wrap-site change) but the
-    UI rendered only the sanitized class-name from ``runs.error``. The
+    killed the pipeline; ``operations.error_message`` had the full chain, but
+    the UI rendered only the sanitized class-name from ``runs.error``. The
     diagnostics endpoint must surface the failed operation directly so the
-    frontend doesn't have to scan the (paged) operations list.
+    frontend doesn't have to scan the (paged) operations list, while relying on
+    provider-boundary redaction to keep raw provider bodies out of the surfaced
+    message.
     """
     db = LandscapeDB.from_url(f"sqlite:///{tmp_path / 'audit.db'}")
     try:
@@ -335,8 +336,8 @@ def test_diagnostics_surfaces_latest_failed_operation_as_failure_detail(tmp_path
             "failed",
             error=(
                 "pre_flight_failed: llm provider openrouter failed runtime preflight: "
-                "LLMClientError: HTTP 400 | body: "
-                '{"error":{"message":"max_output_tokens below minimum"}}'
+                "LLMClientError: HTTP 400 | provider error body redacted "
+                "(body_present=true; chars=58)"
             ),
             duration_ms=995.0,
         )
@@ -353,8 +354,9 @@ def test_diagnostics_surfaces_latest_failed_operation_as_failure_detail(tmp_path
         assert diagnostics.failure_detail.operation_id == bad_op.operation_id
         assert diagnostics.failure_detail.node_id == "transform"
         assert diagnostics.failure_detail.operation_type == "runtime_preflight"
-        assert "max_output_tokens below minimum" in diagnostics.failure_detail.error_message
         assert "HTTP 400" in diagnostics.failure_detail.error_message
+        assert "provider error body redacted" in diagnostics.failure_detail.error_message
+        assert "max_output_tokens below minimum" not in diagnostics.failure_detail.error_message
     finally:
         db.close()
 

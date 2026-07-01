@@ -15,7 +15,7 @@ Chaos instruments:
   LLM API. Determinism note: error-injection percentages are pinned to 100.0
   or 0.0 per call window, so every injection decision is forced — no RNG
   outcome dependence, no real network socket, default-CI safe.
-- Injected MockClock (the test_rc6_lease_recovery_sweep.py pattern) to force
+- Injected MockClock (the test_lease_recovery_sweep.py pattern) to force
   lease expiry mid-transform without wall-clock sleeps.
 - A peer-owner ``recover_expired_leases`` sweep issued from INSIDE a
   transform, simulating a concurrent recovery worker racing the engine.

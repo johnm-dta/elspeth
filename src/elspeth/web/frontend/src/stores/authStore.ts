@@ -68,16 +68,19 @@ export const useAuthStore = create<AuthState>((set) => ({
       { useExecutionStore },
       { useBlobStore },
       { useSecretsStore },
+      { useShareableReviewStore },
     ] = await Promise.all([
       import("./sessionStore"),
       import("./executionStore"),
       import("./blobStore"),
       import("./secretsStore"),
+      import("./shareableReviewStore"),
     ]);
     useSessionStore.getState().reset?.();
     useExecutionStore.getState().reset?.();
     useBlobStore.getState().reset();
     useSecretsStore.getState().reset();
+    useShareableReviewStore.getState().reset();
     usePreferencesStore.getState().reset();
   },
 

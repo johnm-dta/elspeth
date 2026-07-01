@@ -20,6 +20,25 @@ def test_simple_str_field_lowers_to_text():
     assert f["nullable"] is False
 
 
+def test_aliased_field_lowers_under_its_alias():
+    # The schema field on data-plugin configs is stored internally as
+    # ``schema_config`` (to avoid shadowing ``BaseModel.schema``) but exposed
+    # under the alias ``schema`` everywhere user-facing (YAML, JSON Schema,
+    # source options, prefilled). The knob is ALSO a user-facing surface, so it
+    # must lower under the ALIAS — otherwise prefilled values (keyed by alias)
+    # never populate the form field (keyed by internal name).
+    class Opts(BaseModel):
+        model_config = {"populate_by_name": True}
+
+        schema_config: Annotated[str, Field(alias="schema", title="Schema")]
+
+    ks = lower_model_to_knob_schema(Opts, plugin_kind="source", plugin_name="test")
+    assert len(ks["fields"]) == 1
+    f = ks["fields"][0]
+    assert f["name"] == "schema"
+    assert f["label"] == "Schema"
+
+
 def test_optional_str_lowers_to_nullable_text():
     class Opts(BaseModel):
         encoding: Annotated[str | None, Field(title="Encoding", description="File encoding")] = None

@@ -22,10 +22,7 @@ export type TurnType =
   | "schema_form"
   | "propose_chain"
   | "recipe_offer"
-  // Phase 5b: guided-mode interpretation-review widget.  Dispatched from
-  // GuidedTurn.tsx (the freeform variant uses InterpretationReviewInlineMessage
-  // — different file, different component, no shared widget).
-  | "interpretation_review";
+  | "confirm_wiring";
 
 export type ControlSignal =
   | "exit_to_freeform"
@@ -36,7 +33,8 @@ export type GuidedStep =
   | "step_1_source"
   | "step_2_sink"
   | "step_2_5_recipe_match"
-  | "step_3_transforms";
+  | "step_3_transforms"
+  | "step_4_wire";
 
 export type TerminalKind = "completed" | "exited_to_freeform";
 
@@ -80,6 +78,18 @@ export interface ChatTurn {
 }
 
 /**
+ * Wire: WorkflowProfileResponse (schemas.py — WorkflowProfileResponse).
+ * Server-owned workflow profile (the four behavior flags).
+ * A `null` `GuidedSession.profile` is the empty/live-guided profile.
+ */
+export interface WorkflowProfile {
+  coaching: boolean;
+  bookends: boolean;
+  recipe_match: boolean;
+  advisor_checkpoints: boolean;
+}
+
+/**
  * Wire: GuidedSessionResponse (schemas.py:231-242 post-slice-5).
  * `chat_history` + `chat_turn_seq` were added in Phase A slice 5 to
  * persist per-step chat across reloads; before slice 5 the frontend
@@ -92,6 +102,8 @@ export interface GuidedSession {
   terminal: TerminalState | null;
   chat_history: ChatTurn[];
   chat_turn_seq: number;
+  /** Server-owned WorkflowProfile, or `null` for the empty/live-guided profile. */
+  profile: WorkflowProfile | null;
 }
 
 /** Wire: TurnPayloadResponse (schemas.py:239-252). step_index is 0-based ordinal (number). */
@@ -120,6 +132,12 @@ export interface GuidedRespondRequest {
   edit_step_index: number | null;
   /** Typed as closed enum client-side; server validates and accepts str for graceful stale-client failure. */
   control_signal: ControlSignal | null;
+  /**
+   * Optimistic-concurrency token: the client's expected current step. When
+   * present the server 409s on mismatch (the wizard advanced under the
+   * client). Optional — omit for non-wire turns that don't carry a step.
+   */
+  step_index?: GuidedStep | null;
 }
 
 /** Response for POST /api/sessions/{id}/guided/respond (schemas.py:286-296). */
@@ -128,6 +146,23 @@ export interface GuidedRespondResponse {
   next_turn: TurnPayload | null;
   terminal: TerminalState | null;
   composition_state: CompositionState | null;
+}
+
+/**
+ * Response for GET /api/sessions/{id}/guided/tutorial-sample
+ * (sessions/schemas.py — TutorialSampleResponse, p4 Task 8a).
+ *
+ * Runtime-derived inputs for the tutorial worked example: the 3 synthetic
+ * sample-page URLs (`sample_urls`) computed from the active tutorial session's
+ * resolved origin and appended to the locked STEP_1 prompt so the source driver
+ * can parse the runtime-served addresses.
+ *
+ * No `allowed_hosts` is carried: the synthetic pages are publicly hosted, so the
+ * tutorial's web_scrape node relies on the plugin default
+ * `allowed_hosts="public_only"` — the client never sets an SSRF allowlist.
+ */
+export interface TutorialSampleResponse {
+  sample_urls: string[];
 }
 
 /**
@@ -298,6 +333,63 @@ export interface ProposeChainPayload {
   steps: ProposedStep[];
   why: string;
   blockers: string[];
+}
+
+/**
+ * Wire data for the step-4 wiring review: topology describes source/node/output
+ * connection labels, while contracts overlay producer/consumer compatibility.
+ * Source ids use `source` or `source:<name>` and output ids use
+ * `output:<sink_name>`. Warnings and advisor/signoff fields are optional
+ * advisory metadata emitted when the backend has something to report.
+ */
+export interface WireStageData {
+  topology: {
+    sources: Record<
+      string,
+      {
+        id: string;
+        plugin: string;
+        on_success: string | null;
+        on_validation_failure: string;
+      }
+    >;
+    nodes: Array<{
+      id: string;
+      node_type: string;
+      plugin: string | null;
+      input: string | null;
+      on_success: string | null;
+      on_error: string | null;
+      routes: Record<string, string> | null;
+      fork_to: string[] | null;
+      branches: string[] | Record<string, string> | null;
+    }>;
+    outputs: Array<{
+      id: string;
+      sink_name: string;
+      plugin: string;
+      on_write_failure: string;
+    }>;
+  };
+  edge_contracts: Array<{
+    from: string;
+    to: string;
+    producer_guarantees: string[];
+    consumer_requires: string[];
+    missing_fields: string[];
+    satisfied: boolean;
+  }>;
+  semantic_contracts: Array<Record<string, unknown>>;
+  warnings: Array<Record<string, unknown>>;
+  advisor_findings?: string;
+  signoff_outcome?: string;
+  /**
+   * Advisor sign-off passes left AFTER the pass that produced this turn. Present
+   * only on a RE-EMITTED wire turn (the two sites where the pass budget is in
+   * scope); ABSENT on the initial turn and the advisor-off tutorial, so the
+   * wire-stage cost copy gates on `passes_remaining !== undefined`.
+   */
+  passes_remaining?: number;
 }
 
 /**

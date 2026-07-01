@@ -38,6 +38,7 @@ from elspeth.web.execution.schemas import RunOutputArtifactPreview
 
 _DEFAULT_BYTE_CAP = 256 * 1024
 _DEFAULT_ROW_CAP = 100
+DEFAULT_ARTIFACT_PREVIEW_BYTE_CAP = _DEFAULT_BYTE_CAP
 
 # Extensions we render as a parsed-row table on the frontend.
 _CSV_EXTENSIONS = frozenset({".csv", ".tsv"})
@@ -98,6 +99,45 @@ def build_artifact_preview(
     total_size_bytes = fs_path.stat().st_size
     with fs_path.open("rb") as f:
         head_bytes = f.read(byte_cap)
+    return _build_artifact_preview_from_head(
+        fs_path,
+        artifact_id=artifact_id,
+        total_size_bytes=total_size_bytes,
+        head_bytes=head_bytes,
+        byte_cap=byte_cap,
+        row_cap=row_cap,
+    )
+
+
+def build_artifact_preview_from_head(
+    fs_path: Path,
+    *,
+    artifact_id: str,
+    total_size_bytes: int,
+    head_bytes: bytes,
+    byte_cap: int = _DEFAULT_BYTE_CAP,
+    row_cap: int = _DEFAULT_ROW_CAP,
+) -> RunOutputArtifactPreview:
+    """Build a bounded preview from a previously verified head-of-file snapshot."""
+    return _build_artifact_preview_from_head(
+        fs_path,
+        artifact_id=artifact_id,
+        total_size_bytes=total_size_bytes,
+        head_bytes=head_bytes,
+        byte_cap=byte_cap,
+        row_cap=row_cap,
+    )
+
+
+def _build_artifact_preview_from_head(
+    fs_path: Path,
+    *,
+    artifact_id: str,
+    total_size_bytes: int,
+    head_bytes: bytes,
+    byte_cap: int,
+    row_cap: int,
+) -> RunOutputArtifactPreview:
     bytes_read = len(head_bytes)
     truncated_by_bytes = bytes_read < total_size_bytes
 

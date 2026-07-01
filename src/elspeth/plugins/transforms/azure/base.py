@@ -13,7 +13,7 @@ Subclasses implement _analyze_field() for their specific Azure API.
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from threading import Event, Lock
 from typing import Any
 
@@ -100,6 +100,9 @@ class BaseAzureSafetyTransform(BaseTransform, BatchTransformMixin):
     determinism = Determinism.EXTERNAL_CALL
     plugin_version = "1.0.0"
     creates_tokens = False
+    discovery_secret_requirements: Mapping[str, tuple[str, ...]] = {
+        "api_key": ("AZURE_CONTENT_SAFETY_KEY",),
+    }
 
     API_VERSION = "2024-09-01"
 

@@ -46,6 +46,7 @@ from elspeth.core.dag.models import EdgeContractError, GraphValidationError, Gra
 from elspeth.core.secrets import (
     collect_credential_field_violations,
     collect_disallowed_secret_ref_markers,
+    redact_secret_refs_for_validation,
     resolve_secret_refs,
     secret_env_ref_name,
 )
@@ -82,6 +83,9 @@ from elspeth.web.execution.schemas import (
     CHECK_BLOB_INLINE_REFS,
     CHECK_IDENTITY_NODE_ADVISORY,
     CHECK_INTERPRETATION_REVIEW,
+    CHECK_LLM_BASE_URL_POLICY,
+    CHECK_LLM_RETRY_BUDGET_POLICY,
+    CHECK_MANAGED_IDENTITY_POLICY,
     CHECK_OUTCOME_SECRET_REFS_NO_REFS,
     CHECK_OUTCOME_SECRET_REFS_RESOLVED,
     CHECK_OUTCOME_SECRET_REFS_SKIPPED_NO_SERVICE,
@@ -109,6 +113,11 @@ from elspeth.web.interpretation_state import (
     materialize_state_for_authoring,
     materialize_state_for_execution,
 )
+from elspeth.web.provider_config_policy import (
+    web_llm_base_url_policy_error,
+    web_llm_retry_budget_policy_error,
+    web_rag_provider_config_policy_error,
+)
 from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields, allowed_secret_ref_fields_text
 
 # ── Check names (ordered) ─────────────────────────────────────────────
@@ -119,6 +128,9 @@ _CHECK_BLOB_INLINE_REFS = CHECK_BLOB_INLINE_REFS
 _CHECK_SEMANTIC_CONTRACTS = CHECK_SEMANTIC_CONTRACTS
 _CHECK_BATCH_TRANSFORM_OPTIONS = CHECK_BATCH_TRANSFORM_OPTIONS
 _CHECK_INTERPRETATION_REVIEW = CHECK_INTERPRETATION_REVIEW
+_CHECK_MANAGED_IDENTITY_POLICY = CHECK_MANAGED_IDENTITY_POLICY
+_CHECK_LLM_RETRY_BUDGET_POLICY = CHECK_LLM_RETRY_BUDGET_POLICY
+_CHECK_LLM_BASE_URL_POLICY = CHECK_LLM_BASE_URL_POLICY
 _CHECK_SETTINGS = CHECK_SETTINGS
 _CHECK_PLUGINS = RUNTIME_CHECK_PLUGIN_INSTANTIATION
 _CHECK_VALUE_SOURCE_COMPLIANCE = CHECK_VALUE_SOURCE_COMPLIANCE
@@ -452,7 +464,7 @@ def _build_edge_contract_suggestion(
     return "\n".join(parts)
 
 
-def _skipped_checks(from_check: str) -> list[ValidationCheck]:
+def _skipped_checks(from_check: str, *, already_emitted: frozenset[str] = frozenset()) -> list[ValidationCheck]:
     """Generate skipped check records for all checks after from_check."""
     skipping = False
     result: list[ValidationCheck] = []
@@ -460,7 +472,7 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
         if name == from_check:
             skipping = True
             continue
-        if skipping:
+        if skipping and name not in already_emitted:
             result.append(
                 ValidationCheck(
                     name=name,
@@ -471,6 +483,10 @@ def _skipped_checks(from_check: str) -> list[ValidationCheck]:
                 )
             )
     return result
+
+
+def _append_skipped_checks(checks: list[ValidationCheck], from_check: str) -> None:
+    checks.extend(_skipped_checks(from_check, already_emitted=frozenset(check.name for check in checks)))
 
 
 def _format_interpretation_site(site: InterpretationReviewSite) -> str:
@@ -985,7 +1001,7 @@ def validate_pipeline(
                 outcome_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_WEB_SCRAPE_NETWORK_POLICY))
+        _append_skipped_checks(checks, _CHECK_WEB_SCRAPE_NETWORK_POLICY)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1136,7 +1152,7 @@ def validate_pipeline(
                     outcome_code=CHECK_OUTCOME_SECRET_REFS_UNRESOLVED,
                 )
             )
-            checks.extend(_skipped_checks(_CHECK_SECRET_REFS))
+            _append_skipped_checks(checks, _CHECK_SECRET_REFS)
             return ValidationResult(
                 is_valid=False,
                 checks=checks,
@@ -1189,7 +1205,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_SEMANTIC_CONTRACTS))
+        _append_skipped_checks(checks, _CHECK_SEMANTIC_CONTRACTS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1247,7 +1263,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_BATCH_TRANSFORM_OPTIONS))
+        _append_skipped_checks(checks, _CHECK_BATCH_TRANSFORM_OPTIONS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1293,7 +1309,7 @@ def validate_pipeline(
             )
             for site in materialized_state.sites
         )
-        checks.extend(_skipped_checks(_CHECK_INTERPRETATION_REVIEW))
+        _append_skipped_checks(checks, _CHECK_INTERPRETATION_REVIEW)
         single_site = materialized_state.sites[0] if len(materialized_state.sites) == 1 else None
         return ValidationResult(
             is_valid=False,
@@ -1347,7 +1363,7 @@ def validate_pipeline(
                 )
             )
             errors.extend(_blob_inline_validation_error(violation) for violation in blob_violations)
-            checks.extend(_skipped_checks(_CHECK_BLOB_INLINE_REFS))
+            _append_skipped_checks(checks, _CHECK_BLOB_INLINE_REFS)
             return ValidationResult(
                 is_valid=False,
                 checks=checks,
@@ -1389,6 +1405,157 @@ def validate_pipeline(
             )
         )
 
+    # managed_identity_policy (#8) and llm_retry_budget_policy (#9) run here to
+    # match their declared position in VALIDATION_BLOCKING_CHECK_NAMES — AFTER
+    # web_scrape_network_policy (#2) through blob_inline_refs (#7). Emitting them
+    # earlier left their pass records in ``checks`` before an earlier-declared
+    # gate could fail, which suppressed the canonical skipped-after-failure record
+    # and made the trail report a later gate passing under an earlier failure.
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        provider_policy_error = web_rag_provider_config_policy_error(node.options)
+        if provider_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_MANAGED_IDENTITY_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' uses disallowed managed identity provider_config",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_MANAGED_IDENTITY_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=provider_policy_error,
+                        suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
+                        error_code=None,
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_MANAGED_IDENTITY_POLICY,
+                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_MANAGED_IDENTITY_POLICY,
+            passed=True,
+            detail="No web-authored managed identity provider_config",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
+        if llm_retry_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_LLM_RETRY_BUDGET_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' uses disallowed sequential multi-query LLM retry budget",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_LLM_RETRY_BUDGET_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=llm_retry_policy_error,
+                        suggestion=(
+                            "Set max_capacity_retry_seconds to a small positive value or configure pool_size > 1 for pooled retry handling."
+                        ),
+                        error_code=None,
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_LLM_RETRY_BUDGET_POLICY,
+                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_LLM_RETRY_BUDGET_POLICY,
+            passed=True,
+            detail="No unsafe web-authored sequential multi-query LLM retry budget",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
+    # llm_base_url_policy (#10) — web-authored OpenRouter LLM nodes may not
+    # override base_url. The api_key resolves server-side (possibly a server-
+    # scoped secret the author cannot read), so a custom base_url would direct
+    # the server's bearer to an author-chosen destination — a credential-egress
+    # / SSRF vector. The plugin config-validator tolerates HTTP loopback for the
+    # CLI dev examples; this web-execution gate is the boundary that makes the
+    # single-machine threat model not leak into the hosted path. Mirrors the
+    # managed_identity / web_scrape network policies.
+    for node in state.nodes:
+        if node.node_type != "transform":
+            continue
+        llm_base_url_policy_error = web_llm_base_url_policy_error(node.plugin, node.options)
+        if llm_base_url_policy_error is not None:
+            checks.append(
+                ValidationCheck(
+                    name=_CHECK_LLM_BASE_URL_POLICY,
+                    passed=False,
+                    detail=f"Transform '{node.id}' overrides OpenRouter base_url in a web-authored pipeline",
+                    affected_nodes=(node.id,),
+                    outcome_code=None,
+                )
+            )
+            _append_skipped_checks(checks, _CHECK_LLM_BASE_URL_POLICY)
+            return ValidationResult(
+                is_valid=False,
+                checks=checks,
+                errors=[
+                    ValidationError(
+                        component_id=node.id,
+                        component_type="transform",
+                        message=llm_base_url_policy_error,
+                        suggestion="Remove the base_url option to use the canonical OpenRouter endpoint.",
+                        error_code="llm_base_url_not_allowed",
+                    ),
+                ],
+                readiness=_blocked_readiness(
+                    code=_CHECK_LLM_BASE_URL_POLICY,
+                    detail=f"transform {node.id} overrides OpenRouter base_url in a web-authored pipeline",
+                    component_id=node.id,
+                    component_type="transform",
+                ),
+                semantic_contracts=serialize_semantic_contracts(semantic_contracts),
+            )
+    checks.append(
+        ValidationCheck(
+            name=_CHECK_LLM_BASE_URL_POLICY,
+            passed=True,
+            detail="No web-authored OpenRouter base_url override",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+    )
+
     # Step 3: Settings loading
     #
     # Always uses load_settings_from_yaml_string() — the same loader the
@@ -1417,6 +1584,23 @@ def validate_pipeline(
                 env_ref_names=env_ref_names,
             )
             settings_yaml = yaml.dump(resolved_dict, default_flow_style=False)
+        elif secret_service is None:
+            # No-resolver path (YAML-export preflight withholds the resolver so
+            # resolved secret values can never reach plugin error prose). A wired
+            # {secret_ref: NAME} marker is valid wiring, but plugin config models
+            # type credential fields as ``str`` (e.g. OpenRouter ``api_key: str``)
+            # — an unsubstituted marker dict fails instantiation with "Input
+            # should be a valid string" and false-rejects an exportable pipeline.
+            # Substitute a benign placeholder so structural validation proceeds.
+            # The export YAML is generated separately from the original state
+            # (generate_public_yaml), so the real marker is preserved on the wire
+            # — the placeholder lives only in this loader-local copy.
+            config_dict = yaml.safe_load(pipeline_yaml)
+            if isinstance(config_dict, dict):
+                settings_yaml = yaml.dump(
+                    redact_secret_refs_for_validation(config_dict),
+                    default_flow_style=False,
+                )
 
         # Web-authored pipeline YAML must never expand host ${VAR} placeholders
         # (parity with the execution path). Known secret inventory names are
@@ -1451,7 +1635,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_SETTINGS))
+        _append_skipped_checks(checks, _CHECK_SETTINGS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1539,7 +1723,7 @@ def validate_pipeline(
                     error_code=None,
                 )
             )
-        checks.extend(_skipped_checks(_CHECK_VALUE_SOURCE_COMPLIANCE))
+        _append_skipped_checks(checks, _CHECK_VALUE_SOURCE_COMPLIANCE)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1579,7 +1763,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_PLUGINS))
+        _append_skipped_checks(checks, _CHECK_PLUGINS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1630,7 +1814,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_PLUGINS))
+        _append_skipped_checks(checks, _CHECK_PLUGINS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1678,7 +1862,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_GRAPH))
+        _append_skipped_checks(checks, _CHECK_GRAPH)
         return ValidationResult(
             is_valid=False,
             checks=checks,
@@ -1745,7 +1929,7 @@ def validate_pipeline(
                 error_code=None,
             )
         )
-        checks.extend(_skipped_checks(_CHECK_ROUTE_TARGETS))
+        _append_skipped_checks(checks, _CHECK_ROUTE_TARGETS)
         return ValidationResult(
             is_valid=False,
             checks=checks,

@@ -197,8 +197,11 @@ Use the same release gates for non-cloud and Azure deployments:
    - `mypy src/`
    - `ruff check src/`
    - `python -m scripts.check_contracts`
-   - `python scripts/cicd/enforce_tier_model.py check --root src/elspeth --allowlist config/cicd/enforce_tier_model`
-   - `python scripts/cicd/enforce_freeze_guards.py check --root src/elspeth --allowlist config/cicd/enforce_freeze_guards`
+   - `elspeth-lints check --rules trust_tier.tier_model --root src/elspeth --allowlist-dir config/cicd/enforce_tier_model`
+   - `elspeth-lints check --rules immutability.freeze_guards,immutability.frozen_annotations --root src/elspeth`
+   Run the trust-tier gate from a CI or operator shell that has
+   `ELSPETH_JUDGE_METADATA_HMAC_KEY`; the packaged linter fails closed without
+   the key unless CI explicitly selects the fork-PR shape-only mode.
    The playbooks below do not run these gates; they assume the commit named in
    `elspeth_repo_version` has already passed them. The preflight role
    *does* machine-verify that the named SHA passed CI when
@@ -472,6 +475,7 @@ elspeth_server_secret_allowlist:
   - OPENAI_API_KEY
   - ANTHROPIC_API_KEY
   - AZURE_API_KEY
+  - AZURE_CONTENT_SAFETY_KEY
 
 # ---- Payload-store retention -----------------------------------------
 # Mirrors core/config.py:PayloadStoreSettings.retention_days. Surfaced

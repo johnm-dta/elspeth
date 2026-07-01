@@ -4,7 +4,227 @@ All notable changes to ELSPETH are documented here.
 
 ---
 
-## [0.6.0] - 2026-06-20 (cross-process multi-worker run coordination)
+## 0.7.0 - 2026-06-28 (LLM-primary guided pipeline creation)
+
+Guided pipeline creation becomes LLM-primary. The guided composer is
+reworked so each stage of a pipeline — source, then sink, then transforms,
+then the final wiring — is driven by a language model through the
+`/guided/chat` endpoint, which applies the model's proposed change to the
+in-progress pipeline in place rather than asking the operator to author
+plugin options by hand. A revise mode reopens a committed stage and amends
+it against its current state, and the flow terminates at a new wiring stage
+whose completion is gated by an advisor sign-off. The design is recorded in
+`docs/superpowers/specs/2026-06-25-llm-primary-guided-creation-design.md`.
+
+The web session database resets on upgrade and the Landscape audit database
+does not: `SESSION_SCHEMA_EPOCH` advances to 24 (it was 22 at the 0.6.0
+release) while `SQLITE_SCHEMA_EPOCH` stays 21, so per the delete-the-DB
+migration policy this is a single-DB, session-only cutover. The untagged
+0.6.1 maintenance line is folded into this release rather than tagged
+separately (the same precedent as 0.5.4 into 0.6.0).
+
+### Added
+
+#### LLM-primary staged guided pipeline creation
+
+- **Each guided stage is built by a language model through `/guided/chat`**
+  — the guided composer drives source, sink, transform, and wiring as
+  ordered stages; at each stage the model interprets the operator's chat and
+  applies the resulting change to the in-progress pipeline in place, instead
+  of the operator hand-authoring plugin options. The source, sink, and
+  transform drivers accept the current node so a committed stage can be
+  revised, and a revise-mode addendum carries the prior stage state into the
+  model's context (`revise_context`). The free-text sink driver auto-drops
+  its wrapper, and a source driver routes a URL-row source to the web-scrape
+  recipe.
+- **`WorkflowProfile` value type** — a new closed-enum profile is threaded
+  through guided-session bootstrap and persisted on `GuidedSession`,
+  distinguishing a tutorial walk from an ordinary guided session. It is
+  surfaced on every `GuidedSessionResponse` (via a `WorkflowProfileResponse`
+  field), mirrored onto the TypeScript `GuidedSession`, seeded by a new
+  idempotent `POST /guided/start` entry endpoint, and stripped on fork so a
+  tutorial profile cannot leak into a forked session.
+  `GUIDED_SESSION_SCHEMA_VERSION` advances 5→6.
+- **`STEP_4_WIRE` wiring stage with a confirm-wiring contract** — a terminal
+  wiring stage is added to the guided order; it rebuilds the pipeline edges
+  from the model's connection labels, renders them with a contract overlay,
+  and is gated by an explicit `CONFIRM_WIRING` payload with pinned
+  required/nested keys. An invalid confirm re-emits the wire turn rather than
+  completing, and a stale terminal stamp is cleared on a wire redirect.
+- **Advisor sign-off authority at the wire stage** — a persisted-counter-
+  bound wire sign-off runner gates the `STEP_4_WIRE` terminal on an advisor
+  checkpoint (`run_signoff_checkpoint`), with a sign-off verdict classifier,
+  differentiated sign-off audit names, fail-closed handling of blocked
+  findings, and a whole-pipeline `REQUEST_ADVISOR` escape that re-emits —
+  never auto-completes — the wire turn. The advisor pass counter is
+  persisted on the guided session, and an optimistic-concurrency
+  `step_index` 409 guards a guided respond against a lost update.
+- **Pending-interpretation gate in the guided flow** — guided sessions
+  project pending interpretation cards (invented source, pipeline decision,
+  …) at the persist seam and block advancement until they are resolved,
+  extending the interpretation-surfacing model into the guided flow with a
+  backend run-tier backstop.
+
+#### Always-on prompt-shield review
+
+- **Prompt-shield review is now always-on** — the previously advisory
+  (RC5.2-demoted) prompt-shield review is made always-on, with its State A
+  decoupled and a three-state (A/B/C) shield-state helper plus an
+  availability resolver; the B-vs-C shield refinement is wired into the
+  confirm-wiring route, where the repair turn stages the fail-safe shield
+  C-draft.
+
+#### Passive first-run tutorial — synthetic web-scrape recut
+
+- **Canonical first-run scenario retargeted to web-scrape extraction** — the
+  hello-world tutorial now teaches source→transform→sink by having a model
+  rate a set of synthetic government-style pages, over a deterministic
+  synthetic-sample URL backed by an SSRF resolver; the staging rubric harness
+  is retargeted to match, with assumption and shield-override teaching-moment
+  copy. The tutorial runs as a staged guided walk through
+  `TutorialGuidedShell` (a welcome bookend wrapping an embedded guided
+  `ChatPanel`) with prepopulated, locked stage prompts, and never falls
+  through to the freeform composer body.
+- **Tutorial wired to public GitHub Pages** — the scrape pages are served
+  from public GitHub Pages rather than synthetic in-app pages, and the
+  tutorial uses the DTA abuse contact rather than a personal dev domain.
+- **`allowed_hosts` SSRF slot on the web-scrape recipe** — an optional
+  `allowed_hosts` slot is added to the web-scrape recipe as an SSRF
+  enforcement boundary (not a slot-inaccessibility control), with the
+  tutorial-sample GET surface injecting the allowed host at the accept seam
+  and a blank `tutorial_sample_base_url` rejected at config time.
+- **Five-input tutorial cache key** — the tutorial cache key now folds the
+  staged guided skill hash and the recipe-catalog content hash
+  (`guided_staged_skill_hash`, `recipe_catalog_content_hash`) alongside its
+  existing inputs, so a change to either the staged skill or the recipe
+  catalog invalidates a stale tutorial build.
+- Design: `docs/superpowers/specs/2026-06-22-tutorial-staged-recut-design.md`
+  and `docs/superpowers/specs/2026-06-25-tutorial-synthetic-scrape-page-design.md`.
+
+#### ELSPETH design system and marketing website
+
+- **Typed React primitive library (`components/ui`)** — a typed primitive
+  library (Button, Card, Input, Textarea, Tabs, AlertBanner, StatusBadge,
+  TypeBadge, WordMark) lands under
+  `src/elspeth/web/frontend/src/components/ui/`, font weights and wordmark
+  tracking are tokenized, and `LoginPage` is migrated onto the primitives as
+  an exemplar. Design:
+  `docs/superpowers/specs/2026-06-27-elspeth-design-system-implementation-design.md`.
+- **Standalone marketing website (`website/`)** — a static, design-token-
+  based marketing site is added at `website/`, separate from the application
+  frontend, and hardened for public release: the example pipeline YAML uses
+  the real secret-reference syntax (`${VAR}` for the CLI, `{secret_ref: NAME}`
+  for the Composer) so a published example runs as written; the data-source
+  list, the two authoring modes, and the Web Composer on-ramp (`elspeth web`)
+  are reconciled against the source tree; WCAG 2.1 AA contrast and Level-A
+  semantics (skip link, `<main>` landmark, heading order, native data tables)
+  are added; the icon set is vendored locally in place of a third-party CDN;
+  and the colour theme follows the operating-system preference and persists
+  across pages.
+
+### Changed
+
+- **Composer routes decomposed into an area package** — the monolithic
+  `routes/composer.py` is decomposed into a `routes/composer/` area package,
+  splitting the route module without changing its HTTP surface.
+
+### Fixed
+
+Assorted engine, web, and frontend correctness fixes land alongside the
+headline work.
+
+- **Run/session durability and liveness** — the run-event replay cursor is
+  made durable; follower liveness is forced per claim and unregistered
+  claimants are fenced; session quota writers are serialized; a dependency
+  settings-hash snapshot is taken before a run; empty assistant audit rows
+  are rejected; and coalesce-branch sink collisions are rejected.
+- **Composer and guided robustness** — dynamic-source-from-chat resolves to a
+  committable inline source; blob source names are validated; guided audit
+  payload refs are persisted; the guided source-chat resolver is guarded;
+  tutorial runs are rate-limited; stale guided default entries no longer
+  break the frontend; and a completed guided wizard no longer re-fires on
+  remount.
+- **Provider and MCP boundary hygiene** — OpenRouter preflight response
+  bodies are validated and a stale catalog is cleared on a failed refresh;
+  MCP enum tool arguments are validated, malformed mutation validation is
+  deferred, and runtime preflight summary operations are counted; malformed
+  `Content-Length` is rejected; and non-standard HTTP status codes are
+  audited.
+- **Catalog, config, and allowlist** — aliased plugin knobs surface under
+  their user-facing alias; env schema option overrides are normalized; and a
+  dangling allowlist `allow_hits` entry degrades to skip-and-warn instead of
+  crashing the run.
+
+### Security
+
+A large trust-boundary hardening body lands in this release. The fixes keep
+tool arguments, provider diagnostics, and audit anchors from leaking caller
+data or being forged, and tighten transport and endpoint authentication.
+
+- **Declarative redaction of composer tool arguments and responses** — source
+  option values, recipe slots, set-pipeline options, blob-discovery extra
+  arguments, advisor unknown arguments, and unexpected mutation tool
+  arguments are redacted before they reach an audit record or a model. CSV
+  header-mismatch evidence is redacted; advisor and OpenRouter provider /
+  diagnostic errors are redacted before LLM evaluation; exception redaction
+  is preserved through the operation audit; MCP preflight crash errors and
+  Azure managed-identity auth failures are sanitized; and embedded PEM key
+  blocks are redacted.
+- **Forged audit anchors blocked** — forged or operator-anchored LLM audit
+  anchors are rejected, so a model cannot inject a counterfeit audit
+  reference; the HTML fragment separator is escaped and file-output audit
+  URIs are encoded.
+- **Transport and endpoint authentication tightened** — websocket
+  authentication moves from a JWT-in-query parameter to tickets; HTTPS is
+  required for bearer and OpenRouter endpoints; the Prometheus metrics
+  endpoint requires authentication; managed-identity RAG configs are blocked;
+  blob mutations are gated behind approval; recovery execution is bound to
+  reviewed state; and the secret inventory is made metadata-only.
+- **CI judge-tool fail-closed gates and signature verification
+  (`elspeth_lints`)** — agent judge tools fail closed; judge-tool reads are
+  gated through the scrubber and blocked on signing paths; rejudge and new
+  judge-metadata signatures are verified in the audit gates; justify prompts
+  are bound to the scan snapshot; stale v1 scope migrations are refused; and
+  unverified fork-allowlist signatures are rejected.
+- **Bounded budgets** — sequential LLM retry budgets and MCP Landscape query
+  limits are bounded so a runaway model or query cannot exhaust the host.
+
+### Operational
+
+- **The web session database resets on upgrade; the audit database does
+  not.** `SESSION_SCHEMA_EPOCH` advances to 24 (it was 22 at the 0.6.0
+  release), in lockstep with `GUIDED_SESSION_SCHEMA_VERSION` 5→6; the new
+  guided fields live in the `composition_states.composer_meta` JSON blob, so
+  there is no new SQL column. The Landscape audit DB schema is unchanged —
+  `SQLITE_SCHEMA_EPOCH` stays 21 — so this is a single-DB, session-only
+  cutover. 0.7.0 boot fails closed on a pre-0.7.0 session DB with
+  `SessionSchemaError: Session DB schema version 22 does not match
+  SESSION_SCHEMA_EPOCH=24. Pre-release ELSPETH does not migrate session
+  databases. Delete the session DB file and restart.` Before first start on
+  0.7.0, stop `elspeth-web.service`, archive and remove `data/sessions.db`
+  (and its `-wal`/`-shm` sidecars), and restart; the bootstrap recreates the
+  schema on first start. `data/auth.db` is a SEPARATE file — local user
+  accounts survive — and the Landscape audit / run history survives. Do NOT
+  run the two-DB (Landscape) reset: there is no matching audit-schema change
+  for 0.7.0. Procedure: the 0.7.0 single-DB cutover section of
+  `docs/runbooks/staging-session-db-recreation.md`, which also carries
+  hardened secret-archive steps — `PRAGMA wal_checkpoint(TRUNCATE)` before
+  copying the database, destroy or secure the archive at the end of the
+  deploy window, and rotate `settings.secret_key` so an archived copy of the
+  encrypted `user_secrets` rows is inert under the new key.
+- **Ship a frontend dist rebuilt from this release's source.** The web UI is
+  served from `src/elspeth/web/frontend/dist/`, which is gitignored and built
+  out of band (`cd src/elspeth/web/frontend && npm run build`); it is produced
+  by neither CI nor the Docker image. The 0.7.0 frontend carries the new
+  `components/ui` primitive library, the `LoginPage` migration onto it, the
+  tokenized font weights, and the guided wiring-stage / tutorial-shell
+  changes, so producing the 0.7.0 web deploy MUST rebuild the dist from
+  `release/0.7.0` HEAD rather than reuse a prebuilt bundle; a stale bundle
+  will not render the new login, design-token, or guided wire-stage surfaces.
+
+---
+
+## 0.6.0 - 2026-06-20 (cross-process multi-worker run coordination)
 
 The single-worker-to-multi-worker transition. Multiple cooperating
 processes on one host may now operate against a single run backed by one
@@ -315,7 +535,7 @@ client as a streaming byte-limit (elspeth-a6f246d02a).
 
 ---
 
-## [0.5.4] - 2026-06-20 (maintenance fixes folded into 0.6.0)
+## 0.5.4 - 2026-06-20 (maintenance fixes folded into 0.6.0)
 
 Maintenance line opened on top of RC-5.3, carrying correctness fixes that
 post-date the 0.5.3 cut. These fixes ship as part of the 0.6.0 release
@@ -331,7 +551,7 @@ rather than as a standalone 0.5.4 tag.
 
 ---
 
-## [0.5.3] - 2026-06-08 (RC-5.3 — Correctness, Audit Integrity, and Release Gating)
+## 0.5.3 - 2026-06-08 (RC-5.3 — Correctness, Audit Integrity, and Release Gating)
 
 RC-5.3 is a correctness and hardening release on top of the RC-5.2 composer
 train. It carries one new composer capability (operator-set sampling), tightens
@@ -421,136 +641,43 @@ audit-integrity paths.
 
 ### Fixed
 
-#### Audit integrity and determinism
-
-- **Artifact streaming verifies bytes against the audit hash** before streaming,
-  so a tampered or truncated artifact cannot be served as audited evidence.
-- **Composer MCP delete preserves audit history** rather than dropping the
-  delete from the trail.
-- **`resolved_prompt_template_hash` is preserved** across the read and export
-  surfaces; the Landscape prompt-hash anchor is validated *before* insert so no
-  bad row is ever committed.
-- **SSRF-safe request success is recorded outside the network try** to avoid a
-  duplicate audit row; empty-corpus Chroma retrievals are now recorded in the
-  audit trail.
-- **Replayer sequence advances only after a concrete result**, and failed-run
-  accounting is hydrated when the data is available.
-
-#### Output contracts and sink/source boundaries
-
-- **Sparse-field output contracts** fixed for Azure Blob, Dataverse, and
-  `JSONSource`; the narrative-summary transform's output contract is corrected.
-- **Custom CSV headers are enforced completely** for the CSV and Azure Blob
-  sinks; Azure Blob CSV custom headers are honoured.
-- **Sink write safety** — the database sink enforces target-table compatibility
-  before appending, the Chroma sink preflights a full batch for duplicates
-  before any add (error mode), the JSON sink rolls back its array buffer on a
-  failed write, and Chroma persistent sink paths are guarded.
-- **Dataverse rejects OData-unsafe lookup bind values** at the sink boundary.
-
-#### Trust-tier and web error semantics
-
-- **Web session Tier-1 error semantics** now raise typed, upstream-interpretable
-  errors instead of crashing or coercing.
-- **Composer routes surface the provider detail** on a bad request, and the boot
-  probe bounds its transient handling.
-- **Redaction masks both the path and file blob storage-path carriers**, closing
-  a storage-path leak.
-
-#### Web composer recovery and stale-response guards
-
-- Guarded stale responses across session selection, navigation, blob loads,
-  execution-start, YAML refetch, and run-outputs artifact state; guided turn
-  widgets remount on payload changes; blob and secret stores clear on logout;
-  loop closure during progress scheduling is treated as shutdown; shared-inspect
-  401 auth is preserved.
-
-#### Sessions, Landscape, and CI/CD
-
-- **Session index/constraint validation** checks column *sets*, not just names.
-- **Landscape read-only mode** keeps live WAL audit DBs visible.
-- **CI/CD gate repairs** — restored the adapter-budget gate, repaired the
-  cicd-judge gates and cleared stale judge allowlist blockers, refreshed judge
-  signatures for RC5.3 allowlist drift, narrowed `fingerprint_params` to a
-  scalar value type to green `check_contracts`, fixed staging web-unit safety
-  flags, and aligned release-PDF distribution labels.
-
-#### Web composer and execution orchestrator
-
-- **Fail-closed pre-run validation gate in `execute()`** (Fix 1 of composer
-  reliability) — a composed pipeline that fails validation can no longer launch
-  a run.
-- **Preflight-repair gate** (Fix 2) and **advisor-blocked orphan surfacing** —
-  orphaned `{{interpretation:<term>}}` placeholders are surfaced at authoring
-  time instead of failing silently at run time.
-- **Guard against degenerate LLM-node output** in the composer.
-- **Advisor end gate now reaches LLM-prompt-template pipelines** — auto-
-  surfaceable prompt-template state is filtered out of the pre-check so the end
-  gate still engages; checkpoint errors now emit a diagnostic and the budget
-  docstring is honest about cost.
-- **Tutorial-reliability e2e harness** outcome classifier de-conflated so a
-  fired-normalization is no longer misread as a dimension-B fault.
-- **Boot-probe and authoring-guard robustness** — the composer boot probe no
-  longer requests `max_tokens` below the provider floor, and the authoring guard
-  skips a null nested `provider_config` path instead of dereferencing it.
-
-#### Trust-tier and audit integrity (engine / core / plugins)
-
-- **Typed `AuditIntegrityError` for malformed checkpoint shapes** — aggregation
-  and coalesce checkpoint restore now raise contract-grade errors below the
-  Tier-1 boundary instead of accepting malformed top-level shapes.
-- **Teardown no longer masks the primary failure** — `finally`-block teardown in
-  the engine/CLI, and `safe_flush_telemetry`, re-raise Tier-1 errors and stop
-  swallowing the run's primary exception.
-- **Retrieval boundaries shape-check results** — Azure Search and Chroma parse
-  paths convert malformed payloads (`AttributeError`, strict-`zip`
-  `ValueError`, `dict(metadata)` `TypeError`) into typed `RetrievalError`s so the
-  audit trail is preserved.
-- **Telemetry accounting integrity** — `ChromaSink.on_complete` telemetry is
-  best-effort (completion no longer fails after successful writes),
-  `AuditedLLMClient` emits ERROR telemetry on every malformed-response branch
-  (no more undercounting), and `chroma_sink` reads `TIER_1_ERRORS` live rather
-  than from an import snapshot.
-- **Replayable Chroma mixed-batch audit hash** and an **empty-safe `error_hash`
-  helper** so audit attributability survives empty inputs.
-- **Config-time validation hardening** — invalid `_plugin_component_type` is
-  rejected at class creation; runtime config dataclasses validate their own
-  bool/enum/value-type invariants instead of trusting Settings factories;
-  `RuntimeTelemetryConfig` validates `exporter_configs` element types;
-  provably-numeric gate conditions, duplicate `collection_probes`, and invalid
-  env-var names in `SecretsConfig` are rejected at config validation time.
-- **Sparse-row `field_mapping`** for the JSON, Dataverse, and Azure Blob sources
-  no longer quarantines or mis-maps rows with absent fields.
-- **Dataverse error audits** preserve request context on pagination-validation
-  errors and include fingerprinted `request_headers`.
-
-#### CI/CD enforcement scanners (`elspeth_lints`)
-
-- **Allowlist expiry parsers fail closed** on malformed dates rather than warning
-  and passing.
-- **`gve_attribution`** catches aliased `GraphValidationError` raises, treats
-  `component_id=None` as unattributed, and fails on `SyntaxError` in scanned
-  files.
-- **`frozen_annotations`** catches `typing.List/Dict/Set` and bare
-  `list/dict/set` mutable annotations.
-- **`freeze_guards`** catches qualified guards, nested mutables in
-  `tuple`/`frozenset`, and partial `freeze_fields` coverage.
-- **`component_type`** catches `DataPluginConfig` subclasses imported through
-  aliases and rejects arbitrary-string labels.
-- **`contract_manifest`** enforces real registration provenance (rejecting
-  shadowed `register_declaration_contract` / `implements_dispatch_site`), catches
-  duplicate contract-name registrations, and honours keyword-form dispatch
-  markers.
-- **`tier_1_decoration`** requires a non-empty reason and enforces TDE2
-  repo-wide; **`audit_evidence_nominal`** catches annotated `to_audit_dict` and
-  spoofed base names; **`tier_model` L1** catches relative / package-root upward
-  imports and nested `TYPE_CHECKING`; **composer `catch_order`** catches aliased
-  handlers and broad `Exception` shadowing.
-- **CI lanes fail closed** — the integration lane fails on real test failures,
-  the codex-audit runners fail on stale sidecars and partial scans, and the
-  build-push smoke test exercises the registry that was actually pushed.
-- **Lint-rule fixtures are excluded** from the ruff and mypy pre-commit hooks so
-  intentionally-broken fixtures stop producing spurious findings.
+- **Audit integrity and determinism** — artifact streaming now verifies bytes
+  against the audit hash before serving, composer MCP delete preserves audit
+  history, `resolved_prompt_template_hash` is preserved across read/export and
+  validated before insert, SSRF-safe success and empty-corpus Chroma retrievals
+  are each recorded once, and the replayer advances only on a concrete result.
+  Per-item detail in git history.
+- **Output contracts and sink/source boundaries** — sparse-field output
+  contracts (Azure Blob, Dataverse, `JSONSource`, narrative-summary), complete
+  custom-CSV-header enforcement, database/Chroma/JSON sink write-safety
+  preflights, and Dataverse OData-unsafe-lookup rejection were corrected at the
+  boundary.
+- **Trust-tier and web error semantics** — web-session Tier-1 paths raise typed,
+  upstream-interpretable errors, composer routes surface provider detail, and
+  redaction masks the file-blob storage-path carrier (storage-path leak closed).
+- **Web composer recovery and stale-response guards** — stale responses are
+  guarded across session selection, navigation, blob loads, execution-start,
+  YAML refetch, and run-outputs state; stores clear on logout; loop closure
+  during progress scheduling is treated as shutdown.
+- **Sessions, Landscape, and CI/CD gates** — session index/constraint validation
+  checks column sets, Landscape read-only mode keeps live WAL audit DBs visible,
+  and the adapter-budget / cicd-judge gates and RC5.3 allowlist drift were
+  repaired.
+- **Composer reliability and execution orchestrator** — a fail-closed pre-run
+  validation gate, a preflight-repair gate, advisor-blocked orphan-placeholder
+  surfacing, advisor end-gate reach into prompt-template pipelines, and
+  boot-probe / authoring-guard robustness closed the composer-reliability fixes.
+- **Trust-tier and audit-integrity burn-down (engine / core / plugins)** — typed
+  `AuditIntegrityError` for malformed checkpoints, teardown that no longer masks
+  the primary failure, shape-checked retrieval boundaries, telemetry-accounting
+  integrity, replay-safe Chroma audit hashing, config-time validation hardening,
+  and sparse-row `field_mapping` correctness. Per-item detail in git history.
+- **CI/CD enforcement-scanner burn-down (`elspeth_lints`)** — the allowlist-
+  expiry, attribution (`gve_attribution`), frozen-annotation, freeze-guard,
+  component-type, contract-manifest, `tier_1_decoration` / `audit_evidence_nominal`
+  / `tier_model`, and composer `catch_order` rules were all made fail-closed and
+  broadened, and the CI lanes themselves now fail closed. Per-rule detail in git
+  history.
 
 ### Security
 
@@ -560,7 +687,7 @@ audit-integrity paths.
   ≤3.3.3 → 3.4.8 (four XSS sanitizer bypasses), `mermaid` 11.14 → 11.15 (Gantt
   DoS and `classDef` CSS/HTML injection), and `uuid` <11.1.1 (buffer-bounds,
   transitive). `npm audit` reports zero remaining advisories; the frontend
-  suite (1317 cases) and build remain green.
+  suite and build remain green.
 - **SSRF Host header brackets literal IPv6 authorities** instead of emitting an
   ambiguous, splittable host.
 - **Secret-echo closed** — the commencement gate no longer echoes an environment
@@ -596,7 +723,7 @@ audit-integrity paths.
 
 ---
 
-## [0.5.2] - 2026-05-19 (RC-5.2 — Guided Composer, Durable Progress, and Recovery UX)
+## 0.5.2 - 2026-05-19 (RC-5.2 — Guided Composer, Durable Progress, and Recovery UX)
 
 RC-5.2 is the large Web Composer release train that folds the guided-mode
 wizard, composer progress persistence, manifest-keyed redaction, per-step chat,
@@ -624,261 +751,141 @@ now share one evidence story.
   `ComposerToolInvocation` audit channel so an auditor can reconstruct
   both what the model was asked and what tools it then dispatched.
 
-#### Composer Progress Persistence — Phase 1A (schema)
+#### Composer Progress Persistence (durable, recoverable authoring)
 
-- **`chat_messages` audit columns** — `tool_call_id`, `sequence_no`,
-  `writer_principal`, `parent_assistant_id` are now required by the
-  schema, with biconditional CHECK constraints
-  (`ck_chat_messages_tool_call_id_role`, `ck_chat_messages_parent_role`)
-  pinning the OpenAI-shaped tool-call linkage. `role` now permits the
-  `audit` value alongside the prior four for breadcrumb rows that have
-  no parent assistant.
-- **`composition_states.provenance` column** — every composition-state
-  write declares one of `tool_call`, `convergence_persist`,
-  `plugin_crash_persist`, `preflight_persist`, `session_seed`,
-  `session_fork`. The enum is enforced by
-  `ck_composition_states_provenance`.
-- **`run_events` table** — new SQLAlchemy table for per-run event
-  records (`progress` / `error` / `completed` / `cancelled` / `failed`)
-  with `ck_run_events_type` CHECK.
-- **`audit_access_log` table** — scaffolded INERT for Phase 3+
-  read-side audit (`requesting_principal`, `request_path`,
-  `query_args`, `ip_address`, `writer_principal`).
-- **Per-session indices** — `ix_audit_access_log_session_timestamp`
-  and new partial uniqueness on `chat_messages(session_id, sequence_no)`.
-
-#### Composer Progress Persistence — Phase 1B (single-transaction primitive)
-
-- **`SessionServiceImpl.persist_compose_turn` / `persist_compose_turn_async`** —
-  new single-transaction primitive that writes assistant message,
-  redacted tool rows, and composition state atomically. Sync primitive
-  for in-thread tests; async wrapper for production.
-  See `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`.
-- **`_persist_payload.py` DTOs** — `StatePayload`, `_ToolOutcome`,
-  `RedactedToolRow`, `AuditOutcome` formalize the turn payload shape.
-- **Advisory-lock primitive** — `contracts/advisory_locks.py` typed
-  helpers; Postgres `pg_advisory_xact_lock` for cross-session
-  serialization, SQLite per-session `RLock` for testcontainer parity.
-- **Sequence-number reservation** — `_reserve_sequence_range` allocates
-  a contiguous `sequence_no` block under the session write lock to
-  preserve per-session monotonicity under concurrent writers.
-
-#### Composer Progress Persistence — Phase 1C (Postgres portability lane)
-
-- **Testcontainer-backed integration tests** — a new `@pytest.mark.testcontainer`
-  lane spins up an ephemeral Postgres container per test. Exercises
-  `pg_advisory_xact_lock` semantics, commit-wins concurrency, and
-  Postgres-specific blob `ready_hash` partial uniqueness that SQLite
-  cannot model. `psycopg2-binary` and `testcontainers[postgres]` are
-  shipped as opt-in deps.
-
-#### Composer Progress Persistence — Phase 2 (redaction walker + MANIFEST)
-
-- **Redaction walker** — `web/composer/redaction.py` grew from a
-  42-line stub to a 2,752-line walker. Recursively descends LLM-supplied
-  argument and response payloads, applies `Sensitive[T]` typed markers
-  with per-field summarizers, and produces a redacted payload safe for
-  Tier-1 audit storage and Tier-3 LLM echo.
-- **38-entry MANIFEST** — every composer tool now has an explicit
-  redaction policy: 10 type-driven entries with Pydantic argument
-  models (`CreateBlobArgumentsModel`, `UpdateBlobArgumentsModel`,
-  `SetSourceArgumentsModel`, `SetSourceFromBlobArgumentsModel`,
-  `SetPipelineArgumentsModel`, `ApplyPipelineRecipeArgumentsModel`,
-  `PatchSourceOptionsArgumentsModel`, `PatchNodeOptionsArgumentsModel`,
-  `PatchOutputOptionsArgumentsModel`) plus 28 declarative entries for
-  discovery and inspection tools.
-- **Pydantic-first ARG_ERROR routing** — promoted tools now validate
-  arguments via their argument model first; `pydantic.ValidationError`
-  is re-raised as `ToolArgumentError` so the compose loop's ARG_ERROR
-  channel receives the right exception class. LLM-facing error message
-  names the argument-bundle + model name only, never per-field detail
-  (rev-2 BLOCKER_A leak discipline). Structured Pydantic detail
-  survives on `__cause__` for auditors via
-  `canonicalize_pydantic_cause`.
-- **Adequacy guard** — `test_adequacy_guard.py` pins manifest-registry
-  parity (every registered tool must have a MANIFEST entry) and a
-  byte-identical redaction snapshot (`redaction_policy_snapshot.json`).
-  Any MANIFEST change must regenerate the snapshot via
-  `scripts/cicd/bootstrap_redaction_snapshot.py`.
-- **F1–F6 hardening** — completeness Hypothesis property tests,
-  walker-guard parity, summarizer contract Hypothesis, label-gate
-  CI workflow, drift guards for Hypothesis strategy overrides.
-
-#### Composer Progress Persistence — Phase 3 (compose loop persistence)
-
-- **Atomic compose-loop tool turns** — `_compose_loop` now persists assistant
-  messages, tool-call breadcrumbs, redacted tool payloads, and composition-state
-  snapshots through `persist_compose_turn`, preserving the audit-first contract
-  even when tools fail, cancellation lands mid-turn, or a plugin crash triggers
-  recovery handling.
-- **Per-turn tool-call cap** — composer turns enforce a bounded tool-call count
-  and emit a `tool_call_cap_exceeded` reason code instead of allowing unbounded
-  tool recursion.
-- **Audit-grade transcript access** — session message reads can opt into
-  `include_tool_rows=true` and record access through `audit_access_log`, giving
-  auditors a path to reconstruct tool rows without exposing them in normal chat
-  history.
-- **Compose-loop invariant coverage** — property and integration tests now pin
-  audit counter conservation, manifest redaction, cancellation commit windows,
-  failed-turn tool-response counts, no-op behaviour, and the compose-loop
-  persistence harness.
-
-#### Composer Progress Persistence — Phase 4 (frontend recovery)
-
-- **Recovery panel** — the frontend now detects recoverable composer failures
-  and opens a dedicated recovery surface with the assistant transcript, redacted
-  tool rows, and before/after state diff for operator inspection.
-- **Recovery transcript and diff rendering** — recovery payloads are parsed,
-  stored in the session store, fetched with `include_tool_rows=true`, and
-  rendered through focused `RecoveryTranscript`, `RecoveryDiff`, and
-  `RecoveryPanel` components.
-- **Frontend lint gate** — the frontend package now ships an ESLint config and
-  `npm run lint` gate so recovery/guided-mode UI changes have a static quality
-  check alongside tests, typecheck, and build.
+- **Schema (Phase 1A)** — new audit columns on `chat_messages` (tool-call
+  linkage, `sequence_no`, `writer_principal`) with biconditional CHECK
+  constraints, a `composition_states.provenance` enum, and new `run_events` and
+  (INERT, read-side) `audit_access_log` tables with per-session indices. Applied
+  by recreation, not Alembic — see *Operational* below.
+- **Single-transaction turn primitive** — `persist_compose_turn` /
+  `persist_compose_turn_async` writes the assistant message, redacted tool rows,
+  and composition state atomically, with advisory-lock serialization and
+  contiguous per-session `sequence_no` reservation under concurrent writers. A
+  testcontainer-backed Postgres lane exercises the cross-DB semantics SQLite
+  cannot model. See
+  `docs/superpowers/specs/2026-04-30-composer-progress-persistence-design.md`.
+- **Redaction walker + MANIFEST** — every composer tool now has an explicit
+  redaction policy (type-driven Pydantic argument models plus declarative
+  entries) so LLM-supplied argument and response payloads are made Tier-1-safe;
+  Pydantic validation errors route through the `ToolArgumentError` ARG_ERROR
+  channel without leaking per-field detail, and a manifest-parity adequacy guard
+  pins a byte-identical redaction snapshot. Per-entry detail in git history.
+- **Atomic compose-loop persistence** — `_compose_loop` persists assistant
+  messages, tool-call breadcrumbs, redacted payloads, and state snapshots through
+  `persist_compose_turn` even when tools fail, cancellation lands mid-turn, or a
+  plugin crash triggers recovery; a bounded per-turn tool-call cap emits
+  `tool_call_cap_exceeded`, and audit-grade transcript reads opt into
+  `include_tool_rows` through `audit_access_log`.
+- **Frontend recovery panel** — the frontend detects recoverable composer
+  failures and opens a dedicated recovery surface rendering the assistant
+  transcript, redacted tool rows, and a before/after state diff, plus an ESLint
+  `npm run lint` gate for the recovery / guided-mode UI.
 
 #### RC5.2 Hotfix Integration
 
-- **Auth and audit hardening** — local/Entra auth flows now audit token
-  issuance, auth failure classes, local login outcomes, refresh-provider
-  invariants, provider outages, and web-run attribution into Landscape while
-  redacting JWKS failure detail and suppressing token-response caching.
-- **Execution and validation hardening** — web execution now classifies
-  validation errors, sanitizes broad execution errors, persists resolved run
-  config, rejects misplaced secret refs, and preserves guided audit persistence
-  failures.
-- **Engine/plugin correctness fixes** — checkpoint resume parsing, empty
-  coalesce checkpoint state, pending batch row identities, JSON sink parent
-  creation, sink preflight collision timing, Web Scrape fail-closed boundaries,
-  LLM provider preflight, and shared LLM telemetry helpers were tightened.
-- **Frontend accessibility and theming fixes** — guided/catalog/run UI now has
-  improved contrast, forced-colors fallbacks, theme initialization and cross-tab
-  sync, screen-reader-safe status symbols, catalog retry controls, keyboard
-  shortcut support, and preserved plugin descriptions.
+- **Auth, audit, and execution hardening** — local/Entra auth flows now audit
+  token issuance, failure classes, login outcomes, and web-run attribution into
+  Landscape (redacting JWKS failure detail, suppressing token-response caching),
+  and web execution classifies validation errors, sanitizes broad execution
+  errors, persists resolved run config, and rejects misplaced secret refs.
+- **Engine/plugin and frontend fixes** — checkpoint resume/coalesce parsing,
+  pending batch row identity, JSON sink parent creation, sink preflight timing,
+  Web Scrape fail-closed boundaries, and LLM provider preflight were tightened,
+  alongside guided/catalog/run accessibility and theming fixes (contrast,
+  forced-colors, cross-tab theme sync, screen-reader-safe status). Per-item
+  detail in git history.
 
 #### Composer UX Redesign, Preferences, and Review Flow
 
-- **Composer preferences** — new user preferences schema, service, routes, and
-  frontend defaults let users choose their composer starting mode, with review
-  follow-up hardening for backend validation, frontend error surfacing, and
-  preference write-failure alerts.
-- **Chat as data entry** — short chat inputs can project into audited inline
-  blob sources with source provenance, hash evidence, MIME parsing, ambiguity
-  handling, fallback prompts, and audit-readiness panel support.
-- **LLM interpretation review** — ambiguous prompt-template decisions can now
-  pause for operator review, persist append-only interpretation events, support
-  opt-out, gate execution while unresolved reviews remain, and show guided and
-  freeform review widgets in the chat surface.
+- **Composer preferences** — a new preferences schema, service, and routes let
+  users choose their composer starting mode, with backend validation and
+  write-failure alerting.
+- **Chat as data entry** — short chat inputs can project into audited inline blob
+  sources with source provenance, hash evidence, MIME parsing, and ambiguity
+  handling.
+- **LLM interpretation review** — ambiguous prompt-template decisions can pause
+  for operator review, persist append-only interpretation events, gate execution
+  while unresolved, and surface guided/freeform review widgets in chat.
 - **Completion gestures and shareable reviews** — composer sessions gained
   completion events, HMAC-signed shareable review links, YAML-export audit
-  events, narrative result views, save-for-review dialogs, shared inspection
-  views, and reusable frontend primitives for completion flows.
-- **First-run tutorial and mode guidance** — the Phase 4 tutorial introduces
-  the composer through a hello-world path, persistent tutorial state, cache-skip
-  telemetry, and explicit guidance for switching between freeform and guided
-  authoring.
+  events, narrative result views, and shared-inspection views.
+- **First-run tutorial and mode guidance** — a hello-world tutorial introduces
+  the composer with persistent tutorial state, cache-skip telemetry, and explicit
+  freeform/guided switching guidance.
 - **Catalog reshape and audit-readiness UI** — plugin catalog cards, filters,
-  audit characteristics, inline chat-source entry, SideRail audit status, graph
-  and YAML modals, validation suggestions, and modal focus traps were rebuilt
-  around the new composer information architecture.
+  audit characteristics, inline chat-source entry, SideRail audit status, and
+  graph/YAML modals were rebuilt around the new composer information architecture.
 
 #### Engine, Transform, and Plugin Additions
 
 - **Batch-aware aggregation context** — transforms can receive
   `AggregationBatchContext`, enabling the new `report_assemble` transform with
-  end-to-end pipeline coverage, metadata-collision checks, and documentation.
+  metadata-collision checks.
 - **Composer knob schema lowering** — plugin option metadata now lowers into
   one-knob composer schemas, with discriminated plugin protocol support,
-  visible-when scope guards, recipe-slot adapters, golden catalog coverage, and
-  config-metadata enforcement.
-- **Determinism declaration enforcement** — plugin infrastructure now enforces
-  determinism declarations mechanically via `__init_subclass__`, with catalog
-  and boundary-classification follow-up coverage.
+  visible-when scope guards, and recipe-slot adapters.
+- **Determinism declaration enforcement** — plugin infrastructure enforces
+  determinism declarations mechanically via `__init_subclass__`.
 
 #### CI, Lints, and Release Documentation
 
-- **`elspeth-lints` static analyzer** — custom CI analyzers moved into the
-  `elspeth-lints` package with rule fixtures, parity harnesses, emitters, SARIF
-  output, ADR-023, rule-author documentation, and migrated tests for composer,
-  contract, audit-evidence, immutability, manifest, and trust-tier rules.
-- **CI/CD master-plan consolidation** — CI now gates RC branches, consolidates
-  static analysis, runs CodeQL, checks dependency/license state, gates
-  Playwright E2E as a required signal, and carries branch-protection runbooks
-  plus allowlist audit findings.
-- **Telemetry backfill trailer enforcement** — commit hooks and GitHub Actions
-  now enforce cohort-attribution trailers for commits touching telemetry
-  backfill surfaces.
-- **Release docs and docs cleanout** — RC-1/RC-2 changelog fragments,
-  superseded release snapshots, frozen architecture packs, generated reviews,
-  and completed handover corpora were moved to the dated
-  `docs-archive/2026-05-19-docs-cleanout/` archive with a manifest, while
-  current release, executive, progress, velocity, assurance, composer evidence,
-  and audit documents stay linked from `docs/README.md`.
-- **PDF tooling hygiene** — generated PDF output now defaults under
-  `tools/pdf/out/`, with build scripts and docs updated so generated artifacts
-  no longer pollute tracked documentation paths.
+- **`elspeth-lints` static analyzer (ADR-023)** — custom CI analyzers moved into
+  the `elspeth-lints` package with rule fixtures, parity harnesses, SARIF output,
+  and rule-author docs; CI now consolidates static analysis, gates RC branches,
+  runs CodeQL and dependency/license checks, makes Playwright E2E a required
+  signal, and enforces cohort-attribution trailers on telemetry-backfill commits.
+- **Release docs cleanout** — RC-1/RC-2 changelog fragments, superseded release
+  snapshots, frozen architecture packs, and completed handover corpora were moved
+  to the dated `docs-archive/2026-05-19-docs-cleanout/` archive with a manifest,
+  while current release/assurance/audit documents stay linked from
+  `docs/README.md`; generated PDF output now defaults under `tools/pdf/out/`.
 
 ### Changed
 
-- **`SessionServiceImpl.add_message()` requires `writer_principal=`** —
-  one of `compose_loop`, `route_user_message`, `route_system_message`,
-  `admin_tool`, `session_fork`. Enforced by `ck_chat_messages_writer_principal`.
-- **`SessionServiceImpl.save_composition_state()` requires `provenance=`** —
-  one of the 6 values above. Enforced by `ck_composition_states_provenance`.
-- **`SessionServiceImpl.__init__()` requires `telemetry=` and `log=`** —
-  callers construct via `build_sessions_telemetry()` from
-  `web/sessions/telemetry.py`.
-- **Composer chain-solver tool response shape** — guided-mode chain
-  solver now constrains tool response shape and surfaces malformed
-  responses via the auto-drop channel rather than masking them.
+- **`SessionServiceImpl` write contracts tightened** — `add_message()` now
+  requires `writer_principal=`, `save_composition_state()` requires
+  `provenance=`, and `__init__()` requires `telemetry=` and `log=` (constructed
+  via `build_sessions_telemetry()`); each principal/provenance value is enforced
+  by a CHECK constraint.
 - **Exit-from-COMPLETED terminal returns 200** — guided sessions in
-  `kind=completed` terminal accept `control_signal=exit_to_freeform`
-  via POST `/api/sessions/{id}/guided/respond` and transition to
-  `kind=exited_to_freeform` (previously returned 409).
-- **Per-step guided chat** — guided mode now has a separate per-step advisory
-  chat channel with persisted `chat_history`, `ComposerChatTurn` audit rows,
-  route-level invariant auditing, and a `GuidedChatHistory` frontend component.
+  `kind=completed` accept `control_signal=exit_to_freeform` via POST
+  `/api/sessions/{id}/guided/respond` and transition to `kind=exited_to_freeform`
+  (previously returned 409).
 - **Guided-mode prompt loading** — the guided composer skill pack is split into
-  base plus step-specific prompt files, preserving the deployment overlay and
-  allowing step-scoped context without flattening all guidance into one prompt.
-- **Finite status typing** — MCP finite status fields and guided wire shapes use
-  narrower literals/enums, with cross-language SlotType drift checked by CI.
+  base plus step-specific prompt files, allowing step-scoped context without
+  flattening all guidance into one prompt; guided mode also gains a separate
+  per-step advisory chat channel with persisted history and `ComposerChatTurn`
+  audit rows.
 - **Composer dependency packaging** — `chromadb`, `html2text`, and
-  `beautifulsoup4` are mandatory dependencies rather than optional `rag` / `web`
-  extras, matching the composer and web-scrape surfaces that import them during
-  normal RC5.2 operation.
+  `beautifulsoup4` are now mandatory dependencies rather than optional `rag` /
+  `web` extras, matching the composer and web-scrape surfaces that import them
+  during normal operation.
 - **Session schema durability** — session SQLite engines now set WAL,
   `busy_timeout`, synchronous PRAGMA, schema epoch guards, orphan PENDING-row
   recovery, and cross-DB hash spot-checks for interpretation runtime handoff.
-- **Frontend auto-validation and session state** — validation triggers now use
-  cache-aware `requestValidate`, failed validation no longer poisons version
-  caches, active run progress blocks auto-validation, auth/session transitions
-  clear stale validation state, and active-session null transitions reset
-  execution state.
-- **Hash routing and retired views** — the composer hash router moved from
-  retired Spec/Runs tabs to graph/YAML/catalog modal actions, with stale
-  bookmark redirects, shortcut rewiring, and explicit preservation notes for
-  RunsView capabilities that moved into successor panels.
+- **Composer chain-solver and frontend validation refinements** — the guided
+  chain solver constrains tool-response shape and surfaces malformed responses
+  via the auto-drop channel; MCP finite-status fields use narrower literals with
+  CI-checked cross-language drift; frontend validation became cache-aware; and
+  the hash router moved off retired Spec/Runs tabs to graph/YAML/catalog modal
+  actions. Per-item detail in git history.
 
 ### Removed
 
 - **Composer replacement-shape machinery** —
-  `_runtime_preflight_failure_message`,
-  `_enforce_replacement_non_prefix_invariant`, `_ReplacementBranch`,
-  and `_INTERCEPTED_ASSISTANT_HISTORY_PREFIX` are deleted along with
-  the 7 tests pinning the removed behaviour. The compose loop's
-  augmentation shape (state-claim grounding correction + non-empty-state
-  preflight) is now the sole codepath.
+  `_runtime_preflight_failure_message`, `_enforce_replacement_non_prefix_invariant`,
+  `_ReplacementBranch`, and `_INTERCEPTED_ASSISTANT_HISTORY_PREFIX` are deleted
+  (with the 7 tests pinning them); the compose loop's augmentation shape is now
+  the sole codepath.
 - **Retired composer IA surfaces** — the old Spec tab, Runs tab, SessionSidebar,
-  inspector panel, inspector-page E2E object, and staging migration shims were
-  removed after their live capabilities moved into the SideRail, modals, session
-  switcher, run history, diagnostics, output panels, and validation banner.
-- **Optional dependency extras drift** — the `web` and `rag` extras were retired
-  once their packages became mandatory dependencies for the shipped composer/web
-  surface.
-- **Active-doc clutter** — superseded prompt files, generated review sidecars,
-  completed handovers, point-in-time audits, archived release checklists, and
-  one-off test-bug fixture scripts were removed from active paths or relocated
-  into `docs-archive/2026-05-19-docs-cleanout/`.
+  and inspector panel/page were removed after their capabilities moved into the
+  SideRail, modals, session switcher, run history, output panels, and validation
+  banner.
+- **Optional dependency extras and active-doc clutter** — the `web` and `rag`
+  extras were retired once their packages became mandatory, and superseded prompt
+  files, generated review sidecars, completed handovers, and archived checklists
+  were removed or relocated into `docs-archive/2026-05-19-docs-cleanout/`.
 
 ### Operational
 
@@ -921,57 +928,41 @@ visibility.
 
 #### RC5-UX Substrate, Composer, and Execution Evidence
 
-- **Substrate-first README story** — README now presents ELSPETH as a
-  high-assurance pipeline substrate with two authoring surfaces: hand-edited
-  YAML for operators and the Web Composer for LLM-assisted authoring by
-  non-pipeline-engineers.
-- **Validator-mediated authoring framing** — the README now emphasizes that
-  both surfaces target the same primitives, runtime assembly, graph-validation
-  contracts, executor, Landscape audit trail, and run-accounting model instead
-  of treating the web UI as a bolt-on workflow builder.
+- **Substrate framing** — the README now presents ELSPETH as a high-assurance
+  pipeline substrate with two authoring surfaces (hand-edited YAML and the Web
+  Composer) that target the same primitives, graph-validation contracts,
+  executor, and Landscape audit trail rather than a bolt-on workflow builder.
 - **Expanded Web Composer surface** — authenticated sessions, versioned
-  composition state, blob management, secret references, chat-first pipeline
-  authoring, graph/spec/YAML inspection, validation, execution, cancellation,
-  diagnostics, and output artifact review are now described as part of the
-  authoring surface.
-- **Audited composer tool loop** — the composer surface is now described as a
-  tool-governed authoring loop: plugin discovery, state mutation, validation,
-  YAML export, blob tools, secret-reference tools, and optional advisor hints
-  all happen through explicit tool contracts.
-- **Runtime-shaped validation and preflight** — composer previews, YAML export,
-  `/validate`, and `/execute` are documented as using runtime assembly and graph
-  validation contracts instead of a separate best-effort UI validator, while the
-  compiled-artifact compiler boundary is stated as future direction.
-- **Run evidence endpoints** — web execution now exposes Landscape-derived run
-  accounting, diagnostics snapshots, discard summaries, and the full output
-  artifact manifest/content surfaces for a run.
-- **Cancellation visibility** — in-progress runs can carry a distinct
-  cancellation-requested state while active work drains toward a terminal
-  `cancelled` status.
+  composition state, blob management, secret references, chat-first authoring,
+  graph/spec/YAML inspection, validation, execution, cancellation, and output
+  artifact review are now part of the documented authoring surface.
+- **Audited, runtime-shaped composer loop** — composer plugin discovery, state
+  mutation, validation, YAML export, blob/secret tools, and advisor hints all
+  happen through explicit tool contracts; previews, `/validate`, and `/execute`
+  use runtime assembly and graph-validation contracts rather than a separate
+  best-effort UI validator.
+- **Run evidence and cancellation visibility** — web execution exposes
+  Landscape-derived run accounting, diagnostics snapshots, discard summaries, and
+  the full output artifact manifest/content surfaces, and in-progress runs carry
+  a distinct cancellation-requested state while work drains toward `cancelled`.
 
 #### Composer Reliability and Operator Visibility
 
-- **Deterministic composer calls** — composer LLM requests use deterministic
-  sampling where supported and record temperature/seed metadata in the LLM
-  audit sidecar.
-- **Prompt-cache-aware composer audit** — provider cache counters and
-  Anthropic-style prompt-cache markers are captured without fabricating missing
-  values.
-- **Reasoning metadata capture** — composer LLM audit records can carry
-  provider-reported reasoning token counts and reasoning artifacts when a
-  provider exposes them; normal chat history still hides those internals.
+- **Audited composer LLM calls** — composer requests use deterministic sampling
+  where supported and record temperature/seed, provider cache counters,
+  Anthropic-style prompt-cache markers, and provider-reported reasoning token
+  counts in the LLM audit sidecar without fabricating missing values; normal chat
+  history still hides those internals.
 - **Advisor escalation contract** — the optional advisor tool is gated behind
   explicit trigger categories so the composer can ask for frontier-model help
   only under mechanically validated conditions.
-- **Hard-mode composer evaluation harness** — reusable shell tooling and
-  scenario fan-out capture validation transport failures, composer regressions,
-  and per-row output evidence for demo-readiness checks.
-- **Advisor-conditional skill markers** — composer prompt assembly now strips
-  both `<!-- ADVISOR-ONLY -->` and `<!-- ADVISOR-DISABLED -->` regions from the
-  skill markdown depending on whether the advisor tool is enabled, so an
-  advisor-disabled deployment can no longer leak `request_advisor_hint`
-  guidance (anti-fabrication rule, fork+coalesce table row, Recipe #10
-  escalation, §10b read-gate) to the composer LLM.
+- **Advisor-conditional skill markers** — composer prompt assembly strips
+  `<!-- ADVISOR-ONLY -->` and `<!-- ADVISOR-DISABLED -->` regions depending on
+  whether the advisor tool is enabled, so an advisor-disabled deployment can no
+  longer leak `request_advisor_hint` guidance to the composer LLM.
+- **Hard-mode evaluation harness** — reusable shell tooling and scenario fan-out
+  capture validation transport failures, composer regressions, and per-row output
+  evidence for demo-readiness checks.
 
 #### Plugin and Contract Surface
 
@@ -1015,56 +1006,33 @@ visibility.
 
 - **`identity_node_advisory` validator check** — `validate_pipeline` now detects
   identity passthrough nodes wired between transforms and observed sinks, where
-  the passthrough silently degrades observed-sink lineage. The check is gated
-  by an exemption matrix locked in by tests, surfaces as an actionable repair
-  hint in the composer, and is enforced on the validation happy path.
+  the passthrough silently degrades observed-sink lineage. The check is gated by
+  an exemption matrix locked in by tests and surfaces as an actionable composer
+  repair hint.
 - **Composer pipeline recipes** — `apply_pipeline_recipe` MCP tool plus two
   initial templates compose a multi-node pipeline from a single named recipe,
-  with deep-frozen `RecipeSpec.slots`, `SlotSpec.default` validated against
-  `slot_type` at construction, recipes that emit schema-valid `llm` and
-  `type_coerce` options, and recipe `blob_id` placed at source top-level so
-  `set_pipeline` can resolve it.
-- **Source inspection MCP tool** — new `source_inspection` module and
-  `inspect_source` MCP tool surface external-data shape and silent-failure modes
-  as warnings, supporting "look before you wire" composer sessions; hostile-input
-  coverage included for `inspect_blob_content`.
+  with deep-frozen `RecipeSpec.slots` and slot defaults validated against
+  `slot_type` at construction.
+- **Source inspection MCP tool** — new `inspect_source` MCP tool surfaces
+  external-data shape and silent-failure modes as warnings, supporting
+  "look before you wire" composer sessions; hostile-input coverage included.
 - **Forced-repair loop with proof diagnostics** — `preview_pipeline` runs a
-  proof step that produces a `proof_diagnostics` array; the composer's
-  forced-repair loop is wired to those diagnostics, fires on the resumed-session
-  first turn, and plumbs `repair_turns_used` into `composition_states.composer_meta`.
-  `compute_proof_diagnostics` verifies blob `content_hash` so a stale blob can
-  no longer pass the proof gate. `_BLOCKING_DIAGNOSTIC_CODES` is now the
-  structural source of truth for blocking diagnostics.
-- **Audit-backend skill + recipe-first fork-coalesce shape** — composer skill
-  pack adds an audit-backend skill and reorganises the fork-coalesce guidance
-  to be recipe-first; canonical fork pattern aligned to the
-  `validate_boolean_routes` contract; mandatory advisor escalation gate for
-  Recipe #10 (fork+coalesce) shapes.
-- **Convergence-suite test scenarios** — new evaluation scenarios cover
-  end-to-end convergence (URL-text smoke, mocked-LLM integration, end-to-end
-  forced-repair through the real `_compose_loop`, end-to-end
-  `apply_pipeline_recipe` through the proof step) plus a pure scoring function;
-  fork-and-coalesce regression scenario locks in skill commit `a2d9706b`.
-- **Composer authoring affordances** — `Use in pipeline` action in the plugin
-  catalog prefills the chat input; chat code blocks gain syntax highlighting
-  and a copy-to-clipboard control; `secret_ref` advertises an inline form for
-  new-node credentials; resize-handle keyboard arrows align with value
-  direction with a static affordance and touch-friendly hit zone.
-- **`<OPERATOR_REQUIRED>` sentinels for identity-bearing fields** — the
-  composer skill replaces literal example values for
-  `web_scrape.http.abuse_contact` and `scraping_reason` with angle-bracket
-  sentinels and an explicit resolution order (operator-supplied →
-  deployment-identity → ask the operator before `set_pipeline`). The
-  angle-bracket form is intentional: a placeholder validator (tracked
-  separately) can mechanically reject any YAML that still carries a
-  sentinel, providing a structural safety net for the prompt-level rule.
-- **Hard rule against silent operator-input rewrites** — composer skill now
+  proof step emitting a `proof_diagnostics` array; the composer's forced-repair
+  loop fires on the resumed-session first turn and plumbs `repair_turns_used`
+  into `composition_states.composer_meta`. `compute_proof_diagnostics` verifies
+  blob `content_hash` so a stale blob cannot pass the proof gate.
+- **`<OPERATOR_REQUIRED>` sentinels for identity-bearing fields** — the composer
+  skill replaces literal example values for `web_scrape.http.abuse_contact` and
+  `scraping_reason` with angle-bracket sentinels and an explicit resolution order
+  (operator-supplied → deployment-identity → ask). The angle-bracket form lets a
+  placeholder validator mechanically reject any YAML that still carries a
+  sentinel.
+- **Hard rule against silent operator-input rewrites** — the composer skill now
   forbids silent normalisations of operator-supplied strings (e.g. prepending
-  `https://` to a bare hostname, lowercasing, trailing-slash strip). Any
-  rewrite must either be confirmed by the operator or routed through a
-  recorded normalisation step (`value_transform` etc.) so it appears in the
-  YAML and the build summary.
-- **Implicit-decision disclosure ("Decisions I made on your behalf")** — new
+  `https://`, lowercasing, trailing-slash strip); any rewrite must be confirmed
+  by the operator or routed through a recorded normalisation step so it appears
+  in the YAML and build summary.
+- **Implicit-decision disclosure ("Decisions I made on your behalf")** — a new
   Build Summary Discipline subsection requires the composer to enumerate
   operator-invisible authoring decisions (identity headers, model/provider/
   temperature, output shape and routing, format choices, allowlist defaults,
@@ -1075,81 +1043,59 @@ visibility.
 
 - **Run outputs panel** — frontend `RunOutputsPanel` exposes the full
   audit-evidence manifest for a run, with downloadable artifacts gated by a
-  per-artifact `downloadable` flag; backed by a new `/artifacts/preview`
+  per-artifact `downloadable` flag and backed by a new `/artifacts/preview`
   execution endpoint.
-- **Cancellation-requested badge** — runs whose cancellation has been requested
-  but not yet drained now carry a distinct badge style, separate from the
-  terminal `cancelled` state.
-- **GraphView viewport preservation** — composer GraphView preserves the
-  operator's pan/zoom across topology changes, so iterative edits no longer
-  reset the view to a default `fitView`.
-- **`data_dir` resolved to absolute path** — `WebSettings` now resolves
-  `data_dir` to an absolute path at validation time, eliminating a class of
-  ambiguity where relative paths were interpreted against different working
-  directories at validate vs. run time.
-- **Composer source-inspection silent-failure surfacing** — Tier-3 source
-  inspection surfaces silent-failure modes (e.g. all-rows quarantined) as
-  warnings rather than treating success-with-zero-results as a quiet pass.
-- **Failure-sample aggregation in run-level errors** — new
+- **`data_dir` resolved to absolute path** — `WebSettings` resolves `data_dir`
+  to an absolute path at validation time, eliminating ambiguity where relative
+  paths were interpreted against different working directories at validate vs.
+  run time.
+- **Failure-sample aggregation in run-level errors** — a new
   `web/execution/failure_samples` module aggregates the top distinct
   `transform_errors` rows so a failed run's top-level error message carries
   actionable detail rather than a single bubble-up exception string.
+- **Operator-visibility polish** — cancellation-requested runs carry a distinct
+  badge separate from terminal `cancelled`, GraphView preserves pan/zoom across
+  topology changes, and Tier-3 source inspection surfaces silent-failure modes
+  (e.g. all-rows quarantined) as warnings.
 
 #### Audit Integrity Test Coverage (RC-5.1)
 
-- **ADR-019 deferred-invariant sweep** — direct unit coverage for the
-  `sweep_deferred_invariants_or_crash` run-end invariant enforcer (was
-  previously zero unit tests).
-- **DataFlowRepository `_validate_token_row_ownership`** — direct coverage for
-  the cross-row lineage corruption guard (previously never directly tested).
-- **`link_validation_error_to_row` branches** — direct coverage for quarantine
-  lineage exactness across all branches.
-- **`_REQUIRED_COMPOSITE_FOREIGN_KEYS`** — exhaustive coverage for all 12
-  composite foreign-key entries (previously 11 of 12 untested).
-- **SSRF blocked-IP coverage** — closes residual blocklist coverage including
-  the `::ffff:0:0/96` IPv4-mapped-IPv6 range and seven other previously
-  untested boundary cases in `web_scrape`.
+- **Direct audit-integrity invariant coverage** — unit tests added for four
+  ADR-019-family invariants that previously had none (deferred-invariant sweep,
+  `_validate_token_row_ownership` lineage guard, `link_validation_error_to_row`
+  quarantine branches, and all 12 `_REQUIRED_COMPOSITE_FOREIGN_KEYS` entries),
+  plus residual SSRF blocklist boundary cases (the `::ffff:0:0/96` IPv4-mapped
+  range and seven others) in `web_scrape`.
 
 #### Contracts and Lifecycle (RC-5.1)
 
-- **Symmetric `_on_start_called` / `_on_complete_called` lifecycle flags** —
-  runtime-config protocols now expose paired start/complete lifecycle flags so
-  asymmetric implementations (start without complete, or complete without
-  start) become structurally detectable.
-- **Autouse catalog fixture + derived `RUNTIME_CONFIGS`** — contract tests now
-  derive the runtime-config inventory from runtime introspection rather than
-  a hand-maintained list, eliminating drift between the inventory and the
-  actually-registered configs.
+- **Lifecycle symmetry and contract-test derivation** — runtime-config protocols
+  expose paired `_on_start_called` / `_on_complete_called` flags so asymmetric
+  implementations become structurally detectable, and contract tests now derive
+  the runtime-config inventory from introspection rather than a hand-maintained
+  list.
 
 ### Changed
 
 - **README front door refreshed for RC-5** — the README now leads with the
   high-assurance substrate, the gap ELSPETH closes, the two authoring audiences,
-  architecture at a glance, parallel YAML/Web Composer start paths, capability
-  map, audit/assurance model, and shipped-vs-direction compiler status.
-- **Web quickstart port corrected** — the README quickstart now uses the
-  `elspeth web` default port `8451`.
+  parallel YAML/Web Composer start paths, the capability map, and the
+  audit/assurance model, and the quickstart uses the `elspeth web` default port
+  `8451`.
 - **Batch-specific LLM transforms retired from the public story** —
-  `azure_batch_llm` and `openrouter_batch_llm` are no longer advertised. Use
-  the regular `llm` transform with provider pooling/multi-query for LLM
-  throughput and the statistical batch transforms for audit-attributable local
-  aggregation.
-- **Default `on_validation_failure` is now `discard`** — the default
-  per-source validation-failure behaviour changed to `discard` with documented
-  quarantine semantics, replacing the prior implicit fall-through.
+  `azure_batch_llm` and `openrouter_batch_llm` are no longer advertised; use the
+  regular `llm` transform with provider pooling/multi-query for throughput and
+  the statistical batch transforms for audit-attributable local aggregation.
+- **Default `on_validation_failure` is now `discard`** — the default per-source
+  validation-failure behaviour changed to `discard` with documented quarantine
+  semantics, replacing the prior implicit fall-through.
 - **Unknown-plugin composer error is now actionable** —
-  `_prevalidate_plugin_options` surfaces an unknown plugin id as a structured,
-  actionable rejection instead of a silent fail-open.
-- **Composer rejected-mutation entries lead `validation.errors`** — when a
-  composer mutation is rejected, the rejection entry is now the first item in
-  `validation.errors`, so downstream UI surfaces and skill prose treat it as
-  the primary diagnostic.
-- **Augment-shape preflight failures preserve model prose** — when an
-  augment-shape preflight fails, the composer now retains the model's original
-  prose explanation instead of replacing it with a generic failure summary.
-- **`apply_pipeline_recipe` surfaces destructive replacement** — applying a
-  recipe over an existing pipeline now explicitly reports the replacement as
-  destructive in the composer audit trail.
+  `_prevalidate_plugin_options` surfaces an unknown plugin id as a structured
+  rejection instead of a silent fail-open, and rejected-mutation entries now lead
+  `validation.errors` as the primary diagnostic.
+- **Composer audit-trail honesty** — augment-shape preflight failures retain the
+  model's original prose instead of a generic summary, and `apply_pipeline_recipe`
+  explicitly reports a destructive replacement in the composer audit trail.
 
 ### Fixed
 
@@ -1163,23 +1109,16 @@ visibility.
   no relationship with. Closed by the `<OPERATOR_REQUIRED>` sentinel rewrite,
   the silent-rewrite hard rule, and the implicit-decision disclosure block
   (see *Validator and Pipeline Authoring (RC-5.1)*).
-- **Composer skill correctness** — multi-commit sweep closing skill-text
-  fabrication and silent-shape-downgrade loopholes, widening the grounding
-  detector and adding `confirm`/`confirmed` to the grounding verb list, scoping
-  state-claim grounding correction (Path 3), forbidding identity nodes between
-  transforms and observed sinks, and narrowing the `ComposerResult` pairing
-  invariant.
-- **Composer accessibility (Tier-1 panel review)** — `aria-controls` IDREF
-  remains resolvable when a run is collapsed; `aria-expanded` added to the
-  `RunsView` Inspect button (now using the shared `.btn` class); health-check
-  banners downgraded to `role=status`; nested `aria-live` removed from
-  `ComposingIndicator`; `aria-live` scoped to the validation banner instead of
-  the tab panel; light-theme `--color-status-empty` override added; validation
-  indicator decoupled from the warning colour.
-- **Composer SecretsPanel form recovery** — the form now recovers cleanly when
-  `createSecret` fails, instead of leaving the panel in a wedged state.
-- **Composer audit-shape symmetry** — `augment` and `replace` audit shapes now
-  use symmetric producer-side invariants.
+- **Composer skill correctness** — a multi-commit sweep closed skill-text
+  fabrication and silent-shape-downgrade loopholes, widened the grounding
+  detector, scoped state-claim grounding correction, forbade identity nodes
+  between transforms and observed sinks, and narrowed the `ComposerResult`
+  pairing invariant.
+- **Composer frontend and audit-shape fixes** — a Tier-1 accessibility panel
+  review fixed `aria-controls` / `aria-expanded`, `aria-live` scoping, and
+  validation-colour decoupling; the SecretsPanel form recovers cleanly on a
+  failed `createSecret`; and `augment` / `replace` audit shapes now use symmetric
+  producer-side invariants.
 
 ---
 
@@ -1195,22 +1134,14 @@ Full web application platform for chat-first pipeline composition, three-provide
 
 #### Web UX Composer Platform
 
-- **`elspeth web` CLI command** — FastAPI app factory with `[webui]` extra, `WebSettings` config model, and default port 8451. Serves the React SPA from `src/elspeth/web/frontend/dist/`.
-- **React frontend bundle** — Vite-built SPA with `/api` and `/ws` proxying for development.
-- **DTA/AGDS theming** — deep teal, green accent, and GOLD semantic colours matching Australian Government Design System guidelines.
-- **Frontend UX** — logout UI, session creation guards, archive sessions, confirm destructive actions, version loading, bumped font sizes.
-- **Accessibility** — skip-to-content links, reduced motion support, touch target sizing.
+- **`elspeth web` CLI command** — FastAPI app factory with `[webui]` extra, `WebSettings` config model, and default port 8451, serving the Vite-built React SPA from `src/elspeth/web/frontend/dist/` with `/api` and `/ws` proxying.
+- **DTA/AGDS theming and accessibility** — deep teal, green accent, and GOLD semantic colours matching Australian Government Design System guidelines, plus skip-to-content links, reduced-motion support, touch-target sizing, session creation/archive guards, and destructive-action confirmation.
 
 #### Authentication Subsystem
 
-- **`AuthProvider` protocol** — pluggable identity model with `AuthenticationError` base exception.
-- **`LocalAuthProvider`** — bcrypt password hashing with JWT token issuance.
-- **`OIDCAuthProvider`** — OpenID Connect with JWKS discovery and key caching.
-- **`EntraAuthProvider`** — Microsoft Entra ID with tenant validation and group claims.
-- **`get_current_user` middleware** — FastAPI dependency for route-level authentication.
-- **Auth routes** — login, token refresh, user profile, configuration endpoints.
-- **Registration endpoint** — configurable mode (`open`, `email_verified`, `closed`).
-- **python-jose → PyJWT migration** — replaced unmaintained library across all auth code.
+- **`AuthProvider` protocol** — pluggable identity model (`AuthenticationError` base) with three providers: `LocalAuthProvider` (bcrypt + JWT issuance), `OIDCAuthProvider` (OpenID Connect with JWKS discovery and key caching), and `EntraAuthProvider` (Microsoft Entra ID with tenant validation and group claims).
+- **Auth surface** — `get_current_user` route-level middleware, login/token-refresh/profile/config routes, and a configurable registration endpoint (`open`, `email_verified`, `closed`).
+- **python-jose → PyJWT migration** — replaced the unmaintained library across all auth code.
 
 #### Plugin Catalog
 
@@ -1218,43 +1149,29 @@ Full web application platform for chat-first pipeline composition, three-provide
 
 #### Session Management
 
-- **SQLAlchemy Core table definitions** — session database schema with migrations.
-- **`SessionServiceProtocol`** and `SessionServiceImpl` — CRUD, versioning, run enforcement, with `RunAlreadyActiveError`.
-- **Session API routes** — full REST API with pagination, state pruning, upload hardening.
-- **Fork-from-message** — create new session versions branching from specific conversation messages, with text source plugin.
-- **TOCTOU race elimination** — DB-level constraints replacing application-level checks (batch 6).
-- **Thread pool executor** — all DB calls moved off the async event loop (batch 5).
-- **Orphan cleanup** — wired into FastAPI lifespan, UUID path parameters.
+- **SQLAlchemy Core schema + `SessionServiceImpl`** — session database with migrations, and CRUD/versioning/run-enforcement (`RunAlreadyActiveError`) behind `SessionServiceProtocol`, with a full REST API (pagination, state pruning, upload hardening).
+- **Fork-from-message** — create new session versions branching from specific conversation messages, with a text source plugin.
+- **Concurrency and lifecycle hardening** — DB-level constraints replacing application-level TOCTOU checks, all DB calls moved off the async event loop via a thread-pool executor, and orphan cleanup wired into the FastAPI lifespan with UUID path parameters.
 
 #### Blob Storage Manager
 
-- **Phase 1** — data model, service foundation, migration.
-- **Phase 2** — REST API routes and app wiring.
-- **Phases 3–6** — frontend integration, composer tools, execution integration, schema inference.
-- **Upload dedup, quota enforcement, and file cleanup.**
+- **Blob storage subsystem** — data model, service, and migration; REST API and app wiring; frontend, composer-tool, and execution integration; schema inference; and upload dedup, quota enforcement, and file cleanup.
 
 #### Secret Reference System
 
-- **`SecretResolution` audit extension** — accepts `"env"` and `"user"` sources for web-originated secrets.
-- **`resolve_secret_refs()` tree-walk** — recursive config replacement of `$secret{name}` references.
-- **`ServerSecretStore`** and `WebSecretService` — chained resolution with allowlist enforcement, env-var boundary, fingerprint audit.
-- **REST API, composer tools, execution integration, frontend wiring.**
-- **Security hardening** — audit trail, fingerprints, leakage prevention, input validation.
+- **Historical `$secret{name}` reference resolution** — `SecretResolution` audit extension accepting `"env"` / `"user"` sources, a recursive `resolve_secret_refs()` config tree-walk, and `ServerSecretStore` / `WebSecretService` chained resolution with allowlist enforcement, env-var boundary, and fingerprint audit. Current Composer authoring uses `{secret_ref: NAME}` markers for new nodes and `wire_secret_ref(...)` for existing components.
+- **Secret-system surface and hardening** — REST API, composer tools, execution integration, frontend wiring, plus audit trail, fingerprints, leakage prevention, and input validation.
 
 #### Pipeline Execution Layer
 
-- **Background pipeline runs** — `ExecutionServiceImpl` with WebSocket progress streaming and dry-run validation.
+- **Background pipeline runs** — `ExecutionServiceImpl` with WebSocket progress streaming, dry-run validation, and late-client seeding (clients connecting after run start receive current state).
 - **Cancel-vs-execute race closure** — atomic state transition preventing concurrent execution attempts.
-- **Late WebSocket client seeding** — clients connecting after run start receive current state.
 
 #### Pipeline Composer (LLM Tool-Use)
 
-- **Frozen data models** — `SourceSpec`, `NodeSpec`, `EdgeSpec`, `OutputSpec`, `PipelineMetadata` with deep immutability.
-- **Composition tools and YAML generator** — Sub-4B + 4C tool implementations.
-- **`ComposerService` protocol** — LLM tool-use loop with prompts and message management (Sub-4D).
-- **Wired to session routes** — composer integrated into session API.
-- **Sub-4x hardening** — dual-counter loop guard, discovery cache, partial state recovery, rate limiting, tool registry.
-- **Enhanced Stage 1 validation** — warnings, suggestions, and status tint.
+- **Frozen composition data models** — `SourceSpec`, `NodeSpec`, `EdgeSpec`, `OutputSpec`, `PipelineMetadata` with deep immutability.
+- **`ComposerService` LLM tool-use loop** — composition tools and YAML generator, prompt/message management, and integration into the session API, with Stage 1 validation (warnings, suggestions, status tint).
+- **Composer loop hardening** — dual-counter loop guard, discovery cache, partial state recovery, rate limiting, and tool registry.
 
 #### Pipeline Inspector
 
@@ -1262,23 +1179,12 @@ Full web application platform for chat-first pipeline composition, three-provide
 
 #### Pipeline Composer MCP Server
 
-- **`elspeth-composer` MCP server** — full pipeline composition toolset via Model Context Protocol. Tools for plugin discovery, pipeline state mutation, validation, YAML generation, and session persistence.
-- **Pipeline-composer skill pack** — Claude Code skill for interactive MCP-driven pipeline building.
-- **Pydantic model serialization** — fixed discovery tool responses.
-- **Wave 4 tools** — `clear_source`, `explain_validation_error`, `list_models`, `preview_pipeline`.
-- **Connection field sync** — when edges target outputs.
-- **Path allowlist** — on `patch_source_options`, null argument guards.
+- **`elspeth-composer` MCP server** — full pipeline composition toolset via Model Context Protocol (plugin discovery, state mutation, validation, YAML generation, session persistence), with a Claude Code pipeline-composer skill pack for interactive MCP-driven building.
 
 #### Sink Failsink Pattern
 
-- **`RowDiversion` and `SinkWriteResult`** — new contracts for per-row write failure routing.
-- **`DIVERTED` outcome** — new terminal row state and `rows_diverted` counter.
-- **`on_write_failure` mandatory config field** — `SinkSettings` requires explicit failure handling (`route_to`, `discard`, `fail`).
-- **`BaseSink._divert_row()`** — with `FrameworkBugError` guard and protocol update.
-- **`__failsink__` DIVERT edges** — DAG builder creates automatic diversion edges for sink failsink routing.
-- **`validate_sink_failsink_destinations()`** — construction-time validation of failsink routing.
-- **`SinkExecutor.write()` routing** — failsink dispatch on per-row write failure.
-- **Hypothesis property tests** — partition-completeness and exactly-once routing invariants.
+- **Per-row write-failure routing contracts** — `RowDiversion` and `SinkWriteResult`, a new `DIVERTED` terminal row state with a `rows_diverted` counter, and a mandatory `on_write_failure` config field on `SinkSettings` (`route_to`, `discard`, `fail`).
+- **Failsink DAG wiring and validation** — `BaseSink._divert_row()` (with `FrameworkBugError` guard), automatic `__failsink__` DIVERT edges in the DAG builder, construction-time `validate_sink_failsink_destinations()`, and `SinkExecutor.write()` failsink dispatch on per-row write failure.
 
 #### DAG Schema Propagation
 
@@ -1286,38 +1192,27 @@ Full web application platform for chat-first pipeline composition, three-provide
 
 #### Frontend UX Refresh (A1-A7)
 
-- **A1: Categorized file folders in blob manager** — files organized by category.
-- **A2: Markdown and Mermaid rendering in chat** — rich content display with DOMPurify sanitization.
-- **A3: Route validation errors visibly through chat** — errors surface in the conversation flow.
-- **A4: Default 50/50 panel split** — balanced layout for graph and chat.
-- **A5: Secrets button in chat toolbar** — moved with key icon for discoverability.
-- **A6: Per-node validation indicators on graph** — visual status on each node.
-- **A7: Three-state pipeline status indicator** — clear pipeline readiness feedback.
-- **Validation indicator design tokens** — consistent visual language for validation states.
-- **Validation orchestration extraction** — refactored to component layer.
+- **Frontend UX refresh (A1-A7)** — categorized blob-manager folders, markdown/Mermaid rendering in chat (DOMPurify-sanitized), validation errors routed through chat, a default 50/50 graph/chat split, a relocated secrets button, per-node validation indicators, a three-state pipeline status indicator, and design-token / orchestration-extraction cleanup.
 
 #### Composer Agent Tooling (B1-B5)
 
-- **Blob CRUD, structured validation, path redaction, pipeline diff** — agent-facing tools for the composer MCP server.
+- **Composer agent tooling (B1-B5)** — blob CRUD, structured validation, path redaction, and pipeline diff for the composer MCP server.
 
 #### Composer Skill Pack Update
 
-- **C1-C8, D1-D4 + deployment skill layer** — expanded skill definitions for composer interactions.
+- **Composer skill pack (C1-C8, D1-D4)** — expanded skill definitions plus the deployment skill layer for composer interactions.
 
 #### Web Group E
 
-- **Unified file storage, blob refresh, inline source docs** — file handling consolidation.
+- **Unified file storage** — blob refresh and inline source docs (file-handling consolidation).
 
 #### Guard Symmetry Scanner
 
-- **`enforce_guard_symmetry` CI tool** — detects write/read guard parity gaps (every Landscape write site must have a corresponding read guard). GitHub Actions workflow and allowlist support.
+- **`enforce_guard_symmetry` CI tool** — detects write/read guard parity gaps (every Landscape write site must have a corresponding read guard), with a GitHub Actions workflow and allowlist support.
 
 #### TokenRef Type
 
-- **`TokenRef`** — bundled `token_id + run_id` frozen dataclass in `contracts/`. Replaces loose 2-tuple passing.
-- **`AuditIntegrityError` loader guards** — Landscape read sites crash on corruption.
-- **`coalesce_tokens` on TokenRef** — Landscape API accepts `TokenRef` directly.
-- **`_validate_token_run_ownership` refactored** — accepts `TokenRef` instead of separate args.
+- **`TokenRef` frozen dataclass** — bundles `token_id + run_id` in `contracts/`, replacing loose 2-tuple passing; the Landscape API accepts `TokenRef` directly (`coalesce_tokens`, `_validate_token_run_ownership`) and read sites crash on corruption via `AuditIntegrityError` loader guards.
 
 #### Exception Hygiene
 
@@ -1329,136 +1224,18 @@ Full web application platform for chat-first pipeline composition, three-provide
 
 ### Fixed
 
-#### P1 Bug Closure Campaign (~100+ bugs)
-
-- **13 Landscape/Checkpoint/DAG integrity bugs** — audit write ordering, checkpoint restore invariants, DAG validation edge cases.
-- **16 plugin transform bugs** — LLM response handling, multi-query field extraction, batch adapter identity, and miscellaneous isolates.
-- **9 plugin source/sink bugs** — contract violations, atomicity gaps, and boundary validation.
-- **10 engine orchestrator/processor/executor bugs** — execution loop invariants, processor state, executor edge cases.
-- **7 web execution service bugs** — setup, race conditions, and state management.
-- **3 checkpoint/coalesce integrity bugs** — resume state corruption and barrier restoration.
-- **4 Landscape audit integrity bugs** — write guard gaps and recording consistency.
-- **8 silent-failure and impossible-state validation bugs** — crash-on-invalid replacing silent skip.
-- **3 LLM bugs** — empty choices audit gap, `tool_calls` fabrication, batch `finish_reason`.
-- **7 web execution setup and contract silent-failure invariant bugs.**
-- **9 sink phase ordering, expression parser coercion, and audit integrity bugs.**
-- **4 `cluster:null-check` bugs** — retry `batch_id`, Chroma metadata, Azure audit, Annotated constraints.
-- **3 `cluster:null-check` LLM bugs** — schema type erasure, content type validation.
-- **8 `cluster:null-check` bugs** — NumPy float overflow, MCP contract drift, exporter field, LLM report condition.
-- **6 `cluster:null-check` contract bugs** — NoneType inference, boolean guards, fabrication, userinfo leak, contract invariant.
-- **7 pool shutdown, batch identity, and utils cluster bugs.**
-- **4 SSRF gap, silent truncation, type crash, double-completion bugs.**
-- **11 code review findings** — auth bypass, JSONL rollback, error narrowing.
-
-#### Web Platform Hardening
-
-- **Blob IDOR guard** — session deletion guard, orphan run cleanup.
-- **21 code review findings** — across sessions, blobs, auth, execution.
-- **17 code review findings** — FK constraints, 34 new tests.
-- **6 code review findings** — Entra issuer, secret audit, cancel race, SNI, regex, fork timestamps.
-- **3 code review findings** — `blob_ref` validation, fork guard, budget classification.
-- **5 code review findings** — stranded runs, litellm dep, Chroma audit, WS race, shutdown iteration.
-- **16 review findings** — across web epic subsystems.
-- **Startup and auth regressions** — from code review integration.
-- **Aggregation wiring, OIDC flow, and blob quota atomicity.**
-- **Runtime routing fields** — for W1 output reachability check.
-
-#### Plugin Hardening
-
-- **Dataverse, RAG, and retrieval plugins** — 11 fixes from 5-agent review.
-
-#### Deep Immutability
-
-- **6 frozen dataclasses** — enforce deep immutability on mutable containers (contracts layer).
-- **5 frozen dataclasses** — additional deep immutability enforcement.
-
-#### Engine and Infrastructure
-
-- **Terminal immutability in `complete_run()`** — Landscape enforces immutability on completed runs.
-- **Tier 1 corruption guards** — added to MCP diagnostics and report analyzers.
-- **Resource leaks closed** — weight validation added, error contracts hardened.
-- **Non-finite float rejection** — at serialization and configuration boundaries.
-- **`validate_input` unconditional** — removed opt-in flag; executor validates all input.
-- **Validation error enrichment** — deterministic `repr_hash`, 8 test repairs.
-- **6 pre-existing test failures** — across export, grades, and examples.
-- **8 sweep findings** — dead code, redundant types, stale abstractions.
-
-#### Code Review Synthesis
-
-- **6-agent PR review findings** — metadata validation, `RunResult` hardening, consistency.
-- **Failsink review** — cross-field checks, docstrings, test coverage.
-- **6 correctness issues from PR review** — audit accuracy, fail-fast ordering, per-row diversion.
-- **15 bugfixes from systematic code review** — expression parser, sink executor, Chroma, probes, bootstrap.
-- **`hasattr` ban enforcement** — env isolation, type-check stubs.
-
-#### Systematic Bug Sweep (Post-RC5-Cut — ~130 additional bugs)
-
-- **36 bugs across 9 clusters** — audit integrity, silent failure, security, race conditions, resource leaks, freeze gaps, error handling, performance, web execution.
-- **32 bugs across 6 groups** — audit integrity, validation, module hygiene, serialization, headers, engine contracts.
-- **7 confirmed bugs** — audit integrity, state ordering, silent coercion.
-- **8 type-safety and contract bugs** — from RC4 bug sweep.
-- **7 quick-win bugs** — path anchoring, type contracts, dead params, stale docstring.
-- **7 bugs + test infrastructure hardening** — phases 1-3.
-- **6 Tier 1 audit integrity bugs** — inverted telemetry exception pattern.
-- **5 validation-too-late bugs** — push constraints to construction boundaries.
-- **6 P2 bugs** — config truncation, cache race, DNS ordering, schema tables, checkpoint integrity.
-- **4 DAG/engine bugs** — plus telemetry circular import fix.
-- **4 frozen dataclass / type safety bugs** — class-level shared-state hazard.
-- **6 plugin/source/sink bugs** — config timing, type guards, boundary checks.
-- **4 CLI/config/defensive-access bugs** — immutability, error messages, offensive guards.
-- **AIMD zero-config guard** — `WebScrapeError` contract, plan doc types.
-
-#### Tier Model & Exception Hygiene
-
-- **7 unjustified `.get()` calls eliminated** — on Tier 1/2 data; replaced with direct access, `Counter`, freeze guard.
-- **4 frozen DCs** — replaced shallow `MappingProxyType` wraps with `freeze_fields`.
-- **Broad exception handlers narrowed** — `display_name` fabrication eliminated.
-- **Typed `SchemaConfig` propagation** — `MappingProxyType` `to_dict` serialization fix.
-- **Azure batch error shape probe** — split from field access; 3 reviewed-OK patterns documented.
-
-#### Landscape & Audit Integrity
-
-- **`complete_node_state()` terminal guard** — prevents terminal status overwrite.
-- **`complete_batch()` terminal guard** — prevents terminal state overwrite.
-- **DIVERTED in outcome validation** — added to Tier 1 read guards.
-- **Terminal outcomes derived from `RowOutcome` enum** — closes DIVERTED gap in recovery.
-
-#### Security
-
-- **DSN credential scrubbing** — `_sanitize_dsn()` strips credentials from query parameters.
-
-#### Web & Frontend Hardening
-
-- **26 UX design review issues** — accessibility, contrast, touch targets (two review rounds: 14 + 12).
-- **Mermaid SVG sanitization** — DOMPurify added to frontend.
-- **Frontend type alignment** — types matched to backend schemas, system message rendering fixed.
-- **Composer path resolution** — relative paths resolved against `data_dir`, not CWD.
-
-#### Infrastructure & Contracts
-
-- **`np.ndarray` in canonical JSON** — `sanitize_for_canonical()` handles NumPy arrays.
-- **HTTP method serialization** — `to_dict()` serializes json/params for all methods.
-- **Chroma distance function validation** — crash on missing metadata (offensive guard).
-- **TOCTOU race fix** — seed race, `PluginNotFoundError` for validation, `str()` coercion removed.
-- **Plugin discovery** — optional extras handling, JSONL MIME mapping.
-- **DataverseClientError** — request metadata added.
-- **LLM multi-query validation** — `WebSettings` required composer fields.
-- **AIMD bootstrap** — fix after recovery, remove redundant finish-reason logging.
-- **Session table DateTime columns** — timezone support added.
-- **Review follow-ups** — TOCTOU guard, redundant or-None, TypeError catch.
-- **8 stale code comments** — corrected across codebase.
-- **221 logging errors** — from stale stdout capture in test suite.
-- **Tier model fingerprints** — allowlist updates and `_state_response` entry.
+- **~100+ bug closure campaign (P1) across all subsystems** — Landscape/checkpoint/DAG integrity, plugin transform/source/sink contracts, engine orchestrator/processor/executor invariants, web execution races, and a large `cluster:null-check` sweep, including SSRF / auth-bypass / userinfo-leak hardening, with crash-on-invalid replacing silent-skip throughout. Per-bug detail in git history.
+- **Web platform hardening** — successive code-review rounds across sessions, blobs, auth, and execution closed a blob IDOR guard, FK constraints, an Entra-issuer / SNI / regex / cancel-race set, OIDC flow and blob-quota atomicity, and startup/auth regressions.
+- **Post-RC5-cut systematic bug sweep (~130 bugs)** — audit integrity, silent failure, security, race conditions, resource leaks, freeze gaps, validation-too-late, and type/contract safety across nine-plus clusters. Per-bug detail in git history.
+- **Engine, contract, and tier-model hygiene** — deep-immutability frozen dataclasses, unjustified `.get()` elimination on Tier 1/2 data, narrowed broad exception handlers, non-finite float rejection, unconditional `validate_input`, and assorted infrastructure/contract fixes (canonical-JSON NumPy handling, HTTP-method serialization, TOCTOU guards, timezone-aware session columns).
+- **Landscape audit-integrity guards** — `complete_node_state()` / `complete_batch()` terminal-overwrite guards, `DIVERTED` added to the Tier 1 outcome read guards, and terminal outcomes derived from the `RowOutcome` enum (closing the DIVERTED recovery gap).
+- **Security** — DSN credential scrubbing (`_sanitize_dsn()` strips credentials from query parameters), Mermaid SVG DOMPurify sanitization, and composer path resolution against `data_dir` rather than CWD.
 
 ### Changed
 
-- **README web startup docs** — explicit instructions for `.[webui]` extra, building the frontend, `ELSPETH_WEB__SECRET_KEY`, creating a local auth user, and running the MVP locally.
-- **Plugin manager singleton** — extracted from `cli.py` to `manager.py`.
-- **532 mypy/ruff errors resolved** — across the full test suite.
-- **CI hygiene** — format, mypy, stale allowlists from Sub-2 merge.
-- **`_raise_if_invalid` extraction** — eliminates 3x error formatting duplication in manager.
-- **`_make_span` extraction** — eliminates 7x no-op guard duplication in spans.
-- **Stale schema mode references** — `fields: dynamic` → `mode: observed` across docs.
+- **README web startup docs** — explicit instructions for the `.[webui]` extra, building the frontend, `ELSPETH_WEB__SECRET_KEY`, creating a local auth user, and running the MVP locally.
+- **Refactor and lint hygiene** — plugin-manager singleton extracted from `cli.py` to `manager.py`, 532 mypy/ruff errors resolved across the suite, and duplicated error-formatting / no-op-guard logic factored out (`_raise_if_invalid`, `_make_span`).
+- **Stale schema-mode references** — `fields: dynamic` → `mode: observed` across docs.
 
 ### Removed
 
@@ -1467,61 +1244,7 @@ Full web application platform for chat-first pipeline composition, three-provide
 
 ### Tests
 
-#### Test Hygiene Sweep
-
-Systematic removal of low-value tests and replacement with behavioural gap-filling tests across all subsystems. Net result: fewer tests, better coverage of actual behavior.
-
-- **Contracts** — removed 236 low-value tests, added 40 gap-filling tests.
-- **Config** — removed 24 Pydantic default/assignment/frozen guarantee tests.
-- **TUI** — removed 8 trivial import/existence checks, 11 TypedDict construction/duplicate tests; added 6 ExplainScreen loading tests, 3 node selection tests.
-- **Telemetry** — removed 28 redundant tests, added 5 gap-fill tests.
-- **MCP** — removed 8 trivial enum identity and method-existence tests; added 18 `get_error_analysis`/`get_llm_usage_report` tests.
-- **Plugins** — removed 18 constructor passthrough/isinstance/decorator tests, 3 duplicate `PluginRetryableError` tests; added Truncate transform and `safety_utils` boundary tests.
-- **Engine** — removed `test_run_status.py`, `test_diverted_counters.py`; added 11 orchestrator execution loop integration tests, partial purge failure invariant test.
-- **Clock** — trimmed 9 redundant tests covered by property tests.
-- **Models** — removed 54 low-value mutation-gap defaults tests.
-- **Landscape** — consolidated 70 `where_exactness` tests into 36, 12 noncanonical validation error tests into 5; removed 4 stdlib-testing NaN guard tests.
-- **Enums** — removed `test_enums.py`, `test_hookspecs.py`.
-
-#### New Coverage
-
-- **Azure Blob** — source and sink unit tests (config, CSV, JSON, JSONL, schema, audit) plus property-based tests.
-- **DAG validation** — 15 error path tests.
-- **Lineage** — 3 missing validation tests.
-- **Builder** — validation gap tests, removed 34 low-value tests.
-- **Web/Composer** — comprehensive `CompositionState` mutation and Stage 1 validation tests.
-- **Web/Auth** — `ServerSecretStore` allowlist enforcement, env-var boundary, fingerprint audit tests.
-- **Web/Prompts** — message isolation, ordering, context injection tests.
-- **Buffer rollback** — strengthened to verify two-write scenario.
-
-#### Post-Cut Coverage
-
-- **8 coverage gaps closed** — IDOR, timezone, chroma metadata, schemas, mocks.
-- **Source schema test strengthened** — verify `guaranteed_fields` round-trip.
-- **Frontend test gaps** — from review, localStorage mock type annotation.
-- **`error_edge_label`, control-flow exceptions, `CompatibilityResult`, `CONTRACT_TYPE_MAP`** — missing tests added, plus landscape error paths.
-- **Mock spec enforcement** — `spec=LLMProvider` on unspec'd mocks, `spec=LandscapeRecorder` on resume failure test, `make_context()` landscape mock spec'd.
-- **ChromaSink MagicMock contexts** — replaced with factories.
-- **Batch transform tests** — `time.sleep` replaced with condition-based waits.
-- **Autouse fixture narrowing** — scoped to telemetry dirs only.
-- **Property test column strategy** — Python keywords filtered out.
-- **`_on_write_failure` fixture** — replaced session-scoped fixture with explicit injection; hoisted to root conftest; `BaseSink.__init__` patched for integration tests.
-- **`test_version_validation` reclassified** — `test_bootstrap_preflight` split.
-- **`test_skill_drift`** — updated for `ValidationEntry` type change.
-
-### Design Documentation
-
-- **Web UX LLM Composer MVP** — design spec, 6 sub-specs, 6 sub-plans, program overview.
-- **Sink failsink pattern** — design spec and 2-part implementation plan.
-- **Fork-from-message** — sub-plan 04.
-- **Composer hardening (Sub-4x)** — spec and implementation plan.
-- **System Landscape spec** — platform-level audit trail.
-- **Web test hygiene plan.**
-- **Server config design.**
-- **Frontend UX (A1-A7) implementation plan.**
-- **VerifiedTokenRef implementation plan and review.**
-- **Validation warning glossary** — added to CLI pipeline-composer skill.
-- **Single-schema source-of-truth plan** — DAG `output_schema_config` propagation design.
+- **Comprehensive test-hygiene sweep across all subsystems** — removed ~500 low-value tests and added ~200 behavioural gap-filling tests, plus new Azure Blob / DAG-validation / Web-Composer / Web-Auth coverage and post-cut gap closure (IDOR, timezone, Chroma metadata, mock-spec enforcement, audit error paths). Per-subsystem counts in git history.
 
 ## [0.4.1] (RC-4.1 — RAG Ingestion Pipeline)
 

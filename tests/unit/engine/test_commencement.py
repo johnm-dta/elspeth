@@ -99,6 +99,29 @@ class TestEvaluateCommencementGates:
         # The diagnostic type is still present.
         assert "str" in (err.reason or "")
 
+    def test_expression_exception_does_not_echo_env_secret(self) -> None:
+        """Expression exception reasons must not include raw env-derived values."""
+        secret = "sk-SUPERSECRET-9f3a"
+        gates = [
+            CommencementGateConfig(
+                name="lookup",
+                condition="collections[env['API_KEY']]['count'] > 0",
+            )
+        ]
+        context = {
+            "dependency_runs": {},
+            "collections": {"known": {"count": 1}},
+            "env": {"API_KEY": secret},
+        }
+
+        with pytest.raises(CommencementGateFailedError) as exc_info:
+            evaluate_commencement_gates(gates, context)
+
+        err = exc_info.value
+        assert secret not in str(err)
+        assert secret not in (err.reason or "")
+        assert "ExpressionEvaluationError" in (err.reason or "")
+
     def test_snapshot_is_deep_frozen(self) -> None:
         gates = [
             CommencementGateConfig(

@@ -52,6 +52,7 @@ from elspeth.web.blobs.service import (
     _active_run_pipeline_dict,
     _composition_references_blob,
     _guard_blob_row_literals,
+    _lock_session_for_blob_quota,
     content_hash,
     sanitize_filename,
 )
@@ -69,11 +70,13 @@ from elspeth.web.composer.tools._common import (
     _discovery_result,
     _failure_result,
     _mutation_result,
+    _runtime_owned_llm_option_error,
 )
 from elspeth.web.composer.tools.declarations import (
     ToolDeclaration,
     ToolKind,
 )
+from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY
 from elspeth.web.sessions.models import blob_run_links_table, blobs_table, composition_states_table, runs_table
 
 
@@ -163,7 +166,7 @@ def _blob_id_uuid_validation_error(blob_id: Any) -> str | None:
         UUID(blob_id)
     except ValueError:
         return (
-            f"blob_id {blob_id!r} is not a valid UUID. Use list_blobs or "
+            "blob_id is not a valid UUID. Use list_blobs or "
             "list_composer_blobs to select an uploaded blob, ask the user to "
             "upload the source file, or use create_blob for inline content "
             "before calling this tool."
@@ -189,6 +192,28 @@ def _sync_get_blob_by_storage_path(
     """
     with engine.connect() as conn:
         query = select(blobs_table).where(blobs_table.c.session_id == session_id).where(blobs_table.c.storage_path == storage_path)
+        row = conn.execute(query).first()
+        if row is None:
+            return None
+        return _blob_row_to_tool_dict(row)
+
+
+def _sync_get_blob_by_id(
+    engine: Engine,
+    blob_id: str,
+    session_id: str,
+) -> BlobToolRecord | None:
+    """Look up a blob by its UUID within a session (authoritative DB query).
+
+    The inverse of :func:`_sync_get_blob_by_storage_path`: used by
+    ``handle_step_1_source`` (steps.py) to resolve a ``blob:<ref>`` path sentinel
+    — emitted by ``build_step_1_schema_form_turn_from_resolved`` to keep the
+    absolute storage_path off the wire — back to the blob's real ``storage_path``
+    before the source is committed. Session-scoped so a blob ref cannot resolve
+    across sessions (project/tenant isolation). Returns None if no row matches.
+    """
+    with engine.connect() as conn:
+        query = select(blobs_table).where(blobs_table.c.session_id == session_id).where(blobs_table.c.id == blob_id)
         row = conn.execute(query).first()
         if row is None:
             return None
@@ -260,7 +285,7 @@ _LIST_BLOBS_DECLARATION = ToolDeclaration(
     handler=_handle_list_blobs,
     kind=ToolKind.BLOB_DISCOVERY,
     description="List uploaded/created files (blobs) in this session with metadata.",
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 )
 
 
@@ -291,7 +316,7 @@ _LIST_COMPOSER_BLOBS_DECLARATION = ToolDeclaration(
         "List ready blobs available for audited inline-content authoring. "
         "Returns only blob_id, mime_type, size_bytes, content_hash, and filename; never content bytes."
     ),
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
 )
 
 
@@ -304,11 +329,20 @@ def _handle_get_blob_metadata(
     session_id = context.session_id
     if session_engine is None or session_id is None:
         return _failure_result(state, "Blob tools require session context.")
+    blob_id_error = _blob_id_uuid_validation_error(arguments["blob_id"])
+    if blob_id_error is not None:
+        return _failure_result(state, blob_id_error)
     blob = _sync_get_blob(session_engine, arguments["blob_id"], session_id)
     if blob is None:
-        return _failure_result(state, f"Blob '{arguments['blob_id']}' not found.")
-    # Exclude storage_path from response
-    safe_blob = {k: v for k, v in blob.items() if k != "storage_path"}
+        return _failure_result(state, "Blob not found for this session.")
+    safe_blob = {
+        "id": blob["id"],
+        "filename": blob["filename"],
+        "mime_type": blob["mime_type"],
+        "size_bytes": blob["size_bytes"],
+        "content_hash": blob["content_hash"],
+        "status": blob["status"],
+    }
     return _discovery_result(state, safe_blob)
 
 
@@ -323,6 +357,7 @@ _GET_BLOB_METADATA_DECLARATION = ToolDeclaration(
             "blob_id": {"type": "string", "description": "Blob ID."},
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
 )
 
@@ -366,6 +401,17 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
             if source_name == "source":
                 raise ValueError("Cannot wire source ref: no source has been set")
             raise ValueError(f"Source {source_name!r} not found in composition state")
+        # Symmetric with the node arm below: never let a wire write land inside a
+        # source's interpretation_requirements. Source review metadata
+        # (INVENTED_SOURCE) may only be staged as a pending composer requirement
+        # and resolved by resolve_interpretation_event — a wired ref here would
+        # corrupt that structure outside the review boundary.
+        if keys[0] == INTERPRETATION_REQUIREMENTS_KEY:
+            raise ValueError(
+                "wire_blob_inline_ref cannot write source interpretation_requirements; "
+                "review metadata may only be staged as pending composer input and "
+                "resolved by resolve_interpretation_event."
+            )
         patched_options = _set_nested_option(dict(deep_thaw(source.options)), keys, marker)
         return state.with_named_source(source_name, replace(source, options=patched_options))
 
@@ -375,6 +421,19 @@ def _apply_inline_blob_marker(state: CompositionState, field_path: str, marker: 
         found = False
         for node in state.nodes:
             if node.id == node_id:
+                if node.plugin == "llm" and keys[0] == INTERPRETATION_REQUIREMENTS_KEY:
+                    raise ValueError(
+                        "wire_blob_inline_ref cannot write LLM interpretation_requirements; "
+                        "review metadata may only be staged as pending composer input and "
+                        "resolved by resolve_interpretation_event."
+                    )
+                runtime_owned_error = _runtime_owned_llm_option_error(
+                    node.plugin,
+                    {keys[0]: marker},
+                    tool_name="wire_blob_inline_ref",
+                )
+                if runtime_owned_error is not None:
+                    raise ValueError(runtime_owned_error)
                 patched_options = _set_nested_option(dict(deep_thaw(node.options)), keys, marker)
                 new_nodes.append(replace(node, options=patched_options))
                 found = True
@@ -515,6 +574,7 @@ _WIRE_BLOB_INLINE_REF_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["field_path", "blob_id"],
+        "additionalProperties": False,
     },
 )
 
@@ -669,12 +729,15 @@ def _check_blob_quota(
     additional_bytes: int,
     *,
     quota_bytes: int | None = None,
+    session_locked: bool = False,
 ) -> str | None:
     """Check if adding bytes would exceed the session blob quota.
 
     Returns an error message if quota exceeded, None if OK.
     Runs inside an existing transaction for TOCTOU safety.
     """
+    if not session_locked:
+        _lock_session_for_blob_quota(conn, session_id)
     current_total = conn.execute(
         select(func.coalesce(func.sum(blobs_table.c.size_bytes), 0)).where(blobs_table.c.session_id == session_id)
     ).scalar()
@@ -995,6 +1058,7 @@ _CREATE_BLOB_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["filename", "mime_type", "content"],
+        "additionalProperties": False,
     },
     blob_store_only=True,
 )
@@ -1208,7 +1272,14 @@ def _execute_update_blob(
             return _failure_result(state, f"Blob '{blob_id}' not found.")
 
         storage_path = Path(blob["storage_path"])
-        content_bytes = content.encode("utf-8")
+        try:
+            content_bytes = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolArgumentError(
+                argument="update_blob content",
+                expected="valid UTF-8 text",
+                actual_type=type(exc).__name__,
+            ) from exc
         file_hash = content_hash(content_bytes)
         new_size = len(content_bytes)
 
@@ -1297,12 +1368,14 @@ def _execute_update_blob(
                             f"Blob '{blob_id}' cannot be updated while active run '{active_run.run_id}' references it."
                         )
 
-                    # Atomic quota check.  ``size_bytes`` is re-read
-                    # inside the transaction so the delta reflects the
-                    # current DB row rather than a pre-transaction
-                    # snapshot (stale under writers that bypass the
-                    # composer session lock — e.g. ``BlobServiceImpl``
-                    # paths that share the same session_engine).
+                    # Atomic quota check. The session row lock serializes
+                    # same-session writers before ``size_bytes`` is re-read,
+                    # so the delta reflects the current DB row rather than a
+                    # pre-transaction snapshot (stale under writers that
+                    # bypass the composer session lock — e.g.
+                    # ``BlobServiceImpl`` paths that share the same
+                    # session_engine).
+                    _lock_session_for_blob_quota(conn, session_id)
                     current_size: int = conn.execute(
                         select(blobs_table.c.size_bytes).where(
                             blobs_table.c.id == blob_id,
@@ -1316,6 +1389,7 @@ def _execute_update_blob(
                             session_id,
                             size_delta,
                             quota_bytes=context.max_blob_storage_per_session_bytes,
+                            session_locked=True,
                         )
                         if quota_error is not None:
                             # Raising inside the ``with`` rolls the DB
@@ -1465,6 +1539,7 @@ _UPDATE_BLOB_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id", "content"],
+        "additionalProperties": False,
     },
     blob_store_only=True,
 )
@@ -1592,6 +1667,7 @@ _DELETE_BLOB_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
     blob_store_only=True,
 )
@@ -1613,11 +1689,15 @@ def _verify_blob_content_integrity(blob: BlobToolRecord, data: bytes) -> None:
     silently passing through unverified bytes would let the audit
     trail confidently record decisions made on garbage.
     """
+    _verify_blob_content_hash(blob, content_hash(data))
+
+
+def _verify_blob_content_hash(blob: BlobToolRecord, actual_hash: str) -> None:
+    """Verify a precomputed SHA-256 digest against a blob row."""
     blob_id = blob["id"]
     stored_hash = blob["content_hash"]
     if stored_hash is None:
         raise AuditIntegrityError(f"Tier 1: ready blob {blob_id} has NULL content_hash — DB integrity anomaly, cannot verify")
-    actual_hash = content_hash(data)
     if not hmac.compare_digest(actual_hash, stored_hash):
         raise BlobIntegrityError(blob_id, expected=stored_hash, actual=actual_hash)
 
@@ -1735,6 +1815,7 @@ _GET_BLOB_CONTENT_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["blob_id"],
+        "additionalProperties": False,
     },
 )
 

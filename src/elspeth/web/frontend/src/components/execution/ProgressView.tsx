@@ -14,10 +14,41 @@ import { useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import type { RunAccounting } from "@/types/index";
+import type { RunAccounting, RunProgress } from "@/types/index";
 
 function formattedCount(value: number): string {
   return value.toLocaleString();
+}
+
+// M07 (WCAG 4.1.3): phase-driven announcement for the polite live region.
+// Derived from ``progress.status`` (the phase) rather than the counters, so the
+// string is stable across counter ticks while running and only changes on a
+// terminal transition — the live region then announces the run once per phase
+// instead of on every update.
+function buildStatusAnnouncement(progress: RunProgress, cancelRequested: boolean): string {
+  if (cancelRequested) return "Cancelling pipeline.";
+  const totals =
+    `${formattedCount(progress.source_rows_processed)} rows, ` +
+    `${formattedCount(progress.tokens_succeeded)} succeeded, ` +
+    `${formattedCount(progress.tokens_failed)} failed`;
+  switch (progress.status) {
+    case "completed":
+      return `Pipeline completed — ${totals}.`;
+    case "completed_with_failures":
+      return `Pipeline completed with failures — ${totals}.`;
+    case "failed":
+      return `Pipeline failed — ${totals}.`;
+    case "empty":
+      return "Pipeline completed — no rows processed.";
+    case "cancelled":
+      return "Pipeline execution was cancelled.";
+    case "pending":
+      // Distinct from "running" so the polite live region announces the
+      // pending→running transition (a queued run has not started yet).
+      return "Pipeline queued.";
+    case "running":
+      return "Pipeline running.";
+  }
 }
 
 function ProgressAccountingDetails({ accounting }: { accounting: RunAccounting }) {
@@ -79,9 +110,19 @@ export function ProgressView() {
     progress.status === "cancelled" ||
     progress.status === "failed";
   const cancelRequested = progress.cancel_requested === true && !isTerminal;
+  const statusAnnouncement = buildStatusAnnouncement(progress, cancelRequested);
 
   return (
     <div className="progress-container">
+      {/* Single phase-driven live region (M07 / WCAG 4.1.3): announces the run
+          phase (running → each terminal status) once per transition. The
+          visible cancelled/failed messages below are visual-only (no live
+          role) so a screen reader hears each terminal status exactly once,
+          politely, via this region rather than from a competing live region. */}
+      <div role="status" aria-live="polite" className="sr-only">
+        {statusAnnouncement}
+      </div>
+
       {/* WebSocket disconnect banner */}
       {wsDisconnected && !isTerminal && (
         <div
@@ -211,21 +252,17 @@ export function ProgressView() {
 
       {progress.accounting && <ProgressAccountingDetails accounting={progress.accounting} />}
 
-      {/* Cancellation message */}
+      {/* Cancellation message — visual-only; the announcement is carried by
+          the polite live region at the top of the container. */}
       {progress.status === "cancelled" && (
-        <div
-          role="status"
-          className="progress-cancelled-msg"
-        >
+        <div className="progress-cancelled-msg">
           Pipeline execution was cancelled.
         </div>
       )}
 
+      {/* Failure message — visual-only; announced via the live region above. */}
       {progress.status === "failed" && progress.recent_errors.length === 0 && (
-        <div
-          role="alert"
-          className="progress-failed-msg"
-        >
+        <div className="progress-failed-msg">
           Pipeline execution failed.
         </div>
       )}

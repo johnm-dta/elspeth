@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from elspeth.contracts.freeze import require_int
 from elspeth.contracts.schema_contract import PipelineRow
 
 
@@ -73,6 +74,7 @@ class TokenInfo:
         # from a resume re-drive (processor.resume_incomplete_token), which always stamps
         # the checkpoint id. The implication is one-directional — offset 0 is ambiguous
         # (run-1 OR a never-stepped resume token), so we do NOT require the converse.
+        require_int(self.resume_attempt_offset, "TokenInfo.resume_attempt_offset", min_value=0)
         if self.resume_attempt_offset > 0 and self.resume_checkpoint_id is None:
             raise ValueError(
                 f"TokenInfo.resume_attempt_offset={self.resume_attempt_offset} > 0 requires a "

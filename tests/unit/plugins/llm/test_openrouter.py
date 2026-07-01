@@ -16,6 +16,7 @@ from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.engine.batch_adapter import ExceptionResult
 from elspeth.plugins.infrastructure.batching.ports import CollectorOutputPort
+from elspeth.plugins.infrastructure.clients.llm import ContentPolicyError, LLMClientError
 from elspeth.plugins.infrastructure.config_base import PluginConfigError
 from elspeth.plugins.transforms.llm.providers.openrouter import OpenRouterConfig, OpenRouterLLMProvider
 from elspeth.plugins.transforms.llm.transform import LLMTransform
@@ -246,8 +247,10 @@ class TestOpenRouterConfig:
         assert config.base_url == "https://custom.proxy.com/api/v1"
 
     @pytest.mark.parametrize("base_url", ["http://127.0.0.1:8199/v1", "http://localhost:8199/v1", "http://[::1]:8199/v1"])
-    def test_config_accepts_loopback_http_base_url_for_local_compatible_servers(self, base_url: str) -> None:
-        """Local OpenAI-compatible test servers may use HTTP loopback."""
+    def test_config_accepts_loopback_http_base_url(self, base_url: str) -> None:
+        """Loopback HTTP is allowed for local OpenAI-compatible dev servers — the
+        shipped ChaosLLM examples target http://127.0.0.1:8199/v1, and the bearer
+        token never leaves the machine. Remote HTTP stays rejected (next test)."""
         config = OpenRouterConfig.from_dict(
             {
                 "api_key": "sk-test-key",
@@ -1886,3 +1889,69 @@ class TestOpenRouterRefcount:
 
         with pytest.raises(RuntimeError, match="unknown state_id"):
             provider._release_http_client("never-acquired")
+
+
+class TestOpenRouterRuntimePreflightValidation:
+    """Runtime preflight must validate successful OpenRouter payloads."""
+
+    def _make_provider(self) -> OpenRouterLLMProvider:
+        return OpenRouterLLMProvider(
+            api_key="sk-test",
+            recorder=Mock(),
+            run_id="test-run",
+            telemetry_emit=Mock(),
+        )
+
+    def _response_for_payload(self, chaosllm_server, payload: dict[str, Any] | str) -> httpx.Response:
+        raw_body = payload if isinstance(payload, str) else json.dumps(payload)
+        return _create_mock_response(
+            chaosllm_server,
+            raw_body=raw_body,
+            status_code=200,
+            headers={"content-type": "application/json"},
+        )
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_error", "match"),
+        (
+            ("{not-json", LLMClientError, "not valid JSON"),
+            ({"model": _OPENROUTER_MODEL}, LLMClientError, "Empty or missing choices"),
+            ({"model": _OPENROUTER_MODEL, "choices": []}, LLMClientError, "Empty or missing choices"),
+            ({"model": _OPENROUTER_MODEL, "choices": [{"message": {}}]}, LLMClientError, "Malformed response structure"),
+            (
+                {"model": _OPENROUTER_MODEL, "choices": [{"message": {"content": None}}]},
+                ContentPolicyError,
+                "null content",
+            ),
+            (
+                {"model": _OPENROUTER_MODEL, "choices": [{"message": {"content": 123}}]},
+                LLMClientError,
+                "Expected string content",
+            ),
+            (
+                {"model": _OPENROUTER_MODEL, "choices": [{"message": {"content": "   "}, "finish_reason": "stop"}]},
+                ContentPolicyError,
+                "empty content",
+            ),
+            (
+                {"model": _OPENROUTER_MODEL, "choices": [{"message": {"content": ""}, "finish_reason": "tool_calls"}]},
+                LLMClientError,
+                "tool_calls",
+            ),
+        ),
+    )
+    def test_runtime_preflight_rejects_malformed_200_payloads(
+        self,
+        chaosllm_server,
+        payload: dict[str, Any] | str,
+        expected_error: type[Exception],
+        match: str,
+    ) -> None:
+        provider = self._make_provider()
+        response = self._response_for_payload(chaosllm_server, payload)
+
+        with mock_httpx_client(chaosllm_server, response=response), pytest.raises(expected_error, match=match):
+            provider.runtime_preflight(
+                operation_id="op-preflight",
+                model=_OPENROUTER_MODEL,
+            )

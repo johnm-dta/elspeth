@@ -81,13 +81,35 @@ def test_fresh_sidecar_is_still_authoritative(tmp_path: Path) -> None:
     """A sidecar at least as new as its report keeps the structured fast path."""
     report = _write_report(tmp_path, "finding.md", f"{NO_DEFECT_MARKER}\n")
     sidecar = _write_sidecar(report, [{"priority": "P1", "summary": "fresh real finding"}])
-    # Make the sidecar strictly newer than the report (normal same-run ordering).
+    # Make the sidecar strictly newer than the report.
     report_mtime = report.stat().st_mtime
     os.utime(sidecar, (report_mtime + 5, report_mtime + 5))
 
     stats = generate_summary(tmp_path, no_defect_marker=NO_DEFECT_MARKER)
 
     assert stats.get("P1", 0) == 1
+
+
+def test_sidecar_written_shortly_before_report_is_still_authoritative(tmp_path: Path) -> None:
+    """Structured runs write the sidecar before extracting the Markdown report."""
+    report = tmp_path / "finding.md"
+    sidecar = _write_sidecar(
+        report,
+        [
+            {"priority": "P1", "summary": "first structured finding"},
+            {"priority": "P2", "summary": "second structured finding"},
+        ],
+    )
+    report.write_text("Priority: P3\nMarkdown fallback would undercount this report.\n", encoding="utf-8")
+    base_mtime = 1_700_000_000
+    os.utime(sidecar, (base_mtime, base_mtime))
+    os.utime(report, (base_mtime + 1, base_mtime + 1))
+
+    stats = generate_summary(tmp_path, no_defect_marker=NO_DEFECT_MARKER)
+
+    assert stats.get("P1", 0) == 1
+    assert stats.get("P2", 0) == 1
+    assert stats.get("P3", 0) == 0
 
 
 # --------------------------------------------------------------------------- #

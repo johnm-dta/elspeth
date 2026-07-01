@@ -309,6 +309,16 @@ class TestBarrierScalarsRoundTrips:
         assert isinstance(s.aggregation, MappingProxyType)
         assert isinstance(s.coalesce, MappingProxyType)
 
+    def test_rejects_non_scalar_aggregation_value_at_construction(self) -> None:
+        aggregation: dict[str, Any] = {"agg": "not scalars"}
+        with pytest.raises(TypeError, match="AggregationNodeScalars"):
+            BarrierScalars(aggregation=aggregation, coalesce={})
+
+    def test_rejects_non_scalar_coalesce_value_at_construction(self) -> None:
+        coalesce: dict[tuple[str, str], Any] = {("merge", "row"): "not scalars"}
+        with pytest.raises(TypeError, match="CoalescePendingScalars"):
+            BarrierScalars(aggregation={}, coalesce=coalesce)
+
 
 class TestBarrierScalarsFromDictErrors:
     """from_dict error path coverage."""
@@ -334,6 +344,15 @@ class TestBarrierScalarsFromDictErrors:
     def test_rejects_non_dict_top_level(self) -> None:
         with pytest.raises(AuditIntegrityError):
             BarrierScalars.from_dict("not-a-dict")  # type: ignore[arg-type]
+
+    def test_rejects_empty_aggregation_node_id_as_audit_integrity_error(self) -> None:
+        d: dict[str, Any] = {
+            "_version": "1.0",
+            "aggregation": {"": _agg().to_dict()},
+            "coalesce": [],
+        }
+        with pytest.raises(AuditIntegrityError, match="aggregation key"):
+            BarrierScalars.from_dict(d)
 
     def test_rejects_malformed_coalesce_entry_not_list_of_two(self) -> None:
         d: dict[str, Any] = {"_version": "1.0", "aggregation": {}, "coalesce": [[1, 2, 3], {}]}

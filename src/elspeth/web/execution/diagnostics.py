@@ -42,6 +42,46 @@ _OPERATION_PREVIEW_LIMIT = 20
 _ARTIFACT_PREVIEW_LIMIT = 20
 
 
+def llm_safe_diagnostics_snapshot(diagnostics: RunDiagnosticsResponse) -> dict[str, Any]:
+    """Return a diagnostics projection safe to embed in an LLM prompt.
+
+    The REST diagnostics response intentionally keeps raw operation error text
+    for the operator UI. The diagnostics explanation LLM is a different
+    boundary: provider/runtime error bodies are untrusted text, so they are
+    replaced with generated summaries before prompt construction.
+    """
+    snapshot = diagnostics.model_dump(mode="json")
+    for token in snapshot["tokens"]:
+        for state in token["states"]:
+            state["error"] = _summarize_error_payload_for_llm(state["error"])
+    for operation in snapshot["operations"]:
+        operation["error_message"] = _redacted_error_message_for_llm(operation["error_message"])
+    failure_detail = snapshot["failure_detail"]
+    if failure_detail is not None:
+        failure_detail["error_message"] = _redacted_error_message_for_llm(failure_detail["error_message"])
+    return snapshot
+
+
+def _redacted_error_message_for_llm(error_message: str | None) -> str | None:
+    if error_message is None:
+        return None
+    return f"[diagnostic error text redacted before LLM prompt; chars={len(error_message)}; lines={len(error_message.splitlines()) or 1}]"
+
+
+def _summarize_error_payload_for_llm(error_payload: Any | None) -> dict[str, object] | None:
+    if error_payload is None:
+        return None
+    try:
+        serialized_chars = len(json.dumps(error_payload, sort_keys=True, allow_nan=False, default=str))
+    except (TypeError, ValueError):
+        serialized_chars = None
+    return {
+        "redacted": True,
+        "payload_type": type(error_payload).__name__,
+        "serialized_chars": serialized_chars,
+    }
+
+
 def _bounded_limit(limit: int) -> int:
     if limit < 1:
         raise ValueError("diagnostics limit must be >= 1")

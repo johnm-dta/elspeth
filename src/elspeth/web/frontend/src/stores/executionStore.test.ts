@@ -12,6 +12,7 @@ vi.mock("@/api/client", () => ({
   validatePipeline: vi.fn(),
   executePipeline: vi.fn(),
   cancelRun: vi.fn(),
+  createRunWebSocketTicket: vi.fn(),
   fetchRuns: vi.fn().mockResolvedValue([]),
   fetchRunDiagnostics: vi.fn(),
   evaluateRunDiagnostics: vi.fn(),
@@ -56,7 +57,7 @@ describe("executionStore.validate", () => {
     resetInterpretationStore();
     useSessionStore.setState({
       activeSessionId: "session-1",
-      compositionState: { version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
     } as never);
   });
 
@@ -76,6 +77,7 @@ describe("executionStore.validate", () => {
     await useExecutionStore.getState().validate("session-1");
 
     const state = useExecutionStore.getState();
+    expect(validatePipeline).toHaveBeenCalledWith("session-1", "state-1");
     expect(state.validationResult).toEqual(result);
     expect(state.isValidating).toBe(false);
   });
@@ -314,7 +316,10 @@ describe("executionStore.execute", () => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     resetInterpretationStore();
-    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+    } as never);
   });
 
   it("drops a late start success after the active session changes", async () => {
@@ -449,6 +454,30 @@ describe("executionStore failed run events", () => {
     resetInterpretationStore();
   });
 
+  it("passes an authenticated ticket provider to the websocket client", async () => {
+    const close = vi.fn();
+    (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
+    const { createRunWebSocketTicket } = await import("@/api/client");
+    (createRunWebSocketTicket as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ticket: "opaque-ws-ticket",
+      expires_at: "2026-06-22T12:00:30.000Z",
+    });
+
+    useExecutionStore.getState().connectWebSocket("run-1");
+
+    expect(connectToRun).toHaveBeenCalledTimes(1);
+    expect(connectToRun).toHaveBeenCalledWith(
+      "run-1",
+      expect.any(Function),
+      expect.objectContaining({
+        onAuthFailure: expect.any(Function),
+      }),
+    );
+    const ticketProvider = (connectToRun as ReturnType<typeof vi.fn>).mock.calls[0][1] as () => Promise<string>;
+    await expect(ticketProvider()).resolves.toBe("opaque-ws-ticket");
+    expect(createRunWebSocketTicket).toHaveBeenCalledWith("run-1");
+  });
+
   it("preserves terminal failed event detail in progress and run list", () => {
     const close = vi.fn();
     (connectToRun as ReturnType<typeof vi.fn>).mockReturnValue({ close });
@@ -502,7 +531,10 @@ describe("executionStore fanout guard", () => {
     vi.clearAllMocks();
     useExecutionStore.getState().reset();
     resetInterpretationStore();
-    useSessionStore.setState({ activeSessionId: "session-1" } as never);
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      compositionState: { id: "state-1", version: 1, sources: {}, nodes: [], edges: [], outputs: [] },
+    } as never);
   });
 
   const guard = {
@@ -537,7 +569,11 @@ describe("executionStore fanout guard", () => {
 
     const state = useExecutionStore.getState();
     expect(runId).toBeNull();
-    expect(executePipeline).toHaveBeenCalledWith("session-1");
+    expect(executePipeline).toHaveBeenCalledWith(
+      "session-1",
+      undefined,
+      "state-1",
+    );
     expect(state.pendingFanoutGuard).toEqual(guard);
     expect(state.pendingFanoutSessionId).toBe("session-1");
     expect(state.isExecuting).toBe(false);
@@ -560,10 +596,14 @@ describe("executionStore fanout guard", () => {
 
     const state = useExecutionStore.getState();
     expect(runId).toBe("run-1");
-    expect(executePipeline).toHaveBeenLastCalledWith("session-1", {
-      accepted: true,
-      token: "ack-line-explode",
-    });
+    expect(executePipeline).toHaveBeenLastCalledWith(
+      "session-1",
+      {
+        accepted: true,
+        token: "ack-line-explode",
+      },
+      "state-1",
+    );
     expect(state.pendingFanoutGuard).toBeNull();
     expect(state.pendingFanoutSessionId).toBeNull();
     expect(state.activeRunId).toBe("run-1");

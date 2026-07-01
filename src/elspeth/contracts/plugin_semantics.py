@@ -14,6 +14,8 @@ from enum import StrEnum
 
 from elspeth.contracts.freeze import freeze_fields
 
+_FIELD_SEMANTIC_SEVERITIES: frozenset[str] = frozenset({"high", "medium", "low"})
+
 
 def _require_non_empty_str(value: object, field_name: str) -> None:
     if type(value) is not str:
@@ -53,6 +55,12 @@ def _require_record_tuple(value: object, record_type: type[object], field_name: 
     for idx, item in enumerate(value):
         if type(item) is not record_type:
             raise TypeError(f"{field_name}[{idx}] must be {record_type.__name__}, got {type(item).__name__}: {item!r}")
+
+
+def _require_field_semantic_severity(value: object, field_name: str) -> None:
+    _require_non_empty_str(value, field_name)
+    if value not in _FIELD_SEMANTIC_SEVERITIES:
+        raise ValueError(f"{field_name} must be one of {sorted(_FIELD_SEMANTIC_SEVERITIES)!r}, got {value!r}")
 
 
 class ContentKind(StrEnum):
@@ -178,7 +186,7 @@ class FieldSemanticRequirement:
         _require_enum_frozenset(self.accepted_text_framings, TextFraming, "accepted_text_framings")
         _require_non_empty_str(self.requirement_code, "requirement_code")
         _require_enum_frozenset(self.accepted_value_types, SemanticValueType, "accepted_value_types")
-        _require_non_empty_str(self.severity, "severity")
+        _require_field_semantic_severity(self.severity, "severity")
         _require_enum_member(self.unknown_policy, UnknownSemanticPolicy, "unknown_policy")
         _require_string_tuple(self.configured_by, "configured_by")
 

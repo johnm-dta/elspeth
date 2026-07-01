@@ -4,10 +4,10 @@ Loads the production composer tool definitions from
 :mod:`elspeth.web.composer.tools` and the production skill text via
 :func:`elspeth.web.composer.skills.load_skill`, then runs a scripted user
 prompt against a configurable model with stubbed tool executors.  The
-output is a deterministic transcript of the LLM's tool calls and free
-text, which we diff between RED (current skill) and GREEN (edited skill)
-to verify that a finding is actually fixed by a documentation change
-rather than by harness noise.
+output is a sampling-controlled transcript of the LLM's tool calls and
+free text, which we diff between RED (current skill) and GREEN (edited
+skill) to verify that a finding is actually fixed by a documentation
+change rather than by harness noise.
 
 Why this exists
 ---------------
@@ -16,7 +16,10 @@ The pipeline-composer skill is the cornerstone of an LLM-driven
 auditable pipeline composition system.  The Iron Law from
 ``superpowers:writing-skills`` is "no skill edit without a failing test
 first."  For documentation, the test is "an LLM under pressure produces
-the wrong tool call."  This harness makes that test repeatable.
+the wrong tool call."  This harness makes that test repeatable on
+routes that honor ``temperature`` / ``seed``. Reasoning routes may reject
+those fields; ``drop_params=True`` keeps those routes runnable but makes
+their transcripts best-effort rather than strictly deterministic.
 
 Provider routing
 ----------------
@@ -78,6 +81,8 @@ from elspeth.web.composer.tools import get_tool_definitions  # noqa: E402
 
 TRANSCRIPTS_DIR = Path(__file__).resolve().parent / "transcripts"
 SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
+_SAMPLING_TEMPERATURE = 0
+_SAMPLING_SEED = 0
 
 ToolStub = Callable[[dict[str, Any]], Any]
 
@@ -205,6 +210,8 @@ def run_scenario(
             tools=tools,
             tool_choice="auto",
             max_tokens=4096,
+            temperature=_SAMPLING_TEMPERATURE,
+            seed=_SAMPLING_SEED,
             drop_params=True,
         )
         choice = resp.choices[0].message

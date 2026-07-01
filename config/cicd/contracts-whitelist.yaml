@@ -638,12 +638,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/guided/state_machine.py:ChainProposal.from_dict:d"
   - "src/elspeth/web/composer/guided/state_machine.py:GuidedSession.to_dict:return"
   - "src/elspeth/web/composer/guided/state_machine.py:GuidedSession.from_dict:d"
-  # RecipeMatch serialization — staged offer persisted in GuidedSession.step_2_5_recipe_offer.
-  # to_dict() / from_dict() follow the same Tier-1-strict pattern as the rest of the
-  # guided state-machine types (direct key access, KeyError/ValueError chained via `from exc`).
-  - "src/elspeth/web/composer/guided/recipe_match.py:RecipeMatch.to_dict:return"
-  - "src/elspeth/web/composer/guided/recipe_match.py:RecipeMatch.from_dict:d"
-
   # YAML generator — strips web-specific metadata from plugin options dicts
   # Options are dynamic (vary by plugin) so dict[str, Any] is the correct type
   - "src/elspeth/web/composer/yaml_generator.py:generate_pipeline_dict:return"
@@ -665,8 +659,6 @@ allowed_dict_patterns:
   # serialization to chat_messages.tool_calls.  The unstructured shape
   # (dict[str, Any]) is intrinsic to the tool-call schema crossing the
   # boundary; the structured shape exists on the model side via model_validate.
-  - "src/elspeth/web/composer/redaction.py:_summarize_set_source_options:options"
-  - "src/elspeth/web/composer/redaction.py:_summarize_set_metadata_patch:patch"
   - "src/elspeth/web/composer/redaction.py:_redact_via_schema:return"
   - "src/elspeth/web/composer/redaction.py:_redact_via_policy:arguments"
   - "src/elspeth/web/composer/redaction.py:_redact_via_policy:return"
@@ -897,7 +889,6 @@ allowed_dict_patterns:
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl.compose:messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._compose_loop:messages (list)"
   - "src/elspeth/web/composer/service.py:ComposerServiceImpl._build_messages:chat_history (list)"
-  - "src/elspeth/web/composer/service.py:_make_cache_key:arguments"
   - "src/elspeth/web/composer/llm_response_parsing.py:build_llm_call_record:messages (list)"
   # Late-binding capture of the per-tool-call arguments inside the
   # dispatch_with_audit closure. The loop-local `arguments` is a Tier-3
@@ -940,3 +931,38 @@ allowed_dict_patterns:
   # dynamic pipeline dict keyed by plugin graph sections.
   - "src/elspeth/web/blobs/service.py:_active_run_pipeline_dict:return"
   - "src/elspeth/web/sessions/converters.py:pipeline_dict_from_record:return"
+
+  # Contract checker import-indexing reconciliation (elspeth-b05961e6c2).
+  # Editing scripts/check_contracts.py triggers the full contracts gate. The
+  # rows below are existing web/API JSON payload surfaces that remain dynamic:
+  # provider message lists, JSON Schema dicts, recovery/API response payloads,
+  # guided-profile serialization, and discovery tool descriptors. They are
+  # allowlisted here so the stricter import index can land without rewriting
+  # web source in the checker bugfix.
+  - "src/elspeth/web/interpretation_state.py:refine_prompt_shield_warnings_for_availability:return (list)"
+  - "src/elspeth/web/composer/audit.py:_public_llm_call_audit_payload:return"
+  - "src/elspeth/web/composer/recipes.py:_build_web_scrape_recipe:return"
+  - "src/elspeth/web/composer/yaml_generator.py:_has_blob_binding:options"
+  - "src/elspeth/web/composer/yaml_generator.py:_has_bind_source_mode:options"
+  - "src/elspeth/web/composer/yaml_generator.py:_generate_pipeline_dict:return"
+  - "src/elspeth/web/composer/yaml_generator.py:generate_public_pipeline_dict:return"
+  - "src/elspeth/web/composer/service.py:ComposerServiceImpl._evaluate_terminal_no_tool_advisor_gate:llm_messages (list)"
+  - "src/elspeth/web/composer/discovery_cache.py:make_cache_key:arguments"
+  - "src/elspeth/web/sessions/service.py:_strip_guided_profile_in_meta:return"
+  - "src/elspeth/web/catalog/service.py:CatalogServiceImpl._secret_requirements:schema"
+  - "src/elspeth/web/catalog/service.py:CatalogServiceImpl._required_secret_fields_from_schema:schema"
+  - "src/elspeth/web/catalog/service.py:CatalogServiceImpl._common_required_secret_fields_from_discriminated:schema"
+  - "src/elspeth/web/execution/diagnostics.py:llm_safe_diagnostics_snapshot:return"
+  - "src/elspeth/web/sessions/routes/_helpers.py:_recovery_partial_state_response:return"
+  - "src/elspeth/web/composer/guided/chat_solver.py:_llm_safe_schema_option:return"
+  - "src/elspeth/web/composer/guided/chat_solver.py:_source_revision_context_for_llm:return"
+  - "src/elspeth/web/composer/guided/chat_solver.py:_sink_revision_context_for_llm:return"
+  - "src/elspeth/web/composer/guided/audit.py:_redacted_validation_result:return"
+  - "src/elspeth/web/composer/guided/profile.py:WorkflowProfile.to_dict:return"
+  - "src/elspeth/web/composer/guided/profile.py:WorkflowProfile.from_dict:d"
+  - "src/elspeth/web/composer/guided/_discovery.py:_assistant_tool_calls_message:return"
+  - "src/elspeth/web/composer/guided/_discovery.py:_execute_discovery_call:return"
+  - "src/elspeth/web/composer/tools/_dispatch.py:get_discovery_tool_definitions:return (list)"
+  - "src/elspeth/web/composer/tools/_dispatch.py:_closed_root_schema:return"
+  - "src/elspeth/web/composer/tools/_availability.py:_requirements_from_json_schema:schema"
+  - "src/elspeth/web/composer/tools/_availability.py:_common_required_secret_fields_from_discriminated:schema"

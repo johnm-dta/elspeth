@@ -122,33 +122,6 @@ class TestCreateApp:
         assert app.state.settings is settings
         assert app.state.settings.port == 9999
 
-    def test_tutorial_cache_stored_on_app_state_with_configured_dir(self, tmp_path) -> None:
-        from datetime import UTC, datetime
-
-        from elspeth.web.preferences.tutorial_cache import (
-            CANONICAL_SEED_PROMPT,
-            TutorialCache,
-            TutorialCacheEntry,
-        )
-
-        cache_dir = tmp_path / "custom-cache"
-        app = create_app(_settings(tmp_path, tutorial_cache_dir=cache_dir))
-
-        cache = app.state.tutorial_cache
-        assert isinstance(cache, TutorialCache)
-        cache.store(
-            TutorialCacheEntry(
-                canonical_prompt=CANONICAL_SEED_PROMPT,
-                model_id="gpt-5.5:gpt-5.5",
-                cached_at=datetime(2026, 5, 15, tzinfo=UTC),
-                rows=[],
-                source_data_hash="hash",
-                llm_call_count=0,
-                pipeline_yaml="source: {}\n",
-            )
-        )
-        assert len(list(cache_dir.glob("*.json"))) == 1
-
     def test_loopback_default_secret_key_rejected_without_pytest_module(self, tmp_path, monkeypatch) -> None:
         """Loopback bind is not proof the service is unreachable behind a proxy."""
         settings = _settings(tmp_path, host="127.0.0.1")
@@ -198,9 +171,27 @@ class TestHealthEndpoint:
 class TestMetricsEndpoint:
     """Tests for GET /metrics (Prometheus scrape endpoint)."""
 
-    def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
+    @staticmethod
+    def _authed_client(tmp_path) -> TestClient:
+        from elspeth.web.auth.middleware import get_current_user
+        from elspeth.web.auth.models import UserIdentity
+
+        app = create_app(_settings(tmp_path))
+
+        async def _mock_user() -> UserIdentity:
+            return UserIdentity(user_id="metrics-user", username="metrics-user")
+
+        app.dependency_overrides[get_current_user] = _mock_user
+        return TestClient(app)
+
+    def test_metrics_requires_auth(self, tmp_path) -> None:
         app = create_app(_settings(tmp_path))
         client = TestClient(app)
+        response = client.get("/metrics")
+        assert response.status_code == 401
+
+    def test_metrics_returns_plaintext_on_success(self, tmp_path) -> None:
+        client = self._authed_client(tmp_path)
         response = client.get("/metrics")
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/plain")
@@ -212,8 +203,7 @@ class TestMetricsEndpoint:
         (sanctioned telemetry-system-failure logging per CLAUDE.md), carrying
         a bounded detail that identifies which collector broke.
         """
-        app = create_app(_settings(tmp_path))
-        client = TestClient(app)
+        client = self._authed_client(tmp_path)
         boom = RuntimeError("collector 'broken_metric' raised during collect()")
         with (
             patch("elspeth.web.app.generate_latest", side_effect=boom),
@@ -297,6 +287,14 @@ class TestBodySizeLimitMiddleware:
         assert response.status_code == 413
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("content_length", ["not-a-number", "-1", "+1", "1_000"])
+    async def test_rejects_malformed_content_length_without_body_read(self, content_length: str) -> None:
+        response = await self._dispatch_with_content_length(content_length)
+
+        assert response.status_code == 400
+        assert response.body == b'{"error": "Invalid Content-Length"}'
+
+    @pytest.mark.asyncio
     async def test_missing_content_length_stream_passes_through_without_body_read(self) -> None:
         """No Content-Length means the middleware defers to per-route validators."""
 
@@ -329,7 +327,7 @@ class TestBodySizeLimitMiddleware:
 
         assert response.status_code == 204
 
-    async def _dispatch_with_content_length(self, content_length: int) -> StarletteResponse:
+    async def _dispatch_with_content_length(self, content_length: int | str) -> StarletteResponse:
         async def noop_app(scope, receive, send) -> None:
             return None
 

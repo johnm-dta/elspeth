@@ -342,3 +342,26 @@ describe("MessageBubble", () => {
     });
   });
 });
+
+describe("author attribution for assistive tech (C1, elspeth-f700d8d8a5)", () => {
+  it("labels a user turn 'You said:' (sr-only)", () => {
+    render(<MessageBubble message={makeMessage({ role: "user", content: "hi" })} />);
+    expect(screen.getByText("You said:")).toBeInTheDocument();
+  });
+
+  it("labels an assistant turn 'ELSPETH said:' (sr-only)", () => {
+    render(
+      <MessageBubble message={makeMessage({ role: "assistant", content: "hello" })} />,
+    );
+    expect(screen.getByText("ELSPETH said:")).toBeInTheDocument();
+  });
+
+  it("labels a system turn 'System note:' (sr-only)", () => {
+    render(
+      <MessageBubble
+        message={makeMessage({ role: "system", content: "Pipeline reverted." })}
+      />,
+    );
+    expect(screen.getByText("System note:")).toBeInTheDocument();
+  });
+});

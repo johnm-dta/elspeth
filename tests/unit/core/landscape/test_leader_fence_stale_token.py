@@ -57,6 +57,7 @@ from elspeth.core.landscape.schema import (
     rows_table,
     run_coordination_events_table,
     run_coordination_table,
+    run_workers_table,
     runs_table,
     token_outcomes_table,
     token_work_items_table,
@@ -159,6 +160,27 @@ def _seed_row_and_token(db: LandscapeDB, *, sequence: int) -> tuple[str, str]:
     return token_id, row_id
 
 
+def _ensure_active_worker(db: LandscapeDB, worker_id: str) -> None:
+    with db.engine.begin() as conn:
+        existing = conn.execute(
+            select(run_workers_table.c.worker_id)
+            .where(run_workers_table.c.run_id == RUN_ID)
+            .where(run_workers_table.c.worker_id == worker_id)
+        ).first()
+        if existing is not None:
+            return
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id=worker_id,
+                run_id=RUN_ID,
+                role="follower",
+                status="active",
+                registered_at=NOW,
+                heartbeat_expires_at=NOW + timedelta(hours=1),
+            )
+        )
+
+
 def _work_item_row(db: LandscapeDB, token_id: str) -> dict[str, object]:
     with db.engine.connect() as conn:
         row = conn.execute(select(token_work_items_table).where(token_work_items_table.c.token_id == token_id)).mappings().one()
@@ -178,6 +200,7 @@ def _enqueue_and_claim(db: LandscapeDB, repo: TokenSchedulerRepository, *, seque
         row_payload_json=_payload_json(),
         available_at=NOW,
     )
+    _ensure_active_worker(db, owner)
     claimed = repo.claim_ready(run_id=RUN_ID, lease_owner=owner, lease_seconds=60, now=NOW)
     assert claimed is not None and claimed.token_id == token_id
     return token_id, row_id, claimed.work_item_id
@@ -539,6 +562,7 @@ class TestStrictPendingSinkOwnerCAS:
         repo, token_id = self._parked_handoff(db, owner=WORKER)
         with db.engine.begin() as conn:
             conn.execute(update(token_work_items_table).where(token_work_items_table.c.token_id == token_id).values(lease_owner=None))
+        _ensure_active_worker(db, "resume-worker")
         reclaimed = repo.claim_pending_sink(run_id=RUN_ID, lease_owner="resume-worker", lease_seconds=60, now=NOW)
         assert reclaimed is not None and reclaimed.token_id == token_id
         terminalized = repo.mark_pending_sink_terminal(

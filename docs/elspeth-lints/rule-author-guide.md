@@ -132,8 +132,7 @@ elspeth-lints/src/elspeth_lints/rules/plugin_contract/options_metadata/
     └── examples_clean/
 ```
 
-The legacy script `scripts/cicd/enforce_options_metadata.py` still runs in CI,
-while `config/cicd/lint_migration_status.yaml` keeps the new rule in `shadow`
-with JSON commands for the parity harness. Use this port as the reference for
-metadata placement, fixture counts, command wiring, and protocol-compatible
-runtime dependencies.
+CI runs `plugin_contract.options_metadata` through `elspeth-lints check`, while
+`config/cicd/lint_migration_status.yaml` keeps the deleted legacy mapping for
+parity history. Use this port as the reference for metadata placement, fixture
+counts, command wiring, and protocol-compatible runtime dependencies.

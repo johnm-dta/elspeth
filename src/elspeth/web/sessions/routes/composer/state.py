@@ -1,0 +1,497 @@
+from __future__ import annotations
+
+from typing import TypedDict
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from elspeth.web.blobs.protocol import BlobNotFoundError
+from elspeth.web.composer.state import CompositionState, SourceSpec
+from elspeth.web.composer.yaml_importer import (
+    MAX_RUNTIME_YAML_IMPORT_CHARS,
+    RuntimeYamlImportError,
+    composition_state_from_runtime_yaml,
+)
+from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
+
+from .._helpers import (
+    UTC,
+    UUID,
+    Any,
+    APIRouter,
+    ComposerPreferencesResponse,
+    ComposerProgressSnapshot,
+    CompositionStateResponse,
+    Depends,
+    GraphValidationError,
+    HTTPException,
+    Mapping,
+    PluginConfigError,
+    PluginNotFoundError,
+    Query,
+    Request,
+    RevertStateRequest,
+    SessionServiceProtocol,
+    SessionsTelemetry,
+    UpdateComposerPreferencesRequest,
+    UserIdentity,
+    _composer_preferences_response,
+    _get_composer_progress_registry,
+    _get_session_compose_lock_registry,
+    _record_composer_runtime_preflight_telemetry,
+    _runtime_preflight_for_state,
+    _state_data_from_composer_state,
+    _state_from_record,
+    _state_response,
+    _verify_session_ownership,
+    composer_completion_events_table,
+    datetime,
+    generate_public_yaml,
+    get_current_user,
+    insert,
+    record_session_completed,
+    record_session_switched,
+    uuid4,
+)
+
+router = APIRouter()
+
+
+class StateYamlResponse(TypedDict, total=False):
+    yaml: str
+    source_blob_ids: dict[str, str]
+
+
+class ImportStateYamlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    yaml: str = Field(min_length=1, max_length=MAX_RUNTIME_YAML_IMPORT_CHARS)
+    source_blob_ids: dict[str, str] | None = None
+
+
+def _source_options_reference_blob_storage(options: Mapping[str, Any], *, data_dir: str) -> bool:
+    allowed_dirs = allowed_source_directories(data_dir)
+    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+        value = options.get(key)
+        if not isinstance(value, str):
+            continue
+        resolved = resolve_data_path(value, data_dir)
+        if any(resolved.is_relative_to(directory) for directory in allowed_dirs):
+            return True
+    return False
+
+
+def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: str) -> None:
+    for source_name, source in state.sources.items():
+        if source.options.get("blob_ref") is not None:
+            continue
+        if _source_options_reference_blob_storage(source.options, data_dir=data_dir):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Source '{source_name}' points at session blob storage but has no source_blob_ids entry. "
+                    "Upload the blob into this session and include source_blob_ids for replay imports."
+                ),
+            )
+
+
+async def _state_with_imported_source_blobs(
+    state: CompositionState,
+    *,
+    source_blob_ids: Mapping[str, str] | None,
+    request: Request,
+    session_id: UUID,
+) -> CompositionState:
+    if not source_blob_ids:
+        return state
+
+    sources = dict(state.sources)
+    requested_blobs: list[tuple[str, UUID]] = []
+    for source_name, blob_id_raw in source_blob_ids.items():
+        if source_name not in sources:
+            raise HTTPException(status_code=400, detail=f"source_blob_ids references unknown source '{source_name}'")
+        try:
+            blob_id = UUID(blob_id_raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"source_blob_ids.{source_name} must be a UUID") from exc
+        requested_blobs.append((source_name, blob_id))
+
+    blob_service = getattr(request.app.state, "blob_service", None)
+    if blob_service is None:
+        raise HTTPException(status_code=409, detail="Blob service unavailable for YAML import")
+
+    for source_name, blob_id in requested_blobs:
+        try:
+            blob = await blob_service.get_blob(blob_id)
+        except BlobNotFoundError:
+            raise HTTPException(status_code=404, detail="Blob not found") from None
+        if blob.session_id != session_id:
+            raise HTTPException(status_code=404, detail="Blob not found")
+
+        source = sources[source_name]
+        options = dict(source.options)
+        for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+            options.pop(key, None)
+        options["path"] = blob.storage_path
+        options["blob_ref"] = str(blob.id)
+        sources[source_name] = SourceSpec(
+            plugin=source.plugin,
+            on_success=source.on_success,
+            options=options,
+            on_validation_failure=source.on_validation_failure,
+        )
+
+    return CompositionState(
+        sources=sources,
+        nodes=state.nodes,
+        edges=state.edges,
+        outputs=state.outputs,
+        metadata=state.metadata,
+        version=state.version,
+        guided_session=state.guided_session,
+    )
+
+
+@router.get(
+    "/{session_id}/composer-progress",
+    response_model=ComposerProgressSnapshot,
+)
+async def get_composer_progress(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> ComposerProgressSnapshot:
+    """Return the latest provider-safe composer progress for a session."""
+    session = await _verify_session_ownership(session_id, user, request)
+    registry = _get_composer_progress_registry(request)
+    return await registry.get_latest(str(session.id))
+
+
+@router.get(
+    "/{session_id}/composer/preferences",
+    response_model=ComposerPreferencesResponse,
+)
+async def get_composer_preferences(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> ComposerPreferencesResponse:
+    session = await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    prefs = await service.get_composer_preferences(session.id)
+    return _composer_preferences_response(prefs)
+
+
+@router.patch(
+    "/{session_id}/composer/preferences",
+    response_model=ComposerPreferencesResponse,
+)
+async def update_composer_preferences(
+    session_id: UUID,
+    body: UpdateComposerPreferencesRequest,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> ComposerPreferencesResponse:
+    session = await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    # B2 (load-bearing): the service returns ``(prior, current)`` so
+    # Phase 8b's per-session ``composer.session.switched_total``
+    # counter can read ``from_mode=transition.prior.trust_mode``
+    # without a route-handler read-before-write (which would open a
+    # TOCTOU window — see plan §"Option not taken — read-before-write
+    # from the route handler"). The PATCH response shape is unchanged;
+    # we only project ``current`` into the response model.
+    transition = await service.update_composer_preferences(
+        session.id,
+        trust_mode=body.trust_mode,
+        density_default=body.density_default,
+        actor=f"user:{user.user_id}",
+    )
+
+    # Phase 8 Task 2 Step 3 — per-session ``trust_mode`` switch emit.
+    #
+    # Guarded on actual change (transition-rate semantic, distinct
+    # from the account-level set-rate at preferences/routes.py).
+    # The service's ``trust_mode.changed`` audit row at
+    # ``sessions/service.py:1605-1619`` fires unconditionally on
+    # every PATCH including no-ops; emitting the counter
+    # unconditionally would over-count by the no-op rate. Guarding
+    # on ``prior != current`` also gives the Q4 contract: a
+    # combined PATCH that changes both ``trust_mode`` AND
+    # ``density_default`` fires the counter exactly once,
+    # attributed to the trust_mode change only.
+    #
+    # B1 (audit-primacy superset rule): the emit runs AFTER the
+    # audit row commits (the service ``_run_sync`` returned),
+    # which carries ``prior_trust_mode`` in its payload (B1
+    # extension at sessions/service.py:1614). Telemetry attributes
+    # are a strict subset of audit-recorded reality.
+    #
+    # Vocabulary (B1-r2): both attributes come from the per-session
+    # ``trust_mode`` CHECK-constraint vocabulary
+    # (``explicit_approve`` / ``auto_commit``), NOT the account-
+    # level ``default_composer_mode`` vocabulary.
+    if transition.prior.trust_mode != transition.current.trust_mode:
+        telemetry: SessionsTelemetry = request.app.state.sessions_telemetry
+        record_session_switched(
+            telemetry,
+            from_mode=transition.prior.trust_mode,
+            to_mode=transition.current.trust_mode,
+        )
+
+    return _composer_preferences_response(transition.current)
+
+
+@router.get("/{session_id}/state")
+async def get_current_state(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> CompositionStateResponse | None:
+    """Get the current (highest-version) composition state."""
+    session = await _verify_session_ownership(session_id, user, request)
+    service = request.app.state.session_service
+    state = await service.get_current_state(session.id)
+    if state is None:
+        return None
+    return _state_response(state)
+
+
+@router.get(
+    "/{session_id}/state/versions",
+    response_model=list[CompositionStateResponse],
+)
+async def get_state_versions(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+) -> list[CompositionStateResponse]:
+    """Get composition state versions for a session."""
+    session = await _verify_session_ownership(session_id, user, request)
+    service = request.app.state.session_service
+    versions = await service.get_state_versions(session.id, limit=limit, offset=offset)
+    return [_state_response(v) for v in versions]
+
+
+@router.post(
+    "/{session_id}/state/revert",
+    response_model=CompositionStateResponse,
+)
+async def revert_state(
+    session_id: UUID,
+    body: RevertStateRequest,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> CompositionStateResponse:
+    """Revert the pipeline to a prior composition state version (R1).
+
+    Creates a new version that is a copy of the specified prior state.
+    Injects a system message recording the revert.
+    """
+    session = await _verify_session_ownership(session_id, user, request)
+    service = request.app.state.session_service
+
+    try:
+        new_state = await service.set_active_state(
+            session.id,
+            body.state_id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=404,
+            detail="State not found",
+        ) from None
+
+    # Look up the original version number for the system message
+    original_state = await service.get_state(body.state_id)
+    await service.add_message(
+        session.id,
+        role="system",
+        content=f"Pipeline reverted to version {original_state.version}.",
+        writer_principal="route_system_message",
+    )
+
+    return _state_response(new_state)
+
+
+@router.post(
+    "/{session_id}/state/yaml",
+    response_model=CompositionStateResponse,
+)
+async def import_state_yaml(
+    session_id: UUID,
+    body: ImportStateYamlRequest,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> CompositionStateResponse:
+    """Seed a session's composition state from exported runtime YAML."""
+    session = await _verify_session_ownership(session_id, user, request)
+    compose_lock = await _get_session_compose_lock_registry(request).get_lock(str(session.id))
+    async with compose_lock:
+        try:
+            imported_state = composition_state_from_runtime_yaml(body.yaml)
+        except RuntimeYamlImportError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        imported_state = await _state_with_imported_source_blobs(
+            imported_state,
+            source_blob_ids=body.source_blob_ids,
+            request=request,
+            session_id=session.id,
+        )
+        _reject_unbound_blob_storage_sources(
+            imported_state,
+            data_dir=str(request.app.state.settings.data_dir),
+        )
+
+        service: SessionServiceProtocol = request.app.state.session_service
+        state_data, _validation = await _state_data_from_composer_state(
+            imported_state,
+            settings=request.app.state.settings,
+            secret_service=request.app.state.scoped_secret_resolver,
+            user_id=str(user.user_id),
+            runtime_preflight=None,
+            preflight_exception_policy="persist_invalid",
+            initial_version=imported_state.version,
+            telemetry_source="compose",
+        )
+        state_record = await service.save_composition_state(
+            session.id,
+            state_data,
+            provenance="session_seed",
+        )
+        return _state_response(state_record)
+
+
+@router.get("/{session_id}/state/yaml")
+async def get_state_yaml(
+    session_id: UUID,
+    request: Request,
+    user: UserIdentity = Depends(get_current_user),  # noqa: B008
+) -> StateYamlResponse:
+    """Get YAML representation of the current composition state (M1).
+
+    Runs runtime preflight on the exact CompositionState reconstructed
+    from the persisted record, then generates deterministic public YAML via
+    generate_public_yaml() against that same snapshot. YAML export preflight
+    deliberately does not receive the scoped secret resolver: export
+    serializes secret_ref markers, and a rejected preflight response must
+    not expose resolved secret values through plugin validation prose.
+    The two operations see the same Python object — there is no re-fetch
+    between preflight and serialization, so a state that passes the gate
+    is byte-identical to the state that gets serialized.
+    """
+    session = await _verify_session_ownership(session_id, user, request)
+    service: SessionServiceProtocol = request.app.state.session_service
+    state_record = await service.get_current_state(session.id)
+    if state_record is None:
+        raise HTTPException(status_code=404, detail="No composition state exists")
+    state = _state_from_record(state_record)
+    try:
+        runtime_validation = await _runtime_preflight_for_state(
+            state,
+            settings=request.app.state.settings,
+            secret_service=None,
+            user_id=None,
+        )
+    except (
+        TimeoutError,
+        OSError,
+        PluginConfigError,
+        PluginNotFoundError,
+        GraphValidationError,
+    ) as exc:
+        # Narrowed per CLAUDE.md offensive-programming policy. This
+        # tuple covers the user-fixable preflight failure modes:
+        #
+        # * TimeoutError — asyncio.wait_for exceeded
+        #   composer_runtime_preflight_timeout_seconds. Operator
+        #   action: increase timeout or fix the slow plugin.
+        # * OSError — filesystem error during plugin instantiation
+        #   (file not found, permission denied, broken pipe, etc.).
+        #   Operator action: fix the file/permissions.
+        # * PluginConfigError / PluginNotFoundError — the user's
+        #   pipeline references a misconfigured or missing plugin.
+        #   Operator action: fix the pipeline config.
+        # * GraphValidationError — the pipeline graph is structurally
+        #   invalid (validate_pipeline normally absorbs this, but
+        #   it's listed here for defense-in-depth in case a future
+        #   refactor lets it escape).
+        #
+        # Programmer-bug classes (AttributeError, TypeError,
+        # KeyError, RuntimeError, ImportError, etc.) are deliberately
+        # NOT caught — they propagate to FastAPI's default 500
+        # handler so operators see real tracebacks rather than the
+        # misleading "fix your pipeline" 409 message. The
+        # exception-counter is reserved for the user-fixable bucket
+        # so dashboards measure real preflight failure rate, not
+        # bugs we introduced ourselves.
+        _record_composer_runtime_preflight_telemetry(
+            "exception",
+            source="yaml_export",
+            exception_class=type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="Runtime preflight could not complete; YAML export aborted.",
+        ) from exc
+    _record_composer_runtime_preflight_telemetry(
+        "passed" if runtime_validation.is_valid else "failed",
+        source="yaml_export",
+    )
+    if not runtime_validation.is_valid:
+        # Deliberately a generic message: the YAML-export 409 must not echo
+        # preflight error prose (commit "fix: prevent YAML export secret
+        # leaks"). With secret_service=None the fabricated-secret check is
+        # skipped, so a literally-typed credential is not redacted and could
+        # otherwise surface through plugin validation prose. See
+        # test_get_state_yaml_does_not_echo_preflight_error_messages.
+        detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
+        raise HTTPException(status_code=409, detail=detail)
+    yaml_str = generate_public_yaml(state)
+
+    # Phase 6A B3 — sessions-DB audit event for YAML export.
+    #
+    # Two Tier-1 audit events ship in Phase 6 (mark_ready_for_review and
+    # export_yaml). This is the export_yaml site. Sync, crash-on-failure
+    # per CLAUDE.md audit primacy — if this write fails the request
+    # fails, no YAML is returned, no carve-out is permitted. The write
+    # MUST land before the response is returned: the audit row is the
+    # legal record that the YAML was exported on the user's behalf.
+    #
+    # The state record was just read via ``service.get_current_state``
+    # above; ``state_record.id`` is the composition_state_id this
+    # export is bound to.
+    with request.app.state.session_engine.begin() as conn:
+        conn.execute(
+            insert(composer_completion_events_table).values(
+                id=str(uuid4()),
+                session_id=str(session_id),
+                composition_state_id=str(state_record.id),
+                event_type="export_yaml",
+                actor=str(user.user_id),
+                created_at=datetime.now(UTC),
+                payload_digest=None,
+                expires_at=None,
+            )
+        )
+
+    # Phase 8 Sub-task 7c (telemetry-backfill: phase-6).
+    # composer.session.completed_total — fires AFTER the audit
+    # engine.begin() block has exited cleanly. If the audit INSERT
+    # raises, the with-block exits via exception, FastAPI converts
+    # it to a 5xx, and control never reaches this line — the counter
+    # stays at zero and the superset invariant (counter aggregates
+    # over committed audit rows) is structurally enforced.
+    record_session_completed(
+        request.app.state.sessions_telemetry,
+        completion_verb="export_yaml",
+    )
+
+    response: StateYamlResponse = {"yaml": yaml_str}
+    source_blob_ids = {
+        source_name: str(source.options["blob_ref"]) for source_name, source in state.sources.items() if "blob_ref" in source.options
+    }
+    if source_blob_ids:
+        response["source_blob_ids"] = source_blob_ids
+    return response

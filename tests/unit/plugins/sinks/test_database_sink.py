@@ -49,6 +49,18 @@ class TestDatabaseSink:
                 plugin_name="database",
             )
 
+    @pytest.mark.parametrize("table_name", ["todo", "unknown", "unset", "required"])
+    def test_config_accepts_plain_placeholder_words_as_table_names(self, table_name: str) -> None:
+        cfg = DatabaseSinkConfig.from_dict(
+            {
+                "url": "sqlite:///:memory:",
+                "table": table_name,
+                "schema": STRICT_SCHEMA,
+            },
+            plugin_name="database",
+        )
+        assert cfg.table == table_name
+
     def test_write_creates_table(self, db_url: str, ctx: PluginContext) -> None:
         """write() creates table and inserts rows."""
         from elspeth.plugins.sinks.database_sink import DatabaseSink

@@ -31,8 +31,19 @@
   margin: 0;
   padding: 0;
   display: grid;
+  /* One column per workflow step (GUIDED_WORKFLOW_STEPS = 5). The prior
+     repeat(6,…) left an empty trailing column. */
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: var(--space-xs);
+}
+
+/* Narrow viewports: 5 equal columns are too tight (~70px each at 390px), which
+   shattered single-word labels one character per line. Drop to two columns so
+   labels stay whole; the stepper wraps to a few short rows. */
+@media (max-width: 640px) {
+  .guided-workflow-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .guided-workflow-step {
@@ -74,7 +85,10 @@
 }
 
 .guided-workflow-label {
-  overflow-wrap: anywhere;
+  /* break-word (not anywhere): only break when a word genuinely cannot fit,
+     instead of shattering short labels like "Transforms" character-by-character
+     in a narrow grid cell. */
+  overflow-wrap: break-word;
   line-height: 1.2;
 }
 
@@ -87,11 +101,156 @@
   background-color: var(--color-surface);
 }
 
+/* Operator request: cap the guided surface to a centred content "sheet" on wide
+   viewports instead of full-bleed. The stepper (a direct child) and the
+   scroll-region content are capped + centred; the full-width chrome — the
+   header (top) and the bottom-docked composer — is deliberately NOT capped, so
+   the surface reads like a normal chat window (full-width bars top/bottom, a
+   centred content column between). 64rem keeps the 5-step stepper above its
+   640px 2-column breakpoint. (Width is provisional — tune to taste.)
+   max-width caps the stretched flex item; margin-inline:auto centres it once
+   capped and collapses to a flush fill below the cap (narrow screens
+   unaffected). */
+.chat-panel--guided > .guided-workflow,
+.guided-scroll > * {
+  max-width: 64rem;
+  margin-inline: auto;
+}
+
+/* Scrollable content region between the stepper and the docked composer
+   (mirrors the freeform body's `.chat-panel-messages`). flex:1 absorbs the
+   remaining height; min-height:0 lets it shrink below its content size so the
+   non-tutorial composer below stays pinned at the bottom — the classic
+   flex-column chat layout. */
+.guided-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* "Describe what you want" — a direct child of .chat-panel--guided. In LIVE
+   guided it DOCKS at the bottom (flex-shrink:0 against the full-height panel +
+   flex:1 scroll region — the classic chat layout). In the TUTORIAL the panel is
+   content-height single-document flow (see tutorial.css `.tutorial-shell--guided`),
+   so it simply flows LAST in the stack and flex-shrink:0 is inert there. Either
+   way: chrome-light (dashed surface + top divider, not a full card) and CAPPED +
+   centred to the same 64rem sheet as the decision + summary cards. */
+.chat-panel--guided > .guided-step-chat {
+  flex-shrink: 0;
+  /* width:100% is REQUIRED for a flex-column item: `margin-inline:auto` alone
+     makes a flex item shrink-to-content and centre narrow (it overrides the
+     default align-items:stretch). With an explicit width the item fills to the
+     64rem cap, then the auto margins centre it — matching the summary/decision
+     cards (which fill 64rem because they live in the block-flow .guided-scroll,
+     not in this flex column). */
+  width: 100%;
+  max-width: 64rem;
+  margin: 0 auto var(--space-md);
+  /* Card chrome (dashed border, elevated surface) inherited from the base
+     .guided-step-chat rule — the dashed "input zone" affordance sets the compose
+     box apart from the solid summary/decision cards while sharing their column. */
+}
+
+/* Operator request (revised): align the current decision with the pipeline
+   summary card above it — both share the centred 64rem sheet so their left edges
+   line up. (Earlier this went full-width edge-to-edge; the two-zone split read as
+   misaligned against the centred summary, so it's now a matching centred card.)
+   Only the cap + centred margin are set here; the card chrome (border / radius /
+   surface / padding) falls back to the base `.guided-current-decision` rule, so
+   it visually matches `.guided-graph-panel`. */
+.guided-scroll > .guided-current-decision {
+  max-width: 64rem;
+  margin: var(--space-md) auto;
+}
+
+/* Tutorial: the decision renders OUT of .guided-scroll (ChatPanel places it as a
+   direct child of .chat-panel--guided in tutorial mode), so it flows in document
+   order after the summary and directly above the composer — one continuous stack
+   on the single-document tutorial layout (see tutorial.css `.tutorial-shell--guided`).
+   As a flex-column child it needs an explicit width to fill the 64rem cap before
+   the auto margins centre it (same reason as .guided-step-chat). The small bottom
+   margin groups it with the composer below. Card chrome (solid border / radius /
+   surface) is inherited from the base rule, matching the summary card.
+   (flex-shrink:0 is inert here — the tutorial panel is content-height — but kept
+   for parity with the composer rule.) */
+.chat-panel--guided > .guided-current-decision {
+  flex-shrink: 0;
+  width: 100%;
+  max-width: 64rem;
+  margin: var(--space-md) auto var(--space-sm);
+}
+
+/* ── Two-column WORKSPACE (tutorial; the future first-class hybrid layout) ─────
+   Conversation stream + composer on the LEFT (the freeform half); the
+   pipeline-so-far + current-decision cards pinned sticky TOP-RIGHT (the guided
+   half). Lives inside the single-document tutorial flow (tutorial.css
+   `.tutorial-shell--guided` — the PAGE scrolls). The right column is sticky so
+   the cards stay in view as the conversation grows, and takes its OWN scroll when
+   it is taller than the viewport so the decision's forward button is always
+   reachable. Built with general `.guided-workspace*` classes (not tutorial-only)
+   so it can be promoted to a first-class mode later. */
+.guided-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-lg);
+  align-items: start;
+  width: 100%;
+  max-width: 90rem;
+  margin-inline: auto;
+  padding-inline: var(--space-md);
+}
+
+.guided-workspace-stream {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+.guided-workspace-decision {
+  position: sticky;
+  top: var(--space-md);
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+  min-width: 0;
+  /* Own scroll when the cards exceed the viewport — Continue stays reachable
+     without scrolling the whole page to its very bottom. */
+  max-height: calc(100vh - 8rem);
+  overflow-y: auto;
+}
+
+/* Each column owns its vertical rhythm via `gap`; reset the pieces' own block
+   margins (they centre in a 64rem sheet in the single-column layout) and let them
+   fill their column. The chat narration keeps its readable 70ch measure via
+   .guided-chat-history-content. */
+.guided-workspace-stream > *,
+.guided-workspace-decision > * {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+}
+
+/* Narrow screens: collapse to one column (one document scroll, no sticky). Keep
+   the conversation + composer first so Send stays near the top; the cards follow. */
+@media (max-width: 900px) {
+  .guided-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 64rem;
+  }
+
+  .guided-workspace-decision {
+    position: static;
+    max-height: none;
+    overflow: visible;
+  }
+}
+
 .guided-current-decision-copy {
   margin-bottom: var(--space-md);
 }
 
-.guided-current-decision-copy h2,
 .guided-step-chat-heading,
 .guided-history-heading {
   margin: 0 0 var(--space-xs) 0;
@@ -99,6 +258,30 @@
   line-height: 1.3;
   font-weight: 700;
   color: var(--color-text);
+}
+
+/* Decorative eyebrow above the decision heading ("Current decision"). The
+   prominent thing is now the dynamic build rationale (the <h2> below), so this
+   small uppercase label is aria-hidden and quiet. */
+.guided-current-decision-eyebrow {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+}
+
+/* The dynamic build rationale, rendered AS the decision heading (h2). Specificity
+   0-2-0 so it owns the heading style now that the old .guided-current-decision-copy
+   h2 group rule is retired. font-weight is set explicitly (not inherited) so a
+   barrel-level heading reset can't flatten its prominence. */
+.guided-current-decision-copy .guided-current-decision-rationale {
+  margin: var(--space-xs) 0 var(--space-md);
+  font-size: var(--font-size-lg);
+  line-height: 1.4;
+  font-weight: 700;
+  color: var(--color-text);
+  text-transform: none;
 }
 
 .guided-current-decision-copy p,
@@ -113,14 +296,155 @@
   margin-top: var(--space-sm);
 }
 
+/* Tutorial: the manual decision is optional (Send drives the build), so the
+   decorative eyebrow stays a quiet label and an explanatory note points the
+   learner back to Send. (Repointed off the retired h2 group rule — the h2 is
+   now the dynamic rationale, which stays readable.) */
+.guided-current-decision--tutorial .guided-current-decision-eyebrow {
+  color: var(--color-text-secondary);
+}
+
+.guided-current-decision-tutorial-note {
+  margin: var(--space-xs) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+/* ── Guided verification panel (Slice C) ──────────────────────────────────────
+   The canonical "what I built" surface above the current decision: gloss +
+   validation status (+ a graph thumbnail in the tutorial). A direct child of
+   .guided-scroll, so the sheet cap (64rem, centred) is inherited from the
+   `.guided-scroll > *` rule above. Mirrors the .guided-current-decision card. */
+.guided-graph-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  /* `auto` inline margins restore the centred 64rem sheet this panel inherits
+     from `.guided-scroll > *` (line ~115). A bare `margin: var(--space-md)`
+     shorthand here is same-specificity-but-later than that rule, so it silently
+     overrode `margin-inline:auto` and pinned the panel hard left — contradicting
+     the "centred sheet cap" the comment above promised. Keep the vertical rhythm
+     (top/bottom var(--space-md)); centre horizontally. */
+  margin: var(--space-md) auto;
+  padding: var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface);
+}
+
+/* ── Guided verification panel pieces (Slice C) ───────────────────────────────
+   The plain-language gloss + the in-column validation status. The gloss is the
+   canonical "what I built" line; the status is the novice-register verification
+   signal (the column thumbnail has no per-node markers — those are on expand).
+   Status body text stays --color-text-secondary (AA on the panel surface,
+   gated in colorContrast.test.ts); only the aria-hidden, redundant glyph is
+   tinted by tone, so colour is never the sole signal. */
+.pipeline-gloss {
+  margin: 0;
+  font-size: var(--font-size-base);
+  line-height: 1.4;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.pipeline-validation-summary {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.pipeline-validation-summary-glyph {
+  font-weight: 700;
+}
+
+.pipeline-validation-summary--ok .pipeline-validation-summary-glyph {
+  color: var(--color-success);
+}
+
+.pipeline-validation-summary--warning .pipeline-validation-summary-glyph {
+  color: var(--color-warning);
+}
+
+.pipeline-validation-summary--error .pipeline-validation-summary-glyph {
+  color: var(--color-error);
+}
+
 .guided-step-chat {
   border-style: dashed;
   background-color: var(--color-surface-elevated);
 }
 
+/* Tutorial: shown in place of the locked chat box once the step's prompt has
+   been Sent (the request is in the transcript above). */
+.guided-step-chat-sent {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
 /* Base wrapper — each widget is an isolated block in the chat stream */
 .guided-turn {
   padding: var(--space-md) 0;
+}
+
+/* Shared turn action buttons (SchemaFormTurn / recipe_decision emit
+   .guided-turn-primary / .guided-turn-secondary). These were undefined, so the
+   "Continue" / "Apply recipe" / "Build manually" / "Clear …" buttons rendered
+   as unstyled UA buttons (and fell below the WCAG 2.5.8 44px target). Styled to
+   match the rest of the guided button family. */
+.guided-turn-primary,
+.guided-turn-secondary {
+  padding: var(--space-sm) var(--space-lg);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-base);
+  font-family: inherit;
+  cursor: pointer;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-turn-primary {
+  background-color: var(--color-accent);
+  color: var(--color-text-inverse);
+  border: none;
+}
+
+.guided-turn-primary:hover:not(:disabled) {
+  background-color: var(--color-btn-primary-bg-hover);
+}
+
+.guided-turn-secondary {
+  background-color: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+}
+
+.guided-turn-secondary:hover:not(:disabled) {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-accent);
+}
+
+.guided-turn-primary:disabled,
+.guided-turn-secondary:disabled {
+  background-color: var(--color-surface-elevated);
+  color: var(--color-text-muted);
+  border-color: var(--color-border-strong);
+  cursor: not-allowed;
+}
+
+.guided-turn-primary:focus-visible,
+.guided-turn-secondary:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Field-block wrapper for the schema form. */
+.guided-schema-fields {
+  display: flex;
+  flex-direction: column;
 }
 
 /* Chip-group fieldset — strips browser default fieldset chrome */
@@ -146,29 +470,44 @@
 }
 
 /* Chip group: horizontal wrapping row of option buttons */
+/* Chip group: a uniform option grid. auto-fill keeps the option buttons a tidy,
+   even width (left-packed) instead of the prior flex row where each item's width
+   was dragged out by its hint to a ragged 280px max. align-items: stretch evens
+   item heights so a two-line hint (the dataverse case) no longer staggers the
+   row. On a ~358px mobile column only one 180px track fits → one option per row. */
 .guided-chip-group {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: var(--space-sm);
+  align-items: stretch;
 }
 
-/* One option: button + optional hint stacked vertically */
+/* One option: button + optional hint stacked vertically. The grid track now owns
+   the width (the prior max-width:280px let the hint drag the button to a ragged
+   width). */
 .guided-chip-item {
   display: flex;
   flex-direction: column;
   gap: var(--space-xs);
-  max-width: 280px;
 }
 
-/* The option button itself */
+/* The option button itself. Styled as an accent-OUTLINED option, not a text
+   input: the saturated --color-chip-border (accent-green, dark-aware so it clears
+   WCAG 1.4.11 3:1 in the dark default theme) + medium weight is the resting
+   affordance that distinguishes it from .guided-schema-input (faint
+   --color-border-strong, regular weight). Hover deepens to an accent tint; the
+   selected state (.guided-chip-btn[aria-pressed="true"], below) fills with
+   accent — a clear outlined → tinted → filled ladder. */
 .guided-chip-btn {
+  width: 100%;
   padding: var(--space-sm) var(--space-md);
   background-color: var(--color-surface-elevated);
   color: var(--color-text);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-chip-border);
   border-radius: var(--radius-md);
   cursor: pointer;
   font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
   font-family: inherit;
   text-align: left;
   min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
@@ -176,8 +515,8 @@
 }
 
 .guided-chip-btn:hover {
-  background-color: var(--color-surface-hover);
-  border-color: var(--color-accent);
+  background-color: var(--color-highlight);
+  border-color: var(--color-chip-border);
 }
 
 .guided-chip-btn:focus-visible {
@@ -625,6 +964,64 @@
    form-field-per-row layout, not a chip group.
    --------------------------------------------------------------------------- */
 
+/* Read-only decision summary (default view). A definition list of the visible
+   knobs — label : value — replacing the full-width editable form. Short scalars
+   inline; JSON via the shared CodeBlock; the Edit toggle reveals the form. */
+.guided-schema-summary {
+  display: grid;
+  gap: var(--space-sm);
+  margin: var(--space-sm) 0;
+}
+
+.guided-schema-summary-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, max-content) 1fr;
+  gap: var(--space-md);
+  align-items: baseline;
+}
+
+.guided-schema-summary-label {
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.guided-schema-summary-value {
+  color: var(--color-text);
+  min-width: 0;
+}
+
+.guided-schema-summary-value .code-block {
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin: 4px 0 0;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.guided-schema-summary-value .code-block code {
+  background: none;
+  padding: 0;
+}
+
+/* Validation-failure caveat, demoted to a small note beside its summary row
+   (role=note) instead of a full-width paragraph above Continue. */
+.guided-schema-summary-caveat {
+  margin: var(--space-xs) 0 0;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Non-tutorial nudge shown when a prefilled value blocks Continue — points the
+   user at the Edit toggle to fix it. */
+.guided-schema-summary-needs-edit {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
 /* One property row: label + control + optional hint/error stacked vertically */
 .guided-schema-field-row {
   display: flex;
@@ -640,12 +1037,20 @@
   color: var(--color-text-secondary);
 }
 
+/* Required-field asterisk (WCAG 3.3.2). aria-hidden in the markup — the
+   accessible cue rides the visually-hidden "(required)" + aria-required; this
+   is the sighted-only signal, tinted with the error colour to stand out. */
+.guided-schema-required-marker {
+  color: var(--color-error, var(--color-accent));
+  font-weight: 700;
+}
+
 /* Text / number input */
 .guided-schema-input {
   padding: var(--space-sm) var(--space-md);
   background-color: var(--color-surface-elevated);
   color: var(--color-text);
-  border: 1px solid var(--color-border-strong);
+  border: 1px solid var(--color-input-border);
   border-radius: var(--radius-md);
   font-size: var(--font-size-base);
   font-family: inherit;
@@ -656,6 +1061,12 @@
 .guided-schema-input:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+/* Error-state border for the number input (mirrors .guided-schema-textarea--error
+   used by the JSON branch) — set when aria-invalid is true. */
+.guided-schema-input--error {
+  border-color: var(--color-error, var(--color-accent));
 }
 
 /* Select dropdown */
@@ -772,6 +1183,7 @@
 /* Continue action row */
 .guided-schema-actions {
   display: flex;
+  gap: var(--space-sm);
   margin-top: var(--space-md);
 }
 
@@ -820,6 +1232,9 @@
   color: var(--color-text-secondary);
   margin-bottom: var(--space-md);
   line-height: 1.5;
+  /* Readable measure — same constraint as the chat narration; the LLM
+     rationale must not run the full guided column. */
+  max-width: 70ch;
 }
 
 /* Blockers section — only rendered when payload.blockers is non-empty */
@@ -913,6 +1328,20 @@
   gap: var(--space-xs);
 }
 
+/* Tutorial passive mode: the option dump is collapsed behind a summary so the
+   learner sees a friendly label, not a monospace config wall. */
+.guided-propose-options-details {
+  margin: 0 0 var(--space-sm) 0;
+}
+
+.guided-propose-options-summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-mono, monospace);
+  padding: var(--space-2xs) 0;
+}
+
 /* Each option row: key and value side-by-side */
 .guided-propose-option-row {
   display: flex;
@@ -942,11 +1371,20 @@
   line-height: 1.5;
   padding-top: var(--space-sm);
   border-top: 1px solid var(--color-border);
+  /* Readable measure — matches .guided-propose-why and the chat narration so
+     the per-step rationale doesn't run the full guided column. */
+  max-width: 70ch;
 }
 
-/* Action row: Accept proposal button */
+/* Action row: Reject / Ask advisor / Accept. The sibling
+   .guided-propose-step-actions (below) already carries gap; this row had neither
+   gap nor justification, so the buttons rendered flush. Right-align with the
+   primary (Accept) rightmost; wrap on narrow panels so the row never overflows. */
 .guided-propose-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  justify-content: flex-end;
   margin-top: var(--space-md);
 }
 
@@ -1136,60 +1574,10 @@
   outline-offset: 2px;
 }
 
-/* ---------------------------------------------------------------------------
-   ExitToFreeformButton (Task 7.8)
-   Class: guided-exit-button.
-
-   Secondary / tertiary visual weight -- deliberately quieter than the primary
-   action buttons (accent background) used by individual widgets.  The button
-   must be visible but not compete with the widget's own call-to-action.
-
-   Sized to WCAG 2.5.8 minimum target (min-height: 44px).  Focus ring and
-   hover match the guided-* family convention.
-   --------------------------------------------------------------------------- */
-
-.guided-exit-button {
-  padding: var(--space-sm) var(--space-md);
-  background-color: transparent;
-  color: var(--color-text-secondary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  font-size: var(--font-size-sm);
-  font-family: inherit;
-  cursor: pointer;
-  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
-  transition: background-color 0.1s ease, border-color 0.1s ease,
-    color 0.1s ease;
-}
-
-.guided-exit-button:hover {
-  background-color: var(--color-surface-elevated);
-  border-color: var(--color-border-strong);
-  color: var(--color-text);
-}
-
-.guided-exit-button:focus-visible {
-  outline: 2px solid var(--color-focus-ring);
-  outline-offset: 2px;
-}
-
-.guided-exit-confirmation {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  align-items: center;
-}
-
-.guided-exit-button--danger {
-  border-color: var(--color-error);
-  color: var(--color-error);
-}
-
-.guided-exit-button--danger:hover {
-  background-color: var(--color-error-bg);
-  border-color: var(--color-error);
-  color: var(--color-error);
-}
+/* The guided<->freeform mode toggle moved to the shared ModeSwitchButton
+   (chat.css → .mode-switch-*), used in both body headers. The old
+   ExitToFreeformButton (.guided-exit-*) styles were retired with that
+   component. */
 
 /* ---------------------------------------------------------------------------
    GuidedHistory (Task 7.9)
@@ -1220,7 +1608,11 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
-  margin: var(--space-md);
+  /* `auto` inline margins centre this in the 64rem sheet inherited from
+     `.guided-scroll > *`. A bare `margin` shorthand (same-specificity-but-later)
+     clobbers `margin-inline:auto` and pins it hard left — the same trap fixed on
+     .guided-graph-panel; only visible once prior-step history exists. */
+  margin: var(--space-md) auto;
   padding: var(--space-md);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -1252,6 +1644,67 @@
 
 .guided-history-summary {
   color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------------------
+   GuidedChatHistory — per-step transcript (You / Assistant turns).
+   These classes were undefined, so the role and step badges collapsed together
+   ("YouSource" / "AssistantSource") with no separation and the content ran flat.
+   Style the role+step as a muted header line above each turn's content.
+   --------------------------------------------------------------------------- */
+.guided-chat-history {
+  /* `auto` inline margins centre the transcript in the 64rem sheet it inherits
+     from `.guided-scroll > *`; a bare `margin` shorthand was clobbering
+     `margin-inline:auto` and pinning it hard left, misaligned with the centred
+     cards (the YOU/ASSISTANT transcript rendered in a far-left column). Same trap
+     as .guided-graph-panel / .guided-history; only surfaces once a turn has been
+     sent. */
+  margin: var(--space-md) auto;
+}
+
+.guided-chat-history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.guided-chat-history-role {
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-secondary);
+}
+
+/* Middot separator between the role badge and the step label so they never
+   read as one word. */
+.guided-chat-history-step {
+  margin-left: var(--space-xs);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+}
+
+.guided-chat-history-step::before {
+  content: "·";
+  margin-right: var(--space-xs);
+  color: var(--color-text-muted);
+}
+
+.guided-chat-history-content {
+  margin: var(--space-2xs) 0 0;
+  /* Readable measure — the narration must not run the full ~1300px guided
+     column. ~70 characters keeps lines scannable; on mobile the viewport is
+     already narrower than 70ch so this never constrains the small screen. */
+  max-width: 70ch;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
@@ -1373,9 +1826,52 @@
   outline-offset: 2px;
 }
 
+/* ---------------------------------------------------------------------------
+   ProposeChainTurn secondary actions (transforms stage). The primary
+   .guided-propose-accept-btn is defined above; the edit / secondary buttons and
+   their row were not, so they rendered as unstyled UA buttons.
+   --------------------------------------------------------------------------- */
+.guided-propose-step-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+
+.guided-propose-edit-btn,
+.guided-propose-secondary-btn {
+  padding: var(--space-sm) var(--space-md);
+  background-color: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-family: inherit;
+  min-height: var(--size-control); /* WCAG 2.5.8 minimum target size */
+  transition: background-color 0.1s ease, border-color 0.1s ease;
+}
+
+.guided-propose-edit-btn:hover:not(:disabled),
+.guided-propose-secondary-btn:hover:not(:disabled) {
+  background-color: var(--color-surface-elevated);
+  border-color: var(--color-accent);
+}
+
+.guided-propose-edit-btn:focus-visible,
+.guided-propose-secondary-btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* The guided interpretation-review card styling was retired with the
+   InterpretationReviewTurn widget; pending LLM decisions now render through the
+   shared AcknowledgementStack/AcknowledgementCard (see chat.css → .ack-*). */
+
 /* Honour OS-level motion preferences. Any new transition/animation added in
    the guided-* section above MUST be silenced here. */
 @media (prefers-reduced-motion: reduce) {
+  .guided-turn-primary,
+  .guided-turn-secondary,
   .guided-chip-btn,
   .guided-workflow-step,
   .guided-inspect-confirm-btn,
@@ -1392,9 +1888,10 @@
   .guided-schema-advanced-toggle,
   .guided-schema-continue-btn,
   .guided-propose-accept-btn,
+  .guided-propose-edit-btn,
+  .guided-propose-secondary-btn,
   .guided-recipe-apply-btn,
   .guided-recipe-build-btn,
-  .guided-exit-button,
   .guided-completion-save-btn,
   .guided-completion-edit-btn {
     transition: none;

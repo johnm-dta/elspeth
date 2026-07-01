@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -48,6 +49,8 @@ def test_live_begin_run_writes_non_cache_defaults() -> None:
         config={"pipeline": "test"},
         canonical_version="v1",
         run_id="run-live",
+        openrouter_catalog_sha256="0" * 64,
+        openrouter_catalog_source="bundled",
     )
 
     assert run.llm_call_count is None
@@ -92,6 +95,44 @@ def test_landscape_write_repository_records_synthesised_cache_run() -> None:
     assert run_row.cache_key == "a" * 64
     assert len(row_count) == 1
     assert len(node_count) == 2
+
+
+def test_synthesised_single_source_rows_keep_legacy_identity_when_payload_keys_collide() -> None:
+    from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
+
+    db = make_landscape_db()
+    repo = LandscapeWriteRepository(db)
+
+    run_id = repo.record_synthesised_run(
+        pipeline_yaml="source: {}\n",
+        rows=[
+            {
+                "url": "ato.gov.au",
+                "source_node_index": 99,
+                "source_row_index": 88,
+                "ingest_sequence": 77,
+                "source_data_hash": "payload-field-not-audit-identity",
+            }
+        ],
+        source_data_hash="single-source-run-hash",
+        llm_call_count=0,
+        node_specs=[
+            SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="inline_blob", plugin_version="1.0"),
+            SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="tutorial_summary", plugin_version="1.0"),
+        ],
+        started_at=datetime(2026, 5, 15, tzinfo=UTC),
+        metadata={"seeded_from_cache": True, "cache_key": "b" * 64},
+        openrouter_catalog_sha256="0" * 64,
+        openrouter_catalog_source="bundled",
+    )
+
+    with db.connection() as conn:
+        row = conn.execute(select(rows_table).where(rows_table.c.run_id == run_id)).one()
+
+    assert row.source_node_id == f"{run_id}-n0"
+    assert row.source_row_index == 0
+    assert row.ingest_sequence == 0
+    assert row.source_data_hash == "single-source-run-hash"
 
 
 def test_synthesised_run_records_one_node_per_occurrence_with_plugin_reuse() -> None:
@@ -168,57 +209,184 @@ def test_synthesised_run_records_one_node_per_occurrence_with_plugin_reuse() -> 
     )
 
 
+def test_synthesised_run_records_multi_source_row_identity() -> None:
+    """Multi-source cache replay must record explicit per-source row identity."""
+    from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
+
+    db = make_landscape_db()
+    repo = LandscapeWriteRepository(db)
+
+    node_specs = [
+        SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv", plugin_version="1.0"),
+        SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="json", plugin_version="1.2"),
+        SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="csv", plugin_version="1.0"),
+    ]
+
+    run_id = repo.record_synthesised_run(
+        pipeline_yaml="# canonical multi-source fixture\n",
+        rows=[
+            {
+                "source_node_index": 0,
+                "source_row_index": 0,
+                "ingest_sequence": 0,
+                "source_data_hash": "orders-hash",
+            },
+            {
+                "source_node_index": 1,
+                "source_row_index": 0,
+                "ingest_sequence": 1,
+                "source_data_hash": "refunds-hash",
+            },
+            {
+                "source_node_index": 0,
+                "source_row_index": 1,
+                "ingest_sequence": 2,
+                "source_data_hash": "orders-hash-2",
+            },
+        ],
+        source_data_hash="coalesced-run-hash",
+        llm_call_count=1,
+        node_specs=node_specs,
+        started_at=datetime(2026, 5, 15, tzinfo=UTC),
+        metadata={"seeded_from_cache": True, "cache_key": "f" * 64},
+        openrouter_catalog_sha256="0" * 64,
+        openrouter_catalog_source="bundled",
+    )
+
+    with db.connection() as conn:
+        rows = conn.execute(
+            select(
+                rows_table.c.source_node_id,
+                rows_table.c.row_index,
+                rows_table.c.source_row_index,
+                rows_table.c.ingest_sequence,
+                rows_table.c.source_data_hash,
+            )
+            .where(rows_table.c.run_id == run_id)
+            .order_by(rows_table.c.ingest_sequence)
+        ).all()
+
+    assert [(row.source_node_id, row.row_index, row.source_row_index, row.ingest_sequence, row.source_data_hash) for row in rows] == [
+        (f"{run_id}-n0", 0, 0, 0, "orders-hash"),
+        (f"{run_id}-n1", 1, 0, 1, "refunds-hash"),
+        (f"{run_id}-n0", 2, 1, 2, "orders-hash-2"),
+    ]
+
+
 def test_synthesised_run_rejects_misshapen_node_specs() -> None:
     """Writer must crash on structural violations rather than emit a partial Tier-1 audit row.
 
-    CLAUDE.md: exactly one source per run; one or more sinks. A synthesised
-    audit record that doesn't honour those invariants is a topology lie.
+    Canonical settings allow one or more leading sources and one or more
+    sinks. A synthesised audit record that doesn't honour those invariants is
+    a topology lie.
     """
     from elspeth.core.landscape.errors import LandscapeRecordError
     from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
 
     repo = LandscapeWriteRepository(make_landscape_db())
 
-    base_kwargs: dict[str, object] = {
-        "pipeline_yaml": "# fixture\n",
-        "rows": [{"url": "x"}],
-        "source_data_hash": "h",
-        "llm_call_count": 0,
-        "started_at": datetime(2026, 5, 15, tzinfo=UTC),
-        "metadata": {"seeded_from_cache": True, "cache_key": "e" * 64},
-        "openrouter_catalog_sha256": "0" * 64,
-        "openrouter_catalog_source": "bundled",
-    }
-
-    with pytest.raises(LandscapeRecordError, match="at least one node"):
-        repo.record_synthesised_run(node_specs=[], **base_kwargs)  # type: ignore[arg-type]
-
-    with pytest.raises(LandscapeRecordError, match="first node must be SOURCE"):
-        repo.record_synthesised_run(  # type: ignore[arg-type]
-            node_specs=[
-                SynthesisedNodeSpec(node_type=NodeType.TRANSFORM, plugin_name="llm", plugin_version="1"),
-                SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="csv", plugin_version="1"),
-            ],
-            **base_kwargs,
+    def record(node_specs: Sequence[SynthesisedNodeSpec], rows: Sequence[Mapping[str, object]] = ({"url": "x"},)) -> str:
+        return repo.record_synthesised_run(
+            pipeline_yaml="# fixture\n",
+            rows=rows,
+            source_data_hash="h",
+            llm_call_count=0,
+            node_specs=node_specs,
+            started_at=datetime(2026, 5, 15, tzinfo=UTC),
+            metadata={"seeded_from_cache": True, "cache_key": "e" * 64},
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
 
-    with pytest.raises(LandscapeRecordError, match="exactly one SOURCE"):
-        repo.record_synthesised_run(  # type: ignore[arg-type]
+    with pytest.raises(LandscapeRecordError, match="at least one node"):
+        record([])
+
+    with pytest.raises(LandscapeRecordError, match="first node must be SOURCE"):
+        record(
+            [
+                SynthesisedNodeSpec(node_type=NodeType.TRANSFORM, plugin_name="llm", plugin_version="1"),
+                SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="csv", plugin_version="1"),
+            ]
+        )
+
+    with pytest.raises(LandscapeRecordError, match="SOURCE nodes must precede"):
+        record(
+            [
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv", plugin_version="1"),
+                SynthesisedNodeSpec(node_type=NodeType.TRANSFORM, plugin_name="llm", plugin_version="1"),
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="api", plugin_version="1"),
+                SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="csv", plugin_version="1"),
+            ]
+        )
+
+    with pytest.raises(LandscapeRecordError, match="at least one SINK"):
+        record(
+            [
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv", plugin_version="1"),
+                SynthesisedNodeSpec(node_type=NodeType.TRANSFORM, plugin_name="llm", plugin_version="1"),
+            ]
+        )
+
+    with pytest.raises(LandscapeRecordError, match="multi-source synthesised rows require explicit row identity"):
+        record(
+            [
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv", plugin_version="1"),
+                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="api", plugin_version="1"),
+                SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="csv", plugin_version="1"),
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    ("rows", "match"),
+    [
+        (
+            [{"source_node_index": 0, "source_row_index": 0, "ingest_sequence": 0}],
+            "missing .*source_data_hash",
+        ),
+        (
+            [{"source_node_index": 2, "source_row_index": 0, "ingest_sequence": 0, "source_data_hash": "h"}],
+            "does not reference a SOURCE node",
+        ),
+        (
+            [{"source_node_index": True, "source_row_index": 0, "ingest_sequence": 0, "source_data_hash": "h"}],
+            "source_node_index must be a non-negative integer",
+        ),
+        (
+            [{"source_node_index": 0, "source_row_index": -1, "ingest_sequence": 0, "source_data_hash": "h"}],
+            "source_row_index must be a non-negative integer",
+        ),
+        (
+            [{"source_node_index": 0, "source_row_index": 0, "ingest_sequence": "0", "source_data_hash": "h"}],
+            "ingest_sequence must be a non-negative integer",
+        ),
+        (
+            [{"source_node_index": 0, "source_row_index": 0, "ingest_sequence": 0, "source_data_hash": ""}],
+            "source_data_hash must be a non-empty string",
+        ),
+    ],
+)
+def test_synthesised_multi_source_rows_reject_malformed_identity(rows: Sequence[Mapping[str, object]], match: str) -> None:
+    from elspeth.core.landscape.errors import LandscapeRecordError
+    from elspeth.core.landscape.write_repository import LandscapeWriteRepository, SynthesisedNodeSpec
+
+    repo = LandscapeWriteRepository(make_landscape_db())
+
+    with pytest.raises(LandscapeRecordError, match=match):
+        repo.record_synthesised_run(
+            pipeline_yaml="# fixture\n",
+            rows=rows,
+            source_data_hash="coalesced-run-hash",
+            llm_call_count=0,
             node_specs=[
                 SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv", plugin_version="1"),
                 SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="api", plugin_version="1"),
                 SynthesisedNodeSpec(node_type=NodeType.SINK, plugin_name="csv", plugin_version="1"),
             ],
-            **base_kwargs,
-        )
-
-    with pytest.raises(LandscapeRecordError, match="at least one SINK"):
-        repo.record_synthesised_run(  # type: ignore[arg-type]
-            node_specs=[
-                SynthesisedNodeSpec(node_type=NodeType.SOURCE, plugin_name="csv", plugin_version="1"),
-                SynthesisedNodeSpec(node_type=NodeType.TRANSFORM, plugin_name="llm", plugin_version="1"),
-            ],
-            **base_kwargs,
+            started_at=datetime(2026, 5, 15, tzinfo=UTC),
+            metadata={"seeded_from_cache": True, "cache_key": "g" * 64},
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
         )
 
 

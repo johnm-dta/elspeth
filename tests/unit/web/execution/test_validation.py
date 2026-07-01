@@ -31,7 +31,10 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.protocol import YamlGenerator
+from elspeth.web.execution.schemas import CHECK_OUTCOME_SKIPPED_AFTER_FAILURE, ValidationCheck
 from elspeth.web.execution.validation import (
+    _ALL_CHECKS,
+    _append_skipped_checks,
     _build_edge_contract_suggestion,
     _collect_secret_refs,
     _format_edge_contract_failure,
@@ -273,6 +276,57 @@ class TestValidatePipelinePathAllowlist:
         assert "skipped" in path_check.detail.lower()
 
 
+class TestSkippedCheckDeduplication:
+    """``_append_skipped_checks`` must not emit a second, contradictory
+    "skipped" record for a check that was already recorded earlier in the
+    same ``validate_pipeline`` pass.
+
+    Because checks are *emitted* during ``validate_pipeline`` in a different
+    order than the canonical ``_ALL_CHECKS`` ordering, a check that already has
+    a record can fall inside the "skip everything after me" range of a later
+    gate failure.  Without the ``already_emitted`` guard it would then gain a
+    second, contradictory ``passed=False`` skipped record; the guard exists to
+    prevent exactly that.
+    """
+
+    def test_does_not_duplicate_an_already_emitted_check(self) -> None:
+        from_check = _ALL_CHECKS[0]
+        already_emitted_name = _ALL_CHECKS[-1]  # positioned strictly after from_check
+        assert already_emitted_name != from_check
+
+        original = ValidationCheck(
+            name=already_emitted_name,
+            passed=True,
+            detail="recorded before the skip-after sweep",
+            affected_nodes=(),
+            outcome_code=None,
+        )
+        checks = [original]
+
+        _append_skipped_checks(checks, from_check)
+
+        names = [c.name for c in checks]
+        # The already-emitted record survives exactly once — not shadowed by a
+        # contradictory "skipped" entry for the same check name.
+        assert names.count(already_emitted_name) == 1
+        survivor = next(c for c in checks if c.name == already_emitted_name)
+        assert survivor is original
+        assert survivor.passed is True
+
+    def test_still_records_skips_for_not_yet_emitted_checks(self) -> None:
+        """The dedup guard must not suppress genuine skips for checks that
+        were not already emitted — otherwise the audit trail loses coverage."""
+        from_check = _ALL_CHECKS[0]
+        not_emitted = _ALL_CHECKS[1]  # after from_check, never pre-seeded
+
+        checks: list[ValidationCheck] = []
+        _append_skipped_checks(checks, from_check)
+
+        skipped = next(c for c in checks if c.name == not_emitted)
+        assert skipped.passed is False
+        assert "skipped" in skipped.detail.lower()
+
+
 class TestValidatePipelineWebScrapeNetworkPolicy:
     """Web-authored web_scrape configs must not widen SSRF allowlists."""
 
@@ -339,6 +393,37 @@ class TestValidatePipelineWebScrapeNetworkPolicy:
         assert "CIDR" in result.errors[0].message
         mock_yaml_gen.generate_yaml.assert_not_called()
 
+    def test_web_scrape_failure_skips_later_managed_identity_and_llm_retry_checks(self) -> None:
+        # Regression: managed_identity_policy (declared #8) and llm_retry_budget_policy
+        # (declared #9) must NOT be reported as passed when web_scrape_network_policy
+        # (declared #2) fails earlier in the contract order. They previously executed
+        # before web_scrape in code, so their pass records were already emitted and the
+        # skipped-after-failure record was suppressed — the trail then showed a
+        # later-declared gate passing under an earlier-declared failure.
+        state = _make_state(
+            nodes=(
+                _make_node(
+                    plugin="web_scrape",
+                    options=self._web_scrape_options(["10.0.0.0/8"]),
+                ),
+            ),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "web_scrape_network_policy").passed is False
+        for later_check in ("managed_identity_policy", "llm_retry_budget_policy", "llm_base_url_policy"):
+            check = _check(result, later_check)
+            assert check.passed is False, f"{later_check} must not pass after an earlier gate failed"
+            assert check.outcome_code == CHECK_OUTCOME_SKIPPED_AFTER_FAILURE
+
     def test_web_scrape_public_only_allowed_to_reach_yaml_generation(self) -> None:
         state = _make_state(
             nodes=(
@@ -358,6 +443,124 @@ class TestValidatePipelineWebScrapeNetworkPolicy:
 
         assert _check(result, "web_scrape_network_policy").passed is True
         assert all(error.error_code != "web_scrape_private_network_not_allowed" for error in result.errors)
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+
+
+class TestWebLlmBaseUrlPolicyHelper:
+    """Unit coverage for the web-authored OpenRouter base_url policy helper."""
+
+    def test_non_llm_plugin_is_ignored(self) -> None:
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("web_scrape", {"base_url": "http://127.0.0.1/v1"}) is None
+
+    def test_unset_base_url_is_allowed(self) -> None:
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("llm", {"model": "openai/gpt-4o"}) is None
+
+    def test_canonical_base_url_is_allowed_with_or_without_trailing_slash(self) -> None:
+        from elspeth.web.provider_config_policy import OPENROUTER_BASE_URL, web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("llm", {"base_url": OPENROUTER_BASE_URL}) is None
+        assert web_llm_base_url_policy_error("llm", {"base_url": OPENROUTER_BASE_URL + "/"}) is None
+
+    def test_http_loopback_base_url_is_blocked(self) -> None:
+        # The reviewer's finding: loopback HTTP turns a web-authored config into
+        # a credential-egress / SSRF path.
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("llm", {"base_url": "http://127.0.0.1:8199/v1"}) is not None
+        assert web_llm_base_url_policy_error("llm", {"base_url": "http://localhost/v1"}) is not None
+
+    def test_arbitrary_https_host_is_blocked(self) -> None:
+        # Superset of the loopback finding: an HTTPS host the author controls
+        # would still exfiltrate the server-held bearer credential.
+        from elspeth.web.provider_config_policy import web_llm_base_url_policy_error
+
+        assert web_llm_base_url_policy_error("llm", {"base_url": "https://evil.example.com/v1"}) is not None
+        assert web_llm_base_url_policy_error("llm", {"base_url": "https://10.0.0.5/v1"}) is not None
+
+
+class TestValidatePipelineLlmBaseUrlPolicy:
+    """Web-authored OpenRouter LLM nodes may not override base_url (credential egress)."""
+
+    @staticmethod
+    def _llm_options(base_url: object | None = None) -> dict[str, object]:
+        # No ``model`` — that would stage an llm_model_choice interpretation
+        # review (gate #6) which fires before the base_url gate (#10). The
+        # base_url gate inspects only base_url, so a model is irrelevant here.
+        options: dict[str, object] = {}
+        if base_url is not None:
+            options["base_url"] = base_url
+        return options
+
+    def test_loopback_base_url_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(_make_node(plugin="llm", options=self._llm_options("http://127.0.0.1:8199/v1")),),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "llm_base_url_policy").passed is False
+        assert result.errors[0].component_id == "test_node"
+        assert result.errors[0].error_code == "llm_base_url_not_allowed"
+
+    def test_arbitrary_https_base_url_rejected_before_yaml_generation(self) -> None:
+        state = _make_state(
+            nodes=(_make_node(plugin="llm", options=self._llm_options("https://evil.example.com/v1")),),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert _check(result, "llm_base_url_policy").passed is False
+        assert result.errors[0].error_code == "llm_base_url_not_allowed"
+
+    def test_canonical_base_url_passes_gate_and_reaches_yaml_generation(self) -> None:
+        from elspeth.web.provider_config_policy import OPENROUTER_BASE_URL
+
+        state = _make_state(
+            nodes=(_make_node(plugin="llm", options=self._llm_options(OPENROUTER_BASE_URL)),),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert _check(result, "llm_base_url_policy").passed is True
+        assert all(error.error_code != "llm_base_url_not_allowed" for error in result.errors)
+        mock_yaml_gen.generate_yaml.assert_called_once_with(state)
+
+    def test_unset_base_url_passes_gate(self) -> None:
+        state = _make_state(
+            nodes=(_make_node(plugin="llm", options=self._llm_options(None)),),
+            outputs=(_make_output(name="results"),),
+        )
+        settings = _make_settings()
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}\n"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("settings stop")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert _check(result, "llm_base_url_policy").passed is True
         mock_yaml_gen.generate_yaml.assert_called_once_with(state)
 
 
@@ -901,6 +1104,138 @@ class TestValidatePipelineTransformProviderConfigPathAllowlist:
         assert path_check.passed is True
 
 
+class TestValidatePipelineTransformProviderConfigManagedIdentityPolicy:
+    """Web-authored RAG provider configs must not enable server managed identity."""
+
+    def test_azure_search_managed_identity_provider_config_blocked(self) -> None:
+        node = _make_node(
+            plugin="rag_retrieval",
+            options={
+                "provider": "azure_search",
+                "provider_config": {
+                    "endpoint": "https://tenant-b.search.windows.net",
+                    "index": "payroll",
+                    "use_managed_identity": True,
+                },
+            },
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        assert result.is_valid is False
+        assert any(c.name == "managed_identity_policy" and c.passed is False for c in result.checks)
+        assert any("managed identity" in e.message.lower() for e in result.errors)
+        assert result.readiness is not None
+        assert any(b.code == "managed_identity_policy" for b in result.readiness.blockers)
+
+    def test_azure_search_api_key_provider_config_remains_allowed(self) -> None:
+        node = _make_node(
+            plugin="rag_retrieval",
+            options={
+                "provider": "azure_search",
+                "provider_config": {
+                    "endpoint": "https://tenant-a.search.windows.net",
+                    "index": "docs",
+                    "api_key": "test-key",
+                },
+            },
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        managed_identity_check = next(c for c in result.checks if c.name == "managed_identity_policy")
+        assert managed_identity_check.passed is True
+
+
+class TestValidatePipelineLlmRetryBudgetPolicy:
+    """Web-authored sequential multi-query LLM retries must be bounded."""
+
+    @staticmethod
+    def _llm_multi_query_options(**overrides: Any) -> dict[str, Any]:
+        options: dict[str, Any] = {
+            "provider": "openrouter",
+            "model": "openai/gpt-4o-mini",
+            "api_key": "test-key",
+            "prompt_template": "Classify {{ text }}.",
+            "schema": {"mode": "observed"},
+            "required_input_fields": [],
+            "queries": [
+                {
+                    "name": "classify",
+                    "input_fields": {"text": "body"},
+                }
+            ],
+        }
+        options.update(overrides)
+        return options
+
+    def test_sequential_multi_query_llm_default_retry_budget_blocked(self) -> None:
+        node = _make_node(plugin="llm", options=self._llm_multi_query_options())
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+
+            # Authoring-preflight path (allow_pending_interpretation_placeholders=True):
+            # masks the llm node's pending llm_prompt_template/llm_model_choice review so
+            # validation reaches llm_retry_budget_policy (declared #9, after
+            # interpretation_review #6). This is the same flag the composer authoring
+            # preflight uses; without it interpretation_review blocks first.
+            result = validate_pipeline(state, settings, mock_yaml_gen, allow_pending_interpretation_placeholders=True)
+
+        assert result.is_valid is False
+        assert any(c.name == "llm_retry_budget_policy" and c.passed is False for c in result.checks)
+        assert any("sequential multi-query LLM" in e.message for e in result.errors)
+        assert result.readiness is not None
+        assert any(b.code == "llm_retry_budget_policy" for b in result.readiness.blockers)
+
+    def test_sequential_multi_query_llm_small_retry_budget_allowed(self) -> None:
+        node = _make_node(
+            plugin="llm",
+            options=self._llm_multi_query_options(max_capacity_retry_seconds="30.0"),
+        )
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            # Authoring-preflight path so llm_retry_budget_policy (#9) is reached past
+            # interpretation_review (#6); see the blocked-budget test above.
+            result = validate_pipeline(state, settings, mock_yaml_gen, allow_pending_interpretation_placeholders=True)
+
+        retry_budget_check = next(c for c in result.checks if c.name == "llm_retry_budget_policy")
+        assert retry_budget_check.passed is True
+
+    def test_pooled_multi_query_llm_numeric_string_pool_size_allowed(self) -> None:
+        node = _make_node(plugin="llm", options=self._llm_multi_query_options(pool_size="2.0"))
+        state = _make_state(source_options={}, nodes=(node,))
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "source:\n  plugin: csv_source\n  options: {}"
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string") as mock_load:
+            mock_load.side_effect = ValueError("invalid settings")
+            # Authoring-preflight path so llm_retry_budget_policy (#9) is reached past
+            # interpretation_review (#6); see the blocked-budget test above.
+            result = validate_pipeline(state, settings, mock_yaml_gen, allow_pending_interpretation_placeholders=True)
+
+        retry_budget_check = next(c for c in result.checks if c.name == "llm_retry_budget_policy")
+        assert retry_budget_check.passed is True
+
+
 class TestValidatePipelineSemanticContractsLegacy:
     """Validation must catch transform pairings that violate line framing.
 
@@ -1342,11 +1677,13 @@ class TestValidatePipelineSuccess:
         result = validate_pipeline(state, settings, mock_yaml_gen)
 
         assert result.is_valid is True
-        assert len(result.checks) == 13
+        assert len(result.checks) == 16
         assert all(c.passed for c in result.checks)
         # B11 fix: path_allowlist check is always recorded
         assert _check(result, "path_allowlist").passed is True
         assert _check(result, "web_scrape_network_policy").passed is True
+        assert _check(result, "llm_retry_budget_policy").passed is True
+        assert _check(result, "llm_base_url_policy").passed is True
         assert _check(result, "secret_refs").passed is True
         assert _check(result, "blob_inline_refs").passed is True
         assert _check(result, "semantic_contracts").passed is True
@@ -1419,6 +1756,140 @@ class TestValidatePipelineSuccess:
         graph_check = _check(result, "graph_structure")
         assert graph_check.passed is True
         assert graph_check.affected_nodes == ("t_a",)
+
+
+class TestValidatePipelineExportNoResolverSecretRef:
+    """Export-YAML preflight runs ``validate_pipeline`` with ``secret_service=None``.
+
+    A credential field wired as a ``{secret_ref: NAME}`` marker must not cause a
+    plugin-instantiation false-failure in the no-resolver path. Regression guard
+    for the bug where the YAML-export button reported "Current composition state
+    failed runtime preflight" for a pipeline that *ran successfully*: run
+    preflight resolves the secret, but export preflight (no resolver, by design,
+    so resolved secret values can never reach error prose) tried to instantiate
+    the LLM plugin from an unresolved ``{secret_ref}`` dict and hit
+    ``api_key: Input should be a valid string``.
+    """
+
+    def _secret_ref_llm_state(self, tmp_path: Path) -> CompositionState:
+        from elspeth.contracts.hashing import stable_hash
+
+        # Source paths must resolve under data_dir/blobs, sink paths under
+        # data_dir/outputs (allowed_source_directories / allowed_sink_directories).
+        blobs_dir = tmp_path / "blobs"
+        blobs_dir.mkdir()
+        text_path = blobs_dir / "input.txt"
+        text_path.write_text("hello world\n", encoding="utf-8")
+        prompt_template = "Summarise: {{ row.text }}"
+        model = "openai/gpt-4o-mini"
+        # An LLM node with a prompt_template and a model carries resolved
+        # prompt-template and model-choice review requirements once the guided
+        # composer has surfaced them — mirror that so interpretation_review
+        # passes and validation reaches the plugin-instantiation step (where the
+        # secret-marker bug lives).
+        interpretation_requirements = [
+            {
+                "id": "prompt_template_review:llm",
+                "kind": "llm_prompt_template",
+                "user_term": "llm_prompt_template:llm",
+                "status": "resolved",
+                "draft": prompt_template,
+                "event_id": "evt-prompt",
+                "accepted_value": prompt_template,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(prompt_template),
+            },
+            {
+                "id": "model_choice_review:llm",
+                "kind": "llm_model_choice",
+                "user_term": "llm_model_choice:llm",
+                "status": "resolved",
+                "draft": model,
+                "event_id": "evt-model",
+                "accepted_value": model,
+                "accepted_artifact_hash": None,
+                "resolved_prompt_template_hash": stable_hash(model),
+            },
+        ]
+        return CompositionState(
+            source=SourceSpec(
+                plugin="text",
+                on_success="llm_in",
+                options={"path": str(text_path), "column": "text", "schema": {"mode": "observed"}},
+                on_validation_failure="discard",
+            ),
+            nodes=(
+                NodeSpec(
+                    id="llm",
+                    node_type="transform",
+                    plugin="llm",
+                    input="llm_in",
+                    on_success="main",
+                    on_error="discard",
+                    options={
+                        "provider": "openrouter",
+                        "model": model,
+                        "prompt_template": prompt_template,
+                        "response_field": "summary",
+                        "required_input_fields": ["text"],
+                        # The credential is wired as a secret_ref marker, exactly
+                        # as the guided composer persists an LLM api_key.
+                        "api_key": {"secret_ref": "OPENROUTER_API_KEY"},
+                        "schema": {"mode": "observed", "guaranteed_fields": ["summary"]},
+                        INTERPRETATION_REQUIREMENTS_KEY: interpretation_requirements,
+                    },
+                    condition=None,
+                    routes=None,
+                    fork_to=None,
+                    branches=None,
+                    policy=None,
+                    merge=None,
+                ),
+            ),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="main",
+                    plugin="json",
+                    options={"path": "outputs/out.json", "schema": {"mode": "observed"}},
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+    def test_unresolved_secret_ref_does_not_block_export_preflight(self, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        from elspeth.web.composer import yaml_generator as composer_yaml_generator
+
+        state = self._secret_ref_llm_state(tmp_path)
+        result = validate_pipeline(
+            state,
+            SimpleNamespace(data_dir=tmp_path),
+            composer_yaml_generator,
+            secret_service=None,
+            user_id=None,
+        )
+
+        api_key_errors = [e for e in result.errors if "api_key" in (e.message or "")]
+        assert not api_key_errors, f"export preflight false-failed on a wired secret_ref marker: {[e.message for e in api_key_errors]}"
+        checks = {c.name: c for c in result.checks}
+        assert checks["plugin_instantiation"].passed is True, checks["plugin_instantiation"].detail
+
+    def test_export_yaml_still_serializes_the_secret_ref_marker(self, tmp_path: Path) -> None:
+        """Leak invariant: the placeholder substituted for preflight must never
+        reach the exported YAML, which is generated separately from the original
+        state and must keep the real ``{secret_ref}`` marker.
+        """
+        from elspeth.core.secrets import SECRET_REF_VALIDATION_PLACEHOLDER
+        from elspeth.web.composer.yaml_generator import generate_public_yaml
+
+        state = self._secret_ref_llm_state(tmp_path)
+        public_yaml = generate_public_yaml(state)
+        assert "secret_ref: OPENROUTER_API_KEY" in public_yaml
+        assert SECRET_REF_VALIDATION_PLACEHOLDER not in public_yaml
 
 
 class TestValidatePipelineSettingsFailure:
@@ -2728,7 +3199,6 @@ class TestValidatePipelineRuntimeCheckBoundaries:
             RUNTIME_GRAPH_VALIDATION_CHECKS,
         )
         from elspeth.web.execution.schemas import VALIDATION_BLOCKING_CHECK_NAMES
-        from elspeth.web.execution.validation import _ALL_CHECKS
 
         assert RUNTIME_GRAPH_VALIDATION_CHECKS == (
             RUNTIME_CHECK_PLUGIN_INSTANTIATION,
@@ -2775,6 +3245,44 @@ sinks:
         assert mock_instantiate.call_args.kwargs == {"preflight_mode": True}
         fake_graph.validate.assert_called_once_with()
         fake_graph.validate_edge_compatibility.assert_called_once_with()
+
+    def test_validate_pipeline_emits_checks_in_declared_order(self) -> None:
+        # Regression guard for the *bug class*, not just one case: the physical
+        # emission order of the blocking checks must match
+        # VALIDATION_BLOCKING_CHECK_NAMES. A check appended at the wrong physical
+        # spot (as managed_identity_policy/llm_retry_budget_policy once were —
+        # emitted before web_scrape_network_policy despite being declared after it)
+        # leaves a later-declared gate's pass record ahead of an earlier-declared
+        # gate, which corrupts the skipped-after-failure trail on any earlier
+        # failure. The order-vs-constant test only checks the declared tuple; this
+        # asserts the live emission sequence on a fully-passing pipeline.
+        from elspeth.web.execution.schemas import VALIDATION_BLOCKING_CHECK_NAMES
+
+        state = _make_state(
+            source_options={"path": "/tmp/test_data/blobs/input.csv"},
+            outputs=(_make_output({"path": "/tmp/test_data/outputs/out.csv"}),),
+        )
+        settings = _make_settings(data_dir="/tmp/test_data")
+        mock_yaml_gen = MagicMock(spec=YamlGenerator)
+        mock_yaml_gen.generate_yaml.return_value = "sources: {}\nsinks: {}\n"
+        fake_graph = MagicMock()
+        with (
+            patch("elspeth.web.execution.validation.load_settings_from_yaml_string", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.instantiate_runtime_plugins", return_value=MagicMock()),
+            patch("elspeth.web.execution.validation.build_runtime_graph", return_value=fake_graph),
+            patch("elspeth.web.execution.validation.assemble_and_validate_pipeline_config", return_value=MagicMock()),
+        ):
+            result = validate_pipeline(state, settings, mock_yaml_gen)
+
+        declared_index = {name: i for i, name in enumerate(VALIDATION_BLOCKING_CHECK_NAMES)}
+        emitted = [check.name for check in result.checks if check.name in declared_index]
+        emitted_indices = [declared_index[name] for name in emitted]
+        assert emitted_indices == sorted(emitted_indices), f"blocking checks emitted out of declared order: {emitted}"
+        # And the relocation is concretely asserted: the two policy checks sit
+        # after blob_inline_refs (their declared #8/#9 home), not before web_scrape.
+        assert emitted.index("managed_identity_policy") > emitted.index("blob_inline_refs")
+        assert emitted.index("llm_retry_budget_policy") > emitted.index("managed_identity_policy")
+        assert emitted.index("web_scrape_network_policy") < emitted.index("managed_identity_policy")
 
     @patch("elspeth.web.execution.validation.load_settings_from_yaml_string")
     @patch("elspeth.web.execution.validation.instantiate_runtime_plugins")

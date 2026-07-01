@@ -118,7 +118,7 @@ def evaluate_commencement_gates(
             raise CommencementGateFailedError(
                 gate_name=gate.name,
                 condition=gate.condition,
-                reason=f"Expression raised {type(exc).__name__}: {exc}",
+                reason=f"Expression raised {type(exc).__name__}",
                 context_snapshot=audit_snapshot,
             ) from exc
 

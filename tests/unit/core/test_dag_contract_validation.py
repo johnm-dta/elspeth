@@ -1017,17 +1017,17 @@ class TestCoalesceGuaranteedFieldsSemantics:
         result = graph.get_effective_guaranteed_fields("coalesce")
         assert result == frozenset()
 
-    def test_empty_list_guarantees_treated_as_none(self) -> None:
-        """Empty list in config is normalized to None by _parse_field_names_list → abstains."""
+    def test_empty_list_guarantees_participates_as_explicit_empty(self) -> None:
+        """Empty list in config is preserved as an explicit zero-field guarantee."""
         graph = self._build_coalesce_graph(
             {
                 "branch_a": {"schema": {"mode": "observed", "guaranteed_fields": ["x", "y"]}},
-                "branch_b": {"schema": {"mode": "observed", "guaranteed_fields": []}},  # [] → None
+                "branch_b": {"schema": {"mode": "observed", "guaranteed_fields": []}},  # [] → ()
             }
         )
         result = graph.get_effective_guaranteed_fields("coalesce")
-        # Empty list is parsed as None (unspecified), so branch_b abstains
-        assert result == frozenset({"x", "y"})
+        # Empty list is parsed as an explicit empty tuple, so branch_b participates.
+        assert result == frozenset()
 
     def test_explicit_empty_tuple_kills_intersection(self) -> None:
         """SchemaConfig with guaranteed_fields=() (Python API) participates and kills intersection.

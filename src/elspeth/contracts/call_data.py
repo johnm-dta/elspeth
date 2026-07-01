@@ -82,6 +82,12 @@ def _require_non_empty_str(value: object, field_name: str) -> str:
     return value
 
 
+def _require_str(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be str, got {type(value).__name__}: {value!r}")
+    return value
+
+
 def _require_finite_number(value: object, field_name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{field_name} must be int or float, got {type(value).__name__}: {value!r}")
@@ -124,8 +130,8 @@ def _require_http_status_code(value: object, field_name: str, *, optional: bool 
     require_int(value, field_name, optional=optional, min_value=100)
     if value is not None:
         assert isinstance(value, int)
-    if value is not None and value > 599:
-        raise ValueError(f"{field_name} must be <= 599, got {value!r}")
+    if value is not None and value > 999:
+        raise ValueError(f"{field_name} must be <= 999, got {value!r}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,6 +194,7 @@ class LLMCallResponse:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "raw_response")
+        _require_str(self.content, "content")
         _require_non_empty_str(self.model, "model")
         if type(self.usage) is not TokenUsage:
             raise TypeError(f"usage must be TokenUsage, got {type(self.usage).__name__}: {self.usage!r}")

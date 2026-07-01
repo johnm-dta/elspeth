@@ -210,6 +210,50 @@ def test_freeze_guards_accepts_object_setattr_freeze_coverage() -> None:
     assert findings == []
 
 
+def test_freeze_guards_reports_nested_tuple_inside_mutable_rhs() -> None:
+    findings = _analyze_freeze_guards(
+        """
+        @dataclass(frozen=True)
+        class Example:
+            items: list
+            def __post_init__(self):
+                object.__setattr__(self, "items", list(tuple(self.items)))
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["FG3"]
+    assert "items" in findings[0].message
+
+
+def test_freeze_guards_reports_shallow_tuple_for_nested_mutable_annotation() -> None:
+    findings = _analyze_freeze_guards(
+        """
+        @dataclass(frozen=True)
+        class Example:
+            items: list[dict[str, object]]
+            def __post_init__(self):
+                object.__setattr__(self, "items", tuple(self.items))
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["FG3"]
+    assert "items" in findings[0].message
+
+
+def test_freeze_guards_accepts_shallow_carrier_over_deep_frozen_nested_annotation() -> None:
+    findings = _analyze_freeze_guards(
+        """
+        @dataclass(frozen=True)
+        class Example:
+            items: list[dict[str, object]]
+            def __post_init__(self):
+                object.__setattr__(self, "items", tuple(deep_freeze(self.items)))
+        """
+    )
+
+    assert findings == []
+
+
 def test_freeze_guards_accepts_dynamic_freeze_fields_splat() -> None:
     # freeze_fields(self, *names) is statically unresolvable -> treated as
     # covers-all, not a partial-coverage false positive (CoalesceMetadata pattern).
@@ -468,6 +512,26 @@ def test_frozen_annotations_reports_frozen_true_without_slots() -> None:
 def test_frozen_annotations_reports_mutable_annotation_variants(annotation: str) -> None:
     findings = _analyze_frozen_annotations(
         f"""
+        from dataclasses import dataclass
+
+        @dataclass(frozen=True)
+        class Example:
+            items: {annotation}
+        """
+    )
+
+    assert [finding.rule_id for finding in findings] == ["immutability.frozen_annotations"]
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    ['"list[int]"', "'dict[str, int]'", '"typing.List[int]"', '"Optional[List[int]]"'],
+)
+def test_frozen_annotations_reports_quoted_mutable_annotation_variants(annotation: str) -> None:
+    findings = _analyze_frozen_annotations(
+        f"""
+        import typing
+        from typing import List, Optional
         from dataclasses import dataclass
 
         @dataclass(frozen=True)

@@ -20,8 +20,12 @@ For each manifest entry present in either snapshot:
   the base side (entries removed in head contribute their base count).
 * ``head_total`` = sum of ``sensitive_path_count`` for changed entries on
   the head side (entries added in head contribute their head count).
-* ``direction = "weaken"`` if ``head_total < base_total`` (coverage
-  reduced); otherwise ``direction = "strengthen"``.
+* ``direction = "weaken"`` if any changed entry reduces
+  ``sensitive_path_count``. Changed existing entries with the same non-zero
+  count are also classified as weakening because the snapshot has no stable
+  path identities; a same-count hash change can be a sensitive key/path
+  replacement that removes coverage for the original field.
+* Otherwise ``direction = "strengthen"``.
 
 This script is observational — it always exits 0 even on the weakening
 direction. The direction string is the output the next workflow step
@@ -74,10 +78,11 @@ def compute_direction(
 ) -> tuple[str, list[str], int, int]:
     """Return (direction, changed_entries, base_total, head_total).
 
-    ``direction`` is ``"weaken"`` when ``head_total < base_total`` and
-    ``"strengthen"`` otherwise. Callers should treat ``"strengthen"`` as
-    the default (covers no-change-in-count cases such as entry rename
-    where the head count equals the base count for changed entries).
+    ``direction`` is ``"weaken"`` when any changed entry loses redaction
+    coverage. Aggregate totals are diagnostic only; they must not let an
+    unrelated addition mask a per-entry reduction. Callers should treat
+    ``"strengthen"`` as the default only when no changed entry lost or may have
+    replaced existing sensitive coverage.
     """
     all_keys = set(base) | set(head)
     changed_entries = sorted(k for k in all_keys if base.get(k) != head.get(k))
@@ -85,7 +90,15 @@ def compute_direction(
     base_total = sum(int(base.get(k, {}).get("sensitive_path_count", 0)) for k in changed_entries)
     head_total = sum(int(head.get(k, {}).get("sensitive_path_count", 0)) for k in changed_entries)
 
-    direction = "weaken" if head_total < base_total else "strengthen"
+    weakening_entries = []
+    for key in changed_entries:
+        base_count = int(base.get(key, {}).get("sensitive_path_count", 0))
+        head_count = int(head.get(key, {}).get("sensitive_path_count", 0))
+        same_count_sensitive_change = key in base and key in head and base_count == head_count and base_count > 0
+        if head_count < base_count or same_count_sensitive_change:
+            weakening_entries.append(key)
+
+    direction = "weaken" if weakening_entries else "strengthen"
     return direction, changed_entries, base_total, head_total
 
 

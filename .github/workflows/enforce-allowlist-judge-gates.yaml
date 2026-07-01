@@ -1,14 +1,19 @@
 # CI gates for the convergent panel findings on the cicd-judge-cli prototype.
 #
-# Three gates run here, all load-bearing per the audit-trail thesis:
+# Two gates run here, both load-bearing per the audit-trail thesis. C1 remains
+# implemented in elspeth-lints, but is intentionally not wired into this
+# workflow until every covered allowlist shape can acquire judge metadata:
 #
-#   C1 (check-judge-coverage): on PRs and protected-branch pushes touching
-#     any 'enforce_*' allowlist directory, every new 'allow_hits' entry MUST
-#     carry signed judge metadata. Pre-judge entries grandfathered. The
+#   C1 (check-judge-coverage, temporarily disabled): on PRs and protected-branch
+#     pushes touching any 'enforce_*' allowlist directory, every new
+#     'allow_hits' entry MUST carry signed judge metadata. Pre-judge entries
+#     grandfathered. The
 #     grandfathering is rotation-stable: an entry whose fingerprint shifted
 #     because of an upstream AST refactor still matches its baseline
-#     counterpart, so refactors are not penalised by demanding fresh judge
-#     runs.
+#     counterpart, so refactors are not penalised by demanding fresh judge runs.
+#     This gate is unsatisfiable on the current branch because the signing
+#     tooling covers trust_tier.tier_model only while C1 also sees non-tier-model
+#     per_file_rules.
 #
 #   C3 (check-override-rate): on every configured PR and push to
 #     main/master/RC* branches, the rolling-30d OVERRIDDEN_BY_OPERATOR
@@ -28,15 +33,27 @@
 #     cases) to widen what the tripwire detects.
 #
 # All gates are implemented as elspeth-lints subcommands; the workflow
-# orchestrates checkout (full history, needed for C1's git-show baseline
-# diff) and invocation.
+# orchestrates checkout and invocation.
+#
+# VERIFY-ONLY — NEVER SIGNS (elspeth-2b351cd004, spec [O1] custody rule). This
+# workflow only ever *verifies*: it must never invoke a signing verb
+# (sign-bundle / rekey / justify / sign-judge-signatures / migrate-judge-scope).
+# The judge-metadata HMAC key is operator-custody and must never be reachable
+# from PR-controlled code, so minting or rotating a signature runs ONLY in an
+# operator-controlled shell, never here. Agents stage a review bundle via the
+# elspeth-judge MCP server; an operator fires `elspeth-lints sign-bundle` /
+# `rekey` in a key-bearing shell (see docs/judge-signature-handoff.md). This
+# invariant is enforced as a standing regression guard by
+# tests/unit/elspeth_lints/test_meta_ci_never_signs.py. (Re-enabling C1 is out
+# of scope for this change.)
 #
 # BRANCH PROTECTION: the aggregate ``judge-gates-success`` job at the bottom
 # is the single required status check for these gates (mirroring ci.yaml's
-# ``ci-success``). Branch protection MUST require ``judge-gates-success`` —
+# ``ci-success``). Branch protection MUST require ``Judge gates success`` from
+# GitHub Actions —
 # requiring the individual gate jobs is fragile (a renamed job silently drops
 # the requirement) and GitHub keys protection on one named check. The
-# aggregate fails if C1 or C3 is not ``success``; VAL may be ``skipped`` (it is
+# aggregate fails if C3 is not ``success``; VAL may be ``skipped`` (it is
 # intentionally skipped on untrusted fork PRs, which cannot read the
 # OpenRouter secret).
 #
@@ -193,7 +210,7 @@ jobs:
   # aggregate, a red gate only blocks merge if that specific job name is listed
   # as required — fragile against renames, and it leaves "are the gates even
   # gating?" depending on unverifiable repo settings. This job makes the answer
-  # mechanical: it fails unless C1 and C3 succeeded and VAL succeeded-or-skipped.
+  # mechanical: it fails unless C3 succeeded and VAL succeeded-or-skipped.
   judge-gates-success:
     name: Judge gates success
     runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && '["self-hosted","Linux","X64","nyx-ci","trusted"]' || '"ubuntu-24.04"') }}

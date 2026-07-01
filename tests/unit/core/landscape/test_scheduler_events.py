@@ -20,6 +20,7 @@ from elspeth.core.landscape.schema import (
     nodes_table,
     rows_table,
     run_coordination_table,
+    run_workers_table,
     runs_table,
     token_outcomes_table,
     token_work_items_table,
@@ -914,6 +915,17 @@ def test_query_repository_lists_scheduler_events_by_token_history() -> None:
         available_at=now,
         row_payload_json=payload,
     )
+    with db.engine.begin() as conn:
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id="worker-a",
+                run_id="run-1",
+                role="follower",
+                status="active",
+                registered_at=now,
+                heartbeat_expires_at=now + timedelta(hours=1),
+            )
+        )
     factory.scheduler.claim_ready(
         run_id="run-1",
         lease_owner="worker-a",

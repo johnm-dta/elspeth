@@ -596,14 +596,15 @@ class RowProcessor:
         self._scheduler = scheduler
         self._coordination_token = coordination_token
         self._run_coordination = run_coordination
-        # ADR-030 §G (slice 5): _scheduler_lease_owner_registered is True when the
-        # caller explicitly passed a scheduler_lease_owner that is registered in the
-        # run_workers table (production multi-worker paths: run_core.py for leaders,
-        # follower.py for followers).  False = legacy / test / single-worker path
-        # where the auto-generated "row-processor:{run_id}:{uuid}" identity has no
-        # run_workers row; the membership fence is inactive in that case.
-        self._scheduler_lease_owner_registered: bool = scheduler_lease_owner is not None
-        self._scheduler_lease_owner = scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
+        # ADR-030 §G (slice 5): _scheduler_lease_owner_registered is True when
+        # the lease owner is a run_workers identity. Production paths pass the
+        # owner explicitly; direct tests often pass only the coordination token,
+        # whose worker_id is the same registered leader identity.
+        resolved_scheduler_lease_owner = scheduler_lease_owner
+        if resolved_scheduler_lease_owner is None and coordination_token is not None:
+            resolved_scheduler_lease_owner = coordination_token.worker_id
+        self._scheduler_lease_owner_registered: bool = resolved_scheduler_lease_owner is not None
+        self._scheduler_lease_owner = resolved_scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
         self._scheduler_lease_seconds = scheduler_lease_seconds
         if scheduler_heartbeat_seconds <= 0:
             raise OrchestrationInvariantError(f"scheduler_heartbeat_seconds must be positive, got {scheduler_heartbeat_seconds}")
@@ -2953,14 +2954,14 @@ class RowProcessor:
         the bumped attempt and stamped with provenance (ADDENDUM 4 — carried on the token,
         NOT passed as params to process_token).
 
-        Dispatch cases (branch_name checked first to avoid confusing a fork→coalesce
-        before-barrier token with a post-coalesce merged token that also has join_group_id):
+        Dispatch cases (expand_group_id checked first because expanded children inherit
+        their parent's branch_name; their persisted step still identifies the expand node):
 
-        1. fork → sink terminal branch: branch_name in _branch_to_sink → current_node_id=None
+        1. expand child: expand_group_id set → re-drive from the node AFTER the expand node.
+        2. fork → sink terminal branch: branch_name in _branch_to_sink → current_node_id=None
            (process_token's None-path routes via branch_to_sink to the terminal sink).
-        2. fork → coalesce, crashed before barrier: branch_name in _branch_to_coalesce →
+        3. fork → coalesce, crashed before barrier: branch_name in _branch_to_coalesce →
            re-run the branch from its first processing node with coalesce context.
-        3. expand child: expand_group_id set → re-drive from the node AFTER the expand node.
         4. post-coalesce merged token, crashed after barrier (B1 review finding): join_group_id
            set AND fork_group_id None AND branch_name None →
            - Non-terminal coalesce (next node exists): process_token from node after coalesce.
@@ -2986,6 +2987,15 @@ class RowProcessor:
         )
         branch = spec.branch_name
 
+        if spec.expand_group_id is not None:
+            # expand child: re-drive from the node AFTER the expand node.
+            # Expanded children inherit branch_name from fork branches, including
+            # coalesce-bound branches, so this must run before branch dispatch.
+            # expand is never terminal; an `after` of None here is an audit/DAG inconsistency
+            # that process_token's None-enforcement raises on (no branch_to_sink / on_success_sink).
+            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
+            return self.process_token(token, ctx, current_node_id=after)
+
         if branch is not None and BranchName(branch) in self._branch_to_sink:
             # fork → sink terminal branch: straight to the sink via None-path routing.
             return self.process_token(token, ctx, current_node_id=None)
@@ -3001,13 +3011,6 @@ class RowProcessor:
                 current_node_id=first_node,
                 coalesce_name=coalesce_name,
             )
-
-        if spec.expand_group_id is not None:
-            # expand child: re-drive from the node AFTER the expand node.
-            # expand is never terminal; an `after` of None here is an audit/DAG inconsistency
-            # that process_token's None-enforcement raises on (no branch_to_sink / on_success_sink).
-            after = self._nav.resolve_next_node(self._resolve_step_node(spec))
-            return self.process_token(token, ctx, current_node_id=after)
 
         if spec.join_group_id is not None and spec.fork_group_id is None and branch is None:
             # post-coalesce merged token, crashed AFTER the barrier (B1 review finding):
@@ -3804,21 +3807,16 @@ class RowProcessor:
         """Resolve the TokenInfo to feed executor memory for one adopted row.
 
         Live stash first (N=1 parity: the exact post-transform token the old
-        in-claim accept used, with its original resume provenance); journal
-        rehydration with audit-derived attempt offsets as the inherited-row
-        fallback (leader takeover) — the same semantics as the restore path,
-        stamped with this processor's resume checkpoint provenance.
+        in-claim accept used, with its original resume provenance). Without a
+        live stash, the durable row is still authoritative: fresh leaders use
+        offset zero for normal follower handoffs, while resume leaders use the
+        audit-derived offset stamped with checkpoint provenance.
         """
         hold = self._live_barrier_holds.pop(row.token_id, None)
         if hold is not None:
             return hold.token
         if self._resume_checkpoint_id is None:
-            raise AuditIntegrityError(
-                f"Barrier intake for run {self._run_id!r} found an intake-pending BLOCKED row for token "
-                f"{row.token_id!r} with no live stash entry and no resume checkpoint provenance: a fresh "
-                "(non-resume) leader adopted a row it never blocked. At N=1 every intake-pending row is "
-                "either this leader's own hold (stashed) or takeover inheritance (resume provenance set)."
-            )
+            return token_from_journal_item(row, attempt_offset=0, resume_checkpoint_id=None)
         max_attempts = self._execution.get_max_node_state_attempts(self._run_id, [row.token_id])
         return token_from_journal_item(
             row,
@@ -3892,9 +3890,9 @@ class RowProcessor:
             raise AuditIntegrityError(f"Intake aggregation row {row.work_item_id!r} has no barrier_key.")
         node_id = NodeID(row.barrier_key)
         coordination_token = self._require_coordination_token()
-        # Resolve the token BEFORE the fenced verb: a row this leader cannot
-        # attribute (no live stash, no resume provenance — e.g. a stray
-        # deposit) must be refused with ZERO durable mutation.
+        # Resolve the token BEFORE the fenced verb so an invalid journal row is
+        # refused with ZERO durable mutation. Valid follower handoffs can be
+        # rebuilt from the durable row even without a live stash entry.
         token = self._token_for_intake(row)
         batch_id, ordinal = self._aggregation_executor.open_batch_membership(node_id)
         adoption = self._scheduler.adopt_blocked_barrier_item(
@@ -3948,7 +3946,7 @@ class RowProcessor:
         coalesce_name = CoalesceName(row.barrier_key)
         coordination_token = self._require_coordination_token()
         # Resolve the token BEFORE the fenced verb (refusal-before-mutation
-        # for unattributable rows — see the aggregation arm).
+        # for invalid journal rows — see the aggregation arm).
         token = self._token_for_intake(row)
         adoption = self._scheduler.adopt_blocked_barrier_item(
             run_id=self._run_id,

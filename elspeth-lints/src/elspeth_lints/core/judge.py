@@ -43,7 +43,7 @@ import asyncio
 import hashlib
 import json
 import os
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1131,15 +1131,13 @@ def _call_openrouter(
 # excerpt — identical input to the OpenRouter path. The tool-augmented mode
 # (``tool_scope`` set) lets the judge READ the surrounding source to resolve a
 # question the excerpt can't answer (e.g. "where does this parameter come
-# from?", "is the audit event recorded before this ceremony?"). Since the
-# --judge-tools parity change it is available on BOTH reaudit (read-only) and
-# justify (signing), so it CAN feed a signed verdict. What it trades away is
-# verdict reproducibility (so the deterministic temperature=0 OpenRouter path
-# stays canonical for decay sweeps); and the signed payload does not separately
-# mark a verdict as tool-augmented (``judge_transport`` is "claude_agent_sdk"
-# for blinded and tool modes alike). That provenance gap is benign: reaudit
-# does not gate entry selection on ``policy_hash``, so these entries are
-# re-judged blinded on the next sweep regardless. See elspeth-ab5e093fa3.
+# from?", "is the audit event recorded before this ceremony?"). The CLI permits
+# this only on non-signing reaudit runs. Signing paths stay blinded to the
+# bounded, scrubbed excerpt because tool reads happen inside the external agent
+# transport and raw tool output cannot be routed back through the local source
+# scrubber before it can influence a persisted rationale. What tool mode trades
+# away is verdict reproducibility, so the deterministic temperature=0 OpenRouter
+# path stays canonical for decay sweeps. See elspeth-ab5e093fa3.
 #
 # SECURITY — the load-bearing guard. ``permission_mode="default"``
 # auto-approves read-only tools, so a ``can_use_tool`` callback is NEVER
@@ -1151,15 +1149,17 @@ def _call_openrouter(
 
 # The only tools the investigation mode permits. Everything else (Bash, Write,
 # Edit, Web*, Task, …) is denied by the hook AND listed in ``disallowed_tools``
-# as a redundant first layer. ``Grep`` is included but is the most dangerous —
-# ``output_mode: "content"`` reads file *contents* directly with no ``Read`` —
-# so the hook scopes its ``path`` too (and a pathless Grep is confined to
-# ``cwd``, which is itself an allowed root).
+# as a redundant first layer. ``Read`` is additionally scrubber-gated: any file
+# whose bytes match the source secret scrubber is denied rather than sent to the
+# external agent transport. ``Grep`` is included only for non-content output
+# modes; ``output_mode: "content"`` reads file contents directly with no
+# ``Read`` hook, so the guard denies it fail-closed.
 _TOOL_SCOPE_READONLY_TOOLS: frozenset[str] = frozenset({"Read", "Grep", "Glob"})
+_TOOL_SCOPE_GREP_NON_CONTENT_OUTPUT_MODES: frozenset[str] = frozenset({"count", "files_with_matches"})
 
 # Bound the investigation so a pathological run cannot loop or spend
 # unboundedly. Hitting the cap before a verdict is classified as a failure
-# (see ``_drain_agent_query``), never a silent partial.
+# (see ``_consume_agent_messages``), never a silent partial.
 _AGENT_TOOL_MODE_DEFAULT_MAX_TURNS: int = 12
 
 # Basenames that must never be read even if they somehow sit inside an allowed
@@ -1169,15 +1169,11 @@ _AGENT_TOOL_MODE_DEFAULT_MAX_TURNS: int = 12
 _TOOL_SCOPE_FORBIDDEN_BASENAMES: frozenset[str] = frozenset({".env"})
 
 # Appended to the system prompt ONLY in tool mode, OUTSIDE ``_STATIC_POLICY_BLOCK``
-# so ``JUDGE_POLICY_HASH`` (sha256 of the static block) is unchanged and no
-# corpus re-sign is triggered. Tool mode can now feed a signing justify (the
-# --judge-tools parity change), so the signed ``policy_hash`` CAN accompany a
-# verdict produced under this addendum without capturing it. That is
-# acceptable: the addendum is investigation MECHANICS (read tools, cite what
-# you read), not tier-model verdict CRITERIA — those live in the hashed static
-# block. And reaudit does not gate selection on ``policy_hash``, so a future
-# edit to this addendum cannot silently strand tool-mode-signed entries; they
-# are re-judged (blinded, under openrouter) on the next sweep.
+# so ``JUDGE_POLICY_HASH`` (sha256 of the static block) is unchanged. That is
+# acceptable because the addendum is investigation MECHANICS (read tools, cite
+# what you read), not tier-model verdict CRITERIA — those live in the hashed
+# static block. Signing paths reject tool mode, so this addendum cannot enter a
+# signed allowlist entry's policy hash.
 _TOOL_MODE_ADDENDUM: str = """
 TOOL-AUGMENTED INVESTIGATION MODE (read-only)
 
@@ -1187,6 +1183,12 @@ would-be "block pending more context" by going and looking — e.g. read the
 callers of the function, the definition of a type, or the call site that
 establishes an invariant. You can only read within the project source; writes,
 shell, and network are unavailable.
+
+Security limits: Read may be denied for files that match the project's source
+secret scrubber, and Grep is available only with explicit non-content
+``output_mode`` values: ``files_with_matches`` or ``count``. Omitted/default
+Grep output mode is denied. If a read is denied, decide from the scrubbed
+excerpt and other non-secret files; do not try to recover redacted bytes.
 
 Two rules govern how investigation feeds your verdict:
 
@@ -1289,6 +1291,26 @@ def _tool_scope_candidate_paths(tool_name: str, tool_input: dict[str, Any], cwd:
     return resolved
 
 
+def _read_target_has_secret_redactions(path: Path) -> tuple[bool, str]:
+    """Return whether ``path`` can be safely read by the external agent."""
+    if not path.exists():
+        return False, "target does not exist; no local source bytes to scrub before the tool reports its own read error"
+    if not path.is_file():
+        return True, f"{path} is not a regular file (denied fail-closed)"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return True, f"could not inspect {path} for source-secret redactions (denied fail-closed): {exc}"
+
+    from elspeth_lints.core.source_excerpt import scrub_secrets
+
+    scrubbed = scrub_secrets(raw, path_hint=str(path))
+    if not scrubbed.redactions:
+        return False, "no source-secret redactions"
+    patterns = ", ".join(sorted({record.pattern_name for record in scrubbed.redactions}))
+    return True, f"{path} contains source bytes matched by secret scrubber pattern(s): {patterns}"
+
+
 def _tool_scope_decision(scope: AgentToolScope, tool_name: str, tool_input: dict[str, Any]) -> tuple[bool, str]:
     """Fail-closed allow/deny for one tool call. Pure logic; unit-testable.
 
@@ -1298,6 +1320,13 @@ def _tool_scope_decision(scope: AgentToolScope, tool_name: str, tool_input: dict
     """
     if tool_name not in _TOOL_SCOPE_READONLY_TOOLS:
         return False, (f"tool {tool_name!r} is not permitted in read-only judge-tools mode (allowed: {sorted(_TOOL_SCOPE_READONLY_TOOLS)})")
+    if tool_name == "Grep":
+        output_mode = tool_input.get("output_mode")
+        if output_mode not in _TOOL_SCOPE_GREP_NON_CONTENT_OUTPUT_MODES:
+            return False, (
+                "Grep is permitted only with non-content output_mode values "
+                f"{sorted(_TOOL_SCOPE_GREP_NON_CONTENT_OUTPUT_MODES)}; content/default Grep output can expose unsanitized source bytes"
+            )
     try:
         candidates = _tool_scope_candidate_paths(tool_name, tool_input, scope.cwd)
     except Exception as exc:  # fail closed on any extraction failure
@@ -1307,6 +1336,10 @@ def _tool_scope_decision(scope: AgentToolScope, tool_name: str, tool_input: dict
             return False, f"{cand} is a forbidden file (basename denylist)"
         if not any(cand == r or cand.is_relative_to(r) for r in scope.allowed_roots):
             return False, (f"{cand} is outside the permitted roots {[str(r) for r in scope.allowed_roots]} (read-only judge-tools scope)")
+        if tool_name == "Read":
+            has_redactions, reason = _read_target_has_secret_redactions(cand)
+            if has_redactions:
+                return False, f"{reason}; Read denied so raw bytes cannot bypass source_excerpt.scrub_secrets"
     return True, "in-scope read"
 
 
@@ -1339,6 +1372,31 @@ def _build_pretooluse_scope_hook(scope: AgentToolScope) -> Callable[..., Any]:
     return _hook
 
 
+def _build_pretooluse_deny_all_hook() -> Callable[..., Any]:
+    """Build the blinded-transport hook: no Agent SDK tool call is permitted."""
+
+    async def _hook(input_data: dict[str, Any], tool_use_id: str | None, context: Any) -> dict[str, Any]:
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "the blinded judge transport does not permit tool use",
+            }
+        }
+
+    return _hook
+
+
+async def _one_user_message_stream(text: str) -> AsyncIterator[dict[str, Any]]:
+    """A one-item async stream carrying the user prompt.
+
+    The Claude Agent SDK only invokes PreToolUse hooks for the read tools in
+    streaming-input mode, which requires an async iterable of message dicts
+    rather than a plain string prompt.
+    """
+    yield {"type": "user", "message": {"role": "user", "content": text}}
+
+
 def _call_agent_sdk(
     request: JudgeRequest,
     model_id: str,
@@ -1350,10 +1408,10 @@ def _call_agent_sdk(
 
     Two modes, selected by ``tool_scope``:
 
-    * ``tool_scope is None`` (default) — the BLINDED, no-tools, single-shot
-      query (design §4.2). No tools are allowed and no project settings are
-      loaded (``setting_sources=[]``), so the judge sees only the excerpt in
-      the prompt — identical to the OpenRouter path.
+    * ``tool_scope is None`` (default) — the BLINDED, no-tools query (design
+      §4.2). No tools are allowed, a deny-all PreToolUse hook fails closed, and
+      no project settings are loaded (``setting_sources=[]``), so the judge sees
+      only the excerpt in the prompt — identical to the OpenRouter path.
     * ``tool_scope`` set — the TOOL-AUGMENTED investigation mode: Read/Grep/Glob
       are available but routed through a fail-closed PreToolUse guard scoped to
       ``tool_scope`` (see ``_build_pretooluse_scope_hook``). Streaming-input is
@@ -1424,19 +1482,38 @@ def _call_agent_sdk(
     prompt_text = "\n\n".join(block["text"] for block in _build_user_message_blocks(request))
 
     if tool_scope is None:
-        # Blinded path — UNCHANGED. No tools, single-shot string prompt; the
-        # judge sees only the excerpt, identical to the OpenRouter path.
+        # Blinded path. No tools: the prompt is a single streamed user message so
+        # the PreToolUse hook fires for SDK auto-approved read tools; the hook is
+        # deny-all and permission_mode="dontAsk" supplies the second fail-closed
+        # layer if hook wiring or a future tool shape drifts.
         options = sdk.ClaudeAgentOptions(
             system_prompt={"type": "preset", "preset": "claude_code", "append": _STATIC_POLICY_BLOCK},
             allowed_tools=[],
-            disallowed_tools=["Bash", "Read", "Write", "Edit", "Grep", "Glob", "WebSearch", "WebFetch"],
+            disallowed_tools=[
+                "Bash",
+                "Read",
+                "Write",
+                "Edit",
+                "MultiEdit",
+                "Grep",
+                "Glob",
+                "LS",
+                "Task",
+                "TodoWrite",
+                "WebSearch",
+                "WebFetch",
+                "NotebookRead",
+                "NotebookEdit",
+            ],
             setting_sources=[],
-            permission_mode="bypassPermissions",
+            permission_mode="dontAsk",
+            hooks={"PreToolUse": [sdk.HookMatcher(hooks=[_build_pretooluse_deny_all_hook()])]},
+            max_turns=1,
         )
-        # Blinded single-shot: the bare ``query()`` helper. The subprocess exits
-        # immediately after the one-turn verdict, before ``asyncio.run`` closes
-        # the loop, so there is nothing for asyncio to reap.
-        drain = _drain_agent_query(sdk, prompt_text, options, model_id)
+        # Blinded path still uses the managed client because streamed prompt
+        # input is required for hook enforcement and the client tears down the
+        # subprocess in-loop.
+        drain = _drain_agent_query_client(sdk, prompt_text, options, model_id, max_turns=1, final_message_only=False)
     else:
         # Tool-augmented path. Read/Grep/Glob are NOT in allowed_tools (that
         # list auto-approves and bypasses the hook); they are left available
@@ -1457,14 +1534,14 @@ def _call_agent_sdk(
             max_turns=tool_scope.max_turns,
             cwd=str(tool_scope.cwd),
         )
-        # Tool path: the managed ``ClaudeSDKClient``. Investigation keeps the
-        # subprocess alive across tool turns; the bare ``query()`` generator
-        # leaves it lingering, so when ``asyncio.run`` closes the loop the child
-        # is SIGKILLed (-9, "Fatal error in message reader") — the failure the
-        # operator hit on the second investigation entry. The client's
-        # ``__aexit__`` calls ``disconnect()`` IN-LOOP, terminating the
-        # subprocess gracefully before the loop closes.
-        drain = _drain_agent_query_client(sdk, prompt_text, options, model_id, tool_scope.max_turns)
+        # Tool path: the managed ``ClaudeSDKClient`` with streaming input.
+        # Investigation keeps the subprocess alive across tool turns; the bare
+        # ``query()`` generator left it lingering, so when ``asyncio.run`` closed
+        # the loop the child was SIGKILLed (-9, "Fatal error in message reader").
+        # The client's ``__aexit__`` calls ``disconnect()`` IN-LOOP, terminating
+        # the subprocess gracefully before the loop closes, while the async
+        # prompt stream keeps the PreToolUse hook active for Read/Grep/Glob.
+        drain = _drain_agent_query_client(sdk, prompt_text, options, model_id, max_turns=tool_scope.max_turns, final_message_only=True)
 
     try:
         return asyncio.run(drain)
@@ -1479,7 +1556,7 @@ def _call_agent_sdk(
         # else after configuration is a transport failure. The auth-error
         # discriminator uses the real SDK exception classes (see
         # ``_is_agent_auth_error``); in-band auth failures (AssistantMessage.error)
-        # are mapped inside ``_drain_agent_query`` and re-raised as
+        # are mapped inside ``_consume_agent_messages`` and re-raised as
         # JudgeConfigurationError, which the first except arm above passes through.
         if _is_agent_auth_error(exc):
             raise JudgeConfigurationError(
@@ -1650,37 +1727,31 @@ async def _consume_agent_messages(
     )
 
 
-async def _drain_agent_query(sdk: Any, prompt_text: str, options: Any, requested_model: str) -> _TransportResult:
-    """Blinded single-shot drain: the bare ``query()`` async generator.
+async def _drain_agent_query_client(
+    sdk: Any,
+    prompt_text: str,
+    options: Any,
+    requested_model: str,
+    *,
+    max_turns: int | None,
+    final_message_only: bool,
+) -> _TransportResult:
+    """Drain a streamed Agent SDK query via managed ``ClaudeSDKClient``.
 
-    The one-turn subprocess exits immediately after the verdict, so it is gone
-    before ``asyncio.run`` closes the loop — no managed teardown needed.
-    """
-    return await _consume_agent_messages(
-        sdk,
-        sdk.query(prompt=prompt_text, options=options),
-        requested_model,
-        final_message_only=False,
-        max_turns=None,
-    )
-
-
-async def _drain_agent_query_client(sdk: Any, prompt_text: str, options: Any, requested_model: str, max_turns: int) -> _TransportResult:
-    """Tool-augmented drain via the managed ``ClaudeSDKClient``.
-
-    Investigation keeps the subprocess alive across tool turns. The async-context
-    client connects on enter and ``disconnect()``s on exit — IN the event loop —
-    terminating the subprocess gracefully before ``asyncio.run`` closes the loop.
-    The bare ``query()`` generator left the streaming child alive, so loop close
-    SIGKILLed it (-9, "Fatal error in message reader") on the second sweep entry.
+    Any Agent path with PreToolUse hooks needs streaming-input prompt shape. The
+    async-context client connects on enter and ``disconnect()``s on exit — IN the
+    event loop — terminating the subprocess gracefully before ``asyncio.run``
+    closes the loop. The bare ``query()`` generator left a streaming child alive
+    in tool mode, so loop close SIGKILLed it (-9, "Fatal error in message
+    reader") on the second sweep entry.
     """
     async with sdk.ClaudeSDKClient(options=options) as client:
-        await client.query(prompt_text)
+        await client.query(_one_user_message_stream(prompt_text))
         return await _consume_agent_messages(
             sdk,
             client.receive_response(),
             requested_model,
-            final_message_only=True,
+            final_message_only=final_message_only,
             max_turns=max_turns,
         )
 
@@ -1824,7 +1895,7 @@ def _is_agent_auth_error(exc: Exception) -> bool:
     ``JudgeTransportError`` instead) to avoid telling the operator to fix their
     credentials when the real fault is transient. In-band authentication
     failures (``AssistantMessage.error``) are handled separately in
-    ``_drain_agent_query``.
+    ``_consume_agent_messages``.
 
     Match by class NAME (not ``isinstance`` against an imported symbol) so this
     discriminator does not re-import the optional SDK and works against the

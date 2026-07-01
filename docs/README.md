@@ -4,9 +4,16 @@ Index of the documentation shipped in this repository.
 
 **Framework status:** `0.6.0`
 **Archive note:** current release, architecture, contract, guide, reference, and
-runbook docs remain visible here. Point-in-time audit, architecture-pack,
-generated-review, and handover snapshots from earlier workstreams were moved to
+runbook docs remain visible here. Internal work product — implemented design
+plans and specs, composer evaluation evidence and the 2026-05 UX-redesign phase
+docs, point-in-time audits, agent prompts, and the per-period progress/velocity
+reports — was relocated to
+[`docs-archive/2026-06-28-docs-cleanout/`](../docs-archive/2026-06-28-docs-cleanout/MANIFEST.md)
+ahead of release. Earlier point-in-time audit, architecture-pack,
+generated-review, and handover snapshots are under
 [`docs-archive/2026-05-19-docs-cleanout/`](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md).
+Archived docs keep their relative paths under the dated cleanout directory, so a
+reference to `docs/<path>` resolves at `docs-archive/2026-06-28-docs-cleanout/docs/<path>`.
 
 ---
 
@@ -27,6 +34,7 @@ generated-review, and handover snapshots from earlier workstreams were moved to
 
 Current architecture and design references.
 
+- [Repository Directory Strategy](repository-structure.md) — purpose of every top-level folder and where new files belong
 - [Architecture Overview](../ARCHITECTURE.md) — C4 model, data flows, and system-level orientation
 - [System Overview](architecture/overview.md) — compatibility pointer to the maintained root architecture overview
 - [Requirements Matrix](architecture/requirements.md) — compatibility pointer to current requirement and contract sources
@@ -65,13 +73,6 @@ Tutorials and operator/developer how-to material.
 - [Troubleshooting](guides/troubleshooting.md)
 - [Docker](guides/docker.md)
 
-## Composer Evidence
-
-Evaluation reports and investigation notes that still support current composer
-development or product explanation.
-
-- [Composer Evidence Index](composer/evidence/README.md)
-
 ## Reference
 
 Lookup material for configuration, tools, and plugin-specific behavior.
@@ -98,16 +99,15 @@ Runbooks and production procedures.
 
 ## Release History
 
-Audience-facing release, progress, velocity, and evaluation documents. See the
+Audience-facing release and evaluation documents. See the
 [release docs README](release/README.md) for the full index.
 
 - [Executive Summary](release/executive-summary.md) — capability and assurance brief for Australian public-sector evaluators *(DRAFT — awaiting operator sign-off)*
 - [Composer Guide](release/composer-guide.md) — current user-facing guide to the web authoring surface
 - [Platform Architecture](release/platform-architecture.md) — current platform architecture, trust-boundary, and operational-responsibility overview
 - [Public-Sector Assessment Mapping](release/assessment-mapping.md) — current evidence map for government evaluation touchpoints
-- [Progress Report: RC-1 to RC-5](release/elspeth-progress-rc1-to-rc5.md) — current cumulative-output view (RC-5.2, May 2026): what shipped, period by period
-- [Velocity Report: RC-1 to RC-5](release/elspeth-velocity-rc1-to-rc5.md) — current per-day commit volume (RC-5.2, May 2026): tempo and peak-day attribution
 - [Audit and Lineage Guarantees](release/guarantees.md) — long-lived assurance narrative; refreshed per release (current contract surface; §1–§10 RC-3 base, §11–§14 RC-5.2 additions)
+- Per-period progress and velocity reports (RC-1 to RC-5) are internal work product and now live under [`docs-archive/2026-06-28-docs-cleanout/docs/release/`](../docs-archive/2026-06-28-docs-cleanout/docs/release/)
 - [Archived RC snapshots](../docs-archive/2026-05-19-docs-cleanout/docs/release/) — `feature-inventory.md` (RC-3.3), `rc4-executive-brief.md` (RC-4.0 planning), `rc-3-release-notes.md`, `rc-2-checkpoint-fix-postmortem.md` — historical context only; see the [2026-05-19 cleanout MANIFEST](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) for full relocation map
 
 ## Historical Snapshots
@@ -115,6 +115,7 @@ Audience-facing release, progress, velocity, and evaluation documents. See the
 Intentional point-in-time documents retained for reference.
 
 - [RC-3 Release Notes](../docs-archive/2026-05-19-docs-cleanout/docs/release/rc-3-release-notes.md) — RC-3 release-history snapshot, relocated into the 2026-05-19 dated docs archive
-- [Plans index](plans/README.md) — curated in-tree design and implementation plans
-- [Composer UX Redesign](composer/ux-redesign-2026-05/) — RC-5.2 composer planning and implementation phase documents
-- [Archived docs cleanout manifest](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) — relocation map for archived release docs, audits, frozen architecture packs, generated review sidecars, and completed handovers
+- [Plans index](../docs-archive/2026-06-28-docs-cleanout/docs/plans/README.md) — curated design and implementation plans (all implemented; relocated 2026-06-28)
+- [Composer UX Redesign](../docs-archive/2026-06-28-docs-cleanout/docs/composer/ux-redesign-2026-05/) — RC-5.2 composer planning and implementation phase documents (relocated 2026-06-28)
+- [2026-06-28 cleanout manifest](../docs-archive/2026-06-28-docs-cleanout/MANIFEST.md) — relocation map for implemented plans/specs, composer evidence + UX-redesign, internal audits, agent prompts, and progress/velocity reports
+- [2026-05-19 cleanout manifest](../docs-archive/2026-05-19-docs-cleanout/MANIFEST.md) — relocation map for archived release docs, audits, frozen architecture packs, generated review sidecars, and completed handovers

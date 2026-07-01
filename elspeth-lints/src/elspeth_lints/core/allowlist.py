@@ -31,6 +31,17 @@ _MAX_ALLOWLIST_YAML_BYTES = 5 * 1024 * 1024
 _MIN_AUDIT_ANCHOR_ALNUM_CHARS = 2
 
 
+class DanglingAllowlistEntry(ValueError):
+    """Raised when a judge-gated allow_hits entry's bound source file no longer exists.
+
+    The entry is inert (the file that contained the violation it exempted is
+    gone), so callers may skip it with a warning rather than crashing. This
+    sentinel is distinct from plain ``ValueError`` to ensure that the separate
+    fingerprint-mismatch crash path (which signals tampering, not staleness) is
+    never accidentally swallowed by a broad ``except ValueError`` handler.
+    """
+
+
 class JudgeVerdict(StrEnum):
     """The verdict an allowlist entry carries from the cicd-judge.
 
@@ -478,7 +489,14 @@ def _parse_allow_hits(
         _validate_judge_metadata_atomic(allowlist_entry, context=ctx)
         _validate_audit_review_context(allowlist_entry, context=ctx)
         if source_root is not None and allowlist_entry.judge_verdict is not None:
-            _verify_source_binding_at_load(allowlist_entry, source_root=source_root, context=ctx)
+            try:
+                _verify_source_binding_at_load(allowlist_entry, source_root=source_root, context=ctx)
+            except DanglingAllowlistEntry as exc:
+                sys.stderr.write(
+                    f"WARNING: stale allowlist entry {ctx} binds to a deleted source file — "
+                    f"operator should remove it and re-sign. Detail: {exc}\n"
+                )
+                continue  # skip dangling entry; do NOT append; do NOT verify signature
             _verify_judge_metadata_signature_at_load(allowlist_entry, context=ctx)
         entries.append(allowlist_entry)
     return entries
@@ -581,6 +599,7 @@ def find_scope_fallback_entry(
     5. its within-scope suffix ``ast_path.split("/")[scope_depth:]`` equals the
        finding's (the within-scope position is identical — the fallback-path
        replacement for the exact ``ast_path`` transplant defence).
+    6. it has not already matched another finding in this analysis run.
 
     Returns the unique candidate, or ``None`` when there are zero or **two or
     more** (ambiguity must never silently bind — fail closed). An empty
@@ -605,6 +624,8 @@ def find_scope_fallback_entry(
     live_suffix = live_components[scope_depth:]
     candidates: list[AllowlistEntry] = []
     for entry in entries:
+        if entry.matched:
+            continue
         if entry.judge_verdict is None or entry.scope_fingerprint is None or entry.ast_path is None:
             continue
         if entry.judge_verdict is JudgeVerdict.BLOCKED:
@@ -641,6 +662,26 @@ def _compute_file_fingerprint(source_path: Path) -> str:
     file the judge originally inspected).
     """
     return hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+
+def _resolve_allowlist_source_path(file_path: str, *, source_root: Path, context: str) -> Path:
+    """Resolve an allowlist key path without allowing reads outside ``source_root``."""
+    raw_path = Path(file_path)
+    if raw_path.is_absolute() or ".." in raw_path.parts:
+        raise ValueError(
+            f"{context}: judge-gated entry binds to {file_path!r} outside source_root "
+            f"{source_root}; allowlist keys must use normalized relative .py paths. "
+            "Refusing to read source bytes."
+        )
+
+    resolved_root = source_root.resolve(strict=False)
+    resolved_source = (resolved_root / raw_path).resolve(strict=False)
+    if not resolved_source.is_relative_to(resolved_root):
+        raise ValueError(
+            f"{context}: judge-gated entry binds to {file_path!r} outside source_root "
+            f"{source_root} after path resolution ({resolved_source}). Refusing to read source bytes."
+        )
+    return resolved_source
 
 
 def compute_judge_metadata_signature(
@@ -757,6 +798,28 @@ def _judge_metadata_hmac_key() -> bytes:
     return key
 
 
+def _hmac_key_bytes_from_env(var_name: str) -> bytes:
+    """Load + validate an HMAC key from an operator-NAMED env var (min 32 bytes).
+
+    Mirrors :func:`_judge_metadata_hmac_key`'s validation but reads a caller-chosen
+    variable name: ``rekey`` holds the OLD and NEW keys in two distinct env vars
+    (``--old-key-env`` / ``--new-key-env``), never the single production
+    ``ELSPETH_JUDGE_METADATA_HMAC_KEY``. Raises ``ValueError`` when the named var is
+    unset/empty or the key is too short — the fail-closed gate ``rekey`` runs before
+    any tree read.
+    """
+    raw = os.environ.get(var_name)
+    if raw is None or raw == "":
+        raise ValueError(f"{var_name} is required (HMAC key environment variable) but is unset or empty.")
+    key = raw.encode("utf-8")
+    if len(key) < _MIN_JUDGE_METADATA_HMAC_KEY_BYTES:
+        raise ValueError(
+            f"{var_name} must be at least {_MIN_JUDGE_METADATA_HMAC_KEY_BYTES} bytes when UTF-8 encoded; "
+            "shorter HMAC keys are not acceptable for audit metadata binding."
+        )
+    return key
+
+
 def _judge_metadata_signature_verify_mode() -> str:
     raw = os.environ.get(_JUDGE_METADATA_SIGNATURE_VERIFY_MODE_ENV_VAR, _JUDGE_METADATA_SIGNATURE_VERIFY_REQUIRED)
     if raw not in {
@@ -777,7 +840,7 @@ def _can_skip_judge_metadata_hmac_recompute_for_missing_key() -> bool:
     return mode == _JUDGE_METADATA_SIGNATURE_VERIFY_SHAPE_ONLY_WHEN_KEY_MISSING and (raw_key is None or raw_key == "")
 
 
-def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: str) -> None:
+def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: str, allow_shape_only: bool = True) -> None:
     """Assert a post-judge entry's verdict metadata has not been edited."""
     if entry.judge_metadata_signature is None:
         raise ValueError(
@@ -804,9 +867,42 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
     assert entry.judge_model is not None
     assert entry.judge_rationale is not None
     assert entry.judge_policy_hash is not None
-    if _can_skip_judge_metadata_hmac_recompute_for_missing_key():
+    if allow_shape_only and _can_skip_judge_metadata_hmac_recompute_for_missing_key():
         return
-    expected = compute_judge_metadata_signature(
+    expected = _recompute_entry_signature(entry, hmac_key=_judge_metadata_hmac_key())
+    if not hmac.compare_digest(entry.judge_metadata_signature, expected):
+        raise ValueError(
+            f"{context}: judge_metadata_signature mismatch for entry {entry.key!r}; "
+            "the persisted judge verdict/rationale/model/recorded_at or binding "
+            "fields were edited without the deployment HMAC key. Re-run "
+            "`elspeth-lints justify` to produce a fresh signed entry."
+        )
+
+
+def _recompute_entry_signature(entry: AllowlistEntry, *, hmac_key: bytes) -> str:
+    """Recompute ``entry``'s HMAC signature under ``hmac_key`` (the ONE marshalling).
+
+    This is the single field-marshalling shared by the keyless load-time verifier
+    (:func:`_verify_judge_metadata_signature_at_load`), the keyed verify
+    (:func:`verify_entry_signature_with_key`), and the ``rekey`` keyed write. It
+    passes the FULL signed field set off the already-persisted parsed
+    ``AllowlistEntry`` — including the version branch (``file_fingerprint`` vs
+    ``scope_fingerprint``) and the ``judge_transport`` fallback — VERBATIM. ``hmac_key``
+    is the *only* thing callers vary, so a keyed recompute is field-identical to the
+    production verifier and cannot drift out of parity with it.
+
+    No write-time transform runs here: ``judge_confidence`` is passed off the parsed
+    entry as-is (the round-at-write-time transform in ``cli.py`` is not re-applied;
+    the parsed entry already carries the rounded value).
+    """
+    version = entry.judge_signature_version if entry.judge_signature_version is not None else 1
+    assert entry.ast_path is not None
+    assert entry.judge_verdict is not None
+    assert entry.judge_recorded_at is not None
+    assert entry.judge_model is not None
+    assert entry.judge_rationale is not None
+    assert entry.judge_policy_hash is not None
+    return compute_judge_metadata_signature(
         key=entry.key,
         ast_path=entry.ast_path,
         judge_verdict=entry.judge_verdict,
@@ -825,14 +921,26 @@ def _verify_judge_metadata_signature_at_load(entry: AllowlistEntry, *, context: 
         # where the signer's v2 branch never reads it. Passing it
         # unconditionally keeps the recompute call uniform across versions.
         judge_transport=entry.judge_transport if entry.judge_transport is not None else "openrouter",
+        hmac_key=hmac_key,
     )
+
+
+def verify_entry_signature_with_key(entry: AllowlistEntry, *, hmac_key: bytes) -> None:
+    """Authoritatively verify ``entry``'s signature under an EXPLICIT key.
+
+    Unlike :func:`_verify_judge_metadata_signature_at_load` (keyless — env var only,
+    with a shape-only escape hatch when the deployment key is absent), this takes the
+    key bytes directly and has NO shape-only path: an explicit key is always
+    authoritative. Raises ``ValueError`` if the entry carries no signature or the
+    recomputed signature does not match. Used by ``rekey``'s dual-key verify window
+    (verify-under-OLD-or-NEW) and shares the one marshalling with the production
+    loader via :func:`_recompute_entry_signature`, so a pass here is a pass there.
+    """
+    if entry.judge_metadata_signature is None:
+        raise ValueError(f"verify_entry_signature_with_key: entry {entry.key!r} has no judge_metadata_signature to verify")
+    expected = _recompute_entry_signature(entry, hmac_key=hmac_key)
     if not hmac.compare_digest(entry.judge_metadata_signature, expected):
-        raise ValueError(
-            f"{context}: judge_metadata_signature mismatch for entry {entry.key!r}; "
-            "the persisted judge verdict/rationale/model/recorded_at or binding "
-            "fields were edited without the deployment HMAC key. Re-run "
-            "`elspeth-lints justify` to produce a fresh signed entry."
-        )
+        raise ValueError(f"verify_entry_signature_with_key: judge_metadata_signature mismatch for entry {entry.key!r}")
 
 
 def _validate_judge_metadata_signature_shape(signature: str, *, context: str) -> None:
@@ -884,9 +992,9 @@ def _verify_source_binding_at_load(entry: AllowlistEntry, *, source_root: Path, 
     accompanied by removing the dependent judge-gated entry).
     """
     file_path = _file_path_from_canonical_key(entry.key)
-    source_path = source_root / file_path
+    source_path = _resolve_allowlist_source_path(file_path, source_root=source_root, context=context)
     if not source_path.exists():
-        raise ValueError(
+        raise DanglingAllowlistEntry(
             f"{context}: judge-gated entry binds to {file_path!r} which does not exist "
             f"under {source_root}; either the source file was removed without removing "
             f"the dependent allowlist entry, or the entry's key was transplanted from a "
@@ -1346,6 +1454,8 @@ def _optional_date(data: dict[str, Any], key: str, *, context: str) -> date | No
     if key not in data or data[key] is None:
         return None
     value = data[key]
+    if isinstance(value, datetime):
+        raise ValueError(f"{context}.{key} must be YYYY-MM-DD")
     if isinstance(value, date):
         return value
     if not isinstance(value, str):

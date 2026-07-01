@@ -14,7 +14,6 @@ chat-completion semantics.
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import math
 import time
@@ -43,7 +42,7 @@ from elspeth.plugins.infrastructure.clients.llm import (
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
 from elspeth.plugins.transforms.llm.base import LLMConfig
 from elspeth.plugins.transforms.llm.model_catalog import MODEL_CATALOG_OPENROUTER
-from elspeth.plugins.transforms.llm.provider import LLMQueryResult, parse_finish_reason
+from elspeth.plugins.transforms.llm.provider import LLMQueryResult, ParsedFinishReason, parse_finish_reason
 from elspeth.plugins.transforms.llm.validation import reject_nonfinite_constant
 
 if TYPE_CHECKING:
@@ -73,39 +72,26 @@ OPENROUTER_APP_TITLE = "Elspeth"
 """Canonical OpenRouter app display title."""
 
 
-_HTTP_ERROR_BODY_LIMIT = 512
-"""Maximum response-body bytes appended to wrapped HTTP exception messages.
-
-Provider error responses (4xx/5xx) routinely carry the only human-readable
-description of what went wrong (e.g. Azure's "max_output_tokens below minimum
-value"). httpx's default HTTPStatusError stringifies only the status line and
-links to MDN — the body is silently dropped. The audit DB preserves the full
-payload via the call_recorder, but the *exception* the caller sees should be
-self-describing. This limit caps how much of the body we paste into the
-exception message; the full body remains in the payload store under
-calls.response_ref.
-"""
+def _http_error_body_text(error: httpx.HTTPStatusError) -> str:
+    """Return buffered HTTP error text for internal classification only."""
+    try:
+        return error.response.text
+    except (httpx.ResponseNotRead, RuntimeError):
+        return ""
 
 
 def _summarize_http_error_body(error: httpx.HTTPStatusError) -> str:
-    """Return a ' | body: <truncated>' suffix for a wrapped HTTPStatusError, or ''.
+    """Return a redacted provider-error-body suffix, or '' when no body exists.
 
-    Reads the response body (already buffered by httpx for raise_for_status to
-    have fired), strips control characters that would mangle structured logs,
-    truncates to _HTTP_ERROR_BODY_LIMIT bytes, and prefixes with a separator so
-    the exception message remains parseable. Returns '' if the body is empty or
-    unavailable (e.g. streamed response not yet read).
+    Provider response bodies are Tier-3 remote text and can contain credentials,
+    request echoes, or private provider diagnostics. The full HTTP response body
+    remains available through the audited call payload; web-visible exception
+    text only records bounded metadata that a body existed.
     """
-    try:
-        body = error.response.text
-    except (httpx.ResponseNotRead, RuntimeError):
-        return ""
+    body = _http_error_body_text(error)
     if not body:
         return ""
-    cleaned = "".join(ch if ch >= " " or ch in "\n\t" else " " for ch in body)
-    if len(cleaned) > _HTTP_ERROR_BODY_LIMIT:
-        cleaned = cleaned[:_HTTP_ERROR_BODY_LIMIT] + "…"
-    return f" | body: {cleaned}"
+    return f" | provider error body redacted (body_present=true; chars={len(body)})"
 
 
 def normalize_openrouter_base_url(value: str) -> str:
@@ -115,37 +101,83 @@ def normalize_openrouter_base_url(value: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
-def _is_loopback_hostname(hostname: str) -> bool:
-    normalized = hostname.lower().rstrip(".")
-    if normalized == "localhost":
-        return True
+def _validate_chat_completion_response(response: httpx.Response) -> tuple[dict[str, Any], str, TokenUsage, ParsedFinishReason, str]:
+    """Parse and validate an OpenRouter chat-completion response body."""
     try:
-        return ipaddress.ip_address(normalized).is_loopback
-    except ValueError:
-        return False
+        data = json.loads(response.content, parse_constant=reject_nonfinite_constant)
+    except (ValueError, TypeError) as e:
+        raise LLMClientError(
+            f"Response is not valid JSON: {e}",
+            retryable=False,
+        ) from e
 
+    if not isinstance(data, dict):
+        raise LLMClientError(
+            f"Empty or missing choices in response: {type(data).__name__}",
+            retryable=False,
+        )
 
-def _validate_openrouter_base_url(value: str) -> str:
-    """Validate OpenRouter base URLs without blocking local chaos endpoints.
+    choices = data.get("choices")
+    if not choices:
+        raise LLMClientError(
+            f"Empty or missing choices in response: {list(data.keys())}",
+            retryable=False,
+        )
 
-    Real credential-bearing OpenRouter/proxy endpoints must use HTTPS. The
-    documented ChaosLLM examples target loopback HTTP servers with fake keys, so
-    HTTP is allowed only for syntactic loopback hosts and still rejects userinfo.
-    """
-    stripped = value.strip()
-    if not stripped:
-        raise ValueError("base_url must not be empty")
+    try:
+        content = choices[0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as e:
+        raise LLMClientError(
+            f"Malformed response structure: {type(e).__name__}: {e}",
+            retryable=False,
+        ) from e
 
-    parsed = urlsplit(stripped)
-    if not parsed.hostname:
-        raise ValueError("base_url must include a hostname")
-    if parsed.username is not None or parsed.password is not None:
-        raise ValueError("base_url must not contain embedded credentials")
-    if parsed.scheme == "https":
-        return stripped
-    if parsed.scheme == "http" and _is_loopback_hostname(parsed.hostname):
-        return stripped
-    raise ValueError(f"base_url must use HTTPS scheme, got {parsed.scheme!r}")
+    if content is None:
+        raise ContentPolicyError("LLM returned null content (likely content-filtered by provider)")
+
+    if not isinstance(content, str):
+        raise LLMClientError(
+            f"Expected string content, got {type(content).__name__}",
+            retryable=False,
+        )
+
+    if not content.strip():
+        raw_fr = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
+        if raw_fr == "tool_calls":
+            raise LLMClientError(
+                "LLM returned tool_calls response (not supported by ELSPETH)",
+                retryable=False,
+            )
+        raise ContentPolicyError(
+            f"LLM returned empty content (finish_reason={raw_fr})",
+        )
+
+    raw_usage = data.get("usage")
+    if isinstance(raw_usage, dict):
+        for usage_key, usage_val in raw_usage.items():
+            if isinstance(usage_val, float) and not math.isfinite(usage_val):
+                raise LLMClientError(
+                    f"Non-finite value in usage.{usage_key}: {usage_val}",
+                    retryable=False,
+                )
+    usage = TokenUsage.from_dict(raw_usage)
+
+    raw_finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
+    finish_reason = parse_finish_reason(str(raw_finish_reason)) if raw_finish_reason is not None else None
+
+    # The provider MUST report which model served the request. Substituting the
+    # requested model would fabricate a Tier-3 datum; callers record/use the
+    # response model as an audited fact.
+    raw_model = data["model"] if "model" in data else None
+    if not isinstance(raw_model, str) or not raw_model.strip():
+        missing_desc = "missing" if raw_model is None else f"{type(raw_model).__name__}/empty"
+        raise LLMClientError(
+            f"LLM response 'model' is {missing_desc}, expected non-empty str. Provider returned malformed data at the Tier 3 boundary.",
+            retryable=False,
+        )
+    response_model = raw_model
+
+    return data, content, usage, finish_reason, response_model
 
 
 class OpenRouterConfig(LLMConfig):
@@ -176,6 +208,12 @@ class OpenRouterConfig(LLMConfig):
     @field_validator("base_url")
     @classmethod
     def _normalize_base_url(cls, value: str) -> str:
+        # allow_http_loopback=True: HTTPS is required for real (network-reachable)
+        # bearer endpoints, but HTTP is permitted for loopback hosts so the
+        # documented local ChaosLLM/OpenAI-compatible dev servers
+        # (http://127.0.0.1:8199/v1, used by the shipped examples) validate and
+        # run. The bearer token never leaves the local machine, so this does not
+        # weaken the "no bearer over plaintext to a remote host" guarantee.
         return normalize_openrouter_base_url(validate_credential_safe_https_url(value, field_name="base_url", allow_http_loopback=True))
 
     # Catalog membership for ``model`` is enforced as a value-source concern,
@@ -202,8 +240,7 @@ class OpenRouterConfig(LLMConfig):
     # Value-source declaration: ``model`` must appear in the OpenRouter
     # slice of ``litellm.model_list``, BUT only when this config targets
     # the canonical OpenRouter endpoint. When an operator overrides
-    # ``base_url`` (e.g. to a chaos test server like errorworks/chaosllm,
-    # or a private OpenAI-compatible gateway), the model identifier
+    # ``base_url`` (e.g. to a private HTTPS OpenAI-compatible gateway), the model identifier
     # semantics are owned by that endpoint — not by litellm's OpenRouter
     # slug list. The ``applies_when`` predicate keeps the catalog check
     # in lock-step with the actual HTTP boundary the runtime targets.
@@ -253,7 +290,13 @@ class OpenRouterLLMProvider:
             "HTTP-Referer": OPENROUTER_APP_REFERER,
             "X-OpenRouter-Title": OPENROUTER_APP_TITLE,
         }
-        self._base_url = base_url
+        # allow_http_loopback=True: mirror the config field-validator — local
+        # loopback dev servers (ChaosLLM at http://127.0.0.1:8199/v1) are
+        # permitted; the bearer token stays on the local machine. Remote hosts
+        # still require HTTPS.
+        self._base_url = normalize_openrouter_base_url(
+            validate_credential_safe_https_url(base_url, field_name="base_url", allow_http_loopback=True)
+        )
         self._timeout = timeout_seconds
         self._recorder = recorder
         self._run_id = run_id
@@ -338,109 +381,27 @@ class OpenRouterLLMProvider:
                 status_code = e.response.status_code
                 detail = _summarize_http_error_body(e)
                 if status_code == 429:
-                    raise RateLimitError(f"Rate limited: {e}{detail}") from e
+                    raise RateLimitError(f"Rate limited (HTTP {status_code}){detail}") from e
                 elif status_code >= 500:
-                    raise ServerError(f"Server error ({status_code}): {e}{detail}") from e
+                    raise ServerError(f"Server error (HTTP {status_code}){detail}") from e
                 else:
                     # Check response body for context length indicators before
                     # falling through to generic LLMClientError. Imports the shared
                     # pattern tuple so the provider classifier and AuditedLLMClient
                     # cannot drift — adding a wording in one place reaches both.
-                    error_body = e.response.text.lower()
+                    error_body = _http_error_body_text(e).lower()
                     if any(p in error_body for p in CONTEXT_LENGTH_PATTERNS):
                         raise ContextLengthError(
-                            f"Context length exceeded: {e.response.text[:200]}",
+                            f"Context length exceeded{detail}",
                         ) from e
                     raise LLMClientError(
-                        f"HTTP {status_code}: {e}{detail}",
+                        f"HTTP {status_code}{detail}",
                         retryable=False,
                     ) from e
             except httpx.RequestError as e:
                 raise NetworkError(f"Network error: {e}") from e
 
-            # Parse JSON — reject NaN/Infinity at Tier 3 boundary
-            try:
-                data = json.loads(response.content, parse_constant=reject_nonfinite_constant)
-            except (ValueError, TypeError) as e:
-                raise LLMClientError(
-                    f"Response is not valid JSON: {e}",
-                    retryable=False,
-                ) from e
-
-            # Extract content from choices
-            choices = data.get("choices") if isinstance(data, dict) else None
-            if not choices:
-                raise LLMClientError(
-                    f"Empty or missing choices in response: {list(data.keys()) if isinstance(data, dict) else type(data).__name__}",
-                    retryable=False,
-                )
-
-            try:
-                content = choices[0]["message"]["content"]
-            except (KeyError, IndexError, TypeError) as e:
-                raise LLMClientError(
-                    f"Malformed response structure: {type(e).__name__}: {e}",
-                    retryable=False,
-                ) from e
-
-            # Null content = content filtered by provider
-            if content is None:
-                raise ContentPolicyError("LLM returned null content (likely content-filtered by provider)")
-
-            # Non-string content
-            if not isinstance(content, str):
-                raise LLMClientError(
-                    f"Expected string content, got {type(content).__name__}",
-                    retryable=False,
-                )
-
-            # Empty/whitespace content — provider returned a string but with no
-            # meaningful text. Raise typed error so the transform's except
-            # LLMClientError handler catches it (not ValueError from LLMQueryResult).
-            if not content.strip():
-                raw_fr = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
-                if raw_fr == "tool_calls":
-                    raise LLMClientError(
-                        "LLM returned tool_calls response (not supported by ELSPETH)",
-                        retryable=False,
-                    )
-                raise ContentPolicyError(
-                    f"LLM returned empty content (finish_reason={raw_fr})",
-                )
-
-            # Validate usage (non-finite rejection)
-            raw_usage = data.get("usage")
-            if isinstance(raw_usage, dict):
-                for usage_key, usage_val in raw_usage.items():
-                    if isinstance(usage_val, float) and not math.isfinite(usage_val):
-                        raise LLMClientError(
-                            f"Non-finite value in usage.{usage_key}: {usage_val}",
-                            retryable=False,
-                        )
-            usage = TokenUsage.from_dict(raw_usage)
-
-            # Extract finish reason
-            raw_finish_reason = choices[0].get("finish_reason") if isinstance(choices[0], dict) else None
-            finish_reason = parse_finish_reason(str(raw_finish_reason)) if raw_finish_reason is not None else None
-
-            # Extract model. The provider MUST report which model served the request.
-            # Substituting the requested model would FABRICATE a Tier-3 datum: the
-            # audited `calls` row, the `{response_field}_model` pipeline field, and the
-            # success metadata would all assert a model the provider never reported,
-            # while the recorded raw_response carries no model — two contradictory
-            # sources of truth (CLAUDE.md Data Manifesto: inference from absence is
-            # fabrication, not coercion). Mirror the Azure provider
-            # (_validate_provider_response_model): record + raise so the row routes to
-            # on_error, rather than recording a confident wrong answer.
-            raw_model = data["model"] if isinstance(data, dict) and "model" in data else None
-            if not isinstance(raw_model, str) or not raw_model.strip():
-                missing_desc = "missing" if raw_model is None else f"{type(raw_model).__name__}/empty"
-                raise LLMClientError(
-                    f"LLM response 'model' is {missing_desc}, expected non-empty str. "
-                    f"Provider returned malformed data at the Tier 3 boundary.",
-                    retryable=False,
-                )
-            response_model = raw_model
+            data, content, usage, finish_reason, response_model = _validate_chat_completion_response(response)
 
             result = LLMQueryResult(
                 content=content,
@@ -560,7 +521,7 @@ class OpenRouterLLMProvider:
         try:
             request_body: dict[str, Any] = {
                 "model": model,
-                "messages": [{"role": "user", "content": "Respond with OK only."}],
+                "messages": [{"role": "user", "content": "This is a pre-flight smoke test. Please reply with ok."}],
                 "temperature": 0.0,
                 # Underlying providers behind OpenRouter enforce different minimums
                 # on max_output_tokens. Azure-backed routes require >= 16; values
@@ -574,14 +535,15 @@ class OpenRouterLLMProvider:
                 headers={"Content-Type": "application/json"},
             )
             response.raise_for_status()
+            _validate_chat_completion_response(response)
         except httpx.HTTPStatusError as e:
             status_code = e.response.status_code
             detail = _summarize_http_error_body(e)
             if status_code == 429:
-                raise RateLimitError(f"Rate limited: {e}{detail}") from e
+                raise RateLimitError(f"Rate limited (HTTP {status_code}){detail}") from e
             if status_code >= 500:
-                raise ServerError(f"Server error ({status_code}): {e}{detail}") from e
-            raise LLMClientError(f"HTTP {status_code}: {e}{detail}", retryable=False) from e
+                raise ServerError(f"Server error (HTTP {status_code}){detail}") from e
+            raise LLMClientError(f"HTTP {status_code}{detail}", retryable=False) from e
         except httpx.RequestError as e:
             raise NetworkError(f"Network error: {e}") from e
         finally:

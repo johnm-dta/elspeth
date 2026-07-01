@@ -258,18 +258,28 @@ class BarrierScalars:
             raise TypeError(f"BarrierScalars.aggregation must be a Mapping, got {type(aggregation).__name__}")
         if not isinstance(coalesce, Mapping):
             raise TypeError(f"BarrierScalars.coalesce must be a Mapping, got {type(coalesce).__name__}")
-        # Validate aggregation keys are non-empty strings
-        for key in aggregation:
+        # Validate aggregation keys and values at direct-construction boundary.
+        for key, aggregation_scalars in aggregation.items():
             if not isinstance(key, str):
                 raise TypeError(f"BarrierScalars.aggregation key must be a str, got {type(key).__name__}: {key!r}")
             if not key:
                 raise ValueError("BarrierScalars.aggregation key must be non-empty")
+            if type(aggregation_scalars) is not AggregationNodeScalars:
+                raise TypeError(
+                    f"BarrierScalars.aggregation[{key!r}] must be AggregationNodeScalars, "
+                    f"got {type(aggregation_scalars).__name__}: {aggregation_scalars!r}"
+                )
         # Validate coalesce keys are (str, str) tuples (runtime guard — from_dict also
         # validates, but direct construction bypasses from_dict).
         raw_key: Any
-        for raw_key in coalesce:
+        for raw_key, coalesce_scalars in coalesce.items():
             if not isinstance(raw_key, tuple) or len(raw_key) != 2 or not all(isinstance(s, str) for s in raw_key):
                 raise TypeError(f"BarrierScalars.coalesce key must be a (str, str) tuple, got {type(raw_key).__name__}: {raw_key!r}")
+            if type(coalesce_scalars) is not CoalescePendingScalars:
+                raise TypeError(
+                    f"BarrierScalars.coalesce[{raw_key!r}] must be CoalescePendingScalars, "
+                    f"got {type(coalesce_scalars).__name__}: {coalesce_scalars!r}"
+                )
         freeze_fields(self, "aggregation", "coalesce")
 
     @property
@@ -309,6 +319,12 @@ class BarrierScalars:
             raise AuditIntegrityError(f"Corrupted BarrierScalars: 'aggregation' must be a dict, got {type(raw_agg).__name__}.")
         aggregation: dict[str, AggregationNodeScalars] = {}
         for node_id, node_data in raw_agg.items():
+            if not isinstance(node_id, str):
+                raise AuditIntegrityError(
+                    f"Corrupted BarrierScalars: aggregation key must be a str, got {type(node_id).__name__}: {node_id!r}."
+                )
+            if not node_id:
+                raise AuditIntegrityError("Corrupted BarrierScalars: aggregation key must be non-empty.")
             if not isinstance(node_data, dict):
                 raise AuditIntegrityError(
                     f"Corrupted BarrierScalars: aggregation[{node_id!r}] must be a dict, got {type(node_data).__name__}."

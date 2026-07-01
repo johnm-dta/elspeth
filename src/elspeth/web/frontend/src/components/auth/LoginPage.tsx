@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from "react";
 import { useAuth } from "../../hooks/useAuth";
 import * as api from "../../api/client";
 import type { AuthConfig } from "../../types/index";
+import { Button, Input, AlertBanner, WordMark } from "../ui";
 
 /**
  * Login page that adapts to the configured auth provider.
@@ -144,143 +145,69 @@ export function LoginPage() {
           boxShadow: "0 2px 8px rgba(10, 40, 50, 0.4)",
         }}
       >
-        <h1
-          style={{
-            fontSize: 24,
-            marginBottom: 24,
-            textAlign: "center",
-            color: "var(--color-text)",
-          }}
-        >
-          Sign in to ELSPETH
-        </h1>
-
-        {loginError && (
-          <div
-            role="alert"
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          {/* The brand mark is the canonical <WordMark> (mono/uppercase/
+              tracked). The positioning line below states what ELSPETH is —
+              derived from the product's own "auditable outputs" thesis, in the
+              public-service register. Copy is operator/UX-tunable. */}
+          <WordMark as="h1" size={22} style={{ margin: 0 }} />
+          <p
             style={{
-              padding: "8px 12px",
-              marginBottom: 16,
-              backgroundColor: "var(--color-error-bg)",
-              color: "var(--color-error)",
-              borderRadius: 4,
-              fontSize: 14,
-              border: "1px solid var(--color-error-border)",
+              margin: "var(--space-sm) 0 0",
+              fontSize: "var(--font-size-sm)",
+              color: "var(--color-text-secondary)",
             }}
           >
-            {loginError}
-          </div>
-        )}
+            Build and run auditable data pipelines.
+          </p>
+        </div>
+
+        {loginError && <AlertBanner tone="error">{loginError}</AlertBanner>}
 
         {isOidc ? (
           /* OIDC / Entra SSO: single "Sign in with SSO" button */
-          <button
+          <Button
+            variant="primary"
             type="button"
             onClick={handleSsoRedirect}
             aria-label="Sign in with single sign-on"
-            style={{
-              display: "block",
-              width: "100%",
-              padding: "10px 16px",
-              backgroundColor: "var(--color-accent)",
-              color: "var(--color-text-inverse)",
-              border: "none",
-              borderRadius: 4,
-              fontSize: 14,
-              cursor: "pointer",
-            }}
           >
             Sign in with SSO
-          </button>
+          </Button>
         ) : (
           /* Local auth: username/password form */
-          <form onSubmit={handleSubmit}>
-            <label
-              htmlFor="login-username"
-              style={{
-                display: "block",
-                marginBottom: 4,
-                fontSize: 14,
-                color: "var(--color-text)",
-              }}
-            >
-              Username
-            </label>
-            <input
+          <form
+            onSubmit={handleSubmit}
+            style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}
+          >
+            <Input
+              label="Username"
               id="login-username"
               type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
               autoComplete="username"
               required
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "8px 12px",
-                marginBottom: 16,
-                border: "1px solid var(--color-border-strong)",
-                borderRadius: 4,
-                fontSize: 14,
-                boxSizing: "border-box",
-                backgroundColor: "var(--color-surface-elevated)",
-                color: "var(--color-text)",
-              }}
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
             />
 
-            <label
-              htmlFor="login-password"
-              style={{
-                display: "block",
-                marginBottom: 4,
-                fontSize: 14,
-                color: "var(--color-text)",
-              }}
-            >
-              Password
-            </label>
-            <input
+            <Input
+              label="Password"
               id="login-password"
               type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"
               required
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "8px 12px",
-                marginBottom: 24,
-                border: "1px solid var(--color-border-strong)",
-                borderRadius: 4,
-                fontSize: 14,
-                boxSizing: "border-box",
-                backgroundColor: "var(--color-surface-elevated)",
-                color: "var(--color-text)",
-              }}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
             />
 
-            <button
+            <Button
+              variant="primary"
               type="submit"
               disabled={isSubmitting}
               aria-label={isSubmitting ? "Signing in" : "Sign in"}
-              style={{
-                display: "block",
-                width: "100%",
-                padding: "10px 16px",
-                backgroundColor: isSubmitting
-                  ? "var(--color-surface-elevated)"
-                  : "var(--color-accent)",
-                color: isSubmitting
-                  ? "var(--color-text-muted)"
-                  : "var(--color-text-inverse)",
-                border: "none",
-                borderRadius: 4,
-                fontSize: 14,
-                cursor: isSubmitting ? "not-allowed" : "pointer",
-              }}
             >
-              {isSubmitting ? "Signing in..." : "Sign in"}
-            </button>
+              {isSubmitting ? "Signing in…" : "Sign in"}
+            </Button>
           </form>
         )}
       </div>

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, NotRequired, Required,
 from elspeth.contracts.audit_evidence import AuditEvidenceBase
 from elspeth.contracts.declaration_contracts import DeclarationContractViolation
 from elspeth.contracts.freeze import deep_freeze, freeze_fields
+from elspeth.contracts.secret_scrub import scrub_text_for_audit
 
 # Re-export FrameworkBugError which lives in tier_registry to break the import
 # cycle between the registry primitive and the public exception module. Apply
@@ -408,6 +409,11 @@ TransformErrorCategory = Literal[
     "transport_exception",  # HTTP transport error during batch retrieval
     # Replication errors
     "invalid_copies",  # Invalid copies value in batch_replicate transform
+    # Azure Document Intelligence (async analyze long-running operation)
+    "analysis_failed",  # Azure analyze operation reported status=failed
+    "poll_timeout",  # async analyze operation did not reach a terminal status within budget
+    "operation_location_missing",  # 202 response lacked the Operation-Location header
+    "operation_location_untrusted",  # Operation-Location host != configured endpoint (security)
 ]
 
 
@@ -1259,7 +1265,7 @@ class RuntimePreflightFailedError(AuditEvidenceBase, Exception):
             "provider": self.provider,
             "cause_type": self.cause_type,
             "retryable": self.retryable,
-            "message": str(self),
+            "message": scrub_text_for_audit(str(self)),
         }
 
 

@@ -93,6 +93,12 @@ interface MultiSelectWithCustomTurnProps {
   payload: MultiSelectWithCustomPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
   disabled?: boolean;
+  /**
+   * Tutorial passive mode: suppress the "Select all that apply, then press
+   * Continue" subtext that contradicts the "press Send" coaching note (mirrors
+   * SingleSelectTurn). The chips remain interactive.
+   */
+  isTutorial?: boolean;
 }
 
 interface Selection {
@@ -105,6 +111,7 @@ export function MultiSelectWithCustomTurn({
   payload,
   onSubmit,
   disabled = false,
+  isTutorial = false,
 }: MultiSelectWithCustomTurnProps) {
   const [selection, setSelection] = useState<Selection>(() => ({
     chosen: new Set(payload.default_chosen),
@@ -263,11 +270,19 @@ export function MultiSelectWithCustomTurn({
 
   return (
     <div className="guided-turn guided-multi-select">
-      <fieldset className="guided-chip-fieldset" aria-describedby={instructionId}>
+      <fieldset
+        className="guided-chip-fieldset"
+        // Tutorial is passive: pressing Send builds the step. Suppress the
+        // "Select all that apply" subtext (it contradicts the coaching note) and
+        // drop its aria-describedby so the fieldset carries no dangling IDREF.
+        aria-describedby={isTutorial ? undefined : instructionId}
+      >
         <legend className="guided-chip-legend">{payload.question}</legend>
-        <p id={instructionId} className="guided-chip-instruction">
-          Select all that apply, then press Continue.
-        </p>
+        {!isTutorial && (
+          <p id={instructionId} className="guided-chip-instruction">
+            Select all that apply, then press Continue.
+          </p>
+        )}
         {/* No role="group" on the inner div — <fieldset> already provides
             group semantics; duplicating creates two nested groups in the
             accessibility tree. */}

@@ -1,23 +1,26 @@
-import { useEffect, useReducer } from "react";
-import { deleteTutorialOrphans } from "@/api/client";
+import { useEffect, useReducer, useState } from "react";
+import {
+  createSession,
+  deleteTutorialOrphans,
+  renameSession,
+} from "@/api/client";
 import { TutorialTurn1Welcome } from "./TutorialTurn1Welcome";
-import { TutorialTurn2Describe } from "./TutorialTurn2Describe";
-import { TutorialTurn2bShowBuilt } from "./TutorialTurn2bShowBuilt";
-import { TutorialTurn3Graph } from "./TutorialTurn3Graph";
+import { TutorialGuidedShell } from "./TutorialGuidedShell";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
 import { TutorialTurn5AuditStory } from "./TutorialTurn5AuditStory";
-import { TutorialTurn6ModeChoice } from "./TutorialTurn6ModeChoice";
 import { TutorialTurn7Graduation } from "./TutorialTurn7Graduation";
 import {
+  CANONICAL_TUTORIAL_PROMPT,
   initialTutorialState,
   tutorialReducer,
 } from "./tutorialMachine";
+import { HELLO_WORLD_PENDING_SESSION_TITLE } from "./copy";
 
 export function HelloWorldTutorial(): JSX.Element {
-  const [state, dispatch] = useReducer(
-    tutorialReducer,
-    initialTutorialState,
-  );
+  const [state, dispatch] = useReducer(tutorialReducer, initialTutorialState);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
 
   useEffect(() => {
     void deleteTutorialOrphans().catch((err) => {
@@ -25,14 +28,56 @@ export function HelloWorldTutorial(): JSX.Element {
     });
   }, []);
 
+  // Create the tutorial session on Start so TutorialGuidedShell has a
+  // sessionId. Tag it with the pending title BEFORE the shell's external
+  // POST /guided/start so the backend orphan-cleanup scan (which filters by
+  // the "hello-world (" prefix) catches sessions abandoned mid-tutorial.
+  const onStart = async (): Promise<void> => {
+    setStarting(true);
+    setStartError(null);
+    try {
+      const session = await createSession();
+      await renameSession(session.id, HELLO_WORLD_PENDING_SESSION_TITLE);
+      setSessionId(session.id);
+      dispatch({ type: "start" });
+    } catch (err) {
+      setStartError(formatError(err));
+    } finally {
+      setStarting(false);
+    }
+  };
+
   const goBack = (): void => dispatch({ type: "back" });
   const stepLabels = TUTORIAL_STEP_LABELS;
   const currentIndex = stepIndex(state.step);
   const totalSteps = stepLabels.length;
   const currentLabel = stepLabels[currentIndex]?.label ?? "Step";
 
+  // Back from graduation lands on audit (previousStep). The audit turn only
+  // renders content when a real run exists (sessionId + runId +
+  // sourceDataHash). On the skipped path all three are null; on the cancelled
+  // path runId/sourceDataHash are null. In both cases an unconditional Back
+  // would render an empty audit, so suppress the Back affordance unless audit
+  // would render real content — the same predicate that guards the audit
+  // branch below.
+  const auditHasContent =
+    state.sessionId !== null &&
+    state.runId !== null &&
+    state.sourceDataHash !== null;
+
   return (
-    <main className="tutorial-shell" aria-label="First-run tutorial">
+    <main
+      className={
+        // The guided step embeds the full-height ChatPanel, whose composer docks
+        // at the bottom; that dock needs the wrapper to be a growing flex column
+        // (see `.tutorial-shell--guided` in tutorial.css). The bookend turns are
+        // short centred cards and keep the base scrolling-column layout.
+        state.step === "guided"
+          ? "tutorial-shell tutorial-shell--guided"
+          : "tutorial-shell"
+      }
+      aria-label="First-run tutorial"
+    >
       <nav
         className="tutorial-progress"
         role="group"
@@ -49,14 +94,20 @@ export function HelloWorldTutorial(): JSX.Element {
           // assistive tech. Don't add aria-current here: it would be
           // ignored anyway (aria-hidden removes the element from the AT
           // tree) and the dual-encoding is misleading to future readers.
+          //
+          // Current and completed get DISTINCT classes (ringed vs plain fill):
+          // collapsing both to `--active` made "you are here" indistinguishable
+          // from "already done".
           return (
             <span
               key={key}
               aria-hidden="true"
               className={
-                isActive || isComplete
+                isActive
                   ? "tutorial-progress-dot tutorial-progress-dot--active"
-                  : "tutorial-progress-dot"
+                  : isComplete
+                    ? "tutorial-progress-dot tutorial-progress-dot--complete"
+                    : "tutorial-progress-dot"
               }
               title={label}
             />
@@ -64,40 +115,42 @@ export function HelloWorldTutorial(): JSX.Element {
         })}
       </nav>
       {state.step === "welcome" && (
-        <TutorialTurn1Welcome
-          onStart={() => dispatch({ type: "start" })}
-          onSkip={() => dispatch({ type: "skipToMode" })}
-        />
+        <>
+          <p role="status" className="sr-only">
+            {starting ? "Creating tutorial session" : ""}
+          </p>
+          {startError !== null && (
+            <p role="alert" className="tutorial-error">
+              {startError}
+            </p>
+          )}
+          <TutorialTurn1Welcome
+            onStart={() => void onStart()}
+            onSkip={() => dispatch({ type: "skipToGraduation" })}
+          />
+        </>
       )}
-      {state.step === "describe" && (
-        <TutorialTurn2Describe
-          initialPrompt={state.prompt}
-          onBuilt={(result) => dispatch({ type: "built", result })}
-          onBack={goBack}
-        />
-      )}
-      {state.step === "showBuilt" && state.sessionId !== null && state.builtSummary !== null && (
-        <TutorialTurn2bShowBuilt
-          sessionId={state.sessionId}
-          summary={state.builtSummary}
-          onContinue={() => dispatch({ type: "showGraph" })}
-          onBack={goBack}
-        />
-      )}
-      {state.step === "graph" && state.builtSummary !== null && (
-        <TutorialTurn3Graph
-          summary={state.builtSummary}
-          onContinue={() => dispatch({ type: "startRun" })}
-          onBack={goBack}
+      {state.step === "guided" && sessionId !== null && (
+        // One TutorialGuidedShell per tutorial session. The shell is
+        // mount-once (startedRef); keying it on sessionId guarantees a new
+        // session remounts a fresh shell rather than reusing a started one.
+        <TutorialGuidedShell
+          key={sessionId}
+          sessionId={sessionId}
+          onCompleted={(id) =>
+            dispatch({ type: "guidedCompleted", sessionId: id })
+          }
         />
       )}
       {state.step === "run" && state.sessionId !== null && (
+        // No onBack: the guided wizard is terminal once completed
+        // (previousStep(run) is null), so the run turn has no prior step to
+        // return to and renders no Back affordance.
         <TutorialTurn4Run
           sessionId={state.sessionId}
-          prompt={state.prompt}
+          prompt={CANONICAL_TUTORIAL_PROMPT}
           onCompleted={(result) => dispatch({ type: "runCompleted", result })}
           onCancelled={() => dispatch({ type: "cancelRun" })}
-          onBack={goBack}
         />
       )}
       {state.step === "audit" &&
@@ -107,21 +160,17 @@ export function HelloWorldTutorial(): JSX.Element {
           <TutorialTurn5AuditStory
             sessionId={state.sessionId}
             runId={state.runId}
-            onContinue={() => dispatch({ type: "continueToMode" })}
+            onContinue={() => dispatch({ type: "continueToGraduation" })}
             onBack={goBack}
           />
         )}
-      {state.step === "mode" && (
-        <TutorialTurn6ModeChoice
+      {state.step === "graduation" && (
+        <TutorialTurn7Graduation
           sessionId={state.sessionId}
           skipped={state.skipped}
           cancelled={state.cancelled}
-          onBack={goBack}
-          onFinished={() => dispatch({ type: "finishMode" })}
+          onBack={auditHasContent ? goBack : undefined}
         />
-      )}
-      {state.step === "graduation" && (
-        <TutorialTurn7Graduation onBack={goBack} />
       )}
     </main>
   );
@@ -129,39 +178,50 @@ export function HelloWorldTutorial(): JSX.Element {
 
 /**
  * Display labels for the progress dots and the sr-only "Step N of M" hint.
- * The key matches the `TutorialStep` union but `showBuilt` is shown as
- * "Draft" for the user-facing label.
+ * The staged guided flow is welcome -> guided -> run -> audit -> graduation;
+ * the guided surface owns its own internal stages (source/sink/transform/wire).
  */
 const TUTORIAL_STEP_LABELS: ReadonlyArray<{ key: string; label: string }> = [
   { key: "welcome", label: "Welcome" },
-  { key: "describe", label: "Describe" },
-  { key: "showBuilt", label: "Draft" },
-  { key: "graph", label: "Graph" },
+  { key: "guided", label: "Build" },
   { key: "run", label: "Run" },
   { key: "audit", label: "Audit" },
-  { key: "mode", label: "Mode" },
-  { key: "graduation", label: "Ready" },
+  // "Graduate" (was "Ready"): this macro phase IS the graduation turn. The inner
+  // guided stepper's terminal step is also labelled "Ready" (an assembled,
+  // ready-to-run pipeline); two different "Ready"s in nested progress trackers
+  // read as a collision. Rename the macro one — "Ready" stays the product term
+  // for a finished pipeline on the stepper.
+  { key: "graduation", label: "Graduate" },
 ];
 
 function stepIndex(step: string): number {
   switch (step) {
     case "welcome":
       return 0;
-    case "describe":
+    case "guided":
       return 1;
-    case "showBuilt":
-      return 2;
-    case "graph":
-      return 3;
     case "run":
-      return 4;
+      return 2;
     case "audit":
-      return 5;
-    case "mode":
-      return 6;
+      return 3;
     case "graduation":
-      return 7;
+      return 4;
     default:
       return 0;
   }
+}
+
+function formatError(err: unknown): string {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    "detail" in err &&
+    typeof (err as { detail?: unknown }).detail === "string"
+  ) {
+    return (err as { detail: string }).detail;
+  }
+  if (err instanceof Error) {
+    return err.message;
+  }
+  return "The tutorial session could not be created.";
 }

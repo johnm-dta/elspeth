@@ -637,4 +637,7 @@ elspeth plugins --help
 elspeth explain --help
 ```
 
-For bug reports and feature requests, see the project repository.
+For bug reports and feature requests, see the project repository. Include a
+sanitized reproduction, not raw session data. Do not attach raw composer chat
+history or session exports; remove secrets, tokens, PII, blob contents, sample
+rows, URLs, and organization-specific identifiers before posting.

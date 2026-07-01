@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
-from typing import NotRequired, TypedDict
+from typing import ClassVar, NotRequired, TypedDict
 
 import pytest
 
@@ -31,6 +31,7 @@ from elspeth.contracts.declaration_contracts import (
     positive_example_does_not_apply_bundles,
     register_declaration_contract,
     registered_declaration_contracts,
+    resolve_payload_schema_key_sets,
 )
 from elspeth.contracts.errors import FrameworkBugError
 
@@ -61,7 +62,7 @@ class _TestPayload(TypedDict):
     """
 
     k: NotRequired[str]
-    outer: NotRequired[dict]
+    outer: NotRequired[dict[str, object]]
     api_key: NotRequired[str]
     reason: NotRequired[str]
     note: NotRequired[str]
@@ -81,12 +82,12 @@ class _FakeViolation(DeclarationContractViolation):
 
 class _FakeContract(DeclarationContract):
     name = "fake_declaration"
-    payload_schema: type = _FakePayload
-    violation_class: type[DeclarationContractViolation] = _FakeViolation
+    payload_schema: ClassVar[type] = _FakePayload
+    violation_class: ClassVar[type[DeclarationContractViolation]] = _FakeViolation
 
     def applies_to(self, plugin: object) -> bool:
         # Direct attribute access — NOT getattr with default (CLAUDE.md).
-        return plugin.__class__.__name__ == "_FakePlugin" and plugin.fake_flag
+        return isinstance(plugin, _FakePlugin) and plugin.fake_flag
 
     @implements_dispatch_site("post_emission_check")
     def post_emission_check(
@@ -511,7 +512,7 @@ def test_runtime_check_raises_violation() -> None:
 
 
 def test_emitted_rows_is_frozen_tuple() -> None:
-    outputs = PostEmissionOutputs(emitted_rows=[1, 2, 3])
+    outputs = PostEmissionOutputs(emitted_rows=[1, 2, 3])  # type: ignore[arg-type]
     assert isinstance(outputs.emitted_rows, tuple)  # freeze guard converts list→tuple
 
 
@@ -522,13 +523,13 @@ def test_emitted_rows_non_list_non_tuple_raises() -> None:
     class _LazySeq:
         """Minimal Sequence subtype that would deceive static typing."""
 
-        def __init__(self, items):
+        def __init__(self, items: list[int]) -> None:
             self._items = items
 
-        def __len__(self):
+        def __len__(self) -> int:
             return len(self._items)
 
-        def __getitem__(self, i):
+        def __getitem__(self, i: int) -> int:
             return self._items[i]
 
     with pytest.raises(TypeError, match="must be list or tuple"):
@@ -603,7 +604,7 @@ def test_negative_example_fires_the_violation() -> None:
 def test_negative_example_bundle_helper_collects_all_claimed_sites() -> None:
     class _MultiSiteContract(DeclarationContract):
         name = "multi_site_examples"
-        payload_schema: type = _FakePayload
+        payload_schema: ClassVar[type] = _FakePayload
         violation_class = _FakeViolation
 
         def applies_to(self, plugin: object) -> bool:
@@ -647,7 +648,7 @@ def test_negative_example_bundle_helper_collects_all_claimed_sites() -> None:
 def test_shadowed_undecorated_override_rejected() -> None:
     class _BaseMarkedContract(DeclarationContract):
         name = "base_marked"
-        payload_schema: type = _FakePayload
+        payload_schema: ClassVar[type] = _FakePayload
         violation_class = _FakeViolation
 
         def applies_to(self, plugin: object) -> bool:
@@ -680,7 +681,7 @@ def test_shadowed_undecorated_override_rejected() -> None:
 def test_negative_example_bundle_helper_requires_every_claimed_site() -> None:
     class _MissingCoverageContract(DeclarationContract):
         name = "missing_site_example"
-        payload_schema: type = _FakePayload
+        payload_schema: ClassVar[type] = _FakePayload
         violation_class = _FakeViolation
 
         def applies_to(self, plugin: object) -> bool:
@@ -885,7 +886,7 @@ def test_dispatcher_attaches_contract_name_from_registry() -> None:
         method body thought it was producing."""
 
         name = "authentic_contract_name"
-        payload_schema: type = _AttackerPayload
+        payload_schema: ClassVar[type] = _AttackerPayload
         violation_class = _AttackerViolation
 
         def applies_to(self, plugin: object) -> bool:
@@ -953,6 +954,41 @@ class _StrictPayload(TypedDict):
 
 class _StrictViolation(DeclarationContractViolation):
     payload_schema = _StrictPayload
+
+
+def test_layer1_payload_schema_key_sets_preserve_inherited_totality() -> None:
+    class _BasePayload(TypedDict):
+        inherited_required: str
+
+    class _ChildPayload(_BasePayload, total=False):
+        child_optional: str
+
+    required, optional = resolve_payload_schema_key_sets(_ChildPayload)
+
+    assert required == frozenset({"inherited_required"})
+    assert optional == frozenset({"child_optional"})
+
+
+def test_layer1_inherited_required_payload_key_rejected_when_missing() -> None:
+    class _BasePayload(TypedDict):
+        inherited_required: str
+
+    class _ChildPayload(_BasePayload, total=False):
+        child_optional: str
+
+    class _InheritedViolation(DeclarationContractViolation):
+        payload_schema = _ChildPayload
+
+    with pytest.raises(ValueError, match="missing required"):
+        _InheritedViolation(
+            plugin="P",
+            node_id="n",
+            run_id="r",
+            row_id="rw",
+            token_id="tk",
+            payload={"child_optional": "x"},
+            message="m",
+        )
 
 
 def test_layer1_unknown_payload_key_rejected_at_construction() -> None:

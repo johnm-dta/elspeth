@@ -40,6 +40,11 @@ class TestBaseSourceContract:
         source = StubSource({})
         assert source.declared_guaranteed_fields == frozenset()
 
+    def test_on_success_defaults_none_until_runtime_bridge_injects(self) -> None:
+        """BaseSource exposes the same post-construction routing lifecycle as transforms."""
+        source = StubSource({})
+        assert source.on_success is None
+
     def test_get_schema_contract_returns_none_before_load(self) -> None:
         """get_schema_contract() returns None before load()."""
         source = StubSource({})

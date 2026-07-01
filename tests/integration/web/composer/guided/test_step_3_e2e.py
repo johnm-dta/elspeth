@@ -2,12 +2,14 @@
 
 Walks the wizard from new-session through Step 1 (CSV source) + Step 2
 (JSON sink, no recipe match by virtue of non-classifier ``required_fields``)
-+ Step 3 (LLM-proposed chain, accepted) to a COMPLETED terminal with
-rendered YAML.  The LLM is stubbed by patching ``_litellm_acompletion`` on
++ Step 3 (LLM-proposed chain, accepted) to the wire-confirm stage and then a
+COMPLETED terminal with rendered YAML.  The LLM is stubbed by patching
+``_litellm_acompletion`` on
 the chain_solver module the same way the dedicated chain-solver tests do.
 
-Reject and clarifying-question paths are not implemented in this endpoint;
-they raise ``HTTPException`` 501, which the second test exercises.
+An unsupported ``chosen=['reject']`` response is not a valid propose_chain
+reply; it falls through to the standard invalid-``chosen`` 400, which the
+second test exercises.
 """
 
 from __future__ import annotations
@@ -26,10 +28,14 @@ from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 # ---------------------------------------------------------------------------
 
 
-def _create_session(client: TestClient) -> str:
+def _create_session(client: TestClient, *, profile: str | None = None) -> str:
     resp = client.post("/api/sessions", json={"title": "step-3-e2e"})
     assert resp.status_code == 201, resp.json()
-    return resp.json()["id"]
+    session_id = resp.json()["id"]
+    if profile is not None:
+        start_resp = client.post(f"/api/sessions/{session_id}/guided/start", json={"profile": profile})
+        assert start_resp.status_code == 200, start_resp.json()
+    return session_id
 
 
 def _get_guided(client: TestClient, session_id: str) -> dict:
@@ -42,6 +48,19 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
     assert resp.status_code == 200, resp.json()
     return resp.json()
+
+
+def _confirm_wiring(client: TestClient, session_id: str) -> dict:
+    return _respond(
+        client,
+        session_id,
+        chosen=["confirm"],
+        edited_values=None,
+        custom_inputs=None,
+        accepted_step_index=None,
+        edit_step_index=None,
+        control_signal=None,
+    )
 
 
 def _seed_blob(client: TestClient, session_id: str) -> tuple[str, str]:
@@ -107,7 +126,9 @@ def _fake_llm_response_for_passthrough() -> SimpleNamespace:
 def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple[dict, str, str]:
     """Drive the wizard to the Step 3 ``propose_chain`` turn.
 
-    Returns (response_body_at_step_3, blob_id, output_path).
+    Returns (chat_response_body_at_step_3, blob_id, output_path). The body is
+    the /guided/chat response carrying the server-emitted propose_chain turn in
+    ``next_turn`` (the sink-commit itself no longer auto-builds the chain).
 
     Picks ``required_fields=["text"]`` so the deterministic recipe matcher
     finds no match (no classifier keyword present, single JSON output —
@@ -147,12 +168,25 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
     )
     # No classifier keyword (no category/label/tag/classification),
     # not exactly two outputs → no recipe matches → chain solver entry seam fires.
-    body = _respond(
+    #
+    # Committing the sink no longer AUTO-BUILDS the chain: it advances to
+    # step_3_transforms with ``next_turn: null``. The transform chain is built by
+    # the per-stage transforms prompt sent via /guided/chat. Callers wrap this
+    # helper in the ``chain_solver._litellm_acompletion`` mock, so the chat below
+    # fires that mock and the propose_chain turn rides back on the chat-response
+    # body. Any transforms-intent string works — the mock ignores it.
+    _respond(
         client,
         session_id,
         chosen=["text"],
         custom_inputs=[],
     )
+    chat_resp = client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={"message": "fetch each page and summarise it", "step_index": "step_3_transforms"},
+    )
+    assert chat_resp.status_code == 200, chat_resp.json()
+    body = chat_resp.json()
     return body, blob_id, output_path
 
 
@@ -162,11 +196,12 @@ def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple
 
 
 class TestStep3ChainAccept:
-    def test_csv_to_json_step_3_accept_completes_session(self, composer_test_client: TestClient) -> None:
-        """End-to-end: Step 1 + Step 2 + Step 3 ACCEPT → terminal=COMPLETED with YAML."""
-        session_id = _create_session(composer_test_client)
+    def test_csv_to_json_step_3_accept_returns_confirm_wiring_then_completes_session(self, composer_test_client: TestClient) -> None:
+        """End-to-end: Step 3 ACCEPT → confirm_wiring → terminal=COMPLETED."""
+        session_id = _create_session(composer_test_client, profile="tutorial")
 
-        # Drive Steps 1 + 2 + the auto-advance to Step 3 (with chain-solver stubbed).
+        # Drive Steps 1 + 2 + the step_3 transforms-prompt chat that builds the
+        # proposal (with chain-solver stubbed across the whole helper).
         with patch(
             "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
             new_callable=AsyncMock,
@@ -186,8 +221,14 @@ class TestStep3ChainAccept:
             assert payload["steps"][0]["plugin"] == "passthrough"
 
             # Accept the chain.  handle_step_3_chain_accept commits via
-            # _execute_set_pipeline and stamps terminal=COMPLETED.
+            # _execute_set_pipeline and redirects to the wire stage.
             accept_body = _respond(composer_test_client, session_id, chosen=["accept"])
+
+        assert accept_body["terminal"] is None
+        assert accept_body["guided_session"]["step"] == "step_4_wire"
+        assert accept_body["next_turn"]["type"] == "confirm_wiring"
+
+        accept_body = _confirm_wiring(composer_test_client, session_id)
 
         terminal = accept_body["terminal"]
         assert terminal is not None
@@ -202,8 +243,15 @@ class TestStep3ChainAccept:
 
 
 class TestStep3RejectNotImplemented:
-    def test_csv_to_json_step_3_reject_returns_501(self, composer_test_client: TestClient) -> None:
-        """Rejecting the chain proposal returns 501 with the freeform escape hatch."""
+    def test_csv_to_json_step_3_reject_returns_400(self, composer_test_client: TestClient) -> None:
+        """An unsupported ``chosen=['reject']`` falls through to the standard 400.
+
+        The dead pre-mutation 501 ('not yet implemented') branch was removed:
+        ``chosen=['reject']`` is not a valid propose_chain response, so it lands
+        on the generic invalid-``chosen`` 400, whose message no longer advertises
+        ``reject`` as an accepted value. Rejecting the chain is done via
+        ``control_signal='reject'`` (re-roll) or exit-to-freeform, not this path.
+        """
         session_id = _create_session(composer_test_client)
 
         with patch(
@@ -218,7 +266,7 @@ class TestStep3RejectNotImplemented:
                 json={"chosen": ["reject"]},
             )
 
-        assert resp.status_code == 501
+        assert resp.status_code == 400
         detail = resp.json()["detail"]
-        assert "not yet implemented" in detail
-        assert "exit-to-freeform" in detail
+        assert "chosen=['accept']" in detail
+        assert "or chosen=['reject']" not in detail

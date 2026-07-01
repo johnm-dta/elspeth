@@ -86,17 +86,16 @@ if [[ $sessions_touched -eq 1 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Allowlist: a per-cohort YAML file may name commits that pre-date the
-# hook's introduction or that legitimately bypass the rule.  The mechanism
-# mirrors enforce_tier_model's allowlist shape so future legitimate
-# exceptions have a controlled escape valve.  No entries are expected at
-# 8a landing.
+# Allowlist: The SHA allowlist is CI-only.  This hook runs before the
+# final commit SHA exists, so it cannot use
+# config/cicd/enforce_telemetry_backfill_trailer/*.yaml entries.  The
+# local rule therefore always enforces detected cohort hits against the
+# commit message and staged index.  The CI range checker consumes SHA
+# allowlist entries after commits exist.
 # ---------------------------------------------------------------------------
-# Implementation note: at landing the allowlist directory is empty (a
-# README documents the schema).  When the first legitimate exception
-# arises, ratchet via a tracked YAML entry rather than removing the hook.
-# The README documents the schema so future contributors know how to add
-# an entry.
+# Implementation note: if a legitimate local exception occurs, add the
+# trailer and explain the exception in the commit body, or document the
+# final commit SHA in the CI-only allowlist after the commit exists.
 
 # ---------------------------------------------------------------------------
 # Trailer requirement check.
@@ -124,6 +123,10 @@ COMMIT REJECTED — telemetry-backfill cohort attribution missing.
   Place the trailer on its own line in the commit message body (after the
   subject + blank line + body), per the git-interpret-trailers convention.
   Multiple trailers are allowed if the commit touches multiple cohorts.
+
+  SHA allowlist exemptions are CI-only because this hook runs before the
+  final commit SHA exists. The CI range checker reads entries under
+  config/cicd/enforce_telemetry_backfill_trailer/ after commit creation.
 
 Why this matters
   The cohort emit code "belongs" semantically to a different delivery

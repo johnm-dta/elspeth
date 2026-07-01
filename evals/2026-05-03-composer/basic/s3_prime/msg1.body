@@ -1,1 +1,0 @@
-{"content":"I just uploaded tickets.csv (columns: ticket_id, subject, body, customer_tier, amount). Build a pipeline that aggregates per customer_tier and emits a single JSON file with one record per tier showing: customer_tier, count of rows, sum of amount."}

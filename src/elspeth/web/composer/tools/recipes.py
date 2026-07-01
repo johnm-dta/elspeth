@@ -46,7 +46,7 @@ _LIST_RECIPES_DECLARATION = ToolDeclaration(
         "the highest-frequency 'classify CSV with LLM' and 'split rows by threshold' "
         "patterns; for shapes outside the recipe set, hand-author with set_pipeline."
     ),
-    json_schema={"type": "object", "properties": {}, "required": []},
+    json_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
     cacheable=True,
 )
 

@@ -50,6 +50,31 @@
   color: var(--color-info);
 }
 
+/* Warning / success tones. The components/ui AlertBanner primitive emits these
+   modifier classes (tone="warning"|"success"); without them both tones fell
+   back to the base error styling. Mirrors website/tokens/primitives.css. */
+.alert-banner--warning {
+  background-color: var(--color-warning-bg);
+  color: var(--color-warning);
+  border-bottom-color: var(--color-warning-border);
+}
+
+.alert-banner--warning .alert-banner-action {
+  border-color: var(--color-warning-border);
+  color: var(--color-warning);
+}
+
+.alert-banner--success {
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
+  border-bottom-color: var(--color-success-border);
+}
+
+.alert-banner--success .alert-banner-action {
+  border-color: var(--color-success-border);
+  color: var(--color-success);
+}
+
 .app-main {
   flex: 1;
   min-height: 0;
@@ -74,18 +99,12 @@
   gap: 12px;
 }
 
-.app-header-brand {
-  /* Use the mono face with wider tracking for the wordmark. The body of the
-     app stays Inter (DTA Foundation typeface) — this is a 1-element exception
-     that gives the brand mark a distinct register without breaking AGDS
-     register elsewhere. JetBrains Mono reads as "audit/forensic" which
-     matches the product positioning. */
-  font-family: var(--font-mono);
-  font-weight: 700;
-  font-size: var(--font-size-sm);
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
+/* The header brand mark is rendered by the canonical <WordMark> primitive
+   (components/ui/WordMark.tsx), which owns the mono/uppercase/tracking
+   treatment — the rationale (JetBrains Mono = "audit/forensic" register, a
+   1-element exception to the Inter body) lives there. The former
+   .app-header-brand class duplicated those declarations; it was removed so the
+   wordmark has a single source of truth. */
 
 .app-header-separator {
   width: 1px;

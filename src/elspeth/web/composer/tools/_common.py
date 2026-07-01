@@ -50,6 +50,7 @@ from elspeth.plugins.infrastructure.validation import (
     get_transform_config_model,
 )
 from elspeth.web.catalog.protocol import CatalogService, PluginKind
+from elspeth.web.catalog.schemas import PluginSchemaInfo
 from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
@@ -78,6 +79,7 @@ from elspeth.web.paths import (
     allowed_source_directories,
     resolve_data_path,
 )
+from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.secrets.ref_policy import (
     allowed_secret_ref_fields,
     allowed_secret_ref_fields_text,
@@ -86,7 +88,18 @@ from elspeth.web.validation import (
     INTERPRETATION_PLACEHOLDER_RE,
 )
 
+_FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
+_FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
 _DATA_ERROR_KEY: Final[str] = "error"
+_RUNTIME_OWNED_LLM_OPTION_KEYS: Final[frozenset[str]] = frozenset({"resolved_prompt_template_hash"})
+_RESOLVER_OWNED_INTERPRETATION_REQUIREMENT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "event_id",
+        "accepted_value",
+        "accepted_artifact_hash",
+        "resolved_prompt_template_hash",
+    }
+)
 
 
 def _pending_interpretation_requirement(
@@ -247,6 +260,75 @@ def _options_with_default_model_choice_review(
     )
 
 
+# Typographic punctuation an LLM routinely emits, mapped to its ASCII equivalent.
+# web_scrape's ``http.scraping_reason`` / ``http.abuse_contact`` are sent verbatim
+# as the X-Scraping-Reason / X-Abuse-Contact request headers, which must be
+# ASCII-encodable (WebScrapeHTTPConfig). Folding the common typographic cases here
+# lets composer-built pipelines (the first-run tutorial) round-trip; characters
+# with no ASCII mapping are left untouched so the WebScrapeHTTPConfig validator
+# still rejects them as a configuration error on hand-authored / YAML configs.
+_TYPOGRAPHIC_TO_ASCII = {
+    "\u2010": "-",  # hyphen
+    "\u2011": "-",  # non-breaking hyphen
+    "\u2012": "-",  # figure dash
+    "\u2013": "-",  # en dash
+    "\u2014": "-",  # em dash
+    "\u2015": "-",  # horizontal bar
+    "\u2018": "'",  # left single quotation mark
+    "\u2019": "'",  # right single quotation mark / apostrophe
+    "\u201a": "'",  # single low-9 quotation mark
+    "\u201b": "'",  # single high-reversed-9 quotation mark
+    "\u201c": '"',  # left double quotation mark
+    "\u201d": '"',  # right double quotation mark
+    "\u201e": '"',  # double low-9 quotation mark
+    "\u201f": '"',  # double high-reversed-9 quotation mark
+    "\u2032": "'",  # prime
+    "\u2033": '"',  # double prime
+    "\u2026": "...",  # horizontal ellipsis
+    "\u00a0": " ",  # no-break space
+    "\u2009": " ",  # thin space
+    "\u202f": " ",  # narrow no-break space
+}
+_TYPOGRAPHIC_TRANSLATION = str.maketrans(_TYPOGRAPHIC_TO_ASCII)
+
+_WIRE_VISIBLE_SCRAPE_HEADER_FIELDS = ("scraping_reason", "abuse_contact")
+
+
+def _options_with_ascii_safe_scrape_headers(
+    *,
+    plugin: str | None,
+    options: Mapping[str, Any],
+) -> Mapping[str, Any]:
+    """Fold common typographic punctuation to ASCII in web_scrape header fields.
+
+    No-op unless ``plugin == "web_scrape"`` and a header value actually changes,
+    so it is safe to compose for every node. Only the wire-visible header fields
+    are touched (a scrape node's prompt-like fields, and every other plugin's
+    body text, are left alone). Characters with no ASCII mapping are preserved —
+    the ``WebScrapeHTTPConfig`` validator rejects those as a configuration error.
+    """
+    if plugin != "web_scrape":
+        return options
+    http = options.get("http")
+    if not isinstance(http, Mapping):
+        return options
+    folded_http: dict[str, Any] | None = None
+    for field in _WIRE_VISIBLE_SCRAPE_HEADER_FIELDS:
+        value = http.get(field)
+        if not isinstance(value, str):
+            continue
+        folded = value.translate(_TYPOGRAPHIC_TRANSLATION)
+        if folded != value:
+            if folded_http is None:
+                folded_http = dict(http)
+            folded_http[field] = folded
+    if folded_http is None:
+        return options
+    new_options = dict(options)
+    new_options["http"] = folded_http
+    return new_options
+
+
 def _options_with_default_llm_reviews(
     *,
     node_id: str,
@@ -255,17 +337,18 @@ def _options_with_default_llm_reviews(
 ) -> Mapping[str, Any]:
     """Apply every default review auto-stager for an LLM node, in order.
 
-    Composes the per-field auto-stagers (prompt template, model choice)
-    so call sites do not have to remember the full set. Each individual
-    helper is a no-op when its trigger condition doesn't hold (non-llm
-    plugin, missing field), so the composition is safe for non-llm nodes
-    and for partial LLM-node options.
+    Composes the per-field auto-stagers (prompt template, model choice) plus the
+    web_scrape wire-visible-header ASCII fold, so call sites do not have to
+    remember the full set. Each individual helper is a no-op when its trigger
+    condition doesn't hold (non-llm plugin, missing field, non-scrape plugin), so
+    the composition is safe for non-llm nodes and for partial node options.
 
-    Adding a new default review here is the canonical extension point —
+    Adding a new default auto-stager here is the canonical extension point —
     callers stay on the composite and acquire the new gate automatically.
     """
     staged = _options_with_default_prompt_template_review(node_id=node_id, plugin=plugin, options=options)
     staged = _options_with_default_model_choice_review(node_id=node_id, plugin=plugin, options=staged)
+    staged = _options_with_ascii_safe_scrape_headers(plugin=plugin, options=staged)
     return staged
 
 
@@ -824,6 +907,8 @@ _INVALID_OPTIONS_PLUGIN_RE: Final[re.Pattern[str]] = re.compile(
 def build_plugin_schemas_for_failure(
     result: ToolResult,
     catalog: CatalogService,
+    *,
+    schema_unavailable_message: Callable[[PluginSchemaInfo], str | None] | None = None,
 ) -> Mapping[str, Mapping[str, Any]] | None:
     """Build the ``plugin_schemas`` augmentation dict for a failed mutation.
 
@@ -834,7 +919,9 @@ def build_plugin_schemas_for_failure(
     is resolved through ``catalog.get_schema`` and dumped to a plain dict
     via ``PluginSchemaInfo.model_dump()`` so the payload is byte-identical
     to what the LLM would otherwise receive from a discrete
-    ``get_plugin_schema`` tool call.
+    ``get_plugin_schema`` tool call. When ``schema_unavailable_message`` is
+    supplied, plugins hidden by the same availability gate as
+    ``get_plugin_schema`` are omitted rather than inlining a forbidden schema.
 
     Returns ``None`` when the result is successful or when no error
     message matches the option-shape pattern. The caller is responsible
@@ -859,6 +946,8 @@ def build_plugin_schemas_for_failure(
             if key in discovered:
                 continue
             schema = catalog.get_schema(kind, plugin_name)
+            if schema_unavailable_message is not None and schema_unavailable_message(schema) is not None:
+                continue
             discovered[key] = schema.model_dump()
     if not discovered:
         return None
@@ -1021,6 +1110,23 @@ def _serialize_edge(edge: EdgeSpec) -> dict[str, Any]:
     }
 
 
+def _serialize_full_pipeline_state(state: CompositionState, *, requested_component: Any) -> _FullPipelineStatePayload:
+    """Serialize the full state and expose accepted full-state spellings."""
+    return {
+        "sources": {name: _serialize_source(source) for name, source in state.sources.items()},
+        "nodes": [_serialize_node(n) for n in state.nodes],
+        "outputs": [_serialize_output(o) for o in state.outputs],
+        "edges": [_serialize_edge(e) for e in state.edges],
+        "metadata": {"name": state.metadata.name, "description": state.metadata.description},
+        "version": state.version,
+        "inspection": {
+            "requested_component": requested_component,
+            "resolved_component": "full",
+            "accepted_full_state_aliases": list(_FULL_STATE_COMPONENT_ALIASES),
+        },
+    }
+
+
 # Slice 4 additions — shared validation/repair helpers, file-sink collision-policy
 # cluster, and source-validation policy strings. Pulled to ``_common`` so the
 # per-plane files (sources/transforms/sinks/outputs/sessions) can avoid importing
@@ -1039,6 +1145,8 @@ def _credential_wiring_contract_failure(
     *,
     component_id: str,
     component_type: str,
+    plugin_type: PluginKind | None = None,
+    plugin_name: str | None = None,
     options: Any,
 ) -> ToolResult | None:
     """Reject literal credentials before a mutation writes them into state.
@@ -1058,7 +1166,17 @@ def _credential_wiring_contract_failure(
     The post-hoc ``wire_secret_ref`` sequence is still documented as
     the secondary path for nodes that already exist in state.
     """
-    fields = tuple(dict.fromkeys(collect_credential_field_violations(options)))
+    plugin_specific_fields = (
+        allowed_secret_ref_fields(plugin_type, plugin_name) if plugin_type is not None and plugin_name is not None else frozenset()
+    )
+    fields = tuple(
+        dict.fromkeys(
+            collect_credential_field_violations(
+                options,
+                additional_credential_fields=plugin_specific_fields,
+            )
+        )
+    )
     if not fields:
         return None
 
@@ -1138,19 +1256,25 @@ def _validate_aggregation_trigger(trigger: Any) -> str | None:
 def _validate_source_path(
     options: Mapping[str, Any],
     data_dir: str | None,
+    *,
+    require_data_dir: bool = False,
 ) -> str | None:
     """S2: Validate that path/file options are under allowed source directories.
 
     Returns an error message if validation fails, None if OK.
     Uses Path.resolve() + is_relative_to() to defeat ../ traversal.
     """
-    if data_dir is None:
-        return None
-
-    allowed = allowed_source_directories(data_dir)
-
     for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
         if key in options:
+            if data_dir is None:
+                if not require_data_dir:
+                    return None
+                return (
+                    "Path violation (S2): source path options require data_dir "
+                    "for allowlist enforcement. Bind uploaded files through "
+                    "set_source_from_blob or provide the dispatcher data_dir."
+                )
+            allowed = allowed_source_directories(data_dir)
             resolved = resolve_data_path(options[key], data_dir)
             if not any(resolved.is_relative_to(d) for d in allowed):
                 return (
@@ -1227,6 +1351,14 @@ def _validate_transform_provider_config_path(
                 f"or {data_dir}/blobs/."
             )
     return None
+
+
+def _validate_transform_provider_config_policy(options: Mapping[str, Any], *, plugin: str | None = None) -> str | None:
+    """Validate non-path web transform configuration policy constraints."""
+    provider_policy_error = web_rag_provider_config_policy_error(options)
+    if provider_policy_error is not None:
+        return provider_policy_error
+    return web_llm_retry_budget_policy_error(plugin, options)
 
 
 def _prevalidate_plugin_options(
@@ -1375,6 +1507,89 @@ def _mask_pending_interpretation_placeholders_for_authoring_validation(
         "pending interpretation",
         prompt_template,
     )
+
+
+def _resolver_owned_interpretation_requirement_error(
+    options: Mapping[str, Any],
+    *,
+    tool_name: str,
+) -> str | None:
+    """Reject LLM-supplied ``interpretation_requirements`` carrying resolver-owned review metadata.
+
+    Composer tool input may stage only PENDING review requirements; a resolved
+    ``status`` or any resolver-owned field (``event_id`` / ``accepted_value`` /
+    ``accepted_artifact_hash`` / ``resolved_prompt_template_hash``) may be written
+    ONLY by ``resolve_interpretation_event``, which records a real human
+    resolution in the interpretation-events audit DB.
+
+    This check is PLUGIN-AGNOSTIC and must guard every write path to a spec's
+    ``options`` — both LLM-node options (``vague_term`` / ``llm_prompt_template``
+    / ``llm_model_choice`` requirements) and SOURCE options
+    (``invented_source`` requirements). The read side that decides whether an
+    LLM-authored ("invented") source still needs human review
+    (``interpretation_state._pending_source_sites``) trusts a self-reported
+    ``status == "resolved"`` + ``accepted_artifact_hash`` match without
+    consulting the events DB, so this write-boundary guard is the only real
+    defence against a forged "resolved" requirement. Apply it to the
+    LLM-SUPPLIED delta (full options on a create, the ``patch`` on a merge) so a
+    legitimately-resolved requirement already in stored state is not re-flagged.
+    """
+    requirements_value = options[INTERPRETATION_REQUIREMENTS_KEY] if INTERPRETATION_REQUIREMENTS_KEY in options else None
+    if not isinstance(requirements_value, (list, tuple)):
+        return None
+
+    for index, requirement in enumerate(requirements_value):
+        if not isinstance(requirement, Mapping):
+            continue
+        status = requirement["status"] if "status" in requirement else None
+        if status not in (None, "pending"):
+            return (
+                f"{tool_name} options.{INTERPRETATION_REQUIREMENTS_KEY}[{index}] includes "
+                f"resolver-owned status {status!r}. Composer tool input may stage pending "
+                "review requirements only; resolved review metadata may only be written by "
+                "resolve_interpretation_event."
+            )
+        resolver_owned_fields = sorted(
+            field for field in _RESOLVER_OWNED_INTERPRETATION_REQUIREMENT_FIELDS if requirement.get(field) is not None
+        )
+        if resolver_owned_fields:
+            field_names = ", ".join(resolver_owned_fields)
+            return (
+                f"{tool_name} options.{INTERPRETATION_REQUIREMENTS_KEY}[{index}] includes "
+                f"resolver-owned field(s): {field_names}. Composer tool input may stage "
+                "pending review requirements only; resolved review metadata may only be "
+                "written by resolve_interpretation_event."
+            )
+    return None
+
+
+def _runtime_owned_llm_option_error(
+    plugin_name: str | None,
+    options: Mapping[str, Any],
+    *,
+    tool_name: str,
+) -> str | None:
+    """Reject composer-authored writes to runtime-owned LLM audit fields.
+
+    Two checks: (1) the LLM-only runtime-owned option keys
+    (``_RUNTIME_OWNED_LLM_OPTION_KEYS``, e.g. ``resolved_prompt_template_hash``
+    at the top level), gated on ``plugin_name == "llm"``; and (2) the
+    plugin-agnostic resolver-owned interpretation-requirement check, which also
+    guards source write paths via
+    :func:`_resolver_owned_interpretation_requirement_error`.
+    """
+    if plugin_name != "llm":
+        return None
+    supplied = sorted(key for key in _RUNTIME_OWNED_LLM_OPTION_KEYS if key in options)
+    if supplied:
+        field_names = ", ".join(supplied)
+        return (
+            f"{tool_name} options include runtime-owned LLM option(s): {field_names}. "
+            "These audit-link fields may only be written by resolve_interpretation_event, "
+            "not by composer tool input."
+        )
+
+    return _resolver_owned_interpretation_requirement_error(options, tool_name=tool_name)
 
 
 def _secret_ref_placement_error(
@@ -1563,6 +1778,9 @@ class ToolContext:
         data_dir: Base data directory enforced for S2 path allowlist checks
             on source/sink options. ``None`` when the caller is not a web
             request (legacy direct tests).
+        require_data_dir_for_paths: Fail closed when a source-local path
+            option appears without ``data_dir``. Enabled for audited web/LLM
+            dispatches.
         session_engine: SQLAlchemy engine for the session database. Required
             for blob tools to perform synchronous lookups; ``None`` for
             non-session callers.
@@ -1608,6 +1826,7 @@ class ToolContext:
 
     catalog: CatalogService
     data_dir: str | None = None
+    require_data_dir_for_paths: bool = False
     session_engine: Engine | None = None
     session_id: str | None = None
     secret_service: WebSecretResolver | None = None

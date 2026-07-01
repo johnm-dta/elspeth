@@ -33,6 +33,48 @@ from elspeth.web.composer.guided.state_machine import TerminalReason
 _VALID_EMITTERS: frozenset[str] = frozenset({"server", "llm"})
 _VALID_ADVANCE_REASONS: frozenset[str] = frozenset({"recipe_applied", "user_advanced", "auto_advanced"})
 
+# Allowlist of the per-error fields safe to persist from a validation_result
+# entry. Two producer shapes feed this channel:
+#   * pipeline ``ValidationEntry`` (``…composer.state.ValidationEntry`` →
+#     ``{component, message, severity}``) from the repair-validation drop path;
+#   * the chain-solver auto-drop path, which records ``{error_class}`` only.
+# ``component`` is a composition node id (structural, already surfaced in the
+# composer UI), ``severity`` is a closed enum, and ``error_class`` is a Python
+# exception class name (``type(exc).__name__``) — all safe. ``message`` is
+# deliberately EXCLUDED: it is free-form validator text that echoes filesystem
+# paths and raw plugin / pydantic exception strings (see ``tools/_common.py``
+# path / ``{exc}`` messages).
+_SAFE_VALIDATION_ERROR_KEYS: frozenset[str] = frozenset({"component", "severity", "error_class"})
+
+
+def _redacted_validation_result(validation_result: Mapping[str, Any]) -> dict[str, Any]:
+    """Reconstruct a ``validation_result`` payload by allowlist for the audit trail.
+
+    The guided synthetic-event channel is structurally exempt from the composer
+    redaction MANIFEST: its ``tool_name``s are not registered, and the chat-
+    message persistence projection (``sessions/routes/_helpers.py``) fail-OPENS
+    for any non-MANIFEST tool, returning ``arguments_canonical`` verbatim. So
+    this payload must be safe BY CONSTRUCTION here, at emission.
+
+    Reconstruct rather than blocklist: keep only ``is_valid`` plus each error's
+    allowlisted structured fields (``component``/``severity``), dropping the
+    free-form ``message``. Allowlisting bounds the egress to known-safe keys, so
+    a future ``ValidationEntry`` field cannot silently re-open the leak. A
+    non-mapping error entry is unexpected (our own ``ValidationSummary`` always
+    serialises mappings) and is recorded as an opaque marker rather than echoed,
+    so an anomalous shape can never carry raw text through.
+    """
+    redacted: dict[str, Any] = {}
+    if "is_valid" in validation_result:
+        redacted["is_valid"] = validation_result["is_valid"]
+    errors = validation_result["errors"] if "errors" in validation_result else None
+    if isinstance(errors, (list, tuple)):
+        redacted["errors"] = [
+            {key: entry[key] for key in _SAFE_VALIDATION_ERROR_KEYS if key in entry} if isinstance(entry, Mapping) else {"redacted": True}
+            for entry in errors
+        ]
+    return redacted
+
 
 def _build_invocation(
     *,
@@ -246,10 +288,44 @@ def emit_dropped_to_freeform(
         "drop_reason": drop_reason.value,
     }
     if validation_result is not None:
-        payload["validation_result"] = dict(validation_result)
+        payload["validation_result"] = _redacted_validation_result(validation_result)
     now = datetime.now(UTC)
     invocation = _build_invocation(
         tool_name="guided_dropped_to_freeform",
+        payload=payload,
+        composition_version=composition_version,
+        actor=actor,
+        now=now,
+    )
+    recorder.record(invocation)
+
+
+def emit_signoff_decision(
+    recorder: ComposerToolRecorder,
+    *,
+    event_name: str,
+    outcome: str,
+    reason: str | None,
+    composition_version: int,
+    actor: str,
+) -> None:
+    """Record a differentiated wire-stage sign-off decision audit event (D13).
+
+    ``event_name`` is the distinct ``signoff_audit_event_name(decision)`` string
+    (e.g. ``"composer.signoff.completed_without_signoff_advisor_unreachable"`` vs
+    ``"composer.signoff.clean"``) — the audit trail MUST distinguish an
+    advisor-unreachable completion from a real sign-off. Built as a
+    ``ComposerToolInvocation`` via the shared ``_build_invocation`` (Errata C4
+    pattern: no new audit primitive); recorded through ``recorder.record(...)``.
+    ``reason`` is omitted from the canonical payload when ``None`` so the
+    absence (a CLEAN sign-off) is unambiguous rather than a null sentinel.
+    """
+    payload: dict[str, Any] = {"outcome": outcome}
+    if reason is not None:
+        payload["reason"] = reason
+    now = datetime.now(UTC)
+    invocation = _build_invocation(
+        tool_name=event_name,
         payload=payload,
         composition_version=composition_version,
         actor=actor,

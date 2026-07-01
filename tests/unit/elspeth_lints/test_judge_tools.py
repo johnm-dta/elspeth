@@ -27,8 +27,9 @@ import asyncio
 import os
 import sys
 import types
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -44,6 +45,7 @@ from elspeth_lints.core.judge import (
     _call_openrouter,
     _extract_trailing_verdict_json,
     _tool_scope_decision,
+    _TransportResult,
     build_readonly_tool_scope,
     call_judge,
 )
@@ -114,14 +116,18 @@ def test_agent_tool_scope_rejects_nonpositive_turns() -> None:
 
 
 def test_guard_allows_in_root_read(scope: AgentToolScope) -> None:
-    target = str(scope.cwd / "contracts" / "x.py")
-    allowed, _ = _tool_scope_decision(scope, "Read", {"file_path": target})
+    target = scope.cwd / "contracts" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("VALUE = 'not-secret'\n", encoding="utf-8")
+    allowed, _ = _tool_scope_decision(scope, "Read", {"file_path": str(target)})
     assert allowed is True
 
 
 def test_guard_allows_allowlist_dir_read(scope: AgentToolScope) -> None:
     allow_root = next(r for r in scope.allowed_roots if r != scope.cwd)
-    allowed, _ = _tool_scope_decision(scope, "Read", {"file_path": str(allow_root / "web.yaml")})
+    target = allow_root / "web.yaml"
+    target.write_text("allow_hits: []\n", encoding="utf-8")
+    allowed, _ = _tool_scope_decision(scope, "Read", {"file_path": str(target)})
     assert allowed is True
 
 
@@ -150,6 +156,19 @@ def test_guard_fail_closed_on_missing_file_path(scope: AgentToolScope) -> None:
     assert "fail-closed" in reason
 
 
+def test_guard_denies_read_of_source_file_with_scrubbable_secret(scope: AgentToolScope) -> None:
+    target = scope.cwd / "contracts" / "secret.py"
+    target.parent.mkdir(parents=True)
+    planted = "sk-" + ("A" * 48)
+    target.write_text(f'API_KEY = "{planted}"\n', encoding="utf-8")
+
+    allowed, reason = _tool_scope_decision(scope, "Read", {"file_path": str(target)})
+
+    assert allowed is False
+    assert "secret scrubber" in reason
+    assert "source_excerpt.scrub_secrets" in reason
+
+
 def test_guard_denies_non_read_tools(scope: AgentToolScope) -> None:
     for tool, inp in [
         ("Bash", {"command": "cat /etc/passwd"}),
@@ -163,14 +182,25 @@ def test_guard_denies_non_read_tools(scope: AgentToolScope) -> None:
         assert "not permitted" in reason
 
 
-def test_guard_allows_pathless_grep_and_glob(scope: AgentToolScope) -> None:
+def test_guard_allows_pathless_safe_grep_and_glob(scope: AgentToolScope) -> None:
     # No 'path' -> defaults to cwd, which is an allowed root.
-    assert _tool_scope_decision(scope, "Grep", {"pattern": "x"})[0] is True
+    assert _tool_scope_decision(scope, "Grep", {"pattern": "x", "output_mode": "files_with_matches"})[0] is True
+    assert _tool_scope_decision(scope, "Grep", {"pattern": "x", "output_mode": "count"})[0] is True
     assert _tool_scope_decision(scope, "Glob", {"pattern": "**/*.py"})[0] is True
 
 
+def test_guard_denies_grep_content_and_default_output_modes(scope: AgentToolScope) -> None:
+    allowed_content, reason_content = _tool_scope_decision(scope, "Grep", {"pattern": "secret", "output_mode": "content"})
+    allowed_default, reason_default = _tool_scope_decision(scope, "Grep", {"pattern": "secret"})
+
+    assert allowed_content is False
+    assert allowed_default is False
+    assert "unsanitized source bytes" in reason_content
+    assert "unsanitized source bytes" in reason_default
+
+
 def test_guard_denies_out_of_root_grep_path(scope: AgentToolScope) -> None:
-    allowed, _ = _tool_scope_decision(scope, "Grep", {"pattern": "x", "path": "/etc"})
+    allowed, _ = _tool_scope_decision(scope, "Grep", {"pattern": "x", "path": "/etc", "output_mode": "files_with_matches"})
     assert allowed is False
 
 
@@ -198,14 +228,26 @@ def test_guard_allows_in_root_symlink(scope: AgentToolScope) -> None:
 # --------------------------------------------------------------------------
 
 
-def _run_hook(scope: AgentToolScope, payload: dict[str, object]) -> dict:
+def _run_hook(scope: AgentToolScope, payload: dict[str, object]) -> dict[str, Any]:
     hook = _build_pretooluse_scope_hook(scope)
     return asyncio.run(hook(payload, None, None))
 
 
 def test_hook_allows_in_root(scope: AgentToolScope) -> None:
-    out = _run_hook(scope, {"tool_name": "Read", "tool_input": {"file_path": str(scope.cwd / "a.py")}})
+    target = scope.cwd / "a.py"
+    target.write_text("VALUE = 'not-secret'\n", encoding="utf-8")
+    out = _run_hook(scope, {"tool_name": "Read", "tool_input": {"file_path": str(target)}})
     assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+
+
+def test_hook_denies_scrubbable_secret_read(scope: AgentToolScope) -> None:
+    target = scope.cwd / "secret.py"
+    target.write_text('API_KEY = "sk-' + ("A" * 48) + '"\n', encoding="utf-8")
+
+    out = _run_hook(scope, {"tool_name": "Read", "tool_input": {"file_path": str(target)}})
+
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "source_excerpt.scrub_secrets" in out["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_hook_denies_out_of_root(scope: AgentToolScope) -> None:
@@ -261,7 +303,7 @@ def _install_tool_fake_sdk(
     messages: list[tuple[str, bool]],
     num_turns: int = 2,
     served: str = "claude-opus-4-7",
-    capture: dict | None = None,
+    capture: dict[str, Any] | None = None,
 ) -> types.ModuleType:
     """Fake SDK whose managed ``ClaudeSDKClient`` emits a sequence of messages.
 
@@ -283,12 +325,12 @@ def _install_tool_fake_sdk(
             self.text = text
 
     class ToolUseBlock:
-        def __init__(self, name: str = "Read", tool_input: dict | None = None) -> None:
+        def __init__(self, name: str = "Read", tool_input: dict[str, object] | None = None) -> None:
             self.name = name
             self.input = tool_input or {}
 
     class HookMatcher:
-        def __init__(self, *, matcher: object = None, hooks: list | None = None, timeout: object = None) -> None:
+        def __init__(self, *, matcher: object = None, hooks: list[object] | None = None, timeout: object = None) -> None:
             self.matcher = matcher
             self.hooks = hooks or []
 
@@ -341,6 +383,12 @@ def _install_tool_fake_sdk(
         async def query(self, prompt: object, session_id: str = "default") -> None:
             if capture is not None:
                 capture["prompt"] = prompt
+                try:
+                    _aiter = cast(AsyncIterable[object], prompt).__aiter__
+                except AttributeError:
+                    pass
+                else:
+                    capture["prompt_messages"] = [item async for item in cast(AsyncIterable[object], prompt)]
 
         async def receive_response(self) -> AsyncIterator[object]:
             async for m in _emit_messages():
@@ -373,7 +421,7 @@ def test_tool_mode_extracts_verdict_from_final_narrated_message(monkeypatch: pyt
 
 
 def test_tool_mode_builds_streaming_hook_guarded_options(monkeypatch: pytest.MonkeyPatch, scope: AgentToolScope) -> None:
-    capture: dict = {}
+    capture: dict[str, Any] = {}
     _install_tool_fake_sdk(
         monkeypatch,
         messages=[("done\n" + _VERDICT_JSON, False)],
@@ -394,7 +442,18 @@ def test_tool_mode_builds_streaming_hook_guarded_options(monkeypatch: pytest.Mon
     # disconnects in-loop — the fix for the -9 SIGKILL on a lingering subprocess.
     assert capture["used_client"] is True
     assert capture["disconnected"] is True
-    assert isinstance(capture["prompt"], str)  # client.query(prompt_text)
+    # Tool mode must use the SDK's streaming-input prompt shape; with a plain
+    # string prompt the SDK does not invoke PreToolUse hooks for Read/Grep/Glob.
+    assert not isinstance(capture["prompt"], str)
+    _aiter = cast(AsyncIterable[object], capture["prompt"]).__aiter__
+    prompt_messages = capture["prompt_messages"]
+    assert len(prompt_messages) == 1
+    prompt_message = cast(dict[str, object], prompt_messages[0])
+    assert prompt_message["type"] == "user"
+    wrapped = cast(dict[str, object], prompt_message["message"])
+    assert wrapped["role"] == "user"
+    assert isinstance(wrapped["content"], str)
+    assert "UNTRUSTED DATA BOUNDARY" in wrapped["content"]
     # tool-mode addendum rides OUTSIDE the hashed policy block.
     assert "TOOL-AUGMENTED INVESTIGATION MODE" in opts["system_prompt"]["append"]
 
@@ -444,11 +503,10 @@ def test_call_judge_openrouter_with_tool_scope_raises(scope: AgentToolScope) -> 
 def test_call_judge_threads_scope_only_when_set() -> None:
     # Backward-compat: with no tool_scope, a 3-arg fake transport_impl (the
     # historical signature) is invoked unchanged.
-    seen: dict = {}
+    seen: dict[str, Any] = {}
 
-    def fake_impl(request: JudgeRequest, model_id: str, max_tokens: int) -> object:
+    def fake_impl(request: JudgeRequest, model_id: str, max_tokens: int) -> _TransportResult:
         seen["args"] = (model_id, max_tokens)
-        from elspeth_lints.core.judge import _TransportResult
 
         return _TransportResult(raw_text=_VERDICT_JSON, served_model_id="m", prompt_tokens_total=10, prompt_tokens_cached=None)
 
@@ -458,7 +516,7 @@ def test_call_judge_threads_scope_only_when_set() -> None:
 
 
 # --------------------------------------------------------------------------
-# CLI rejection: --judge-tools readonly requires --judge-transport agent
+# CLI rejection: readonly judge tools are not valid on signing paths
 # --------------------------------------------------------------------------
 
 
@@ -477,9 +535,9 @@ def test_cli_readonly_with_openrouter_rejected(tmp_path: Path, capsys: pytest.Ca
     assert "requires --judge-transport agent" in capsys.readouterr().err
 
 
-def test_cli_justify_readonly_with_openrouter_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    # Parity: justify (the signing path) accepts --judge-tools just like reaudit,
-    # and rejects readonly+openrouter the same way, before any finding scan / HMAC.
+def test_cli_justify_readonly_rejected_for_signing_path(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # justify writes signed YAML, so readonly tool mode is unsafe even with the
+    # agent transport: tool-read bytes bypass source_excerpt.scrub_secrets.
     import argparse
 
     from elspeth_lints.core.cli import _run_justify
@@ -488,8 +546,42 @@ def test_cli_justify_readonly_with_openrouter_rejected(tmp_path: Path, capsys: p
         root=tmp_path,
         repo_root=None,
         allowlist_dir=tmp_path,
-        judge_transport="openrouter",
+        judge_transport="agent",
         judge_tools="readonly",
+        file_path="missing.py",
     )
     assert _run_justify(args) == 2
-    assert "requires --judge-transport agent" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "not supported for justify" in captured.err
+    assert "scrubbed excerpt" in captured.err
+
+
+def test_cli_sign_judge_signatures_readonly_rejected_for_signing_path(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import argparse
+
+    import elspeth_lints.core.cli as cli
+    import elspeth_lints.core.judge_signature_diagnosis as diagnosis
+    from elspeth_lints.core.cli import _run_sign_judge_signatures
+
+    def fail_if_called(*args: object, **kwargs: object) -> None:
+        raise AssertionError("readonly signing rejection must run before signing side effects")
+
+    monkeypatch.setattr(cli, "_load_judge_signing_env_file", fail_if_called)
+    monkeypatch.setattr(cli, "_pop_allow_hits_entry", fail_if_called)
+    monkeypatch.setattr(cli, "_run_justify", fail_if_called)
+    monkeypatch.setattr(diagnosis, "diagnose_judge_signatures", fail_if_called)
+    args = argparse.Namespace(
+        judge_tools="readonly",
+        env_file=None,
+        dry_run=False,
+        root=Path("/unused/root"),
+        allowlist_dir=Path("/unused/allowlist"),
+        manifest=[],
+    )
+    assert _run_sign_judge_signatures(args) == 2
+    captured = capsys.readouterr()
+    assert "not supported for sign-judge-signatures" in captured.err
+    assert "scrubbed excerpt" in captured.err

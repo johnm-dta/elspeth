@@ -1,6 +1,7 @@
 """Tests for RateLimitRegistry and NoOpLimiter."""
 
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import patch
 
 from elspeth.contracts.config.runtime import RuntimeRateLimitConfig
@@ -359,7 +360,7 @@ class TestRateLimitRegistryNameCollision:
     """elspeth-2af4e98ee2: distinct service names must not collide onto one
     persistent SQLite bucket via a non-injective sanitizer."""
 
-    def _config(self, tmp_path, rpm=1):  # type: ignore[no-untyped-def]
+    def _config(self, tmp_path: Path, rpm: int = 1) -> RuntimeRateLimitConfig:
         settings = RateLimitSettings(
             enabled=True,
             default_requests_per_minute=rpm,
@@ -367,13 +368,17 @@ class TestRateLimitRegistryNameCollision:
         )
         return RuntimeRateLimitConfig.from_settings(settings)
 
-    def test_colliding_names_get_independent_persistent_buckets(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def _rate_limiter(self, registry: RateLimitRegistry, service_name: str) -> RateLimiter:
+        limiter = registry.get_limiter(service_name)
+        assert isinstance(limiter, RateLimiter)
+        return limiter
+
+    def test_colliding_names_get_independent_persistent_buckets(self, tmp_path: Path) -> None:
         registry = RateLimitRegistry(self._config(tmp_path, rpm=1))
         try:
-            a = registry.get_limiter("api.example")
-            b = registry.get_limiter("api_example")
+            a = self._rate_limiter(registry, "api.example")
+            b = self._rate_limiter(registry, "api_example")
             assert a is not b
-            assert isinstance(a, RateLimiter) and isinstance(b, RateLimiter)
             # Distinct persistent bucket names (the SQLite table is f"ratelimit_{name}").
             assert a.name != b.name
             # Independent RPM=1 buckets: exhausting one must not exhaust the other.
@@ -382,12 +387,24 @@ class TestRateLimitRegistryNameCollision:
         finally:
             registry.close()
 
-    def test_already_valid_name_bucket_is_unchanged(self, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    def test_already_valid_name_bucket_is_unchanged(self, tmp_path: Path) -> None:
         """Stability guard: an already-valid service name keeps its byte-identical
         bucket name (edge-only migration — common case is untouched)."""
         registry = RateLimitRegistry(self._config(tmp_path, rpm=10))
         try:
-            assert registry.get_limiter("openai").name == "openai"
-            assert registry.get_limiter("api_example").name == "api_example"
+            assert self._rate_limiter(registry, "openai").name == "openai"
+            assert self._rate_limiter(registry, "api_example").name == "api_example"
+        finally:
+            registry.close()
+
+    def test_valid_service_name_matching_rewritten_bucket_gets_independent_bucket(self, tmp_path: Path) -> None:
+        registry = RateLimitRegistry(self._config(tmp_path, rpm=1))
+        try:
+            rewritten = self._rate_limiter(registry, "api.example")
+            matching_raw = self._rate_limiter(registry, rewritten.name)
+
+            assert rewritten.name != matching_raw.name
+            assert rewritten.try_acquire() is True
+            assert matching_raw.try_acquire() is True
         finally:
             registry.close()

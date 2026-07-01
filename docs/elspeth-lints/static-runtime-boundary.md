@@ -75,9 +75,9 @@ of disciplines that are deliberately out of scope for the analyzer entirely.
   copy or wraps the caller's reference.* The forbidden anti-patterns in
   CLAUDE.md's "Frozen Dataclass Immutability" section are
   value-dependent. (No runtime check; pre-PR review and the
-  `scripts/cicd/enforce_freeze_guards.py` parity harness catch these
-  during development. This is a deliberate gap: catching them statically
-  requires alias analysis.)
+  `immutability.freeze_guards` / `immutability.frozen_annotations`
+  `elspeth-lints` rules catch these during development. This is a
+  deliberate gap: catching them statically requires alias analysis.)
 
 ## Audit Evidence
 
@@ -127,9 +127,8 @@ of disciplines that are deliberately out of scope for the analyzer entirely.
   declaration is text; the analyzer cannot recompute the hash without
   reading the source bytes — and even if it did, this would be a
   manifest-style check (and the manifest family covers exactly that
-  recompute-and-compare pattern). (The
-  `scripts/cicd/enforce_plugin_hashes.py` parity harness recomputes; the
-  `manifest.plugin_hashes` rule covers the static side.)
+  recompute-and-compare pattern). (The `plugin_contract.plugin_hashes`
+  `elspeth-lints` rule recomputes source hashes and covers the static side.)
 
 ## Composer
 

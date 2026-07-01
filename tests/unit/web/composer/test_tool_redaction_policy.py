@@ -48,6 +48,17 @@ def test_orphan_summarizer_raises() -> None:
         )
 
 
+def test_known_argument_keys_must_cover_sensitive_arguments_when_declared() -> None:
+    """An opt-in argument allowlist must include every sensitive argument key."""
+    with pytest.raises(ValueError, match="known_argument_keys"):
+        ToolRedactionPolicy(
+            sensitive_argument_keys=("path",),
+            known_argument_keys=("name",),
+            known_response_keys=("status",),
+            argument_summarizers={"path": _redact},
+        )
+
+
 # ---------------------------------------------------------------------------
 # Test 2: handles_no_sensitive_data=True without reason struct raises
 # ---------------------------------------------------------------------------
@@ -103,11 +114,13 @@ def test_valid_policy_with_sensitive_data_is_constructable() -> None:
     policy = ToolRedactionPolicy(
         sensitive_argument_keys=("path",),
         argument_summarizers={"path": _redact},
+        known_argument_keys=("path",),
         known_response_keys=("status",),
         handles_no_sensitive_data=False,
         handles_no_sensitive_data_reason_struct=None,
     )
     assert policy.sensitive_argument_keys == ("path",)
+    assert policy.known_argument_keys == ("path",)
     assert policy.known_response_keys == ("status",)
     assert policy.handles_no_sensitive_data is False
     assert policy.handles_no_sensitive_data_reason_struct is None
@@ -123,6 +136,7 @@ def test_container_fields_are_deeply_frozen() -> None:
     policy = ToolRedactionPolicy(
         sensitive_argument_keys=("path",),
         sensitive_response_keys=("body",),
+        known_argument_keys=("path",),
         known_response_keys=("status",),
         argument_summarizers={"path": _redact},
         handles_no_sensitive_data=False,
@@ -131,6 +145,7 @@ def test_container_fields_are_deeply_frozen() -> None:
     # Tuples are already immutable; verify they remain tuples (not converted).
     assert isinstance(policy.sensitive_argument_keys, tuple)
     assert isinstance(policy.sensitive_response_keys, tuple)
+    assert isinstance(policy.known_argument_keys, tuple)
     assert isinstance(policy.known_response_keys, tuple)
 
     # argument_summarizers must be wrapped as MappingProxyType (deeply frozen).

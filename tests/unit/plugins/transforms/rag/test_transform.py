@@ -313,6 +313,53 @@ class TestProcessFlow:
         assert result.status == "error"
         assert result.reason["reason"] == "retrieval_failed"
 
+    def test_managed_identity_token_failure_returns_retrieval_error_result(self):
+        from azure.core.exceptions import ClientAuthenticationError
+
+        from elspeth.plugins.infrastructure.clients.retrieval.azure_search import (
+            AzureSearchProvider,
+            AzureSearchProviderConfig,
+        )
+
+        transform = _make_transform(
+            provider_config={
+                "endpoint": "https://test.search.windows.net",
+                "index": "test-index",
+                "use_managed_identity": True,
+            }
+        )
+        provider = AzureSearchProvider(
+            config=AzureSearchProviderConfig(
+                endpoint="https://test.search.windows.net",
+                index="test-index",
+                use_managed_identity=True,
+            ),
+            execution=MagicMock(),
+            run_id="run-1",
+            telemetry_emit=MagicMock(),
+        )
+        transform._provider = provider
+        transform._on_start_called = True
+        auth_error = ClientAuthenticationError("DefaultAzureCredential failed")
+        mock_credential = MagicMock()
+        mock_credential.get_token.side_effect = auth_error
+        row = _make_row({"question": "test"})
+        ctx = _mock_ctx()
+
+        try:
+            with (
+                patch("azure.identity.DefaultAzureCredential", return_value=mock_credential),
+                patch("elspeth.plugins.infrastructure.clients.retrieval.azure_search.validate_url_for_ssrf", return_value=MagicMock()),
+            ):
+                result = transform.process(row, ctx)
+        finally:
+            provider.close()
+
+        assert result.status == "error"
+        assert result.reason["reason"] == "retrieval_failed"
+        assert "Azure managed identity token acquisition failed" in result.reason["error"]
+        assert result.reason["provider"] == "azure_search"
+
     def test_missing_query_field_diverts_with_audit_record(self):
         """A row lacking query_field must divert with audit record, not crash.
 
@@ -586,6 +633,37 @@ class TestRAGTransformReadinessGuard:
             reachable=False,
             count=None,
             message="missing collection",
+        )
+
+    def test_readiness_retrieval_error_is_recorded_before_raise(self) -> None:
+        """Provider readiness RetrievalError still emits a failed readiness audit row."""
+        mock_provider = MagicMock()
+        mock_provider.check_readiness.side_effect = RetrievalError(
+            "Azure managed identity token acquisition failed",
+            retryable=False,
+        )
+        mock_config_cls = MagicMock(return_value=MagicMock(index="test-index"))
+        mock_factory = MagicMock(return_value=mock_provider)
+
+        transform = _make_transform()
+        lifecycle_ctx = _mock_lifecycle_ctx()
+
+        with (
+            patch.dict(
+                "elspeth.plugins.transforms.rag.transform.PROVIDERS",
+                {"azure_search": (mock_config_cls, mock_factory)},
+            ),
+            pytest.raises(RetrievalNotReadyError, match="Azure managed identity token acquisition failed"),
+        ):
+            transform.on_start(lifecycle_ctx)
+
+        lifecycle_ctx.landscape.record_readiness_check.assert_called_once_with(
+            run_id="run-1",
+            name="rag_retrieval",
+            collection="test-index",
+            reachable=False,
+            count=None,
+            message="Azure managed identity token acquisition failed",
         )
 
     def test_count_one_passes(self) -> None:

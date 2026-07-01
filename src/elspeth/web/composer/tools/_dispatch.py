@@ -18,9 +18,9 @@ only what this module defines (``execute_tool``, ``get_tool_definitions``,
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from jsonschema import Draft202012Validator
 from sqlalchemy import Engine
@@ -28,10 +28,12 @@ from sqlalchemy import Engine
 from elspeth.contracts.freeze import deep_freeze, deep_thaw
 from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
+from elspeth.web.composer.protocol import ToolArgumentError
 from elspeth.web.composer.state import (
     CompositionState,
     ValidationSummary,
 )
+from elspeth.web.composer.tools._availability import schema_secret_unavailable_message
 from elspeth.web.composer.tools._common import (
     RuntimePreflight,
     ToolContext,
@@ -44,6 +46,7 @@ from elspeth.web.composer.tools._registry import (
     _BLOB_DISCOVERY_TOOLS,
     _BLOB_MUTATION_TOOL_NAMES,
     _BLOB_MUTATION_TOOLS,
+    _DISCOVERY_TOOL_NAMES,
     _DISCOVERY_TOOLS,
     _MUTATION_TOOL_NAMES,
     _MUTATION_TOOLS,
@@ -63,6 +66,7 @@ from elspeth.web.composer.tools.sessions import (
 __all__ = [
     "_inject_prior_validation",
     "execute_tool",
+    "get_discovery_tool_definitions",
     "get_tool_definitions",
 ]
 
@@ -126,8 +130,9 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freez
             "request, not per session lifetime) and exhausting it returns a "
             "structured error rather than crashing — inspect budget_remaining "
             "in each response. Do NOT call this tool in a loop, do NOT use it "
-            "as a substitute for reading validator output. Disabled by default; "
-            "only available when the operator has explicitly enabled it."
+            "as a substitute for reading validator output. Availability is "
+            "operator-configured; the mandatory END sign-off checkpoint runs "
+            "independently of this on-demand escape."
         ),
         "parameters": {
             "type": "object",
@@ -146,21 +151,26 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freez
                 },
                 "problem_summary": {
                     "type": "string",
+                    "maxLength": 2000,
                     "description": (
                         "Your own statement of what you are trying to do and "
-                        "why you are stuck. One or two sentences. Be specific: "
+                        "why you are stuck, with secrets and PII removed. One or two sentences. Be specific: "
                         "'I cannot get llm transform options to validate against "
                         "the Azure provider schema' is useful; 'help' is not."
                     ),
                 },
                 "recent_errors": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": ("The last validator error messages verbatim, most recent first. Include up to 5; do not paraphrase."),
+                    "maxItems": 5,
+                    "items": {"type": "string", "maxLength": 2000},
+                    "description": (
+                        "Redacted summaries of the last validator errors, most recent first. Include up to 5; remove secrets and PII."
+                    ),
                 },
                 "attempted_actions": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "maxItems": 8,
+                    "items": {"type": "string", "maxLength": 2000},
                     "description": (
                         "What you have already tried, one item per attempt. "
                         "Include the tool name and a one-line summary of the "
@@ -170,8 +180,9 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freez
                 },
                 "schema_excerpt": {
                     "type": "string",
+                    "maxLength": 8000,
                     "description": (
-                        "Optional — the relevant plugin schema snippet you are "
+                        "Optional — the relevant, redacted plugin schema snippet you are "
                         "working against, as returned by `get_plugin_schema`. "
                         "Including this lets the advisor give field-level "
                         "guidance grounded in the exact contract."
@@ -179,6 +190,7 @@ _REQUEST_ADVISOR_HINT_DEFINITION: Final[Mapping[str, Any]] = _validate_and_freez
                 },
             },
             "required": ["trigger", "problem_summary", "recent_errors", "attempted_actions"],
+            "additionalProperties": False,
         },
     }
 )
@@ -303,6 +315,52 @@ if _trailing_seen != _TRAILING_TOOL_NAME:
 del _trailing_seen
 
 
+def get_discovery_tool_definitions(names: Iterable[str]) -> list[dict[str, Any]]:
+    """Return LiteLLM-wrapped tool defs for a READ-ONLY discovery subset.
+
+    The guided per-phase solver (``composer/guided/chat_solver.py``) wires a
+    bounded subset of the discovery tools into its tool palette so the
+    composer model can ``list_sinks`` / ``get_plugin_schema`` at runtime
+    before it resolves a stage. This emitter is the **advertised-surface**
+    half of that path's safety posture: every requested name must be a
+    declared ``ToolKind.DISCOVERY`` tool (``<= _DISCOVERY_TOOL_NAMES``), so a
+    mutation or secret tool can never be offered to the model by mistake.
+
+    The **execution** half (refusing to *dispatch* a non-discovery name even
+    if the model emits one) is enforced separately at the solver's
+    ``execute_tool`` call site — ``execute_tool``'s handler union includes
+    every mutation registry, so advertising the read-only subset is necessary
+    but not sufficient. Both halves are required.
+
+    Returns the same ``{"type": "function", "function": {...}}`` shape
+    ``ComposerServiceImpl._get_litellm_tools`` produces, so the solver can
+    concatenate these with its ``resolve_X`` tool and pass them straight to
+    ``_litellm_acompletion``. Each def is freshly ``deep_thaw``ed from the
+    immutable registry — callers get a mutually-isolated mutable copy.
+
+    Raises:
+        ValueError: if any requested name is not a declared discovery tool.
+    """
+    requested = frozenset(names)
+    unknown = requested - _DISCOVERY_TOOL_NAMES
+    if unknown:
+        raise ValueError(f"get_discovery_tool_definitions: not declared DISCOVERY tools: {sorted(unknown)}")
+    result: list[dict[str, Any]] = []
+    for name in sorted(requested):
+        defn = deep_thaw(_TOOL_DEFS_BY_NAME[name])
+        result.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": defn["name"],
+                    "description": defn["description"],
+                    "parameters": defn["parameters"],
+                },
+            }
+        )
+    return result
+
+
 def _inject_prior_validation(
     result: ToolResult,
     prior: ValidationSummary,
@@ -324,10 +382,91 @@ def _inject_prior_validation(
 _ALL_MUTATION_TOOL_NAMES: Final[frozenset[str]] = _MUTATION_TOOL_NAMES | _BLOB_MUTATION_TOOL_NAMES | _SECRET_MUTATION_TOOL_NAMES
 
 
+def _closed_root_schema(tool_name: str) -> dict[str, Any]:
+    """Return the tool's argument schema with a fail-closed root object."""
+    schema = cast(dict[str, Any], deep_thaw(_TOOL_DEFS_BY_NAME[tool_name]["parameters"]))
+    if isinstance(schema, dict) and schema.get("type") == "object" and "additionalProperties" not in schema:
+        schema = {**schema, "additionalProperties": False}
+    return schema
+
+
+def _schema_error_path(error: Any) -> str:
+    parts = ["arguments"]
+    for segment in error.absolute_path:
+        if isinstance(segment, int):
+            parts[-1] = f"{parts[-1]}[]"
+        elif isinstance(segment, str) and segment.isidentifier():
+            parts.append(segment)
+        else:
+            parts.append("<item>")
+    return ".".join(parts)
+
+
+def _json_type_label(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Iterable):
+        return " or ".join(str(item) for item in value)
+    return str(value)
+
+
+def _schema_error_summary(error: Any) -> str:
+    path = _schema_error_path(error)
+    if error.validator == "required" and isinstance(error.instance, Mapping):
+        required = tuple(str(item) for item in error.validator_value)
+        missing = tuple(item for item in required if item not in error.instance)
+        if missing:
+            missing_paths = tuple(f"{path}.{item}" for item in missing)
+            plural = "properties" if len(missing) != 1 else "property"
+            return f"{', '.join(missing_paths)} is missing required {plural}"
+    if error.validator == "additionalProperties":
+        return f"{path} contains unsupported properties"
+    if error.validator == "type":
+        return f"{path} must be of type {_json_type_label(error.validator_value)}"
+    if error.validator == "enum":
+        return f"{path} must be one of the declared values"
+    return f"{path} violates schema rule '{error.validator}'"
+
+
+def _schema_argument_model_name(tool_name: str) -> str:
+    return "".join(part.capitalize() for part in tool_name.split("_")) + "ArgumentsModel"
+
+
+def _schema_tool_argument_error(tool_name: str, error: Any) -> ToolArgumentError:
+    return ToolArgumentError(
+        argument=f"{tool_name} arguments",
+        expected=f"object conforming to {_schema_argument_model_name(tool_name)} ({_schema_error_summary(error)})",
+        actual_type="invalid_schema",
+        code="SCHEMA_VALIDATION",
+    )
+
+
+def _validate_tool_arguments(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    state: CompositionState,
+    *,
+    raise_on_error: bool = False,
+) -> ToolResult | None:
+    schema = _closed_root_schema(tool_name)
+    validator = Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(arguments), key=lambda error: tuple(error.absolute_path))
+    if not errors:
+        return None
+    if raise_on_error:
+        raise _schema_tool_argument_error(tool_name, errors[0])
+    return _failure_result(state, f"Invalid arguments for tool '{tool_name}': {_schema_error_summary(errors[0])}.")
+
+
+def _requires_secret_context(tool_name: str) -> bool:
+    return tool_name in _SECRET_DISCOVERY_TOOLS or tool_name in _SECRET_MUTATION_TOOLS
+
+
 def _augment_with_plugin_schemas(
     result: ToolResult,
     tool_name: str,
     catalog: CatalogService,
+    context: ToolContext,
 ) -> ToolResult:
     """Attach inline ``plugin_schemas`` to a failed option-shape rejection.
 
@@ -351,7 +490,11 @@ def _augment_with_plugin_schemas(
         return result
     if result.success or result.plugin_schemas is not None:
         return result
-    schemas = build_plugin_schemas_for_failure(result, catalog)
+    schemas = build_plugin_schemas_for_failure(
+        result,
+        catalog,
+        schema_unavailable_message=lambda schema: schema_secret_unavailable_message(schema, context),
+    )
     if schemas is None:
         return result
     return replace(result, plugin_schemas=schemas)
@@ -378,6 +521,7 @@ def execute_tool(
     composer_provider: str | None = None,
     composer_skill_hash: str | None = None,
     tool_arguments_hash: str | None = None,
+    raise_schema_argument_errors: bool = False,
 ) -> ToolResult:
     """Execute a composition tool by name.
 
@@ -436,6 +580,10 @@ def execute_tool(
             the request.
         tool_arguments_hash: Canonical audited arguments hash for this tool
             call.
+        raise_schema_argument_errors: When true, audited declaration-schema
+            failures raise ``ToolArgumentError`` for compose-loop ARG_ERROR
+            routing. Direct callers keep the historical failed-``ToolResult``
+            contract by leaving this false.
     """
     all_handlers: dict[str, ToolHandler] = {
         **_DISCOVERY_TOOLS,
@@ -449,6 +597,19 @@ def execute_tool(
     if handler is None:
         return _failure_result(state, f"Unknown tool: {tool_name}")
 
+    if tool_arguments_hash is not None:
+        argument_error = _validate_tool_arguments(
+            tool_name,
+            arguments,
+            state,
+            raise_on_error=raise_schema_argument_errors,
+        )
+        if argument_error is not None:
+            return argument_error
+
+    if _requires_secret_context(tool_name) and (secret_service is None or user_id is None):
+        return _failure_result(state, "Secret tools require secret service context.")
+
     # ``current_validation`` carries the live state's ValidationSummary
     # into ``diff_pipeline`` so its delta against the baseline is computed
     # using the caller's pre-mutation validation rather than re-running
@@ -457,6 +618,7 @@ def execute_tool(
     context = ToolContext(
         catalog=catalog,
         data_dir=data_dir,
+        require_data_dir_for_paths=tool_arguments_hash is not None,
         session_engine=session_engine,
         session_id=session_id,
         secret_service=secret_service,
@@ -486,7 +648,7 @@ def execute_tool(
     # validation errors so the LLM avoids a follow-up discovery round-trip.
     # No-op for non-augmentation-eligible tools or successful results
     # (gated inside ``_augment_with_plugin_schemas``).
-    return _augment_with_plugin_schemas(result, tool_name, catalog)
+    return _augment_with_plugin_schemas(result, tool_name, catalog, context)
 
 
 # ---------------------------------------------------------------------------

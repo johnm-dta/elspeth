@@ -180,6 +180,7 @@ class RunEventRecord:
 
     id: UUID
     run_id: UUID
+    sequence: int
     timestamp: datetime
     event_type: SessionRunEventType
     data: Mapping[str, Any]

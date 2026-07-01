@@ -866,6 +866,33 @@ def test_transplanted_quartet_across_files_fails_at_load(tmp_path: Path, monkeyp
     assert b_fp in message  # the live (correct) fingerprint
 
 
+@pytest.mark.parametrize("escape_kind", ("parent_traversal", "absolute_path"))
+def test_judge_gated_source_binding_rejects_paths_outside_source_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    escape_kind: str,
+) -> None:
+    """A source-root load must reject judge-gated keys that escape the root."""
+    source_root = tmp_path / "src"
+    source_root.mkdir()
+    outside_path = tmp_path / "outside.py"
+    outside_path.write_text("secret = 'outside source root'\n", encoding="utf-8")
+    outside_fp = hashlib.sha256(outside_path.read_bytes()).hexdigest()
+    key_path = "../outside.py" if escape_kind == "parent_traversal" else outside_path.as_posix()
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+
+    allowlist = tmp_path / "allowlist.yaml"
+    _write_judge_gated_yaml(
+        yaml_path=allowlist,
+        key=f"{key_path}:R1:fn:fp=somehash",
+        file_fingerprint=outside_fp,
+        ast_path="body[0]",
+    )
+
+    with pytest.raises(ValueError, match="outside source_root"):
+        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+
+
 def test_source_drift_after_judge_verdict_fails_at_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """C8-3 source-drift: editing the source after the verdict invalidates the binding.
 
@@ -934,7 +961,7 @@ def test_judge_excerpt_redactions_round_trip_from_yaml(tmp_path: Path, monkeypat
     file_fp = hashlib.sha256(src_path.read_bytes()).hexdigest()
     key = "redacted.py:R1:fn:fp=somehash"
     ast_path = "body[0]"
-    redactions = (
+    redactions: tuple[dict[str, int | str], ...] = (
         {
             "pattern": "aws_access_key",
             "byte_count": 20,
@@ -1674,8 +1701,18 @@ def test_v2_entry_loads_when_file_present_even_if_bytes_changed(tmp_path: Path, 
     assert len(reloaded.entries) == 1
 
 
-def test_v2_entry_crashes_at_load_when_source_file_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The version-independent file-exists guard still fires for v2 entries."""
+def test_v2_entry_skipped_at_load_when_source_file_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A v2 entry whose source file is missing is now skipped with a warning, not a crash.
+
+    The version-independent file-exists guard still fires (DanglingAllowlistEntry),
+    but the caller (_parse_allow_hits) catches it and degrades gracefully: the entry
+    is dropped from the loaded allowlist and a greppable WARNING is emitted to stderr.
+    The fingerprint-mismatch tamper path (file exists, hash wrong) is unaffected.
+    """
     source_root = tmp_path / "src"
     source_root.mkdir(parents=True, exist_ok=True)
     # Deliberately do NOT create gone.py under source_root.
@@ -1689,8 +1726,11 @@ def test_v2_entry_crashes_at_load_when_source_file_missing(tmp_path: Path, monke
         ast_path="body[0]",
     )
 
-    with pytest.raises(ValueError, match="does not exist"):
-        load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+    loaded = load_allowlist(allowlist, valid_rule_ids=set(), source_root=source_root)
+    assert len(loaded.entries) == 0, "dangling v2 entry must be skipped, not loaded"
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert "gone.py" in captured.err or "does not exist" in captured.err
 
 
 def test_v1_entry_still_crashes_on_whole_file_byte_drift(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

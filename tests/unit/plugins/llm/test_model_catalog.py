@@ -22,6 +22,7 @@ sequence continues.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -31,7 +32,7 @@ from elspeth.plugins.transforms.llm import model_catalog
 
 
 @pytest.fixture(autouse=True)
-def _reset_live_catalog() -> None:
+def _reset_live_catalog() -> Iterator[None]:
     """Reset the module-level live catalog before and after every test.
 
     The catalog reader keeps a module-global :data:`_LIVE_CATALOG` snapshot
@@ -56,6 +57,25 @@ def _make_response(payload: Any, *, status_code: int = 200) -> httpx.Response:
         json=payload,
         request=httpx.Request("GET", "https://openrouter.ai/api/v1/models"),
     )
+
+
+async def _prime_live_catalog(ids: list[str]) -> None:
+    async def fake_get(url: str) -> httpx.Response:
+        assert url == model_catalog.OPENROUTER_MODELS_URL
+        return _make_response({"data": [{"id": model_id} for model_id in ids]})
+
+    primed = await model_catalog.prime_openrouter_catalog_from_live(http_get=fake_get)
+    assert primed is True
+    assert model_catalog._read_openrouter_catalog() == frozenset(ids)
+    _sha, source = model_catalog.read_openrouter_catalog_snapshot_id()
+    assert source == "live"
+
+
+def _assert_bundled_catalog_is_active() -> None:
+    assert model_catalog._read_openrouter_catalog() == model_catalog._bundled_openrouter_slice()
+    sha, source = model_catalog.read_openrouter_catalog_snapshot_id()
+    assert source == "bundled"
+    assert sha == model_catalog._bundled_openrouter_slice_sha256()
 
 
 def test_read_openrouter_catalog_returns_bundled_slice_when_unprimed() -> None:
@@ -149,6 +169,49 @@ async def test_prime_openrouter_catalog_falls_back_on_transport_error() -> None:
         if m.startswith(model_catalog.OPENROUTER_LITELLM_PREFIX)
     }
     assert catalog == frozenset(bundled)
+
+
+@pytest.mark.asyncio
+async def test_failed_transport_reprime_after_success_clears_live_snapshot() -> None:
+    await _prime_live_catalog(["vendor/live-only-model"])
+
+    async def failing_get(url: str) -> httpx.Response:
+        assert url == model_catalog.OPENROUTER_MODELS_URL
+        raise httpx.ConnectTimeout("simulated re-prime transport failure")
+
+    primed = await model_catalog.prime_openrouter_catalog_from_live(http_get=failing_get)
+
+    assert primed is False
+    _assert_bundled_catalog_is_active()
+
+
+@pytest.mark.parametrize("failure_kind", ("http_status", "json_decode", "malformed_top_level", "empty_data"))
+@pytest.mark.asyncio
+async def test_failed_early_return_reprime_after_success_clears_live_snapshot(failure_kind: str) -> None:
+    await _prime_live_catalog([f"vendor/live-only-model-{failure_kind}"])
+
+    class _BadJsonResponse:
+        status_code = 200
+
+        def json(self) -> Any:
+            raise ValueError("not json")
+
+    async def failing_get(url: str) -> Any:
+        assert url == model_catalog.OPENROUTER_MODELS_URL
+        if failure_kind == "http_status":
+            return _make_response("Service Unavailable", status_code=503)
+        if failure_kind == "json_decode":
+            return _BadJsonResponse()
+        if failure_kind == "malformed_top_level":
+            return _make_response({"unexpected": "shape"})
+        if failure_kind == "empty_data":
+            return _make_response({"data": []})
+        raise AssertionError(f"unhandled failure kind: {failure_kind}")
+
+    primed = await model_catalog.prime_openrouter_catalog_from_live(http_get=failing_get)
+
+    assert primed is False
+    _assert_bundled_catalog_is_active()
 
 
 @pytest.mark.asyncio

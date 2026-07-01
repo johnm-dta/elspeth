@@ -46,13 +46,13 @@ from elspeth.web.composer.state import (
 )
 from elspeth.web.composer.tools._common import (
     _DEFAULT_SOURCE_VALIDATION_FAILURE,
+    _FULL_STATE_COMPONENT_ALIAS_SET,
     _SOURCE_VALIDATION_FAILURE_DESCRIPTION,
     ToolContext,
     ToolResult,
     _credential_wiring_contract_failure,
     _discovery_result,
     _failure_result,
-    _FullPipelineStatePayload,
     _graph_repair_suggestions,
     _missing_output_options_repair_error,
     _mutation_result,
@@ -60,8 +60,10 @@ from elspeth.web.composer.tools._common import (
     _prevalidate_sink,
     _prevalidate_source,
     _prevalidate_transform,
+    _resolver_owned_interpretation_requirement_error,
+    _runtime_owned_llm_option_error,
     _semantic_contracts_payload,
-    _serialize_edge,
+    _serialize_full_pipeline_state,
     _serialize_node,
     _serialize_output,
     _serialize_source,
@@ -70,6 +72,7 @@ from elspeth.web.composer.tools._common import (
     _validate_sink_path,
     _validate_source_path,
     _validate_transform_provider_config_path,
+    _validate_transform_provider_config_policy,
     _vf_destination_note,
     validate_composer_file_sink_collision_policy,
 )
@@ -104,17 +107,12 @@ from elspeth.web.interpretation_state import (
     interpretation_sites,
     transform_vague_term_site_tuples,
     vague_term_wiring_count,
-    validate_pipeline_decision_semantics,
+    validate_pipeline_decision_node_semantics,
 )
 from elspeth.web.validation import (
     _reject_credential_shaped_content,
     _validate_accepted_value_content,
 )
-
-_FULL_STATE_COMPONENT_ALIASES: Final[tuple[str, ...]] = ("", "full", "all", "pipeline")
-
-_FULL_STATE_COMPONENT_ALIAS_SET: Final[frozenset[str]] = frozenset(_FULL_STATE_COMPONENT_ALIASES)
-
 
 ADVISOR_TRIGGER_PROACTIVE_SECURITY: Final[str] = "proactive_security_safety"
 
@@ -290,10 +288,15 @@ def _execute_set_pipeline(
             manual_authoring_error = _reject_manual_source_authoring(src_options, tool_name="set_pipeline")
             if manual_authoring_error is not None:
                 return _failure_result(state, f"Source '{source_name}': {manual_authoring_error}")
+            review_metadata_error = _resolver_owned_interpretation_requirement_error(src_options, tool_name="set_pipeline")
+            if review_metadata_error is not None:
+                return _failure_result(state, f"Source '{source_name}': {review_metadata_error}")
             credential_error = _credential_wiring_contract_failure(
                 state,
                 component_id=_source_component_id(source_name),
                 component_type="source",
+                plugin_type="source",
+                plugin_name=src_plugin,
                 options=src_options,
             )
             if credential_error is not None:
@@ -336,10 +339,15 @@ def _execute_set_pipeline(
         manual_authoring_error = _reject_manual_source_authoring(legacy_src_options, tool_name="set_pipeline")
         if manual_authoring_error is not None:
             return _failure_result(state, manual_authoring_error)
+        review_metadata_error = _resolver_owned_interpretation_requirement_error(legacy_src_options, tool_name="set_pipeline")
+        if review_metadata_error is not None:
+            return _failure_result(state, review_metadata_error)
         credential_error = _credential_wiring_contract_failure(
             state,
             component_id="source",
             component_type="source",
+            plugin_type="source",
+            plugin_name=src_plugin,
             options=legacy_src_options,
         )
         if credential_error is not None:
@@ -447,10 +455,19 @@ def _execute_set_pipeline(
         node_type = node.node_type
         node_plugin = node.plugin
         node_options = node.options
+        runtime_owned_error = _runtime_owned_llm_option_error(
+            node_plugin,
+            node_options,
+            tool_name="set_pipeline",
+        )
+        if runtime_owned_error is not None:
+            return _failure_result(state, f"Node '{node_id}': {runtime_owned_error}")
         credential_error = _credential_wiring_contract_failure(
             state,
             component_id=node_id,
             component_type="node",
+            plugin_type="transform" if node_plugin is not None else None,
+            plugin_name=node_plugin,
             options=node_options,
         )
         if credential_error is not None:
@@ -474,6 +491,10 @@ def _execute_set_pipeline(
             node_prevalidation = _prevalidate_transform(node_plugin, review_options)
             if node_prevalidation is not None:
                 return _failure_result(state, f"Node '{node_id}': {node_prevalidation}")
+
+            provider_policy_error = _validate_transform_provider_config_policy(node_options, plugin=node_plugin)
+            if provider_policy_error is not None:
+                return _failure_result(state, f"Node '{node_id}': {provider_policy_error}")
 
             # S2: confine nested provider_config persist_directory (RAG
             # retrieval). Parity with the per-output sink-path check below so
@@ -543,6 +564,8 @@ def _execute_set_pipeline(
             state,
             component_id=out_name,
             component_type="output",
+            plugin_type="sink",
+            plugin_name=out_plugin,
             options=out_options,
         )
         if credential_error is not None:
@@ -826,6 +849,7 @@ _APPLY_PIPELINE_RECIPE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["recipe_name", "slots"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -996,7 +1020,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
                         "from_node": {"type": "string"},
                         "to_node": {"type": "string"},
                         "edge_type": {"type": "string"},
-                        "label": {"type": "string"},
+                        "label": {"type": ["string", "null"]},
                     },
                     "required": ["id", "from_node", "to_node", "edge_type"],
                 },
@@ -1058,6 +1082,7 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
             },
         },
         "required": ["nodes", "edges", "outputs"],
+        "additionalProperties": False,
     },
     augments_on_failure=True,
 )
@@ -1066,23 +1091,6 @@ _SET_PIPELINE_DECLARATION = ToolDeclaration(
 def _is_full_state_component_alias(component: Any) -> bool:
     """Return whether a component argument explicitly requests full state."""
     return isinstance(component, str) and component.strip().lower() in _FULL_STATE_COMPONENT_ALIAS_SET
-
-
-def _serialize_full_pipeline_state(state: CompositionState, *, requested_component: Any) -> _FullPipelineStatePayload:
-    """Serialize the full state and expose accepted full-state spellings."""
-    return {
-        "sources": {name: _serialize_source(source) for name, source in state.sources.items()},
-        "nodes": [_serialize_node(n) for n in state.nodes],
-        "outputs": [_serialize_output(o) for o in state.outputs],
-        "edges": [_serialize_edge(e) for e in state.edges],
-        "metadata": {"name": state.metadata.name, "description": state.metadata.description},
-        "version": state.version,
-        "inspection": {
-            "requested_component": requested_component,
-            "resolved_component": "full",
-            "accepted_full_state_aliases": list(_FULL_STATE_COMPONENT_ALIASES),
-        },
-    }
 
 
 def _execute_get_pipeline_state(
@@ -1145,6 +1153,7 @@ _GET_PIPELINE_STATE_DECLARATION = ToolDeclaration(
             },
         },
         "required": [],
+        "additionalProperties": False,
     },
     cacheable=False,
 )
@@ -1245,14 +1254,14 @@ def _assert_affected_component(
         if INTERPRETATION_REQUIREMENTS_KEY not in source.options:
             raise ToolArgumentError(
                 argument="affected_node_id",
-                expected=f"source to contain a pending {kind.value} requirement for {user_term!r}",
+                expected=f"source to contain a pending {kind.value} requirement for the requested term",
                 actual_type=f"missing pending {kind.value} review site",
             )
         matched_terms = _matching_interpretation_sites(state, affected_node_id, kind, user_term)
         if not matched_terms:
             raise ToolArgumentError(
                 argument="affected_node_id",
-                expected=f"source to contain a pending {kind.value} requirement for {user_term!r}",
+                expected=f"source to contain a pending {kind.value} requirement for the requested term",
                 actual_type=f"missing pending {kind.value} review site",
             )
         if llm_draft is not None:
@@ -1289,7 +1298,7 @@ def _assert_affected_component(
         if not matched_terms:
             raise ToolArgumentError(
                 argument="affected_node_id",
-                expected=f"node {affected_node_id!r} to contain a pending {kind.value} requirement for {user_term!r}",
+                expected=f"node {affected_node_id!r} to contain a pending {kind.value} requirement for the requested term",
                 actual_type=f"missing pending {kind.value} review site",
             )
         requirements = node.options.get(INTERPRETATION_REQUIREMENTS_KEY)
@@ -1306,10 +1315,9 @@ def _assert_affected_component(
                     draft = draft_value if isinstance(draft_value, str) else None
                     break
         try:
-            validate_pipeline_decision_semantics(
-                node_id=node.id,
-                plugin=node.plugin,
-                options=node.options,
+            validate_pipeline_decision_node_semantics(
+                node=node,
+                all_nodes=state.nodes,
                 user_term=user_term,
                 draft=draft,
                 context="request_interpretation_review",
@@ -1318,7 +1326,7 @@ def _assert_affected_component(
             raise ToolArgumentError(
                 argument="affected_node_id",
                 expected=str(exc),
-                actual_type="pipeline_decision node that does not implement the reviewed decision",
+                actual_type="pipeline_decision node that failed semantic review",
             ) from exc
         return
 
@@ -1351,7 +1359,7 @@ def _assert_affected_component(
         expected_kind = kind.value
         raise ToolArgumentError(
             argument="affected_node_id",
-            expected=(f"node {affected_node_id!r} to contain a pending {expected_kind} requirement or placeholder for {user_term!r}"),
+            expected=(f"node {affected_node_id!r} to contain a pending {expected_kind} requirement or placeholder for the requested term"),
             actual_type=f"missing pending {expected_kind} review site",
         )
     # A pending vague_term requirement is only a *resolvable* handoff when the
@@ -1366,15 +1374,12 @@ def _assert_affected_component(
         raise ToolArgumentError(
             argument="affected_node_id",
             expected=(
-                f"node {affected_node_id!r} to wire the {user_term!r} interpretation into the prompt — "
+                f"node {affected_node_id!r} to wire the requested interpretation into the prompt — "
                 "exactly one prompt_template_parts entry "
                 '{"kind": "interpretation_ref", "requirement_id": "<the pending requirement id>"} '
-                f"referencing the requirement, or exactly one legacy {{{{interpretation:{user_term}}}}} "
-                "placeholder in options.prompt_template"
+                "referencing the requirement, or exactly one legacy interpretation placeholder in options.prompt_template"
             ),
-            actual_type=(
-                f"pending vague_term requirement for {user_term!r} with no resolvable prompt wiring (the operator's resolve would dead-end)"
-            ),
+            actual_type=("pending vague_term requirement with no resolvable prompt wiring (the operator's resolve would dead-end)"),
         )
     if kind is InterpretationKind.LLM_PROMPT_TEMPLATE and llm_draft is not None and llm_draft != prompt_template:
         raise ToolArgumentError(
@@ -1556,10 +1561,8 @@ async def _check_duplicate_interpretation(
                 "event_id": str(original.id),
                 "affected_node_id": affected_node_id,
                 "kind": kind.value,
-                "user_term": user_term,
-                "llm_draft": original.llm_draft,
                 "interpretation_source": original.interpretation_source.value,
-                "message": (f"Interpretation review for '{user_term}' is already pending; reusing the existing event."),
+                "message": "Interpretation review is already pending; reusing the existing event.",
             },
         )
     # Resolved — re-staging an already-decided review is forbidden.
@@ -1628,8 +1631,8 @@ async def _check_interpretation_rate_limits(
             argument="user_term",
             expected=f"at most {per_term_cap} interpretation requests per term in this composition",
             actual_type=(
-                f"term {user_term!r} would be surfaced {per_term_count + 1} times — use a direct "
-                f"interpretation in the prompt template instead"
+                f"per-term cap would be exceeded on request {per_term_count + 1}; use a direct interpretation "
+                "in the prompt template instead"
             ),
             # Compose-loop discriminant (F-6): the rate-cap branch is the
             # trigger for the
@@ -1831,12 +1834,9 @@ async def _handle_request_interpretation_review(
             "event_id": str(event.id),
             "affected_node_id": parsed.affected_node_id,
             "kind": parsed.kind.value,
-            "user_term": parsed.user_term,
-            "llm_draft": parsed.llm_draft,
             "interpretation_source": event.interpretation_source.value,
             "message": (
-                f"Interpretation review staged for '{parsed.user_term}'. "
-                f"Waiting for user acceptance/amendment before the pipeline can finalise."
+                "Interpretation review staged for user review. Waiting for user acceptance/amendment before the pipeline can finalise."
             ),
         },
     )

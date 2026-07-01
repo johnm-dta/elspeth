@@ -220,3 +220,33 @@ describe("CompletionSummary -- no auto-focus on initial render", () => {
     expect(document.activeElement).not.toBe(saveBtn);
   });
 });
+
+// ── Concern B: tutorial suppression ──────────────────────────────────────────
+
+describe("CompletionSummary -- tutorial suppression (concern B)", () => {
+  it("hides 'Open freeform editor' when isTutorial (concern B)", () => {
+    render(<CompletionSummary terminal={COMPLETED_TERMINAL} isTutorial />);
+    // The summary still renders. Bind to the SEMANTIC heading element (an
+    // <h3>, CompletionSummary.tsx:87), matching the file's existing pattern
+    // (CompletionSummary.test.tsx:95 uses getByRole("heading")) — getByText
+    // would still pass if the heading were demoted to a paragraph.
+    expect(
+      screen.getByRole("heading", { name: "Pipeline ready" }),
+    ).toBeInTheDocument();
+    // ...but the freeform exit is suppressed in a tutorial.
+    expect(
+      screen.queryByRole("button", { name: "Open freeform editor" }),
+    ).toBeNull();
+    // The two non-freeform actions remain (exact names verified against
+    // CompletionSummary.tsx:123,131). Pin BOTH presence AND the surviving
+    // button count, so a regression that drops a non-freeform button can't
+    // slip past an absent-button-only check.
+    expect(
+      screen.getByRole("button", { name: "Review YAML" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Validate pipeline" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByRole("button")).toHaveLength(2);
+  });
+});

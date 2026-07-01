@@ -66,8 +66,11 @@ Investigate and resolve production pipeline issues.
 1. **If process crashed:**
    ```bash
    # Resume from last checkpoint
-   elspeth resume <RUN_ID>
+   elspeth resume <RUN_ID> --execute
    ```
+
+   Run `elspeth resume <RUN_ID>` without `--execute` only when you want to
+   inspect whether the run can resume without continuing processing.
 
 2. **If disk full:**
    ```bash

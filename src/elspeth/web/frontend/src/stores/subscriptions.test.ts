@@ -95,13 +95,13 @@ describe("subscriptions — validation result side effects", () => {
     vi.clearAllMocks();
   });
 
-  it("calls injectSystemMessage and sendValidationFeedback when validation fails", () => {
+  it("injects local validation status but does not send raw validation errors to the LLM", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -115,7 +115,7 @@ describe("subscriptions — validation result side effects", () => {
           {
             component_type: "source",
             component_id: "csv_source",
-            message: "Required field 'path' is missing",
+            message: "Required field 'path' contains expanded value sk-live-secret",
           },
         ],
         warnings: [],
@@ -123,29 +123,28 @@ describe("subscriptions — validation result side effects", () => {
     } as never);
 
     expect(injectSystemMessage).toHaveBeenCalled();
-    expect(sendValidationFeedback).toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
 
     const [message, stableId] = injectSystemMessage.mock.calls[0] as [string, string];
     expect(message).toContain("Validation failed");
     expect(message).toContain("csv_source");
+    expect(message).not.toContain("sent to the agent");
     expect(stableId).toBe("system-validation-current");
   });
 
-  it("does NOT inject system message or send validation feedback for the structured empty_pipeline outcome", () => {
+  it("does NOT inject system message or send a composer message for the structured empty_pipeline outcome", () => {
     // Regression: after exit_to_freeform the backend used to surface its
     // pydantic "ElspethSettings: source/sinks Field required" stack trace
     // here, which the subscription would (a) inject into chat and (b) POST
-    // to /messages via sendValidationFeedback — provoking the LLM to
-    // confabulate a placeholder set_pipeline. Backend now returns a
-    // structured ``empty_pipeline`` error_code; this guard suppresses the
-    // broadcast so a user with no pipeline content gets no spurious chat
-    // noise and no LLM auto-fix.
+    // to /messages via the old automatic validation POST. Backend
+    // now returns a structured ``empty_pipeline`` error_code; this guard
+    // suppresses local chat noise for a user with no pipeline content.
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -167,16 +166,16 @@ describe("subscriptions — validation result side effects", () => {
     } as never);
 
     expect(injectSystemMessage).not.toHaveBeenCalled();
-    expect(sendValidationFeedback).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("injects review-pending status but does NOT send validation feedback for pending interpretation review", () => {
+  it("injects review-pending status but does NOT send a composer message for pending interpretation review", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -220,7 +219,7 @@ describe("subscriptions — validation result side effects", () => {
     } as never);
 
     expect(injectSystemMessage).toHaveBeenCalled();
-    expect(sendValidationFeedback).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
     const [message, stableId] = injectSystemMessage.mock.calls[0] as [string, string];
     // Human-centric copy that points at the review cards, NOT a dump of the
     // raw validation blockers. The machine-facing component id / detail
@@ -233,11 +232,9 @@ describe("subscriptions — validation result side effects", () => {
 
   it("replaces the pending message with a ready-to-run nudge once reviews resolve", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -297,11 +294,9 @@ describe("subscriptions — validation result side effects", () => {
 
   it("does NOT fire the ready-to-run nudge for an ordinary valid result", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -326,13 +321,13 @@ describe("subscriptions — validation result side effects", () => {
     expect(injectSystemMessage).not.toHaveBeenCalled();
   });
 
-  it("calls injectSystemMessage but NOT sendValidationFeedback when validation passes with warnings", () => {
+  it("injects local warning status without validation feedback egress", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -352,7 +347,7 @@ describe("subscriptions — validation result side effects", () => {
     } as never);
 
     expect(injectSystemMessage).toHaveBeenCalled();
-    expect(sendValidationFeedback).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
 
     const [message] = injectSystemMessage.mock.calls[0] as [string, string];
     expect(message).toContain("Validation passed with warnings");
@@ -387,11 +382,11 @@ describe("subscriptions — validation result side effects", () => {
 
   it("does not repeat side effects for a fresh object with the same validation outcome", () => {
     const injectSystemMessage = vi.fn();
-    const sendValidationFeedback = vi.fn().mockResolvedValue(undefined);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
       activeSessionId: "sess-1",
       injectSystemMessage,
-      sendValidationFeedback,
+      sendMessage,
     } as never);
     useExecutionStore.setState({ validationResult: null } as never);
     initStoreSubscriptions();
@@ -411,7 +406,7 @@ describe("subscriptions — validation result side effects", () => {
     useExecutionStore.setState({ validationResult: second } as never);
 
     expect(injectSystemMessage).toHaveBeenCalledTimes(1);
-    expect(sendValidationFeedback).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 });
 
@@ -939,9 +934,8 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     // but source=null nodes=[] outputs=[]. Without the guard, requestValidate
     // would queue validate and land the structured ``empty_pipeline``
     // failure — which the executionStore subscription used to broadcast
-    // via injectSystemMessage AND sendValidationFeedback (POST /messages
-    // as role=user). The LLM then "fixed" it with a confabulated placeholder
-    // source/sink, polluting the audit trail.
+    // via injectSystemMessage and the old automatic validation POST
+    // to /messages as role=user.
     const validate = vi.fn().mockResolvedValue(undefined);
     useExecutionStore.setState({ validate } as never);
 

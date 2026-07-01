@@ -78,14 +78,16 @@ def validate_resolved_prompt_template_hash(call_type: CallType, resolved_prompt_
         raise ValueError("Call.resolved_prompt_template_hash must be a 64-character lowercase hex digest")
 
 
-def _validate_enum(value: object, enum_type: type, field_name: str) -> None:
+def _validate_enum(value: object, enum_type: type, field_name: str, *, optional: bool = False) -> None:
     """Validate that value is an instance of the expected enum type.
 
     Tier 1 audit data must crash on invalid types - no coercion, no defaults.
     Per Data Manifesto: If we read garbage from our own database,
     something catastrophic happened - crash immediately.
     """
-    if value is not None and not isinstance(value, enum_type):
+    if value is None and optional:
+        return
+    if not isinstance(value, enum_type):
         raise TypeError(f"{field_name} must be {enum_type.__name__}, got {type(value).__name__}: {value!r}")
 
 
@@ -117,10 +119,12 @@ class Run:
         """Validate enum fields - Tier 1 crash on invalid types."""
         require_int(self.llm_call_count, "llm_call_count", optional=True, min_value=0)
         _validate_enum(self.status, RunStatus, "status")
-        _validate_enum(self.reproducibility_grade, ReproducibilityGrade, "reproducibility_grade")
-        _validate_enum(self.export_status, ExportStatus, "export_status")
+        _validate_enum(self.reproducibility_grade, ReproducibilityGrade, "reproducibility_grade", optional=True)
+        _validate_enum(self.export_status, ExportStatus, "export_status", optional=True)
         if type(self.seeded_from_cache) is not bool:
             raise TypeError(f"seeded_from_cache must be bool, got {type(self.seeded_from_cache).__name__}: {self.seeded_from_cache!r}")
+        if self.seeded_from_cache and self.cache_key is None:
+            raise ValueError(f"seeded_from_cache=True requires cache_key for run {self.run_id!r}")
         if self.cache_key is not None and not _SHA256_HEX_PATTERN.fullmatch(self.cache_key):
             raise ValueError(f"cache_key must be 64 lowercase hex chars or None, got {self.cache_key!r} for run {self.run_id!r}")
 
@@ -483,7 +487,7 @@ class Batch:
         """Validate enum fields - Tier 1 crash on invalid types."""
         require_int(self.attempt, "attempt", min_value=0)
         _validate_enum(self.status, BatchStatus, "status")
-        _validate_enum(self.trigger_type, TriggerType, "trigger_type")
+        _validate_enum(self.trigger_type, TriggerType, "trigger_type", optional=True)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1094,8 +1098,12 @@ class SecretResolutionInput:
         SecretResolution. These checks prevent:
         - Plaintext secrets being written as fingerprints (security)
         - Invalid source values persisting undetected (Tier 1 integrity)
+        - Key Vault rows that cannot round-trip through the read-side contract
+        - Non-finite timestamps persisting into Tier 1 audit data
         - Non-negative latency invariant (data quality)
         """
+        import math
+
         if not self.env_var_name:
             raise ValueError("SecretResolutionInput: env_var_name is required and cannot be empty")
         if not self.source or self.source not in self._ALLOWED_SOURCES:
@@ -1105,5 +1113,12 @@ class SecretResolutionInput:
                 f"SecretResolutionInput: fingerprint must be 64-char lowercase hex (HMAC-SHA256), "
                 f"got {self.fingerprint!r} (length={len(self.fingerprint)})"
             )
+        if not isinstance(self.timestamp, (int, float)) or math.isinf(self.timestamp) or math.isnan(self.timestamp):
+            raise ValueError(f"SecretResolutionInput: timestamp must be a finite number, got {self.timestamp!r}")
         if self.resolution_latency_ms < 0:
             raise ValueError(f"SecretResolutionInput: resolution_latency_ms must be non-negative, got {self.resolution_latency_ms!r}")
+        if self.source == "keyvault":
+            if not self.vault_url:
+                raise ValueError("SecretResolutionInput: vault_url is required when source='keyvault'")
+            if not self.secret_name:
+                raise ValueError("SecretResolutionInput: secret_name is required when source='keyvault'")

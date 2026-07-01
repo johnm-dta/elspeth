@@ -1,45 +1,44 @@
-import type { CompositionState, NodeSpec, OutputSpec, SourceSpec } from "@/types/index";
-import { sortedSourceEntries } from "@/utils/compositionState";
-
-// Kept BYTE-IDENTICAL to the backend cache-key constant ``CANONICAL_SEED_PROMPT``
-// in ``src/elspeth/web/preferences/tutorial_cache.py``. Turn 4 posts this string
-// to ``/api/tutorial/run``; the backend only engages the tutorial cache when
+// RUN-CACHE KEY ONLY — no longer the per-stage build prompt. Kept
+// BYTE-IDENTICAL to the backend cache-key constant ``CANONICAL_SEED_PROMPT`` in
+// ``src/elspeth/web/preferences/tutorial_cache.py``. Turn 4 posts this string to
+// ``/api/tutorial/run``; the backend only engages the tutorial cache when
 // ``effective_prompt == CANONICAL_SEED_PROMPT``. If the two drift apart the cache
 // silently never hits and every tutorial run goes live. The Python test
 // ``test_canonical_seed_matches_frontend_constant`` fails CI if they diverge.
+// The guided BUILD is now driven PER STAGE by the prompts below — the composer
+// is a STAGED orchestrator (source -> sink -> transforms -> wire), one focused
+// prompt per phase, NOT one whole-problem prompt at every phase.
 export const CANONICAL_TUTORIAL_PROMPT =
-  "Create a data source from these five Australian government pages: " +
-  "https://www.naa.gov.au, https://my.gov.au, https://www.aec.gov.au, " +
-  "https://www.oaic.gov.au, and https://www.dta.gov.au. Use abuse contact " +
-  "noreply@dta.gov.au and scraping reason 'DTA technical demonstration'. " +
-  "Read the HTML for each page, have an LLM return a single fact about each " +
-  "government agency based on the page HTML. Remove the HTML and save the " +
-  "rest to a json file.";
+  "Scrape these three synthetic project-brief pages and, for each page, " +
+  "have an LLM write a short summary of the page. Remove the raw HTML and " +
+  "write the rows to a json file.";
+
+// Per-stage prelocked prompts — each phase gets ONLY its stage's intent so the
+// light composer model can focus on one task. Verified live against the
+// per-stage solvers (resolve_source / resolve_sink / solve_chain). The SOURCE
+// prompt names the `url` column so the source declares it as a guaranteed field
+// (surface-or-record); the runtime-resolved sample URLs are appended to it.
+export const TUTORIAL_SOURCE_PROMPT =
+  "Create the source for this pipeline. The rows are these three project-brief " +
+  "pages; each row carries the page's address in a `url` column:";
+
+export const TUTORIAL_SINK_PROMPT =
+  "Save the pipeline's results to a JSON file.";
+
+export const TUTORIAL_TRANSFORMS_PROMPT =
+  "For each row, fetch the page at its URL, then have an LLM write a short " +
+  "summary of the page. Finally drop the raw HTML and fingerprint columns so " +
+  "the saved rows keep only the summary. These are our own demo pages, so use " +
+  "noreply@dta.gov.au as the scraping abuse contact.";
 
 export type TutorialStep =
   | "welcome"
-  | "describe"
-  | "showBuilt"
-  | "graph"
+  | "guided"
   | "run"
   | "audit"
-  | "mode"
   | "graduation";
 
 export type RunResultRow = Record<string, unknown>;
-
-export interface TutorialBuiltSummary {
-  sourceLabel: string;
-  urls: string[];
-  transforms: string[];
-  sinkLabel: string;
-}
-
-export interface TutorialBuildResult {
-  sessionId: string;
-  prompt: string;
-  summary: TutorialBuiltSummary;
-}
 
 export interface TutorialRunResult {
   runId: string;
@@ -57,27 +56,22 @@ export interface TutorialState {
   runId: string | null;
   sourceDataHash: string | null;
   rows: RunResultRow[];
-  builtSummary: TutorialBuiltSummary | null;
   skipped: boolean;
   /**
-   * Set when the user explicitly cancelled the Turn 4 run via the cancel
-   * button. Consumed by Turn 6 to render an acknowledgement note in place
-   * of the audit-story summary the user skipped. Cleared by `reset` and
-   * by any back navigation that returns to `describe` (i.e. the user is
-   * starting over).
+   * Set when the user explicitly cancelled the run via the cancel button.
+   * Skips the audit step (no audit story is available — the run was aborted)
+   * and lands on graduation so the close-out turn can acknowledge the cancel
+   * instead of silently swallowing it. Cleared by `reset`.
    */
   cancelled: boolean;
 }
 
 export type TutorialAction =
   | { type: "start" }
-  | { type: "built"; result: TutorialBuildResult }
-  | { type: "showGraph" }
-  | { type: "startRun" }
+  | { type: "guidedCompleted"; sessionId: string }
   | { type: "runCompleted"; result: TutorialRunResult }
-  | { type: "continueToMode" }
-  | { type: "skipToMode" }
-  | { type: "finishMode" }
+  | { type: "continueToGraduation" }
+  | { type: "skipToGraduation" }
   | { type: "cancelRun" }
   | { type: "back" }
   | { type: "reset" };
@@ -89,41 +83,34 @@ export const initialTutorialState: TutorialState = {
   runId: null,
   sourceDataHash: null,
   rows: [],
-  builtSummary: null,
   skipped: false,
   cancelled: false,
 };
 
 /**
- * Explicit back-navigation parent map. Defined as a function (not a static
- * object) because the previous step depends on how the user reached the
- * current one — Turn 6 has three arrival paths (continueToMode, skipToMode,
- * cancelRun) and each goes back to a different turn.
- *
- * For run/audit, back lands on `describe` rather than the mechanically
- * previous step. The user's actual intent at that point is "I want to edit
- * the prompt and start over", not "show me the graph card again".
+ * Explicit back-navigation parent map. With the staged guided walk the flow is
+ * a straight line: welcome -> guided -> run -> audit -> graduation. The guided
+ * surface owns its own internal stages (source/sink/transform/wire), but once
+ * completed it is TERMINAL: the persisted guided session is `terminal=completed`
+ * server-side, and re-mounting TutorialGuidedShell onto it cannot re-walk the
+ * stages — it would only re-fire completion. So a consumed guided wizard is
+ * NON-RETURNABLE: `previousStep(run)` is null (the run turn drops its Back
+ * affordance) and `previousStep(audit)` is `run` (the run result stays cache-
+ * backed and re-viewable). Neither routes back into `guided`. welcome<->guided
+ * and graduation->audit remain navigable.
  */
 export function previousStep(state: TutorialState): TutorialStep | null {
   switch (state.step) {
     case "welcome":
       return null;
-    case "describe":
+    case "guided":
       return "welcome";
-    case "showBuilt":
-      return "describe";
-    case "graph":
-      return "showBuilt";
     case "run":
-      return "describe";
+      return null;
     case "audit":
-      return "describe";
-    case "mode":
-      if (state.skipped) return "welcome";
-      if (state.cancelled) return "describe";
-      return "audit";
+      return "run";
     case "graduation":
-      return "mode";
+      return "audit";
   }
 }
 
@@ -133,26 +120,9 @@ export function tutorialReducer(
 ): TutorialState {
   switch (action.type) {
     case "start":
-      return { ...state, step: "describe" };
-    case "built":
-      return {
-        ...state,
-        step: "showBuilt",
-        prompt: action.result.prompt,
-        sessionId: action.result.sessionId,
-        builtSummary: action.result.summary,
-        skipped: false,
-      };
-    case "showGraph":
-      if (state.sessionId === null) {
-        throw new Error("tutorialReducer: graph step requires a session");
-      }
-      return { ...state, step: "graph" };
-    case "startRun":
-      if (state.sessionId === null) {
-        throw new Error("tutorialReducer: run step requires a session");
-      }
-      return { ...state, step: "run" };
+      return { ...state, step: "guided" };
+    case "guidedCompleted":
+      return { ...state, step: "run", sessionId: action.sessionId };
     case "runCompleted":
       return {
         ...state,
@@ -161,41 +131,22 @@ export function tutorialReducer(
         sourceDataHash: action.result.sourceDataHash,
         rows: action.result.rows,
       };
-    case "continueToMode":
-      return { ...state, step: "mode" };
-    case "skipToMode":
-      return {
-        ...initialTutorialState,
-        step: "mode",
-        skipped: true,
-      };
-    case "finishMode":
-      if (state.step !== "mode") {
-        throw new Error("tutorialReducer: finishMode requires the mode step");
-      }
+    case "continueToGraduation":
       return { ...state, step: "graduation" };
+    case "skipToGraduation":
+      return { ...initialTutorialState, step: "graduation", skipped: true };
     case "cancelRun":
-      // The user cancelled mid-run. Skip Turn 5 (no audit story is
-      // available — the run was aborted) and land on Turn 6 with the
-      // `cancelled` flag set so the mode-choice turn renders an
+      // The user cancelled mid-run. Skip the audit step (no audit story is
+      // available — the run was aborted) and land on graduation with the
+      // `cancelled` flag set so the close-out turn renders an
       // acknowledgement note instead of silently swallowing the cancel.
-      // Session metadata (sessionId, prompt, builtSummary) is preserved
-      // so the user can rerun the same prompt later from the chat panel.
-      return { ...state, step: "mode", cancelled: true };
+      // Session metadata (sessionId, prompt) is preserved so the user can
+      // rerun the same prompt later from the chat panel.
+      return { ...state, step: "graduation", cancelled: true };
     case "back": {
       const previous = previousStep(state);
       if (previous === null) {
         return state;
-      }
-      // Going back to `describe` is "I want to edit the prompt and start
-      // over": clear the session-derived state so the next build starts
-      // fresh. Preserve the prompt itself so the user keeps their edits.
-      if (previous === "describe" && state.step !== "welcome") {
-        return {
-          ...initialTutorialState,
-          step: "describe",
-          prompt: state.prompt,
-        };
       }
       return { ...state, step: previous };
     }
@@ -206,74 +157,4 @@ export function tutorialReducer(
       return _exhaustive;
     }
   }
-}
-
-export function summariseCompositionState(
-  state: CompositionState,
-): TutorialBuiltSummary {
-  const sources = sortedSourceEntries(state);
-  return {
-    sourceLabel: summariseSources(sources),
-    urls: sources.flatMap(([, source]) => collectUrls(source.options)).slice(0, 10),
-    transforms: state.nodes.map(summariseNode),
-    sinkLabel: summariseOutputs(state.outputs),
-  };
-}
-
-function summariseSources(sources: Array<[string, SourceSpec]>): string {
-  if (sources.length === 0) {
-    return "No source was returned";
-  }
-  if (sources.length === 1) {
-    return sources[0][1].plugin;
-  }
-  return sources.map(([name, source]) => `${name}: ${source.plugin}`).join(", ");
-}
-
-function summariseNode(node: NodeSpec): string {
-  if (node.plugin !== null) {
-    return node.plugin;
-  }
-  return node.node_type;
-}
-
-function summariseOutputs(outputs: OutputSpec[]): string {
-  if (outputs.length === 0) {
-    return "No sink was returned";
-  }
-  return outputs.map((output) => output.plugin).join(", ");
-}
-
-function collectUrls(value: unknown): string[] {
-  const found: string[] = [];
-  const seen = new Set<string>();
-
-  function add(candidate: string): void {
-    const trimmed = candidate.trim().replace(/[),.;\]]+$/, "");
-    if (!trimmed || seen.has(trimmed)) {
-      return;
-    }
-    seen.add(trimmed);
-    found.push(trimmed);
-  }
-
-  function walk(current: unknown): void {
-    if (typeof current === "string") {
-      const matches = current.match(
-        /https?:\/\/[^\s"',)]+|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.gov\.au/gi,
-      );
-      matches?.forEach(add);
-      return;
-    }
-    if (Array.isArray(current)) {
-      current.forEach(walk);
-      return;
-    }
-    if (typeof current === "object" && current !== null) {
-      Object.values(current).forEach(walk);
-    }
-  }
-
-  walk(value);
-  return found;
 }

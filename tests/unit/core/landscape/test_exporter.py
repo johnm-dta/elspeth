@@ -11,8 +11,9 @@ Tests cover:
 
 from __future__ import annotations
 
+from collections import defaultdict as collections_defaultdict
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import Mock, patch
 
 import pytest
@@ -1008,6 +1009,53 @@ class TestBatchRecords:
         assert m["batch_id"] == "batch-1"
         assert m["token_id"] == "tok-1"
         assert m["ordinal"] == 0
+
+
+class TestSparseLookupMemory:
+    """Tests for sparse audit exports."""
+
+    def test_sparse_child_lookups_do_not_store_empty_lists(self) -> None:
+        """Missing optional children must not inflate the grouping maps."""
+
+        class TrackingDefaultDict(collections_defaultdict):
+            instances: ClassVar[list[TrackingDefaultDict]] = []
+
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                super().__init__(*args, **kwargs)
+                self.missing_keys: set[Any] = set()
+                self.instances.append(self)
+
+            def __missing__(self, key: Any) -> Any:
+                value = super().__missing__(key)
+                self.missing_keys.add(key)
+                return value
+
+        exporter = _make_exporter(
+            operations=[_OPERATION],
+            rows=[_ROW],
+            tokens=[_TOKEN],
+            node_states=[_NODE_STATE_COMPLETED],
+            batches=[_BATCH],
+        )
+
+        with patch("elspeth.core.landscape.exporter.defaultdict", TrackingDefaultDict):
+            records = list(exporter.export_run("run-1"))
+
+        assert [record["record_type"] for record in records] == [
+            "run",
+            "operation",
+            "row",
+            "token",
+            "node_state",
+            "batch",
+        ]
+        empty_sparse_entries = [
+            key
+            for mapping in TrackingDefaultDict.instances
+            for key, value in mapping.items()
+            if key in mapping.missing_keys and value == []
+        ]
+        assert empty_sparse_entries == []
 
 
 # ===========================================================================

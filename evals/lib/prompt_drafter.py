@@ -5,7 +5,7 @@ produce the natural-language opening message that persona would type to
 ask the composer to build the workflow this YAML describes.
 
 Why this exists (not just hand-author every prompt):
-  * 33 examples × 2-4 personas = 66-132 opening prompts. Hand-authoring is
+  * 33 examples x 2-4 personas = 66-132 opening prompts. Hand-authoring is
     16-33 hours of writing work the operator confirmed is too costly.
   * LLM drafting from settings.yaml + persona spec produces in-character
     asks at ~$0.001 per draft. Operator spot-checks smoke cohort,
@@ -195,14 +195,12 @@ def _strip_chrome(text: str) -> str:
     if fence_match:
         text = fence_match.group(1).strip()
     # Wrapping double-quotes
-    if (text.startswith('"') and text.endswith('"')) or (
-        text.startswith("“") and text.endswith("”")
-    ):
+    if (text.startswith('"') and text.endswith('"')) or (text.startswith("“") and text.endswith("”")):
         text = text[1:-1].strip()
     # Common preamble patterns
     for prefix in ("Here is the message:", "Opening message:", "Message:"):
         if text.lower().startswith(prefix.lower()):
-            text = text[len(prefix):].strip()
+            text = text[len(prefix) :].strip()
     return text
 
 
@@ -229,10 +227,7 @@ def draft_opening_prompt(
     """
     detected = _detect_provider()
     if detected is None:
-        raise DrafterError(
-            "no OPENROUTER_API_KEY or ANTHROPIC_API_KEY in env — "
-            "cannot draft opening prompt without an LLM call"
-        )
+        raise DrafterError("no OPENROUTER_API_KEY or ANTHROPIC_API_KEY in env — cannot draft opening prompt without an LLM call")
     provider, api_key = detected
     system = SYSTEM_PROMPT
     user = _build_user_prompt(persona_spec, settings_yaml, example_name)
@@ -247,11 +242,9 @@ def draft_opening_prompt(
             return _strip_chrome(raw)
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as exc:
             last_err = exc
-            sys.stderr.write(
-                f"prompt_drafter: API attempt {attempt} failed: {exc}\n"
-            )
+            sys.stderr.write(f"prompt_drafter: API attempt {attempt} failed: {exc}\n")
             if attempt < max_tries:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
     raise DrafterError(f"API failed after {max_tries} attempts: {last_err}")
 
 
@@ -262,9 +255,7 @@ def draft_opening_prompt(
 
 def _main(argv: list[str]) -> int:
     if len(argv) != 3 or argv[1] in {"-h", "--help"}:
-        sys.stderr.write(
-            "usage: python -m evals.lib.prompt_drafter <persona_spec_md> <settings_yaml>\n"
-        )
+        sys.stderr.write("usage: python -m evals.lib.prompt_drafter <persona_spec_md> <settings_yaml>\n")
         return 64
     persona_path = pathlib.Path(argv[1])
     settings_path = pathlib.Path(argv[2])
@@ -282,7 +273,7 @@ def _main(argv: list[str]) -> int:
     except DrafterError as exc:
         sys.stderr.write(f"drafter error: {exc}\n")
         return 71
-    print(msg)
+    print(msg)  # noqa: T201 — drafted prompt is this CLI tool's stdout deliverable
     return 0
 
 

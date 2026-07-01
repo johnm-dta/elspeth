@@ -21,6 +21,7 @@ from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import (
     ConfigFieldSummary,
     PluginSchemaInfo,
+    PluginSecretRequirement,
     PluginSummary,
 )
 from elspeth.web.composer.state import (
@@ -139,6 +140,26 @@ def _passthrough_transform_schema() -> PluginSchemaInfo:
         description="Passthrough transform",
         json_schema={"title": "PassthroughConfig", "properties": {}},
         knob_schema={"fields": []},
+    )
+
+
+def _azure_prompt_shield_schema() -> PluginSchemaInfo:
+    return PluginSchemaInfo(
+        name="azure_prompt_shield",
+        plugin_type="transform",
+        description="Prompt injection shield",
+        json_schema={
+            "title": "AzurePromptShieldConfig",
+            "properties": {
+                "endpoint": {"type": "string"},
+                "api_key": {"type": "string"},
+                "fields": {"type": "string"},
+                "schema": {"type": "object"},
+            },
+            "required": ["endpoint", "api_key", "fields", "schema"],
+        },
+        knob_schema={"fields": []},
+        secret_requirements=(PluginSecretRequirement(field="api_key", candidates=("AZURE_CONTENT_SAFETY_KEY",)),),
     )
 
 
@@ -435,6 +456,37 @@ class TestFailureSchemaAugmentationPerToolCoverage:
         assert "Invalid options for transform 'passthrough'" in errors_text, errors_text
         assert "plugin_schemas" in payload, payload
         assert "transform/passthrough" in payload["plugin_schemas"]
+
+    def test_unavailable_secret_required_transform_schema_is_not_inlined(self) -> None:
+        """Augmentation must not bypass get_plugin_schema's secret-availability gate."""
+        catalog = _make_catalog_with_schemas(
+            transform_schemas={"azure_prompt_shield": _azure_prompt_shield_schema()},
+        )
+        secret_service = MagicMock()
+        secret_service.has_ref.return_value = False
+
+        result = execute_tool(
+            "upsert_node",
+            {
+                "id": "shield",
+                "node_type": "transform",
+                "plugin": "azure_prompt_shield",
+                "input": "rows",
+                "on_success": "llm",
+                "on_error": "discard",
+                "options": {},
+            },
+            _empty_state(),
+            catalog,
+            secret_service=secret_service,
+            user_id="test-user",
+        )
+        payload = result.to_dict()
+
+        assert result.success is False, payload
+        errors_text = " ".join(e["message"] for e in payload["validation"]["errors"])
+        assert "Invalid options for transform 'azure_prompt_shield'" in errors_text
+        assert "plugin_schemas" not in payload
 
     def test_patch_source_options_failure_carries_schema(self) -> None:
         """patch_source_options surfacing Invalid options for source 'csv' must carry the schema inline."""

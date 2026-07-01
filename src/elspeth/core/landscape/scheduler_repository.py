@@ -39,7 +39,7 @@ from elspeth.contracts.scheduler import (
 from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
 from elspeth.core.canonical import canonical_json
 from elspeth.core.landscape._helpers import generate_id
-from elspeth.core.landscape.database import WRITE_INTENT_OPTION, Tier1Engine, begin_write
+from elspeth.core.landscape.database import WRITE_INTENT_OPTION, Tier1Engine, begin_write, verify_sqlite_tier1_pragmas
 from elspeth.core.landscape.errors import LandscapeRecordError
 from elspeth.core.landscape.run_coordination_repository import fenced_leader_transaction, record_coordination_event
 from elspeth.core.landscape.schema import (
@@ -68,14 +68,15 @@ def token_from_journal_item(
     item: TokenWorkItem,
     *,
     attempt_offset: int,
-    resume_checkpoint_id: str,
+    resume_checkpoint_id: str | None,
 ) -> TokenInfo:
-    """Rebuild a ``TokenInfo`` from a journal BLOCKED row (F1 resume path).
+    """Rebuild a ``TokenInfo`` from a journal BLOCKED row.
 
-    Shared by the aggregation and coalesce executors' ``restore_from_journal``:
-    the journal row is authoritative for the payload and token lineage, while
-    the resume provenance (``attempt_offset`` = audit-derived max_attempt + 1,
-    ``resume_checkpoint_id``) is supplied by the restoring caller.
+    Shared by barrier intake and the aggregation/coalesce executors'
+    ``restore_from_journal`` paths. The journal row is authoritative for the
+    payload and token lineage. Resume callers supply audit-derived
+    ``attempt_offset`` and ``resume_checkpoint_id``; normal-run follower
+    handoffs use offset zero with no checkpoint provenance.
 
     Lives next to ``serialize_row_payload`` / ``deserialize_row_payload``
     because the payload round-trip is the heart of the mapping.
@@ -216,37 +217,10 @@ class TokenSchedulerRepository:
     }
 
     def __init__(self, engine: Tier1Engine) -> None:
-        # Runtime PRAGMA probe — defence in depth against a caller that slips
-        # past the type checker (e.g. a ``cast()`` in test code or a mypy
-        # suppression).  Tier-1 doctrine: the scheduler touches the audit DB;
-        # we must refuse to proceed if the engine's SQLite guarantees are unmet.
-        #
-        # The probe mirrors :meth:`LandscapeDB._verify_sqlite_pragmas`.  We
-        # check only ``foreign_keys`` and ``journal_mode`` here — they are the
-        # invariants most likely to be missing on a bare ``create_engine()``
-        # call that bypassed ``LandscapeDB._configure_sqlite``.  If either is
-        # wrong the scheduler would silently operate without referential
-        # integrity or without crash-safe journalling, which is unacceptable
-        # for the audit record.
-        with engine.connect() as conn:
-            fk_result = conn.exec_driver_sql("PRAGMA foreign_keys").scalar_one_or_none()
-            jm_result = conn.exec_driver_sql("PRAGMA journal_mode").scalar_one_or_none()
-
-        foreign_keys = "" if fk_result is None else str(fk_result).lower()
-        journal_mode = "" if jm_result is None else str(jm_result).lower()
-
-        violations: list[str] = []
-        if foreign_keys != "1":
-            violations.append(f"PRAGMA foreign_keys: expected '1', observed {foreign_keys!r}")
-        if journal_mode not in ("wal", "memory"):
-            violations.append(f"PRAGMA journal_mode: expected 'wal' (or 'memory' for :memory: DBs), observed {journal_mode!r}")
-
-        if violations:
-            raise AuditIntegrityError(
-                "TokenSchedulerRepository received an engine that does not meet Tier-1 audit-integrity "
-                "requirements; the engine was not opened through LandscapeDB. " + "; ".join(violations)
-            )
-
+        # Runtime SQLite PRAGMA probe — defence in depth against a caller that
+        # slips a bare SQLite engine past the type checker. Non-SQLite Tier-1
+        # engines skip this SQLite-only syntax.
+        verify_sqlite_tier1_pragmas(engine, owner="TokenSchedulerRepository")
         self._engine = engine
 
     def _fenced_or_plain_write(
@@ -1012,10 +986,11 @@ class TokenSchedulerRepository:
 
         ``membership_fenced=True`` (set only by the public ``claim_ready``
         verb) adds the ``claim_verb_fence_clause`` to the UPDATE WHERE.
-        That clause passes when the worker is active OR when no workers are
-        registered at all (N=0/unit-test mode).  When workers ARE registered,
-        an evicted/departed caller gets rowcount=0 and the re-probe below
-        raises ``RunWorkerEvictedError``.  Internal callers
+        That clause passes when this worker is active OR when no workers are
+        registered for the run at all (N=0/unit-test mode). When workers ARE
+        registered, an absent caller gets rowcount=0 with zero mutation and an
+        evicted/departed caller gets rowcount=0 plus the re-probe below raises
+        ``RunWorkerEvictedError``. Internal callers
         (``_enqueue_ready_claimed_on``, ``ingest_row_with_initial_claim``) pass
         the default ``False`` because they operate inside a broader fenced
         transaction whose leadership CAS is the outer guard.
@@ -1031,8 +1006,9 @@ class TokenSchedulerRepository:
             # Membership fence (ADR-030 §G, slice 4): the claimant must hold
             # an active run_workers row OR the run has no registered workers
             # at all (N=0 / unit-test mode — see claim_verb_fence_clause).
-            # An evicted/departed caller with existing run_workers rows returns
-            # rowcount=0; the re-probe below raises RunWorkerEvictedError.
+            # An absent caller is refused once any worker has registered for
+            # the run; an evicted/departed caller is re-probed below and raises
+            # RunWorkerEvictedError.
             where_clauses = and_(
                 where_clauses,
                 claim_verb_fence_clause(worker_id=lease_owner, run_id=run_id),
@@ -1065,13 +1041,11 @@ class TokenSchedulerRepository:
                     #     the worker was registered, then evicted — raise
                     #     RunWorkerEvictedError (the canonical multi-worker signal).
                     #
-                    # (b) Worker is ABSENT (no run_workers row at all): in
-                    #     production every worker registers before claiming; an
-                    #     absent worker means the caller bypassed registration.
-                    #     Return None rather than raising so that unit tests that
-                    #     call claim_ready with fictional lease_owner IDs continue
-                    #     to work.  The fence clause in the UPDATE WHERE still
-                    #     prevents any data mutation.
+                    # (b) Worker is ABSENT while this run has registered workers:
+                    #     in production every worker registers before claiming;
+                    #     an absent worker means the caller bypassed registration.
+                    #     Return None rather than raising; the fence clause in
+                    #     the UPDATE WHERE prevents any data mutation.
                     worker_status = conn.execute(
                         select(run_workers_table.c.status)
                         .where(run_workers_table.c.worker_id == lease_owner)
@@ -1160,10 +1134,10 @@ class TokenSchedulerRepository:
                         token_work_items_table.c.run_id == run_id,
                         token_work_items_table.c.status == TokenWorkStatus.PENDING_SINK.value,
                         # Membership fence (ADR-030 §G, slice 4): same discipline
-                        # as claim_ready — an evicted/departed claimant gets
-                        # rowcount=0 and the re-probe below raises
-                        # RunWorkerEvictedError rather than silently returning None.
-                        # Uses the lenient variant (passes in N=0/unit-test mode).
+                        # as claim_ready — absent claimants are refused once the
+                        # run has any registered worker; evicted/departed claimants
+                        # are re-probed below and raise RunWorkerEvictedError.
+                        # Uses the lenient variant (passes only in N=0/unit-test mode).
                         claim_verb_fence_clause(worker_id=lease_owner, run_id=run_id),
                     )
                 )
@@ -1176,9 +1150,9 @@ class TokenSchedulerRepository:
             )
             if result.rowcount == 0:
                 # Distinguish "row raced away" from "membership fence failed".
-                # Same absent-vs-evicted logic as _claim_ready_row: only raise
-                # when the worker EXISTS but is non-active (the registered-then-
-                # evicted case that matches the multi-worker eviction protocol).
+                # Same absent-vs-evicted logic as _claim_ready_row: absent
+                # unregistered claimants return None with zero mutation, while
+                # registered-then-evicted claimants raise the multi-worker signal.
                 still_pending = conn.execute(
                     select(token_work_items_table.c.work_item_id)
                     .where(token_work_items_table.c.work_item_id == row["work_item_id"])

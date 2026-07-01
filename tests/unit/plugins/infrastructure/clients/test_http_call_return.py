@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 
+from elspeth.contracts import CallStatus
 from elspeth.contracts.audit import Call
 from elspeth.core.security.web import SSRFSafeRequest
 from elspeth.plugins.infrastructure.clients.http import AuditedHTTPClient
@@ -96,7 +97,6 @@ class TestGetSsrfSafeCallReturn:
         """_record_and_emit() returns a Call object."""
         client, _mock_recorder = self._make_client_with_mock_recorder()
 
-        from elspeth.contracts import CallStatus
         from elspeth.contracts.call_data import HTTPCallRequest
 
         request_dto = HTTPCallRequest(
@@ -119,3 +119,59 @@ class TestGetSsrfSafeCallReturn:
 
         assert isinstance(result, Call)
         assert result.request_ref == "test-request-ref-hash"
+
+    def test_nonstandard_three_digit_status_is_recorded(self):
+        """Remote 6xx/9xx statuses must not crash before audit recording."""
+        client, mock_recorder = self._make_client_with_mock_recorder()
+        response = httpx.Response(
+            999,
+            headers={"content-type": "text/plain"},
+            text="nonstandard",
+            request=httpx.Request("GET", "https://example.com/nonstandard"),
+        )
+        client._client.get = MagicMock(return_value=response)
+
+        result = client.get("https://example.com/nonstandard")
+
+        assert result is response
+        mock_recorder.record_call.assert_called_once()
+        record_kwargs = mock_recorder.record_call.call_args.kwargs
+        assert record_kwargs["status"] is CallStatus.ERROR
+        assert record_kwargs["response_data"].status_code == 999
+        assert record_kwargs["error"].status_code == 999
+
+    def test_ssrf_safe_nonstandard_three_digit_status_is_recorded(self):
+        """SSRF-safe requests also preserve non-standard three-digit statuses in audit."""
+        client, mock_recorder = self._make_client_with_mock_recorder()
+        response = httpx.Response(
+            999,
+            headers={"content-type": "text/plain"},
+            text="nonstandard",
+            request=httpx.Request("GET", "http://93.184.216.34/"),
+        )
+        safe_request = SSRFSafeRequest(
+            original_url="http://example.com/",
+            resolved_ip="93.184.216.34",
+            host_header="example.com",
+            port=80,
+            path="/",
+            scheme="http",
+            bare_hostname="example.com",
+        )
+
+        with patch("httpx.Client") as mock_client_class:
+            mock_http_instance = MagicMock()
+            mock_http_instance.__enter__ = MagicMock(return_value=mock_http_instance)
+            mock_http_instance.__exit__ = MagicMock(return_value=False)
+            mock_http_instance.get.return_value = response
+            mock_client_class.return_value = mock_http_instance
+
+            result, _final_url, call = client.get_ssrf_safe(safe_request)
+
+        assert result is response
+        assert isinstance(call, Call)
+        mock_recorder.record_call.assert_called_once()
+        record_kwargs = mock_recorder.record_call.call_args.kwargs
+        assert record_kwargs["status"] is CallStatus.ERROR
+        assert record_kwargs["response_data"].status_code == 999
+        assert record_kwargs["error"].status_code == 999

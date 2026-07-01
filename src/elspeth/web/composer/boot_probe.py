@@ -31,7 +31,7 @@ async def probe_composer_config(*, model: str, temperature: float | None, seed: 
 
     kwargs: dict[str, object] = {
         "model": model,
-        "messages": [{"role": "user", "content": "ping"}],
+        "messages": [{"role": "user", "content": "This is a composer boot-time configuration smoke test. Please reply with ok."}],
         # The probe only needs the request ACCEPTED (to validate temperature/seed);
         # the output is discarded. Some providers (Azure-backed OpenAI via
         # OpenRouter) reject max_output_tokens below 16, so use that floor rather

@@ -141,6 +141,64 @@ class TestBaselineRedSignals:
         )
         assert result["verdict"] == "RED"
 
+    def test_red_when_relaxed_validity_lacks_allowed_invalid_evidence(self) -> None:
+        """must_be_valid=false is not a blanket pass for invalid non-empty states."""
+        result = score(
+            scenario=_scenario(red={"must_be_valid": False}, green={"must_be_valid": False}),
+            messages=[_msg("assistant", "Pipeline ready.")],
+            state=_state_valid(is_valid=False),
+        )
+
+        assert result["verdict"] == "RED"
+        assert any("is_valid=false" in r and "allowed" in r for r in result["red_reasons"])
+
+    def test_green_when_relaxed_validity_has_only_allowed_error_codes(self) -> None:
+        result = score(
+            scenario=_scenario(
+                red={
+                    "must_be_valid": False,
+                    "allow_is_valid_false_when_error_codes": ["interpretation_review_pending"],
+                },
+                green={"must_be_valid": False},
+            ),
+            messages=[_msg("assistant", "Reviews are surfaced for operator resolution.")],
+            state=_state_valid(
+                is_valid=False,
+                validation_errors=[
+                    {
+                        "error_code": "interpretation_review_pending",
+                        "message": "LLM model choice review is pending",
+                    }
+                ],
+            ),
+        )
+
+        assert result["verdict"] == "GREEN", result["red_reasons"]
+
+    def test_red_when_relaxed_validity_has_disallowed_error_code(self) -> None:
+        result = score(
+            scenario=_scenario(
+                red={
+                    "must_be_valid": False,
+                    "allow_is_valid_false_when_error_codes": ["interpretation_review_pending"],
+                },
+                green={"must_be_valid": False},
+            ),
+            messages=[_msg("assistant", "Pipeline ready.")],
+            state=_state_valid(
+                is_valid=False,
+                validation_errors=[
+                    {
+                        "error_code": "invalid_output_path",
+                        "message": "output path is invalid",
+                    }
+                ],
+            ),
+        )
+
+        assert result["verdict"] == "RED"
+        assert any("invalid_output_path" in r for r in result["red_reasons"])
+
 
 class TestBaselineAmberSignals:
     def test_amber_on_missing_node_kinds(self) -> None:
@@ -170,6 +228,31 @@ class TestBaselineAmberSignals:
             scenario=scenario,
             messages=[_msg("assistant", "ok")],
             state=_state_valid(nodes=[]),
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    @pytest.mark.parametrize(
+        ("expected_token", "observed_plugin"),
+        [
+            ("rag", "rag_retrieval"),
+            ("rag", "chroma"),
+            ("batch", "batch_stats"),
+            ("batch", "stats"),
+            ("content_safety", "azure_content_safety"),
+            ("content_safety", "moderation"),
+            ("json", "jsonl"),
+        ],
+    )
+    def test_node_kind_group_matches_generated_shape_tokens(self, expected_token: str, observed_plugin: str) -> None:
+        scenario = _scenario(green={"must_have_node_kinds_substring_any_of": [[expected_token]]})
+        result = score(
+            scenario=scenario,
+            messages=[_msg("assistant", "ok")],
+            state=_state_valid(
+                nodes=[{"id": "n0", "node_type": "transform", "plugin": observed_plugin}],
+                outputs=[{"name": "out", "plugin": "csv"}],
+            ),
         )
 
         assert result["verdict"] == "GREEN", result["amber_reasons"]
@@ -277,6 +360,24 @@ class TestNodeChainInOrder:
 
         result = score(
             scenario=_scenario(green={"must_have_node_chain_in_order": ["csv", "t1", "t2", "jsonl"]}),
+            messages=[_msg("assistant", "ok")],
+            state=state,
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
+
+    def test_chain_matches_generated_shape_tokens(self) -> None:
+        state = _state_valid(
+            source={"plugin": "csv", "options": {"schema": {"mode": "observed"}}},
+            nodes=[
+                {"id": "n0", "node_type": "transform", "plugin": "rag_retrieval"},
+                {"id": "n1", "node_type": "transform", "plugin": "azure_content_safety"},
+            ],
+            outputs=[{"name": "out", "plugin": "jsonl"}],
+        )
+
+        result = score(
+            scenario=_scenario(green={"must_have_node_chain_in_order": ["csv", "rag", "content_safety", "json"]}),
             messages=[_msg("assistant", "ok")],
             state=state,
         )
@@ -669,6 +770,16 @@ class TestOutputPluginAsserters:
         )
         assert result["verdict"] == "AMBER"
         assert any("output plugins" in r and "csv" in r and "json" in r for r in result["amber_reasons"])
+
+    def test_green_when_required_output_plugin_is_generated_shape_token(self) -> None:
+        state = _state_valid(outputs=[{"name": "out", "plugin": "jsonl", "options": {}}])
+        result = score(
+            scenario=_scenario(green={"must_have_output_plugins": ["json"]}),
+            messages=[_msg("assistant", "done")],
+            state=state,
+        )
+
+        assert result["verdict"] == "GREEN", result["amber_reasons"]
 
 
 # --------------------------------------------------------------------------

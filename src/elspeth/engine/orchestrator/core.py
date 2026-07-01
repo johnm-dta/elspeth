@@ -261,8 +261,9 @@ def prepare_for_run() -> None:
             "If per-name sites drift: the contract's "
             "@implements_dispatch_site(...) markers disagree with "
             "EXPECTED_CONTRACT_SITES. Either fix the markers or update the "
-            "manifest (and run scripts/cicd/enforce_contract_manifest.py to "
-            "confirm MC3a/b/c are clean).\n"
+            "manifest (and run `elspeth-lints check --rules "
+            "manifest.contract_manifest --root src/elspeth` to confirm "
+            "MC3a/b/c are clean).\n"
             "\n"
             "A silent runtime VAL disable is exactly the failure mode ADR-010 "
             "was designed to prevent — extended to per-site coverage under "
@@ -1093,14 +1094,18 @@ class Orchestrator:
             coordination_token=coordination_token,
         )
         preflight_retry_manager = RetryManager(RuntimeRetryConfig.from_settings(settings.retry)) if settings is not None else None
-        run_transform_runtime_preflights(
-            factory,
-            run_id,
-            config,
-            run_ctx.ctx,
-            retry_manager=preflight_retry_manager,
-            shutdown_event=shutdown_event,
-        )
+        try:
+            run_transform_runtime_preflights(
+                factory,
+                run_id,
+                config,
+                run_ctx.ctx,
+                retry_manager=preflight_retry_manager,
+                shutdown_event=shutdown_event,
+            )
+        except BaseException:
+            cleanup_plugins(config, run_ctx.ctx, include_source=True)
+            raise
 
         loop_ctx = LoopContext(
             counters=ExecutionCounters(),

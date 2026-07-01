@@ -342,7 +342,7 @@ class RecorderFactory:
             payload_store=payload_store,
         )
         # The scheduler repository is a pure write surface (its constructor
-        # runs a Tier-1 WAL probe that writer engines must satisfy).  On a
+        # runs a SQLite Tier-1 PRAGMA probe when applicable).  On a
         # read-only handle — MCP analyzer, web read surfaces, immutable
         # snapshot opens whose journal_mode legitimately reads ``delete`` —
         # there is nothing it could ever do, so skip construction entirely
@@ -350,7 +350,8 @@ class RecorderFactory:
         self._scheduler: TokenSchedulerRepository | None = None if db.is_read_only else TokenSchedulerRepository(db.engine)
         # Same posture for the coordination substrate (epoch 21, ADR-030): a
         # pure write/arbitration surface whose constructor runs the same
-        # Tier-1 PRAGMA probe — nothing it could do on a read-only handle.
+        # SQLite Tier-1 PRAGMA probe when applicable — nothing it could do on
+        # a read-only handle.
         self._run_coordination: RunCoordinationRepository | None = None if db.is_read_only else RunCoordinationRepository(db.engine)
 
     @property

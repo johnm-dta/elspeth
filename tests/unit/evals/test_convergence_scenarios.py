@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from evals.lib.composer_rgr_score import score
@@ -24,6 +24,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SUITE = _REPO_ROOT / "evals" / "composer-rgr" / "scenarios" / "convergence-suite"
 _GOV_PAGES_RATE_COOL = _REPO_ROOT / "evals" / "composer-rgr" / "scenarios" / "gov-pages-rate-cool" / "scenario.json"
 
+pytestmark = pytest.mark.skipif(
+    not _SUITE.exists(),
+    reason="composer-rgr scenario corpus is intentionally untracked; populate evals/composer-rgr locally to run these tests",
+)
+
 _KNOWN_RED_KEYS = {
     "passivity_phrases",
     "passivity_phrases_note",
@@ -31,6 +36,8 @@ _KNOWN_RED_KEYS = {
     "build_failure_note",
     "must_be_valid",
     "must_be_valid_note",
+    "allow_is_valid_false_when_error_codes",
+    "allow_is_valid_false_when_error_codes_note",
 }
 
 _KNOWN_GREEN_KEYS = {
@@ -56,7 +63,7 @@ def _scenario_paths() -> list[Path]:
 
 
 def _load(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text())
+    return cast(dict[str, Any], json.loads(path.read_text()))
 
 
 def _gov_pages_messages_with_tool_calls(count: int) -> list[dict[str, Any]]:

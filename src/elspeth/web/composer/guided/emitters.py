@@ -12,9 +12,10 @@ Exported:
     build_step_2_single_select_turn — single_select for sink plugin selection.
     build_step_2_schema_form_turn — schema_form for a chosen sink plugin.
     build_step_2_multi_select_turn — multi_select_with_custom for required fields.
-    build_step_2_5_recipe_offer_turn — recipe_offer from a RecipeMatch.
     build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
     build_step_3_schema_form_turn — schema_form for editing one proposed transform.
+    build_step_4_wire_turn — confirm_wiring turn with topology + validation two-read merge.
+    rebuild_wire_turn_after_reconciliation — resurface and rebuild the wire turn after reconciliation.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
 data constructed from system-owned state; the Turn dict itself is not persisted
@@ -23,11 +24,14 @@ data constructed from system-owned state; the Turn dict itself is not persisted
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
-from elspeth.web.catalog.knob_schema import KnobSchema, lower_slot_specs_to_knob_schema
+from elspeth.web.catalog.knob_schema import KnobSchema
+from elspeth.web.composer._producer_resolver import source_producer_id
+from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import (
+    BLOB_REF_PATH_PREFIX,
     GuidedStep,
     InspectAndConfirmPayload,
     MultiSelectWithCustomPayload,
@@ -36,13 +40,16 @@ from elspeth.web.composer.guided.protocol import (
     SingleSelectPayload,
     Turn,
     TurnType,
+    WireStageData,
+    WireTopology,
     _Observed,
     _Option,
 )
+from elspeth.web.composer.tools._common import _semantic_contracts_payload, _serialize_full_pipeline_state
 
 if TYPE_CHECKING:
     from elspeth.web.catalog.protocol import CatalogService as CatalogServiceProtocol
-    from elspeth.web.composer.guided.recipe_match import RecipeMatch
+    from elspeth.web.composer.guided.resolved import SinkResolved, SourceResolved
     from elspeth.web.composer.guided.state_machine import ChainProposal, SourceIntent
     from elspeth.web.composer.source_inspection import SourceInspectionFacts
     from elspeth.web.composer.state import CompositionState
@@ -232,6 +239,83 @@ def build_step_2_schema_form_turn(
     )
 
 
+def build_step_1_schema_form_turn_from_resolved(
+    source: SourceResolved,
+    catalog: CatalogServiceProtocol,
+) -> Turn:
+    """Build the STEP_1 ``schema_form`` populated from an APPLIED source.
+
+    Unlike :func:`build_step_1_schema_form_turn` (which seeds an empty
+    ``prefilled``), this renders the committed ``source.options`` so the
+    editable form shows what the LLM (or the manual path) built. Used by the
+    chat-apply in-place re-render and by GET /guided when ``step_1_result`` is
+    set on a STEP_1 session.
+    """
+    from elspeth.contracts.freeze import deep_thaw
+
+    schema_info = catalog.get_schema("source", source.plugin)
+    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(deep_thaw(source.options))}
+    # Mask a blob-backed source's absolute storage_path behind a stable
+    # ``blob:<ref>`` sentinel so the deploy dir + OS username never reach the wire
+    # (the un-gated egress that bypasses the blobs/schemas.py "storage_path is
+    # never exposed" doctrine). handle_step_1_source re-resolves the sentinel to
+    # the real path on commit. Gated on blob_ref so an operator-typed path knob is
+    # left untouched.
+    blob_ref = source.options.get("blob_ref")
+    if blob_ref is not None and isinstance(prefilled.get("path"), str):
+        prefilled["path"] = f"{BLOB_REF_PATH_PREFIX}{blob_ref}"
+    # on_validation_failure is a required-no-default source-node knob, so the
+    # schema_form's Continue stays disabled until it has a value. Seed it from the
+    # resolved node field (assigned AFTER the options spread so the authoritative
+    # node value wins over any stray same-named key in options).
+    prefilled["on_validation_failure"] = source.on_validation_failure
+    payload: SchemaFormPayload = {
+        "mode": "plugin_options",
+        "plugin": source.plugin,
+        "knobs": cast(KnobSchema, schema_info.knob_schema),
+        "prefilled": prefilled,
+    }
+    return Turn(
+        type=TurnType.SCHEMA_FORM.value,
+        step_index=_step_index(GuidedStep.STEP_1_SOURCE),
+        payload=payload,
+    )
+
+
+def build_step_2_schema_form_turn_from_resolved(
+    sink: SinkResolved,
+    catalog: CatalogServiceProtocol,
+) -> Turn:
+    """Build the STEP_2 ``schema_form`` populated from an APPLIED sink.
+
+    Renders the first output's committed ``options`` (MVP single-output
+    constraint, matching ``handle_step_2_sink``'s ``sink_name="main"`` loop).
+    Used by the chat-apply in-place re-render and by GET /guided when
+    ``step_2_result`` is set on a STEP_2 session.
+    """
+    from elspeth.contracts.freeze import deep_thaw
+
+    if not sink.outputs:
+        raise InvariantError("build_step_2_schema_form_turn_from_resolved: sink has no outputs")
+    output = sink.outputs[0]
+    schema_info = catalog.get_schema("sink", output.plugin)
+    # deep_thaw: a rehydrated SinkResolved (GET /guided after apply) carries
+    # deep-frozen ``mappingproxy`` options whose NESTED maps (e.g. ``schema``)
+    # Pydantic rejects on serialisation. Mirror the step_1 builder's thaw.
+    prefilled: dict[str, Any] = {"schema": {"mode": "observed"}, **dict(deep_thaw(output.options))}
+    payload: SchemaFormPayload = {
+        "mode": "plugin_options",
+        "plugin": output.plugin,
+        "knobs": cast(KnobSchema, schema_info.knob_schema),
+        "prefilled": prefilled,
+    }
+    return Turn(
+        type=TurnType.SCHEMA_FORM.value,
+        step_index=_step_index(GuidedStep.STEP_2_SINK),
+        payload=payload,
+    )
+
+
 def build_step_2_multi_select_turn(
     observed_columns: Sequence[str],
 ) -> Turn:
@@ -259,46 +343,6 @@ def build_step_2_multi_select_turn(
     return Turn(
         type=TurnType.MULTI_SELECT_WITH_CUSTOM.value,
         step_index=_step_index(GuidedStep.STEP_2_SINK),
-        payload=payload,
-    )
-
-
-def build_step_2_5_recipe_offer_turn(
-    match: RecipeMatch,
-) -> Turn:
-    """Build a ``recipe_offer`` Turn with a schema-form recipe decision payload.
-
-    ``TurnType.RECIPE_OFFER`` is retained for guided state-machine routing,
-    while ``payload.mode == "recipe_decision"`` routes the shared one-knob
-    renderer on the frontend.
-
-    Args:
-        match: The matched recipe with its partial slot map.
-
-    Returns:
-        A ``Turn`` TypedDict ready for serialisation and hash.
-    """
-    from elspeth.contracts.freeze import deep_thaw
-    from elspeth.web.composer.guided.errors import InvariantError
-    from elspeth.web.composer.recipes import get_recipe
-
-    recipe = get_recipe(match.recipe_name)
-    if recipe is None:
-        raise InvariantError(f"Recipe {match.recipe_name!r} disappeared from registry")
-
-    payload: SchemaFormPayload = {
-        "mode": "recipe_decision",
-        "knobs": lower_slot_specs_to_knob_schema(match.unsatisfied_slots),
-        "prefilled": dict(deep_thaw(match.slots)),
-        "recipe_context": {
-            "recipe_name": match.recipe_name,
-            "description": recipe.description,
-            "alternatives": ["build_manually"],
-        },
-    }
-    return Turn(
-        type=TurnType.RECIPE_OFFER.value,
-        step_index=_step_index(GuidedStep.STEP_2_5_RECIPE_MATCH),
         payload=payload,
     )
 
@@ -370,6 +414,91 @@ def build_step_3_schema_form_turn(
     )
 
 
+def build_step_4_wire_turn(
+    state: CompositionState,
+    *,
+    catalog: CatalogServiceProtocol | None = None,
+    advisor_findings: str | None = None,
+    signoff_outcome: str | None = None,
+    passes_remaining: int | None = None,
+) -> Turn:
+    """Build a ``confirm_wiring`` Turn from topology and validation reads.
+
+    ``passes_remaining`` is the advisor sign-off budget left AFTER the pass that
+    produced this turn. The emitter stays dumb — it folds the caller-computed
+    value only when not None (the re-emit sites supply it; the initial turn does
+    not, so its absence is what keeps the advisor-off tutorial cost-copy-free).
+    """
+    del catalog  # Reserved for future catalog-backed presentation enrichment.
+    validation = state.validate()
+    payload: WireStageData = {
+        "topology": _build_wire_topology(state),
+        "edge_contracts": [ec.to_dict() for ec in validation.edge_contracts],
+        "semantic_contracts": _semantic_contracts_payload(validation.semantic_contracts),
+        "warnings": [w.to_dict() for w in validation.warnings],
+    }
+    if advisor_findings is not None:
+        payload["advisor_findings"] = advisor_findings
+    if signoff_outcome is not None:
+        payload["signoff_outcome"] = signoff_outcome
+    if passes_remaining is not None:
+        payload["passes_remaining"] = passes_remaining
+    return Turn(
+        type=TurnType.CONFIRM_WIRING.value,
+        step_index=_step_index(GuidedStep.STEP_4_WIRE),
+        payload=payload,
+    )
+
+
+def rebuild_wire_turn_after_reconciliation(
+    state: CompositionState,
+    *,
+    resurface: Callable[[CompositionState], None],
+) -> tuple[Turn, bool]:
+    """Re-evaluate the wire turn after a wire-stage reconciliation (B6)."""
+    resurface(state)
+    turn = build_step_4_wire_turn(state)
+    return turn, state.validate().is_valid
+
+
+def _build_wire_topology(state: CompositionState) -> WireTopology:
+    """Build the label topology used by the wire-stage renderer."""
+    full_state = _serialize_full_pipeline_state(state, requested_component="pipeline")
+    sources = {
+        source_name: {
+            "id": source_producer_id(source_name),
+            "plugin": source["plugin"],
+            "on_success": source["on_success"],
+            "on_validation_failure": source["on_validation_failure"],
+        }
+        for source_name, source in full_state["sources"].items()
+    }
+    nodes = [
+        {
+            "id": node["id"],
+            "node_type": node["node_type"],
+            "plugin": node["plugin"],
+            "input": node["input"],
+            "on_success": node["on_success"],
+            "on_error": node["on_error"],
+            "routes": node["routes"],
+            "fork_to": node["fork_to"],
+            "branches": node["branches"],
+        }
+        for node in full_state["nodes"]
+    ]
+    outputs = [
+        {
+            "id": f"output:{output['sink_name']}",
+            "sink_name": output["sink_name"],
+            "plugin": output["plugin"],
+            "on_write_failure": output["on_write_failure"],
+        }
+        for output in full_state["outputs"]
+    ]
+    return cast(WireTopology, {"sources": sources, "nodes": nodes, "outputs": outputs})
+
+
 def _build_inspect_and_confirm_turn(
     inspection: SourceInspectionFacts,
 ) -> Turn:
@@ -394,10 +523,20 @@ def _build_inspect_and_confirm_turn(
     )
 
 
+# Degenerate sources hidden from the guided discovery picker. ``null`` yields no
+# rows — it is never a sensible pipeline INPUT to pick first-hand, and surfacing
+# it in the (especially first-run) source list is pure noise. It remains fully
+# usable via explicit YAML / freeform composition.
+_GUIDED_HIDDEN_SOURCES = frozenset({"null"})
+
+
 def _build_step_1_single_select_turn(
     catalog: CatalogServiceProtocol,
 ) -> Turn:
-    """Build a ``single_select`` Turn listing available source plugins."""
+    """Build a ``single_select`` Turn listing selectable source plugins.
+
+    Excludes the degenerate sources in ``_GUIDED_HIDDEN_SOURCES`` (see note).
+    """
     sources = catalog.list_sources()
     options: list[_Option] = [
         _Option(
@@ -406,6 +545,7 @@ def _build_step_1_single_select_turn(
             hint=plugin.description if plugin.description else None,
         )
         for plugin in sources
+        if plugin.name not in _GUIDED_HIDDEN_SOURCES
     ]
     payload: SingleSelectPayload = {
         "question": "Which data source would you like to use?",
@@ -430,5 +570,6 @@ def _step_index(step: GuidedStep) -> int:
         GuidedStep.STEP_2_SINK,
         GuidedStep.STEP_2_5_RECIPE_MATCH,
         GuidedStep.STEP_3_TRANSFORMS,
+        GuidedStep.STEP_4_WIRE,
     )
     return _ORDER.index(step)

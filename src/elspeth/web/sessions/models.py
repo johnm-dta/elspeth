@@ -40,7 +40,7 @@ from sqlalchemy.types import JSON
 # ``SESSION_SCHEMA_EPOCH`` — schema version sentinel. Bump this constant
 # whenever a table is added, removed, or otherwise altered in a way that
 # requires the operator to delete the existing session DB. The startup
-# validator (``schema._assert_schema_version``) reads ``PRAGMA user_version``
+# validator (``schema._assert_schema_sentinels``) reads ``PRAGMA user_version``
 # and crashes if it does not match, producing an actionable
 # "Delete the session DB file and restart" message rather than a cryptic
 # SQLAlchemy error the first time a new code path touches the stale DB.
@@ -114,7 +114,22 @@ from sqlalchemy.types import JSON
 #        ``post_compose`` value for successful send-message/recompose state
 #        advances. SQLite cannot ALTER a CHECK constraint in place, so
 #        pre-release policy remains delete-and-recreate for stale session DBs.
-SESSION_SCHEMA_EPOCH = 22
+#   23 → ``run_events.sequence`` added as a durable per-run replay cursor so
+#        websocket reconnects can replay in insertion order and de-duplicate
+#        live queue events already delivered by the persisted replay.
+#   24 -> no SQL-shape change; bumped in lockstep with GUIDED_SESSION_SCHEMA_VERSION
+#        5->6 (composer_meta JSON adds GuidedSession.profile +
+#        advisor_checkpoint_passes_used + advisor_signoff_escape_offered) so a
+#        stale sessions.db fail-closes at boot via _assert_schema_sentinels instead
+#        of lazy-500-ing per guided row on GuidedSession.from_dict. Pre-release
+#        delete-and-recreate policy; see docs/runbooks/staging-session-db-recreation.md.
+#   25 -> no SQL-shape change; bumped in lockstep with GUIDED_SESSION_SCHEMA_VERSION
+#        6->7 (composer_meta JSON drops the vestigial GuidedSession.profile.entry_seed
+#        key). Invalidates the WHOLE sessions DB at boot, not just guided rows: this
+#        is the eager fail-close that keeps a stale entry_seed-bearing profile blob
+#        from lazy-500-ing deep in WorkflowProfile.from_dict's closed-key-set check.
+#        Pre-release delete-and-recreate policy; see runbook above.
+SESSION_SCHEMA_EPOCH = 25
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -1418,9 +1433,11 @@ run_events_table = Table(
         nullable=False,
         index=True,
     ),
+    Column("sequence", Integer, nullable=False),
     Column("timestamp", DateTime(timezone=True), nullable=False),
     Column("event_type", String, nullable=False),
     Column("data", JSON, nullable=False),
+    UniqueConstraint("run_id", "sequence", name="uq_run_events_run_sequence"),
     CheckConstraint(
         "event_type IN ('progress', 'error', 'completed', 'cancelled', 'failed')",
         name="ck_run_events_type",

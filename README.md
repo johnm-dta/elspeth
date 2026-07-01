@@ -232,8 +232,11 @@ elspeth explain --run <run_id> --row <row_id> \
   --database examples/threshold_gate/runs/audit.db
 
 # Resume an interrupted run
-elspeth resume <run_id>
+elspeth resume <run_id> --execute
 ```
+
+Without `--execute`, `elspeth resume <run_id>` checks whether the run can be
+resumed and reports the resume point without continuing processing.
 
 See [Your First Pipeline](docs/guides/your-first-pipeline.md) for a complete walkthrough.
 
@@ -248,7 +251,7 @@ interactively:
 - create authenticated user sessions and keep versioned conversation/state
   history
 - upload or create blobs, inspect schema hints, and wire blob-backed sources
-- store user secrets and wire `$secret{name}` references without exposing raw
+- store user secrets and wire `{secret_ref: NAME}` references without exposing raw
   values to the composer
 - ask the LLM composer to build or modify a pipeline through audited tools
 - preview validation, graph, spec, YAML, semantic contracts, and repair hints
@@ -332,6 +335,16 @@ Then open `http://localhost:5173`.
 - Run audit data defaults to `data/runs/audit.db`; payloads default to
   `data/payloads/`. Override these with `ELSPETH_WEB__LANDSCAPE_URL` and
   `ELSPETH_WEB__PAYLOAD_STORE_PATH` when you need explicit deployment paths.
+- The first-run tutorial scrapes three synthetic pages at
+  `{base}/tutorial-site/project-N.html`, where `{base}` defaults to the
+  project's public GitHub Pages copy (`https://johnm-dta.github.io/elspeth`).
+  That base is operator-controlled content that needs no local hosting, so the
+  tutorial runs end-to-end on any deployment — including a pure loopback dev box
+  — without the app serving the pages itself. The tutorial's `web_scrape` node
+  uses the default `allowed_hosts="public_only"` SSRF policy, so it only fetches
+  public origins, exactly like any other web-authored pipeline. Override the
+  base with `ELSPETH_WEB__TUTORIAL_SAMPLE_BASE_URL` only if you host your own
+  copy of the pages (e.g. a fork).
 
 ---
 
@@ -585,7 +598,7 @@ elspeth validate --settings pipeline.yaml
 elspeth run --settings pipeline.yaml --execute
 
 # Resume an interrupted run (run_id is positional)
-elspeth resume abc123
+elspeth resume abc123 --execute
 
 # List available plugins
 elspeth plugins list

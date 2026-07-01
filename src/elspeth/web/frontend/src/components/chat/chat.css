@@ -567,11 +567,12 @@
   min-width: 0;
 }
 
-/* "Switch to guided" affordance in the freeform body header.  Visual weight
-   mirrors .guided-exit-button (the symmetric inverse) — quiet outline, hover
-   lift, WCAG 2.5.8 target height — so the two mode-switch controls read as
-   members of the same family. */
-.chat-panel-switch-to-guided {
+/* ModeSwitchButton — the symmetric guided<->freeform toggle in BOTH body
+   headers ("Switch to guided" / "Exit to freeform"). Quiet outline at rest with
+   a hover lift and WCAG 2.5.8 target height. The confirm primary is slightly
+   stronger (accent border) but NOT danger-styled, because switching is
+   non-destructive (the session keeps both modes' state). */
+.mode-switch-btn {
   padding: var(--space-sm) var(--space-md);
   background-color: transparent;
   color: var(--color-text-secondary);
@@ -587,15 +588,35 @@
     color 0.1s ease;
 }
 
-.chat-panel-switch-to-guided:hover {
+.mode-switch-btn:hover {
   background-color: var(--color-surface-elevated);
   border-color: var(--color-border-strong);
   color: var(--color-text);
 }
 
-.chat-panel-switch-to-guided:focus-visible {
+.mode-switch-btn:focus-visible {
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
+}
+
+/* Confirm primary (shown only when the current chat has work). */
+.mode-switch-btn--confirm {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+/* Two-step confirm container: primary + Cancel, wraps if the header is tight. */
+.mode-switch-confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-switch-btn {
+    transition: none;
+  }
 }
 
 .chat-panel-error {
@@ -1547,62 +1568,40 @@
   }
 }
 
-/* ── Freeform interpretation-review cards ────────────────────────────────
-   Inline (freeform-mode) counterpart to the guided InterpretationReviewTurn.
-   Execution is gated until these are resolved, so they read as distinct
-   action cards — an elevated surface with an amber left-accent — rather than
-   ordinary assistant prose bubbles. The chat-message / chat-message--assistant
-   classes the component carries have no CSS of their own (the chat bubbles use
-   .bubble*), so before this every element rendered as unstyled, full-width,
-   default-browser content with no card or separation between stacked reviews.
-   The flex column + gap gives uniform internal rhythm; align-self: stretch lets
-   the card use the full message column (these are tasks, not chat prose). */
-.interpretation-review-inline-message {
-  align-self: stretch;
+/* ── Acknowledgement stack (pinned top-of-chat LLM decisions) ─────────────
+   One surface for BOTH guided and freeform. Reframed from approval to
+   acknowledgement: a compact stack of decision cards on an elevated surface
+   with an amber left-accent so it reads as "clear these to proceed" rather
+   than ordinary assistant prose. Replaces the old verbose per-mode widgets. */
+.ack-stack {
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
-  margin: var(--space-sm) 0;
-  padding: var(--space-lg);
+  margin: 0 0 var(--space-sm);
+  padding: var(--space-md);
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border-strong);
   border-left: 3px solid var(--color-warning);
   border-radius: var(--radius-lg);
 }
 
-.interpretation-review-inline-message-heading {
+/* In freeform mode the stack sits above the scrolling message list; pin it so
+   pending decisions stay visible while the operator scrolls the conversation. */
+.chat-panel > .ack-stack {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.ack-stack-header {
   margin: 0;
-  font-size: var(--font-size-md);
+  font-size: var(--font-size-sm);
   font-weight: 600;
   line-height: var(--line-height-tight);
   color: var(--color-text);
 }
 
-.interpretation-review-inline-message-body {
-  margin: 0;
-  font-size: var(--font-size-sm);
-  line-height: var(--line-height-normal);
-  color: var(--color-text-secondary);
-}
-
-/* Inline emphasis (user term, model name, node id) reads as a value, not
-   italic prose. */
-.interpretation-review-inline-message-body em,
-.interpretation-review-inline-message-user-term,
-.interpretation-review-inline-message-llm-draft {
-  font-style: normal;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.interpretation-review-inline-message-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-sm);
-  margin-top: var(--space-2xs);
-}
-
-.interpretation-review-inline-message-error {
+.ack-stack-error {
   display: flex;
   flex-direction: column;
   gap: var(--space-2xs);
@@ -1614,69 +1613,191 @@
   font-size: var(--font-size-sm);
 }
 
-.interpretation-review-inline-message-error-heading {
+.ack-stack-error-heading {
   color: var(--color-error);
 }
 
-/* "Change it: I meant…" amend form */
-.interpretation-review-inline-message-amend {
+/* Foot-of-stack session opt-out: a single de-emphasised, divided control. */
+.ack-stack-opt-out {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin-top: var(--space-2xs);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--color-border);
+}
+
+.ack-stack-opt-out-link {
+  align-self: flex-start;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.ack-stack-opt-out-link:hover:not(:disabled) {
+  color: var(--color-text);
+}
+
+.ack-stack-opt-out-link:disabled {
+  cursor: not-allowed;
+  color: var(--color-text-muted);
+}
+
+/* ── Acknowledgement card (one decision) ─────────────────────────────────── */
+.ack-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* Title row: humanised step label · kind. De-emphasised; secondary (not muted)
+   clears AA on the surface. */
+.ack-card-title {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  line-height: var(--line-height-tight);
+  color: var(--color-text-secondary);
+}
+
+.ack-card-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.ack-card-line {
+  flex: 1 1 16rem;
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  color: var(--color-text);
+}
+
+/* Inline value emphasis (user term, draft) reads as a value, not italic prose. */
+.ack-card-line em,
+.ack-card-user-term,
+.ack-card-llm-draft {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.ack-card-model {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.95em;
+}
+
+.ack-card-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.ack-card-value {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-xs);
+}
+
+.ack-card-view-toggle {
+  align-self: flex-start;
+  padding: var(--space-2xs) var(--space-sm);
+  background: none;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.ack-card-view-toggle:hover {
+  color: var(--color-text);
+}
+
+.ack-card-prompt-template {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-sm);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.ack-card-prompt-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  color: var(--color-text);
+}
+
+.ack-card-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-sm);
+  background-color: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+}
+
+.ack-card-error-heading {
+  color: var(--color-error);
+}
+
+.ack-card-amend {
   display: flex;
   flex-direction: column;
   gap: var(--space-sm);
 }
 
-.interpretation-review-inline-message-amend-label {
+.ack-card-amend-label {
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
 
-.interpretation-review-inline-message-amend-input {
+.ack-card-amend-input {
   width: 100%;
   box-sizing: border-box;
   padding: var(--space-sm);
   font-family: inherit;
   font-size: var(--font-size-sm);
   color: var(--color-text);
-  background-color: var(--color-surface);
-  border: 1px solid var(--color-border-strong);
+  background-color: var(--color-surface-input);
+  border: 1px solid var(--color-input-border);
   border-radius: var(--radius-md);
   resize: vertical;
 }
 
-.interpretation-review-inline-message-amend-actions {
+.ack-card-amend-actions {
   display: flex;
   gap: var(--space-sm);
 }
 
-.interpretation-review-inline-message-amend-cap-warning {
+.ack-card-amend-cap-warning {
   margin: 0;
   font-size: var(--font-size-xs);
   color: var(--color-warning);
 }
 
-/* Session opt-out: de-emphasised and divided from the card body so it no
-   longer butts straight against the next card's heading. */
-.interpretation-review-inline-message-opt-out {
-  margin-top: var(--space-2xs);
-  padding-top: var(--space-sm);
-  border-top: 1px solid var(--color-border);
-}
-
-.interpretation-review-inline-message-opt-out-link {
-  padding: 0;
-  background: none;
-  border: none;
-  font-size: var(--font-size-xs);
-  color: var(--color-text-muted);
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.interpretation-review-inline-message-opt-out-link:hover:not(:disabled) {
-  color: var(--color-text-secondary);
-}
-
-.interpretation-review-inline-message-spinner {
+.ack-card-spinner {
   display: inline-block;
   width: 0.8em;
   height: 0.8em;
@@ -1691,8 +1812,54 @@
 /* Mirror the per-selector reduced-motion guards in animations.css — the
    global guard there is not a universal `*` reset. */
 @media (prefers-reduced-motion: reduce) {
-  .interpretation-review-inline-message-spinner {
+  .ack-card-spinner {
     animation: none;
     opacity: 0.6;
   }
+}
+
+/* Shared CodeBlock outside .markdown-body (e.g. invented-source JSON in a
+   card). Mirrors the markdown code-block chrome so highlighted/plain values
+   read as code, not prose. */
+.ack-card .code-block-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.ack-card .code-block {
+  margin: 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  background-color: var(--color-surface-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  line-height: 1.4;
+}
+
+.ack-card .code-block--plain {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+}
+
+.ack-card .code-block-copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--font-size-xs);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.ack-card .code-block-wrapper:hover .code-block-copy,
+.ack-card .code-block-copy:focus-visible {
+  opacity: 1;
 }

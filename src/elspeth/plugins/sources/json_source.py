@@ -27,6 +27,7 @@ from elspeth.plugins.infrastructure.schema_factory import create_schema_from_con
 from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
     FieldResolution,
+    extend_field_resolution,
     normalize_field_name,
     resolve_field_names,
 )
@@ -148,7 +149,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:364fafb748508257"
+    source_file_hash: str | None = "sha256:5469477a178de521"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -462,7 +463,7 @@ class JSONSource(BaseSource):
         # normalization would break downstream template references.
         mapping = self._field_resolution.resolution_mapping
         normalized: dict[str, Any] = {}
-        has_unmapped_fields = False
+        new_raw_keys: list[str] = []
         for key, value in row_items:
             if key in mapping:
                 normalized[mapping[key]] = value
@@ -475,22 +476,17 @@ class JSONSource(BaseSource):
                 nk = normalize_field_name(key)
                 final_name = self._field_mapping[nk] if self._field_mapping and nk in self._field_mapping else nk
                 normalized[final_name] = value
-                has_unmapped_fields = True
+                new_raw_keys.append(key)
 
-        # If this row had fields not in the initial mapping, rebuild field
-        # resolution from the UNION of all previously-seen keys and this row's
-        # new keys. Using only list(row.keys()) would REPLACE the mapping with
-        # just the current row's fields, discarding keys from earlier rows and
-        # corrupting the Landscape field-resolution audit record (B4.3).
-        # dict.fromkeys preserves first-seen order while deduplicating.
-        if has_unmapped_fields:
+        # If this row had fields not in the initial mapping, extend the cached
+        # resolution with just those new raw keys. This preserves B4.3 union
+        # semantics without re-normalizing every previously seen sparse key.
+        if new_raw_keys:
             assert self._field_resolution is not None  # set on first row above
-            union_keys = list(dict.fromkeys([*self._field_resolution.resolution_mapping.keys(), *row.keys()]))
-            self._field_resolution = resolve_field_names(
-                raw_headers=union_keys,
+            self._field_resolution = extend_field_resolution(
+                self._field_resolution,
+                raw_headers=new_raw_keys,
                 field_mapping=self._field_mapping,
-                columns=None,
-                require_all_mapping_keys=False,  # sparse JSON records may omit optional mapped keys
             )
 
         return normalized

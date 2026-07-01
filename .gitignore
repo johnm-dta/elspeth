@@ -38,6 +38,17 @@ notes/
 # scratch/ (no dot) is a duplicate of .scratch/ — never track; use .scratch/.
 scratch/
 
+# pytest-benchmark output dir — never tracked (recreated on demand).
+/.benchmarks/
+
+# evals/ — internal eval corpus + harness kept locally, not shipped (2026-06-28).
+# The eval *library* is a test dependency (tests/unit/evals import evals.lib.*),
+# so evals/__init__.py and evals/lib/ stay tracked; the dated run records and
+# harnesses do not.
+/evals/*
+!/evals/__init__.py
+!/evals/lib/
+
 # Generated bug analysis docs (can be regenerated)
 docs/bugs/generated/
 
@@ -244,9 +255,14 @@ landscape.db-wal
 # Antigravity / Gemini AI-IDE local project state (was leaking a machine-specific
 # symlink into ~/.gemini; untracked + deleted from disk 2026-06-07).
 .antigravitycli/
-# .claude/ — Claude Code local project config + agent skills. Untracked
-# 2026-06-07; .agents/ is the canonical tracked skills home. Kept on disk.
+# Agent skill/config dirs — kept on disk, never tracked going forward.
+# .claude/ (Claude Code) and .agents/ (Codex) both hold local project config
+# + agent skills. .claude/ untracked 2026-06-07. .agents/ was the canonical
+# *tracked* skills home until 2026-06-28, when it too was untracked
+# (git rm --cached; history retained, files left on disk) so that neither
+# agent dir is committed from here on.
 .claude/
+.agents/
 
 
 
@@ -291,18 +307,36 @@ config/cicd/**/.*.lock
 # Release PDF pipeline source is intentionally tracked; generated
 # outputs and bulky font source trees are not.
 docs/release/*
-!docs/release/pdf/output/
-
+!docs/release/pdf/
+!docs/release/pdf/*.typ
+!docs/release/pdf/Makefile
+!docs/release/pdf/README.md
+!docs/release/pdf/build.sh
+!docs/release/pdf/versions.lock
+!docs/release/pdf/fonts/
+!docs/release/pdf/fonts/public-sans/
+docs/release/pdf/fonts/public-sans/*
+!docs/release/pdf/fonts/public-sans/LICENSE.md
+!docs/release/pdf/fonts/public-sans/OFL.txt
+!docs/release/pdf/fonts/public-sans/fonts/
+docs/release/pdf/fonts/public-sans/fonts/*
+!docs/release/pdf/fonts/public-sans/fonts/ttf/
+!docs/release/pdf/fonts/public-sans/fonts/ttf/**
+docs/release/pdf/out/
+docs/release/pdf/out/**
+docs/release/pdf/output/
+docs/release/pdf/output/**
+docs-archive/
+!docs-archive/
+docs-archive/*
+!docs-archive/2026-05-19-docs-cleanout/
+docs-archive/2026-05-19-docs-cleanout/*
+!docs-archive/2026-05-19-docs-cleanout/MANIFEST.md
 
 ## Internal tooling
 # Filigree issue tracker
 .filigree/
 .mcp.json
-
-# Clarion
-clarion
-clarion.yaml
-.clarion
 docs/audit/triage/
 notes/resign/*
 
@@ -321,3 +355,20 @@ wardline.yaml
 
 # Filigree issue tracker
 .weft/
+
+# Legis — local working dir / config (regenerated/local; never commit)
+.weft/legis/
+/.weft/legis/operator_session.json
+/.weft/legis/operator.age
+
+# Codex CLI drops a routine ./error.log in its working dir; never commit it
+error.log
+.wardline
+
+# Codex panel review writes model-authored raw findings here; never commit them
+/docs/quality-audit/findings-panel-raw/
+# Wardline scan artifacts
+findings.jsonl
+
+# Local debugging screenshots — not part of the repo
+/images/

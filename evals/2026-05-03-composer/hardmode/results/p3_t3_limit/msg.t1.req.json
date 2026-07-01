@@ -1,3 +1,0 @@
-{
-  "content": "Different ask. We get about 50 new contact form submissions a day, sometimes bursty. Instead of doing daily batch CSV exports out of HubSpot, set this up to fire whenever a new row hits — auto-trigger on form submission. Webhook from HubSpot calls into the system, system does the LLM scoring and routing, fires another webhook back to HubSpot to update the contact's lead-score field. Live event flow, no manual export step. That's how we do everything else.\n"
-}

@@ -2650,8 +2650,8 @@ class TestComposerRuntimeRunStatusAgreement:
 # ── Shape 6 — SecretInventoryItem biconditional agreement ────────────────────
 # Closes elspeth-0d31c22d26 / Phase 2.3 (commit 22e3e0d9).  Per-mode coverage
 # (fingerprint_resolver_not_configured, env_var_not_set,
-# value_decryption_failed) lives in tests/unit/web/secrets/{server,user}_store.py
-# and tests/unit/web/secrets/test_routes.py.  Per the Phase 2.3 closure
+# value_decryption_failed) lives in tests/unit/web/secrets/ and the contract
+# tests below.  Per the Phase 2.3 closure
 # rationale ("agreement-suite scope ... does not need duplication") this suite
 # DOES NOT duplicate the per-mode tests.  The single contract-layer assertion
 # below pins the structural invariant (``available ⟺ reason is None``) so a
@@ -3209,7 +3209,14 @@ sinks:
         session_service.update_run_status = AsyncMock()
         # ``_persist_and_broadcast_run_event`` awaits append_run_event to durably
         # record + broadcast each lifecycle event (multi-worker run coordination).
-        session_service.append_run_event = AsyncMock()
+        next_event_sequence = 0
+
+        async def append_run_event(**_kwargs: Any) -> SimpleNamespace:
+            nonlocal next_event_sequence
+            next_event_sequence += 1
+            return SimpleNamespace(sequence=next_event_sequence)
+
+        session_service.append_run_event = AsyncMock(side_effect=append_run_event)
         # ``_run_pipeline`` resolves the run's owning session (get_run().session_id)
         # to scope inline-blob access before any metadata enforcement
         # (IDOR contract, elspeth-195ecb1d58). Tests below set their owned

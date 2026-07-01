@@ -10,15 +10,23 @@ validation; tests for that surface live in test_step_tool_scope.py.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from elspeth.web.composer.guided import chat_solver
-from elspeth.web.composer.guided.chat_solver import Step1SourceChatResolution, solve_step_chat
+from elspeth.web.composer.guided.chat_solver import (
+    Step1SourceChatResolution,
+    _build_step_1_source_dynamic_block,
+    _build_step_2_sink_tool_prompt,
+    _parse_step_1_source_tool_arguments,
+    solve_step_chat,
+)
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import GuidedStep
+from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved, SourceResolved
 
 
 @dataclass
@@ -51,6 +59,7 @@ def test_step_1_source_chat_resolution_deep_freezes_container_fields() -> None:
         options={"schema": {"fields": ["name"]}},
         observed_columns=("name",),
         sample_rows=({"name": "alice"},),
+        on_validation_failure="discard",
     )
 
     with pytest.raises(TypeError):
@@ -142,3 +151,108 @@ async def test_whitespace_only_response_raises(monkeypatch: pytest.MonkeyPatch) 
             temperature=None,
             seed=None,
         )
+
+
+def _source_tool_args(**overrides: Any) -> str:
+    """A valid resolve_source argument blob (json-encoded), overridable per test."""
+    args: dict[str, Any] = {
+        "resolution": "source",
+        "plugin": "json",
+        "filename": "rows.json",
+        "mime_type": "application/json",
+        "content": '[{"url": "https://example.test/a"}]',
+        "options": {"schema": {"mode": "observed"}},
+        "observed_columns": ["url"],
+        "sample_rows": [{"url": "https://example.test/a"}],
+        "assistant_message": "Created the source.",
+    }
+    args.update(overrides)
+    return json.dumps(args)
+
+
+def test_parse_defaults_on_validation_failure_to_discard_when_omitted() -> None:
+    """The optional knob is absent -> default to 'discard' so a passive walk never stalls."""
+    resolution = _parse_step_1_source_tool_arguments(_source_tool_args(), plugin_hint="json")
+    assert resolution.on_validation_failure == "discard"
+
+
+def test_parse_preserves_explicit_on_validation_failure() -> None:
+    """A composer-chosen value (non-default sentinel) survives the parse verbatim."""
+    resolution = _parse_step_1_source_tool_arguments(_source_tool_args(on_validation_failure="quarantine_sink"), plugin_hint="json")
+    assert resolution.on_validation_failure == "quarantine_sink"
+
+
+def test_parse_empty_on_validation_failure_defaults_to_discard() -> None:
+    """An empty string is treated as 'not set' and defaults to 'discard'."""
+    resolution = _parse_step_1_source_tool_arguments(_source_tool_args(on_validation_failure=""), plugin_hint="json")
+    assert resolution.on_validation_failure == "discard"
+
+
+def test_parse_non_string_on_validation_failure_raises() -> None:
+    """When the model sends a non-string value, reject at the Tier-3 boundary."""
+    with pytest.raises(ValueError, match="on_validation_failure must be a string"):
+        _parse_step_1_source_tool_arguments(_source_tool_args(on_validation_failure=123), plugin_hint="json")
+
+
+def test_step_1_revision_prompt_uses_llm_safe_source_context() -> None:
+    current_source = SourceResolved(
+        plugin="csv",
+        options={
+            "schema": {"mode": "observed", "guaranteed_fields": ["email", "profile_url"]},
+            "blob_ref": {"id": "blob-private-source-id", "storage_path": "/srv/elspeth/blobs/private.csv"},
+            "raw_option_key_should_not_leave": "sk-option-secret",
+        },
+        observed_columns=("email", "profile_url", "note"),
+        sample_rows=(
+            {
+                "email": "person@example.test",
+                "profile_url": "https://example.test/private?token=secret",
+                "note": "customer asked for refunds",
+            },
+        ),
+        on_validation_failure="quarantine",
+    )
+
+    prompt = _build_step_1_source_dynamic_block(plugin_hint="csv", current_source=current_source)
+
+    assert "person@example.test" not in prompt
+    assert "https://example.test/private" not in prompt
+    assert "customer asked for refunds" not in prompt
+    assert "blob-private-source-id" not in prompt
+    assert "/srv/elspeth/blobs/private.csv" not in prompt
+    assert "raw_option_key_should_not_leave" not in prompt
+    assert "sk-option-secret" not in prompt
+    assert '"plugin": "csv"' in prompt
+    assert '"mode": "observed"' in prompt
+    assert '"guaranteed_fields": ["email", "profile_url"]' in prompt
+    assert "<sample:email-like>" in prompt
+    assert "<sample:url>" in prompt
+    assert "<sample:string:" in prompt
+
+
+def test_step_2_revision_prompt_uses_llm_safe_sink_context() -> None:
+    current_sink = SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                plugin="azure_blob",
+                options={
+                    "path": "/srv/elspeth/exports/private-output.jsonl",
+                    "sas_token": "sv=private-token",
+                    "raw_sink_option_key_should_not_leave": {"secret_ref": "PROD_BLOB_SECRET"},
+                },
+                required_fields=("email_hash", "profile_url"),
+                schema_mode="fixed",
+            ),
+        )
+    )
+
+    prompt = _build_step_2_sink_tool_prompt(current_sink=current_sink)
+
+    assert "/srv/elspeth/exports/private-output.jsonl" not in prompt
+    assert "sv=private-token" not in prompt
+    assert "raw_sink_option_key_should_not_leave" not in prompt
+    assert "PROD_BLOB_SECRET" not in prompt
+    assert '"plugin": "azure_blob"' in prompt
+    assert '"schema_mode": "fixed"' in prompt
+    assert '"required_fields": ["email_hash", "profile_url"]' in prompt
+    assert '"option_count": 3' in prompt

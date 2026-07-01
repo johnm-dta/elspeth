@@ -24,6 +24,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    or_,
     select,
     text,
 )
@@ -304,10 +305,12 @@ edges_table = Table(
 #    source_row_index or ingest_sequence from row_index"), but the
 #    prohibition lives in an exception string at one write boundary. The
 #    cache-replay write path (``write_repository.record_synthesised_run``)
-#    intentionally sets all three equal because there is exactly one source;
-#    a future contributor adding a multi-source synthesised-run path could
-#    silently drift. Tracked under filigree elspeth-92afea0d23 (elspeth-lints
-#    rule with the same enforcement status as ``trust_tier.tier_model``).
+#    uses the row-index fallback only for single-source runs; multi-source
+#    synthesised rows must provide explicit source_node_index,
+#    source_row_index, ingest_sequence, and source_data_hash before the
+#    writer inserts them. Tracked under filigree elspeth-92afea0d23
+#    (elspeth-lints rule with the same enforcement status as
+#    ``trust_tier.tier_model``).
 #
 # B. Scheduler lease-ownership transitions (G29). ``token_work_items``
 #    carries the current lease state but not its transition history; a
@@ -745,40 +748,32 @@ def active_worker_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: C
 def claim_verb_fence_clause(*, worker_id: ColumnElement[str] | str, run_id: ColumnElement[str] | str) -> ColumnElement[bool]:
     """Lenient membership fence for claim_ready / claim_pending_sink CAS UPDATEs.
 
-    Passes when the acting worker does NOT hold a non-active (evicted/departed)
-    run_workers row — expressed as:
+    Passes when either:
 
-        NOT EXISTS (
-          SELECT 1 FROM run_workers
-          WHERE worker_id = :wid AND run_id = :rid AND status != 'active'
-        )
+    * the acting worker holds an ACTIVE run_workers row for this run, or
+    * the run has no registered workers at all (N=0 unit-test compatibility).
 
     Semantics by case:
-    (a) ABSENT (no run_workers row for this worker): NOT EXISTS → True → pass.
-        Backward-compat for unit tests that call claim_ready with fictional
-        lease_owner IDs without populating run_workers.  In production, the
-        processor always registers before claiming, so this branch only fires
-        in unit tests.
-    (b) ACTIVE run_workers row: the evicted-row check is False → NOT EXISTS →
-        True → pass.
-    (c) EVICTED or DEPARTED row: the evicted-row check is True → NOT EXISTS →
-        False → UPDATE matches 0 rows → re-probe raises RunWorkerEvictedError.
+    (a) ABSENT worker and N=0 run registry: no registered workers exist for the
+        run → pass. Backward-compat for unit tests that call claim_ready with
+        fictional lease_owner IDs without populating run_workers.
+    (b) ABSENT worker and N>0 run registry: registered workers exist for the run
+        but this caller is not one of them → fail closed with zero mutation.
+    (c) ACTIVE run_workers row for this worker and run → pass.
+    (d) EVICTED or DEPARTED row for this worker and run → fail; the claim verb
+        re-probe raises RunWorkerEvictedError.
 
     This is strictly weaker than ``active_worker_fence_clause`` (strict):
-    ABSENT passes here but is refused there.  Use the strict variant for
-    ``enqueue_ready``'s explicit-worker_id guard where ABSENT is definitively
-    wrong (caller supplied worker_id, registration is mandatory).
+    ABSENT passes here only when the run has no registry at all, and is refused
+    once any worker has registered for the run. Use the strict variant for
+    ``enqueue_ready``'s explicit-worker_id guard where ABSENT is always wrong
+    (caller supplied worker_id, registration is mandatory).
     """
-    this_worker_is_non_active = (
-        select(run_workers_table.c.worker_id)
-        .where(
-            run_workers_table.c.worker_id == worker_id,
-            run_workers_table.c.run_id == run_id,
-            run_workers_table.c.status != "active",
-        )
-        .exists()
+    run_has_no_registered_workers = ~select(run_workers_table.c.worker_id).where(run_workers_table.c.run_id == run_id).exists()
+    return or_(
+        active_worker_fence_clause(worker_id=worker_id, run_id=run_id),
+        run_has_no_registered_workers,
     )
-    return ~this_worker_is_non_active
 
 
 # === Token Parents (for multi-parent joins) ===

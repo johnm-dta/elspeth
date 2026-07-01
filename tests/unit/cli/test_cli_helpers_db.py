@@ -124,8 +124,8 @@ sinks:
 
         url, config = resolve_database_url(database=None, settings_path=settings_file)
 
-        # Should get the default landscape URL
-        assert url == "sqlite:///./state/audit.db"
+        # Should get the default landscape URL (data/ — see LandscapeSettings.url)
+        assert url == "sqlite:///./data/audit.db"
         assert config is not None
 
     def test_uses_default_settings_yaml_when_no_explicit_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

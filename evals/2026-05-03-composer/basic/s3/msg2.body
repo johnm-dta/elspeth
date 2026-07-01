@@ -1,1 +1,0 @@
-{"content":"Execute failed with: \"Sink 'json' input validation failed: 1 validation error for JSONRowSchema\\nbatch_size\\n  Extra inputs are not permitted [type=extra_forbidden, input_value=3, input_type=int]\". This indicates an upstream transform/source schema bug. Please diagnose and fix."}

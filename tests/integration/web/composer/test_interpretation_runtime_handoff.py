@@ -27,12 +27,16 @@ lines 2941-2982):
    hashed — the hash chain has no silent intermediate step.
 
 Scope note: this test exercises the Task 9 hash plumbing in isolation. The
-composer's ``options.prompt_template`` (composer convention) does not map to
-the runtime ``LLMConfig.template`` (Pydantic-required runtime field), which
-means the full ``state_from_record → generate_yaml → ExecutionGraph`` path
-cannot currently execute an LLM transform end-to-end. That bridge is a
-separate Phase 5b coverage gap tracked outside this commit; the hash anchor
-plumbing itself is verified here.
+composer's ``options.prompt_template`` maps directly to the runtime LLM config
+field, which is also named ``prompt_template`` (``LLMConfig.prompt_template``,
+``plugins/transforms/llm/base.py``) — there is no ``LLMConfig.template``. The
+``state_from_record → generate_yaml → validate_pipeline`` path therefore
+validates and builds the runtime graph for a complete LLM transform fine
+(empirically: a ``text → llm → json`` composer pipeline passes the real
+``validate_pipeline``). What this isolated hash-plumbing test does not exercise
+is a *live* end-to-end run: the provider client and its API key are built in
+``on_start()`` at run time, so actually issuing the LLM call needs real
+credentials — orthogonal to the hash anchor verified here.
 
 Operates under the operator-acknowledged assumption that 18a Task 0
 (empirical LLM gate ≥ 8/10 staging runs emit ``{{interpretation:<term>}}``)

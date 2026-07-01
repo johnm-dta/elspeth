@@ -10,7 +10,6 @@ import type {
   CompositionProposal,
   ApiError,
   ComposerRecoveryError,
-  ValidationResult,
 } from "@/types/api";
 import { isComposerRecoveryError } from "@/types/recovery";
 import type {
@@ -21,8 +20,6 @@ import type {
 } from "@/types/guided";
 import * as api from "@/api/client";
 import {
-  COMPOSE_TIMEOUT_ABORT_REASON,
-  COMPOSE_TIMEOUT_MS,
   COMPOSE_USER_CANCEL_ABORT_REASON,
 } from "@/config/composer";
 import { useBlobStore } from "./blobStore";
@@ -138,13 +135,19 @@ function formatLlmAuthError(apiErr: ApiError): string {
  * freeform-surface equivalent. Only selectSession (session load / deep-link)
  * otherwise refreshes, so without this a mid-session compose deadlocks the user.
  *
- * Fire-and-forget and idempotent (the store keys by session_id and reconciles
- * resolved events across surfaces), so it is safe to call on any compose
- * completion. A new compose entry point that omits this call reintroduces the
- * freeform deadlock.
+ * Idempotent (the store keys by session_id and reconciles resolved events
+ * across surfaces), so it is safe to call on any compose completion. A new
+ * compose entry point that omits this call reintroduces the freeform deadlock.
+ *
+ * Returns the underlying refresh promise. The freeform callers fire it and
+ * forget (each `void`s the result); guided `respondGuided` (P3.6/D12) must
+ * `await` it so backend-surfaced pending cards land in the store before the
+ * guided submit re-enables.
  */
-function refreshInterpretationEventsForSession(sessionId: string): void {
-  void useInterpretationEventsStore.getState().refreshAll(sessionId);
+async function refreshInterpretationEventsForSession(
+  sessionId: string,
+): Promise<void> {
+  await useInterpretationEventsStore.getState().refreshAll(sessionId);
 }
 
 function mergeCompositionProposals(
@@ -249,7 +252,6 @@ interface SessionState {
   loadInflightMessages: (sessionId: string) => Promise<void>;
   startInflightMessagesPolling: (sessionId: string) => void;
   stopInflightMessagesPolling: (sessionId?: string) => void;
-  sendValidationFeedback: (result: ValidationResult) => Promise<void>;
   retryMessage: (messageId: string, signal?: AbortSignal) => Promise<void>;
   forkFromMessage: (messageId: string, newContent: string) => Promise<void>;
   openRecoveryFromError: (
@@ -370,6 +372,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     try {
       const mode = await usePreferencesStore.getState().resolveDefaultMode();
       if (mode === "guided") {
+        if (get().activeSessionId !== session.id) {
+          return;
+        }
         await get().enterGuided();
       }
     } catch {
@@ -642,8 +647,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       void get().loadSessions();
       // Surface any interpretation reviews this compose turn created (see the
       // invariant on refreshInterpretationEventsForSession). Without this the
-      // freeform inline review widgets never render mid-session.
-      refreshInterpretationEventsForSession(activeSessionId);
+      // freeform inline review widgets never render mid-session. Freeform is
+      // fire-and-forget (`void`); only guided respondGuided awaits the refresh.
+      void refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       let errorMessage: string;
       // Client-side abort (the useComposer COMPOSE_TIMEOUT_MS guard or any
@@ -750,8 +756,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         ),
       });
       // Surface any interpretation reviews accepting this proposal created
-      // (see the invariant on refreshInterpretationEventsForSession).
-      refreshInterpretationEventsForSession(activeSessionId);
+      // (see the invariant on refreshInterpretationEventsForSession). Freeform
+      // is fire-and-forget (`void`); only guided respondGuided awaits it.
+      void refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       if (isHttpConflict(err)) {
         await get().loadCompositionProposals(activeSessionId);
@@ -954,33 +961,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     clearInflightMessagesPollTimer();
   },
 
-  async sendValidationFeedback(result: ValidationResult) {
-    // Format validation errors into a message the LLM can act on.
-    const lines = ["Pipeline validation failed with the following errors:"];
-    for (const err of result.errors) {
-      lines.push(
-        `- [${err.component_type ?? "unknown"}] ${err.component_id ?? "unknown"}: ${err.message}`,
-      );
-      if (err.suggestion) {
-        lines.push(`  Suggestion: ${err.suggestion}`);
-      }
-    }
-    lines.push("", "Please fix these validation errors.");
-    const content = lines.join("\n");
-
-    // Use sendMessage with the same timeout as manual sends.
-    const controller = new AbortController();
-    const timer = setTimeout(
-      () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
-      COMPOSE_TIMEOUT_MS,
-    );
-    try {
-      await get().sendMessage(content, controller.signal);
-    } finally {
-      clearTimeout(timer);
-    }
-  },
-
   async retryMessage(messageId: string, signal?: AbortSignal) {
     const { activeSessionId, messages } = get();
     if (!activeSessionId) return;
@@ -1064,8 +1044,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // Fire-and-forget: refresh blob list in case the LLM created files
       useBlobStore.getState().loadBlobs(activeSessionId);
       // Surface any interpretation reviews this recompose created (see the
-      // invariant on refreshInterpretationEventsForSession).
-      refreshInterpretationEventsForSession(activeSessionId);
+      // invariant on refreshInterpretationEventsForSession). Freeform is
+      // fire-and-forget (`void`); only guided respondGuided awaits it.
+      void refreshInterpretationEventsForSession(activeSessionId);
     } catch (err) {
       let errorMessage: string;
       if (isAbortError(err)) {
@@ -1188,6 +1169,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     }
 
     const recoveredState = recoveryError.partial_state;
+    if (
+      recoveryError.partial_state_save_failed === true ||
+      typeof recoveredState.id !== "string" ||
+      recoveredState.id.trim() === ""
+    ) {
+      set({
+        error:
+          "Recovered draft was not saved on the server. Discard recovery and retry the composer step.",
+      });
+      return { applied: false, needsConfirmation: false };
+    }
     getExecutionStore().clearValidation();
     set((state) => {
       const nodeStillExists =
@@ -1229,6 +1221,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         compositionState: response.composition_state,
       });
     } catch {
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
       // Error path: set error string, leave existing guided state alone.
       // Mirrors selectSession lines 207-209: set error, don't clobber fields
       // that were already loaded. The caller can inspect error to decide whether
@@ -1262,8 +1257,17 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         guidedNextTurn: response.next_turn,
         guidedTerminal: response.terminal,
         compositionState: response.composition_state,
-        guidedResponsePending: false,
       });
+      // B1 (spec §5/D12): backend-surfaced pending interpretation cards must be
+      // in interpretationEventsStore before guidedResponsePending clears, else
+      // the submit button can briefly re-enable before the card-block arrives.
+      // Keep guidedResponsePending true across this await so the guided turn
+      // stays disabled until the pending-card projection has refreshed.
+      await refreshInterpretationEventsForSession(requestedSessionId);
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      set({ guidedResponsePending: false });
     } catch {
       if (get().activeSessionId !== requestedSessionId) {
         return;
@@ -1294,6 +1298,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         error: null,
       });
     } catch {
+      if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
       set({ error: "Failed to re-enter guided mode. Please try again." });
     }
   },
@@ -1366,7 +1373,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         compositionState: response.composition_state ?? get().compositionState,
         guidedChatPending: false,
       });
-    } catch {
+    } catch (err) {
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
@@ -1375,10 +1382,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // unavailable assistant message AND appends both turns to
       // chat_history — that path completes the optimistic write
       // server-side, so even a synthetic reply round-trips through this
-      // success branch.  This catch fires only when the request itself
-      // failed (no response shape at all).
+      // success branch.  This catch fires when the request itself failed
+      // (no response shape at all) OR the backend rejected with a 4xx/5xx.
+      //
+      // Surface the backend's `detail` when present: a 409 step-mismatch
+      // tells the user to retry, a 400 names the bad step — far more
+      // actionable than a blanket "failed", which forced the user to GUESS
+      // the cause. Backend details are egress-safe by construction (Tier-3
+      // row data is never placed in an HTTP detail — see guided.py); a bare
+      // network failure with no structured body falls back to the generic line.
+      const apiErr = err as ApiError;
       set({
-        error: "Failed to send chat message. Please try again.",
+        error: apiErr.detail ?? "Failed to send chat message. Please try again.",
         guidedChatPending: false,
       });
     }

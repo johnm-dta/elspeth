@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-PROMPT_GUIDE = REPO_ROOT / "docs" / "assets" / "prompt-guide.md"
+PROMPT_GUIDE = REPO_ROOT / "docs-archive" / "2026-06-28-docs-cleanout" / "docs" / "assets" / "prompt-guide.md"
 
 
 def test_prompt_guide_has_no_transcript_citation_placeholders() -> None:

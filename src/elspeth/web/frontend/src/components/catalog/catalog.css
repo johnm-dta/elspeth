@@ -101,7 +101,8 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-elevated);
-  color: var(--color-text-muted);
+  /* secondary not muted: muted is ~3.84:1 on elevated at 10px (fails AA). */
+  color: var(--color-text-secondary);
   font-size: var(--font-size-3xs);
   font-weight: 650;
   line-height: 1.2;

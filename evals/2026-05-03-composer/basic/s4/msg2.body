@@ -1,1 +1,0 @@
-{"content":"Update the routing rule: high_priority should now also include rows where customer_tier == 'pro' (so it's enterprise OR pro). Don't rebuild the whole pipeline — just patch the gate."}

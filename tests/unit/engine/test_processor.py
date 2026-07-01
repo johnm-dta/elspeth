@@ -49,6 +49,7 @@ from elspeth.contracts.routing import RoutingAction
 from elspeth.contracts.schema import SchemaConfig
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.types import BranchName, CoalesceName, GateName, NodeID, SinkName
+from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
 from elspeth.core.config import AggregationSettings, GateSettings
 from elspeth.core.landscape import LandscapeDB
 from elspeth.core.landscape.errors import LandscapeRecordError
@@ -80,6 +81,7 @@ from tests.fixtures.landscape import leader_coordination_token, make_recorder_wi
 
 _DYNAMIC_SCHEMA = SchemaConfig.from_dict({"mode": "observed"})
 _DEFAULT_SCHEDULER = object()
+_TEST_LEADER_WORKER_ID = "seeder"
 
 
 def _make_contract() -> SchemaContract:
@@ -249,8 +251,42 @@ def _make_factory(
         run_id=run_id,
         source_node_id=source_node_id,
         source_plugin_name="test-source",
+        leader_worker_id=_TEST_LEADER_WORKER_ID,
     )
     return setup.db, setup.factory
+
+
+def _register_test_worker(
+    factory: RecorderFactory,
+    worker_id: str,
+    *,
+    run_id: str = "test-run",
+    heartbeat_expires_at: datetime | None = None,
+) -> None:
+    """Register a scheduler lease owner used by direct test claims."""
+    from sqlalchemy import insert, select
+
+    from elspeth.core.landscape.schema import run_workers_table
+
+    with factory._db.engine.begin() as conn:
+        exists = conn.execute(
+            select(run_workers_table.c.worker_id)
+            .where(run_workers_table.c.worker_id == worker_id)
+            .where(run_workers_table.c.run_id == run_id)
+        ).first()
+        if exists is not None:
+            return
+        registered_at = datetime.now(UTC)
+        conn.execute(
+            insert(run_workers_table).values(
+                worker_id=worker_id,
+                run_id=run_id,
+                role="follower",
+                status="active",
+                registered_at=registered_at,
+                heartbeat_expires_at=heartbeat_expires_at or registered_at + timedelta(hours=1),
+            )
+        )
 
 
 def _make_processor(
@@ -284,6 +320,9 @@ def _make_processor(
     stamp_blocked_rows_adopted: bool = True,
 ) -> RowProcessor:
     """Create a RowProcessor with sensible defaults."""
+    if scheduler_lease_owner is not None:
+        _register_test_worker(factory, scheduler_lease_owner, run_id=run_id)
+
     coalesce_nodes = dict(coalesce_node_ids or {})
     traversal_steps = dict(node_step_map or {})
     source_node = NodeID(source_node_id)
@@ -432,16 +471,15 @@ class TestConstructorErrorEdgeMap:
         with pytest.raises(TypeError, match="scheduler"):
             _make_processor(factory, scheduler=None)
 
-    def test_default_scheduler_lease_owner_is_instance_unique(self) -> None:
-        """Implicit scheduler lease owners must distinguish processors for the same run."""
+    def test_default_scheduler_lease_owner_uses_coordination_token(self) -> None:
+        """A processor with a coordination token uses its registered worker identity."""
         _, factory = _make_factory()
 
         first = _make_processor(factory, scheduler=factory.scheduler)
         second = _make_processor(factory, scheduler=factory.scheduler)
 
-        assert first._scheduler_lease_owner.startswith("row-processor:test-run:")
-        assert second._scheduler_lease_owner.startswith("row-processor:test-run:")
-        assert first._scheduler_lease_owner != second._scheduler_lease_owner
+        assert first._scheduler_lease_owner == _TEST_LEADER_WORKER_ID
+        assert second._scheduler_lease_owner == _TEST_LEADER_WORKER_ID
 
     def test_explicit_scheduler_lease_owner_is_honored(self) -> None:
         """Tests and controlled workers can still provide a stable lease-owner identity."""
@@ -4338,6 +4376,7 @@ class TestDurableSchedulerResumeDrain:
             row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
             available_at=past,
         )
+        _register_test_worker(factory, "dead-worker")
         claimed = factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="dead-worker",
@@ -5187,15 +5226,8 @@ class TestDurableSchedulerResumeDrain:
             ).one()
         assert (status, barrier_key) == ("blocked", str(agg_node))
 
-    def test_aggregation_flush_refuses_to_orphan_unconsumed_blocked_work(self) -> None:
-        """Flush completion REFUSES when a BLOCKED row under the barrier is not in the buffer.
-
-        F1/D6 strict exhaustiveness: an aggregation flush is ONE atomic
-        ``complete_barrier`` transition over the WHOLE barrier key (one node =
-        one in-progress batch), so a durable BLOCKED row the live buffer does
-        not account for is journal/buffer divergence — the completion must
-        refuse loudly instead of silently leaving (or sweeping) the orphan.
-        """
+    def test_aggregation_intake_adopts_follower_blocked_work_before_flush(self) -> None:
+        """A fresh leader journal-adopts a follower-blocked aggregation row."""
         db, factory = _make_factory()
         source_node = NodeID("source-0")
         agg_node = NodeID("agg-1")
@@ -5264,6 +5296,7 @@ class TestDurableSchedulerResumeDrain:
             available_at=datetime.now(UTC),
             barrier_key=str(agg_node),
         )
+        _register_test_worker(factory, "test-worker")
         stray_claim = factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="test-worker",
@@ -5280,29 +5313,41 @@ class TestDurableSchedulerResumeDrain:
             expected_lease_owner="test-worker",
         )
 
-        # Slice 3 re-pin (ADR-030 §E.2/§E.3): the refusal moved EARLIER — the
-        # journal-first intake refuses to ADOPT a row this leader cannot
-        # attribute (no live stash entry, no resume provenance) before any
-        # durable mutation, instead of the flush-time orphan refusal.
-        with pytest.raises(AuditIntegrityError, match="no live stash entry and no resume checkpoint provenance"):
-            processor.process_row(
-                row_index=1,
-                source_row=_make_source_row({"value": 2}),
-                transforms=[transform],
-                ctx=ctx,
-                source_row_index=1,
-                ingest_sequence=1,
-            )
+        second_results = processor.process_row(
+            row_index=1,
+            source_row=_make_source_row({"value": 2}),
+            transforms=[transform],
+            ctx=ctx,
+            source_row_index=1,
+            ingest_sequence=1,
+        )
+
+        # The follower-shaped durable row is not an orphan: it is accepted
+        # from the journal, triggers the count flush with the leader's own
+        # buffered row, and the current row then buffers normally.
+        assert [(r.outcome, r.path) for r in second_results] == [
+            (TerminalOutcome.SUCCESS, TerminalPath.DEFAULT_FLOW),
+            (None, TerminalPath.BUFFERED),
+        ]
+        assert second_results[0].sink_name == "agg_sink"
+        assert second_results[0].scheduler_pending_sink is True
+        flushed_token_id = second_results[0].token.token_id
+        current_token_id = second_results[1].token.token_id
 
         from sqlalchemy import select
 
         from elspeth.core.landscape.schema import token_work_items_table
 
-        # The refused completion mutated nothing: buffered and stray rows stay BLOCKED.
+        # The consumed journal rows are both terminalized by the atomic flush.
         with db.connection() as conn:
-            statuses = dict(
-                conn.execute(
-                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+            rows = {
+                row.token_id: row
+                for row in conn.execute(
+                    select(
+                        token_work_items_table.c.token_id,
+                        token_work_items_table.c.status,
+                        token_work_items_table.c.barrier_adopted_epoch,
+                    ).where(
                         token_work_items_table.c.token_id.in_(
                             [
                                 first_token_id,
@@ -5310,11 +5355,25 @@ class TestDurableSchedulerResumeDrain:
                             ]
                         )
                     )
-                ).all()
-            )
+                )
+            }
+        assert {token_id: (row.status, row.barrier_adopted_epoch) for token_id, row in rows.items()} == {
+            first_token_id: ("terminal", 1),
+            stray_token.token_id: ("terminal", 1),
+        }
+
+        with db.connection() as conn:
+            statuses = {
+                row.token_id: row.status
+                for row in conn.execute(
+                    select(token_work_items_table.c.token_id, token_work_items_table.c.status).where(
+                        token_work_items_table.c.token_id.in_([flushed_token_id, current_token_id])
+                    )
+                )
+            }
         assert statuses == {
-            first_token_id: "blocked",
-            stray_token.token_id: "blocked",
+            flushed_token_id: "pending_sink",
+            current_token_id: "blocked",
         }
 
     def test_passthrough_aggregation_sink_flush_marks_all_outputs_pending_sink(self) -> None:
@@ -5508,6 +5567,7 @@ class TestDurableSchedulerResumeDrain:
         # Peer worker A claims the row under its own lease_owner. Lease window
         # is wide enough that ``peer_active_leases`` sees it as unexpired.
         peer_claim_now = datetime.now(UTC)
+        _register_test_worker(factory, "peer-worker-A")
         peer_claim = factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="peer-worker-A",
@@ -5590,6 +5650,7 @@ class TestDurableSchedulerResumeDrain:
         )
 
         # Crashed peer A held a short lease that has since expired.
+        _register_test_worker(factory, "crashed-peer", heartbeat_expires_at=clock.now_utc() - timedelta(seconds=120))
         factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="crashed-peer",
@@ -5663,6 +5724,7 @@ class TestDurableSchedulerResumeDrain:
         )
 
         # The caller's lease_owner pre-claims the row before the drain entry.
+        _register_test_worker(factory, "own-worker")
         factory.scheduler.claim_ready(
             run_id="test-run",
             lease_owner="own-worker",
@@ -6536,6 +6598,72 @@ class TestCompleteCoalesceMerge:
             "token-held-a": "terminal",
             "merged-1": "pending_sink",
         }
+
+
+# =============================================================================
+# resume_incomplete_token
+# =============================================================================
+
+
+class TestResumeIncompleteToken:
+    """Tests for re-driving reconstructed incomplete tokens from the correct DAG node."""
+
+    def test_expanded_child_inside_coalesced_branch_resumes_after_expand_node(self) -> None:
+        """An expanded branch child must resume after expand, not at branch entry."""
+        _, factory = _make_factory()
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+
+        source_node = NodeID("source-0")
+        branch_first_node = NodeID("branch-first")
+        expand_node = NodeID("expand-branch")
+        after_expand_node = NodeID("after-expand")
+        coalesce_node = NodeID("coalesce::merge")
+
+        processor = _make_processor(
+            factory,
+            node_step_map={
+                source_node: 0,
+                branch_first_node: 1,
+                expand_node: 2,
+                after_expand_node: 3,
+                coalesce_node: 4,
+            },
+            node_to_next={
+                source_node: branch_first_node,
+                branch_first_node: expand_node,
+                expand_node: after_expand_node,
+                after_expand_node: coalesce_node,
+                coalesce_node: None,
+            },
+            branch_to_coalesce={BranchName("path_a"): CoalesceName("merge")},
+            coalesce_node_ids={CoalesceName("merge"): coalesce_node},
+        )
+        spec = IncompleteTokenSpec(
+            token_id="token-expanded-child",
+            row_id="row-1",
+            branch_name="path_a",
+            fork_group_id=None,
+            join_group_id=None,
+            expand_group_id="expand-1",
+            token_data_ref="payload-1",
+            step_in_pipeline=2,
+            max_attempt=0,
+        )
+
+        with (
+            patch.object(processor._nav, "resolve_branch_first_node", return_value=branch_first_node),
+            patch.object(processor, "process_token", return_value=[]) as process_token,
+        ):
+            processor.resume_incomplete_token(
+                spec,
+                make_pipeline_row({"value": 42}),
+                ctx,
+                resume_checkpoint_id="checkpoint-1",
+            )
+
+        process_token.assert_called_once()
+        _token_arg, _ctx_arg = process_token.call_args.args
+        assert process_token.call_args.kwargs == {"current_node_id": after_expand_node}
 
 
 # =============================================================================

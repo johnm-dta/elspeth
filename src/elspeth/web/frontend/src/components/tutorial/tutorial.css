@@ -49,11 +49,55 @@
 }
 
 .tutorial-kicker {
-  margin: 0 0 var(--space-sm);
+  /* Align the kicker's left edge with the 64rem centred sheet that the stepper
+     and pipeline gloss sit in (was full-width-left, which left it misaligned
+     with the centred stepper below it). Centre the 64rem block; text stays
+     left-aligned inside it. */
+  margin: 0 auto var(--space-sm);
+  max-width: 64rem;
+  width: 100%;
   color: var(--color-info);
   font-size: var(--font-size-sm);
   font-weight: 700;
-  text-transform: uppercase;
+  /* Sentence case (was uppercase): the welcome copy read as a second shouty
+     eyebrow competing with the uppercase "CURRENT DECISION" micro-label. One
+     uppercase eyebrow per column; the kicker is the quieter, friendlier one. */
+  letter-spacing: 0.01em;
+}
+
+/* Guided-shell bridge wrapper (TutorialGuidedShell): the embedded ChatPanel
+   guided surface lives here. Full width within the centered .tutorial-shell
+   column; the kicker sits above it. */
+.tutorial-guided-shell {
+  width: 100%;
+}
+
+/* ── Guided step: two-column WORKSPACE on a single document scroll ─────────────
+   The bookend turns (welcome/run/audit/graduation) are short centred cards on the
+   base `.tutorial-shell` document scroll. The guided step renders the two-column
+   WORKSPACE (guided.css `.guided-workspace`) — conversation + composer on the
+   left, the pipeline-so-far + current-decision cards pinned sticky top-right — on
+   that SAME single document scroll. The sticky right column replaces the old
+   bottom dock; top-aligned so the cards sit at the top-right as requested.
+
+   (History: the guided step once borrowed the freeform chat model — a flex:1
+   inner scroll that FILLS the viewport + a flex-shrink:0 bottom dock — which
+   produced a ~550px void when content under-flowed and a clipped, unreachable
+   forward button when it over-flowed.)
+
+   Scoped under `.tutorial-shell--guided` (live-guided + freeform never render
+   under `.tutorial-shell`), so the shared `.chat-panel` / `.guided-scroll`
+   dock-and-fill base rules — correct for a real chat log — stay untouched. With no
+   `overflow:hidden` override the base `.tutorial-shell{overflow-y:auto}` governs
+   (one document scroll); the workspace's right column is sticky against it. */
+.tutorial-shell--guided .chat-panel {
+  height: auto;
+  overflow: visible;
+}
+
+.tutorial-sample-loading {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
 }
 
 .tutorial-actions {
@@ -112,11 +156,42 @@
   color: var(--color-text-muted);
 }
 
+.tutorial-callout {
+  margin-top: var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-input);
+  color: var(--color-text);
+}
+
 .tutorial-preamble {
-  /* Small subdued line under the welcome cards and above the Turn 4 run
-     indicator. Signals "here is what happens next" before the LLM call. */
+  /* Top margin for the disclosure note under the welcome cards / above the
+     Turn 4 run indicator. (Font size now comes from the AlertBanner.) */
   margin-top: var(--space-md);
-  font-size: var(--font-size-sm);
+}
+
+.tutorial-disclosure.alert-banner {
+  /* The network/LLM egress disclosure ("…calls the configured LLM and fetches
+     pages over the network") is a real data-handling statement, so it renders
+     as the design system's info AlertBanner rather than the muted line it used
+     to be — buried low-contrast text understated a notice that should be seen.
+     The base .alert-banner is a top-of-panel strip (bottom border only); these
+     overrides make it a self-contained, left-aligned info note with a leading
+     glyph, matching the weight of what it says. Info-on-info contrast and the
+     glyph echo the app's status vocabulary (∅, ⚠). */
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: var(--space-sm);
+  border: 1px solid var(--color-info-border);
+  border-radius: var(--radius-md);
+}
+
+.tutorial-disclosure.alert-banner::before {
+  content: "\24d8"; /* ⓘ — decorative; the role="status" text carries meaning */
+  flex-shrink: 0;
+  font-size: var(--font-size-md);
+  line-height: 1.4;
 }
 
 .tutorial-textarea-label {
@@ -305,6 +380,15 @@
   font-weight: 600;
 }
 
+/* Discarded-rows note on the run turn — a subdued warning (rows were dropped at
+   the source but recorded in the audit trail). */
+.tutorial-run-discarded {
+  margin-top: var(--space-xs);
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+  max-width: 760px;
+}
+
 .tutorial-result-table-wrap {
   overflow-x: auto;
   margin-top: var(--space-lg);
@@ -472,8 +556,20 @@
   background: var(--color-border-strong);
 }
 
+/* Completed steps: filled (reached), no ring. */
+.tutorial-progress-dot--complete {
+  background: var(--color-state-positive);
+}
+
+/* Current step: filled AND ringed. The halo is a SHAPE cue (not colour alone),
+   so "you are here" is distinguishable from the identically-filled completed
+   dots even without colour perception. Previously complete and current shared a
+   single `--active` class and were visually indistinguishable. */
 .tutorial-progress-dot--active {
   background: var(--color-state-positive);
+  box-shadow:
+    0 0 0 2px var(--color-bg),
+    0 0 0 4px var(--color-state-positive);
 }
 
 @media (max-width: 760px) {

@@ -37,6 +37,7 @@ class ClassInfo:
     line: int
     column: int
     base_names: list[str]
+    component_type_base_names: list[str]
     sets_component_type: bool
     is_exempt: bool
     code_snippet: str
@@ -110,6 +111,7 @@ def scan_tree_classes(tree: ast.AST, file_path: str, source_lines: list[str]) ->
                 line=node.lineno,
                 column=node.col_offset,
                 base_names=_extract_base_names(node, aliases),
+                component_type_base_names=_extract_component_type_base_names(node, aliases),
                 sets_component_type=_class_sets_component_type(node),
                 is_exempt=_class_is_exempt(node),
                 code_snippet=snippet,
@@ -190,6 +192,24 @@ def _extract_base_names(node: ast.ClassDef, aliases: dict[str, str]) -> list[str
         elif isinstance(base, ast.Attribute):
             names.append(base.attr)
     return names
+
+
+def _extract_component_type_base_names(node: ast.ClassDef, aliases: dict[str, str]) -> list[str]:
+    names: list[str] = []
+    for base in node.bases:
+        if isinstance(base, ast.Name):
+            names.append(_component_type_base_name(base.id, aliases))
+        elif isinstance(base, ast.Attribute):
+            names.append(base.attr)
+    return names
+
+
+def _component_type_base_name(name: str, aliases: dict[str, str]) -> str:
+    # Literal known bases keep their own CT1 inheritance decision; alias
+    # expansion must not make an untyped base look typed.
+    if name in _KNOWN_BASES:
+        return name
+    return aliases.get(name, name)
 
 
 def _class_sets_component_type(node: ast.ClassDef) -> bool:
@@ -279,7 +299,7 @@ def _ancestor_sets_type(class_name: str, registry: dict[str, ClassInfo], cache: 
         return False
 
     cache[class_name] = None
-    for base in info.base_names:
+    for base in info.component_type_base_names:
         base_info = registry.get(base)
         base_sets = _KNOWN_BASES[base]["sets_type"] if base in _KNOWN_BASES else bool(base_info and base_info.sets_component_type)
         if base_sets or _ancestor_sets_type(base, registry, cache):

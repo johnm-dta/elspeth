@@ -423,6 +423,32 @@ class TestCompleteNodeStateCrashPaths:
         assert isinstance(result_f, NodeStateFailed)
 
 
+class TestCompletedRowLookup:
+    """Exact completed-row lookup for coalesce late-arrival detection."""
+
+    def test_has_completed_row_for_node_scopes_by_run_node_and_row(self) -> None:
+        _db, repo, fac, tok = _make_repo_with_token()
+        fac.data_flow.create_row("run-1", "source-0", 1, {"name": "second"}, row_id="row-2", source_row_index=1, ingest_sequence=1)
+        fac.data_flow.create_token("row-2", token_id="tok-2")
+
+        first = repo.begin_node_state(tok, "transform-1", "run-1", 1, {"name": "test"})
+        second = repo.begin_node_state("tok-2", "transform-1", "run-1", 1, {"name": "second"})
+        repo.complete_node_state(first.state_id, NodeStateStatus.COMPLETED, output_data={"ok": True}, duration_ms=1.0)
+        repo.complete_node_state(second.state_id, NodeStateStatus.COMPLETED, output_data={"ok": True}, duration_ms=1.0)
+
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="transform-1", row_id="row-1") is True
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="transform-1", row_id="row-2") is True
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="transform-1", row_id="row-missing") is False
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="sink-0", row_id="row-1") is False
+        assert repo.has_completed_row_for_node(run_id="run-missing", node_id="transform-1", row_id="row-1") is False
+
+    def test_has_completed_row_for_node_ignores_open_state(self) -> None:
+        _db, repo, _fac, tok = _make_repo_with_token()
+        repo.begin_node_state(tok, "transform-1", "run-1", 1, {"name": "test"})
+
+        assert repo.has_completed_row_for_node(run_id="run-1", node_id="transform-1", row_id="row-1") is False
+
+
 class TestCompleteNodeStateForbiddenFields:
     """Regression tests for elspeth-22e2bca0c1: forbidden fields per status."""
 

@@ -17,13 +17,23 @@ Two contracts are exercised here:
 
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
 from elspeth.contracts.errors import AuditIntegrityError
-from elspeth.core.landscape.database import LandscapeDB
+from elspeth.core.landscape.database import LandscapeDB, Tier1Engine
 from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import metadata
+
+
+class _PostgresEngineWithoutPragmas:
+    dialect = type("_Dialect", (), {"name": "postgresql"})()
+
+    def connect(self) -> None:
+        raise AssertionError("SQLite PRAGMA probe should not run for PostgreSQL engines")
 
 
 class TestSchedulerRepositoryTier1EngineGate:
@@ -65,3 +75,11 @@ class TestSchedulerRepositoryTier1EngineGate:
             assert repo.count_active_work(run_id="nonexistent-run") == 0
         finally:
             db.close()
+
+    def test_postgresql_engine_does_not_run_sqlite_pragma_probe(self) -> None:
+        """Non-SQLite engines must not be probed with SQLite-only PRAGMAs."""
+        engine = Tier1Engine(cast(Engine, _PostgresEngineWithoutPragmas()))
+
+        repo = TokenSchedulerRepository(engine)
+
+        assert isinstance(repo, TokenSchedulerRepository)

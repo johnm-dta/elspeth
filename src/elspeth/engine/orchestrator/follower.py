@@ -310,6 +310,9 @@ class FollowerProcessor:
             if seat is None or not seat.seat_live:
                 raise _SeatDeadError(worker_id, run_id)
 
+        def ensure_leader_live_before_claim() -> None:
+            ensure_leader_live(force=True)
+
         while True:
             # Eviction / finalize-departure discrimination (design §B.1 step 5,
             # §D finalize flip).  The heartbeat latch is set on TWO distinct
@@ -348,7 +351,7 @@ class FollowerProcessor:
                 return
 
             # ── check leader liveness ─────────────────────────────────
-            ensure_leader_live(force=True)
+            ensure_leader_live()
 
             # ── attempt one claim-and-drain pass ──────────────────────
             # _drain_scheduler_claims is the existing production drain; it
@@ -364,7 +367,7 @@ class FollowerProcessor:
                 ctx=ctx,
                 pending_items={},
                 recover_pending_sinks=False,
-                before_claim=ensure_leader_live,
+                before_claim=ensure_leader_live_before_claim,
             )
 
             if drained:
@@ -511,7 +514,13 @@ def build_follower_processor(
     source_id = sources[0]
 
     # Get on_success for the first source (required RowProcessor param).
-    first_source = next(iter(config.sources.values()))
+    first_source_name, first_source = next(iter(config.sources.items()))
+    first_source_on_success = first_source.on_success
+    if first_source_on_success is None:
+        raise OrchestrationInvariantError(
+            f"Source '{first_source_name}' reached follower RowProcessor construction before on_success was injected. "
+            "Sources must be constructed through the runtime factory bridge before execution."
+        )
 
     # Build the edge_map from the database (same as the resume path).
     # The leader already registered nodes and edges in Landscape; the follower
@@ -543,7 +552,7 @@ def build_follower_processor(
         span_factory=SpanFactory(),
         run_id=run_id,
         source_node_id=source_id,
-        source_on_success=first_source.on_success,
+        source_on_success=first_source_on_success,
         source_plugin=None,  # follower: no source
         edge_map=edge_map,
         route_resolution_map=graph.get_route_resolution_map(),

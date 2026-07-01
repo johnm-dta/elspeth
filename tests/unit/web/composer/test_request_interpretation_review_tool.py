@@ -247,10 +247,55 @@ def _pipeline_decision_review_node(*, node_id: str = "drop_raw_html") -> NodeSpe
     )
 
 
+def _web_scrape_node(
+    *,
+    content_field: str = "content",
+    fingerprint_field: str = "content_fingerprint",
+) -> NodeSpec:
+    return NodeSpec(
+        id="fetch_pages",
+        node_type="transform",
+        plugin="web_scrape",
+        input="rows",
+        on_success="scored_rows",
+        on_error=None,
+        options={
+            "url_field": "url",
+            "content_field": content_field,
+            "fingerprint_field": fingerprint_field,
+        },
+        condition=None,
+        routes=None,
+        fork_to=None,
+        branches=None,
+        policy=None,
+        merge=None,
+    )
+
+
 def _state_with(node: NodeSpec) -> CompositionState:
     return CompositionState(
         source=None,
         nodes=(node,),
+        edges=(),
+        outputs=(),
+        metadata=PipelineMetadata(),
+        version=1,
+    )
+
+
+def _state_with_web_scrape_cleanup(
+    node: NodeSpec,
+    *,
+    content_field: str = "content",
+    fingerprint_field: str = "content_fingerprint",
+) -> CompositionState:
+    return CompositionState(
+        source=None,
+        nodes=(
+            _web_scrape_node(content_field=content_field, fingerprint_field=fingerprint_field),
+            replace(node, input="scored_rows"),
+        ),
         edges=(),
         outputs=(),
         metadata=PipelineMetadata(),
@@ -490,8 +535,10 @@ async def test_02_happy_path_produces_success_and_db_row(service: SessionService
     assert result.data["_kind"] == "interpretation_review_pending"
     assert result.data["affected_node_id"] == "rate_node"
     assert result.data["kind"] == "vague_term"
-    assert result.data["user_term"] == "cool"
-    assert result.data["llm_draft"] == "Visually appealing."
+    assert "user_term" not in result.data
+    assert "llm_draft" not in result.data
+    assert "cool" not in result.data["message"]
+    assert "Visually appealing" not in result.data["message"]
     assert result.data["interpretation_source"] == "user_approved"
 
     # Pending row exists in the DB.
@@ -576,7 +623,8 @@ async def test_02c_structured_pending_requirement_happy_path(service: SessionSer
     assert result.data["_kind"] == "interpretation_review_pending"
     assert result.data["affected_node_id"] == "rate_node"
     assert result.data["kind"] == "vague_term"
-    assert result.data["user_term"] == "cool"
+    assert "user_term" not in result.data
+    assert "llm_draft" not in result.data
 
 
 # --------------------------------------------------------------------------- #
@@ -712,6 +760,25 @@ def test_pipeline_decision_boundary_rejects_raw_html_mapping_preservation() -> N
     state = _state_with(replace(node, options=options))
 
     with pytest.raises(ToolArgumentError, match=r"preserves raw HTML/fingerprint field"):
+        _assert_affected_component(state, "drop_raw_html", InterpretationKind.PIPELINE_DECISION, "drop_raw_html_fields")
+
+
+def test_pipeline_decision_boundary_rejects_custom_raw_field_preservation() -> None:
+    node = _pipeline_decision_review_node()
+    options = dict(node.options)
+    options["mapping"] = {
+        "url": "url",
+        "page_body": "page_body",
+        "page_hash": "page_hash",
+        "primary_colours": "primary_colours",
+    }
+    state = _state_with_web_scrape_cleanup(
+        replace(node, options=options),
+        content_field="page_body",
+        fingerprint_field="page_hash",
+    )
+
+    with pytest.raises(ToolArgumentError, match=r"page_body|page_hash"):
         _assert_affected_component(state, "drop_raw_html", InterpretationKind.PIPELINE_DECISION, "drop_raw_html_fields")
 
 
@@ -1124,7 +1191,8 @@ def test_07_proposal_summary_text() -> None:
             "llm_draft": "Visually appealing.",
         },
     )
-    assert summary.summary == 'Surface the interpretation of "cool" for user review.'
+    assert summary.summary == "Surface an interpretation draft for user review."
+    assert "cool" not in summary.summary
     assert summary.affects == ("interpretation",)
     assert "subjective" in summary.rationale.lower() or "underspecified" in summary.rationale.lower()
 
@@ -1146,9 +1214,10 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
     for legitimate per-site churn.
     """
     session_id = uuid4()
+    sensitive_term = "private_health_condition"
 
     # Seed a composition state with 4 LLM nodes, all carrying placeholders for
-    # ``"cool"``. The writer-boundary check at create_pending_interpretation_event
+    # the same sensitive term. The writer-boundary check at create_pending_interpretation_event
     # reads composition_states.nodes inside its locked transaction and validates
     # each affected_node_id; all four must be present from the outset because
     # ``composition_state_id`` is fixed across the iterations.
@@ -1165,7 +1234,7 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
         )
     multi_node_state = CompositionState(
         source=None,
-        nodes=tuple(_llm_node(node_id=f"rate_node_{i}") for i in range(4)),
+        nodes=tuple(_llm_node(node_id=f"rate_node_{i}", term=sensitive_term) for i in range(4)),
         edges=(),
         outputs=(),
         metadata=PipelineMetadata(),
@@ -1188,7 +1257,7 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
             arguments={
                 "affected_node_id": f"rate_node_{i}",
                 "kind": "vague_term",
-                "user_term": "cool",
+                "user_term": sensitive_term,
                 "llm_draft": f"Draft {i}",
             },
             state=multi_node_state,
@@ -1207,12 +1276,12 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
 
     # 4th surfacing — distinct affected_node_id so dedup does not catch it.
     # The per-term cap is the structural bound that fires.
-    with pytest.raises(ToolArgumentError, match=r"per term|user_term"):
+    with pytest.raises(ToolArgumentError, match=r"per term|user_term") as exc_info:
         await _handle_request_interpretation_review(
             arguments={
                 "affected_node_id": "rate_node_3",
                 "kind": "vague_term",
-                "user_term": "cool",
+                "user_term": sensitive_term,
                 "llm_draft": "Draft 4",
             },
             state=multi_node_state,
@@ -1226,6 +1295,8 @@ async def test_08_per_term_rate_cap_after_three_surfacings(service: SessionServi
             list_interpretation_events=service.list_interpretation_events,
             **_provenance_kwargs(),
         )
+    assert sensitive_term not in str(exc_info.value)
+    assert sensitive_term not in exc_info.value.actual_type
 
 
 @pytest.mark.asyncio
@@ -1470,14 +1541,15 @@ async def test_dedup_second_pending_restage_is_idempotent(service: SessionServic
     assert second.data["_kind"] == "interpretation_review_pending_idempotent"
     # Idempotent return MUST echo the original event id, not a fresh one.
     assert second.data["event_id"] == first_event_id
-    # Affected node + kind + user_term flow through for frontend rendering.
+    # Affected node + kind flow through for frontend correlation. Raw review
+    # text stays in the scoped interpretation-events API, not the ToolResult
+    # sent back to the LLM or persisted in chat-message audit payloads.
     assert second.data["affected_node_id"] == "rate_node"
     assert second.data["kind"] == "vague_term"
-    assert second.data["user_term"] == "cool"
+    assert "user_term" not in second.data
+    assert "llm_draft" not in second.data
     assert second.affected_nodes == ("rate_node",)
-    # Message names the user_term so the LLM/frontend can attribute the
-    # idempotent response.
-    assert "cool" in second.data["message"]
+    assert "cool" not in second.data["message"]
     assert "reusing" in second.data["message"]
 
     # Critically: only ONE pending row in the DB. No duplicate persisted.

@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, ClassVar, Final, Literal, Self, TypeAliasType, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from elspeth.contracts import NodeStateStatus, Operation, TerminalOutcome
 from elspeth.web.sessions.protocol import (
@@ -38,6 +38,9 @@ ValidationCheckName = Literal[
     "batch_transform_options",
     "interpretation_review",
     "blob_inline_refs",
+    "managed_identity_policy",
+    "llm_retry_budget_policy",
+    "llm_base_url_policy",
     "settings_load",
     "plugin_instantiation",
     "value_source_compliance",
@@ -57,6 +60,9 @@ CHECK_SEMANTIC_CONTRACTS: Final[ValidationCheckName] = "semantic_contracts"
 CHECK_BATCH_TRANSFORM_OPTIONS: Final[ValidationCheckName] = "batch_transform_options"
 CHECK_INTERPRETATION_REVIEW: Final[ValidationCheckName] = "interpretation_review"
 CHECK_BLOB_INLINE_REFS: Final[ValidationCheckName] = "blob_inline_refs"
+CHECK_MANAGED_IDENTITY_POLICY: Final[ValidationCheckName] = "managed_identity_policy"
+CHECK_LLM_RETRY_BUDGET_POLICY: Final[ValidationCheckName] = "llm_retry_budget_policy"
+CHECK_LLM_BASE_URL_POLICY: Final[ValidationCheckName] = "llm_base_url_policy"
 CHECK_SETTINGS: Final[ValidationCheckName] = "settings_load"
 RUNTIME_CHECK_PLUGIN_INSTANTIATION: Final[ValidationCheckName] = "plugin_instantiation"
 CHECK_VALUE_SOURCE_COMPLIANCE: Final[ValidationCheckName] = "value_source_compliance"
@@ -75,6 +81,9 @@ VALIDATION_BLOCKING_CHECK_NAMES: tuple[ValidationCheckName, ...] = (
     CHECK_BATCH_TRANSFORM_OPTIONS,
     CHECK_INTERPRETATION_REVIEW,
     CHECK_BLOB_INLINE_REFS,
+    CHECK_MANAGED_IDENTITY_POLICY,
+    CHECK_LLM_RETRY_BUDGET_POLICY,
+    CHECK_LLM_BASE_URL_POLICY,
     CHECK_SETTINGS,
     RUNTIME_CHECK_PLUGIN_INSTANTIATION,
     CHECK_VALUE_SOURCE_COMPLIANCE,
@@ -239,6 +248,13 @@ class ExecuteRequest(_StrictResponse):
     """Optional execution-launch acknowledgement payload."""
 
     fanout_ack_token: str | None = Field(default=None, min_length=1)
+
+
+class WebSocketTicketResponse(_StrictResponse):
+    """Short-lived one-use ticket for the execution progress WebSocket."""
+
+    ticket: str
+    expires_at: datetime
 
 
 # ── Typed event payload models ──────────────────────────────────────────
@@ -515,6 +531,8 @@ class RunEvent(_StrictResponse):
     event_type/data types crashes immediately (offensive programming).
     """
 
+    _event_sequence: int | None = PrivateAttr(default=None)
+
     run_id: str
     timestamp: datetime = Field(strict=False)
     # NOTE: Fast pipelines may produce identical timestamps.
@@ -522,6 +540,18 @@ class RunEvent(_StrictResponse):
     # Frontend must NOT sort by timestamp — use arrival order instead.
     event_type: RunEventType
     data: ProgressData | ErrorData | CompletedData | CancelledData | FailedData
+
+    @property
+    def event_sequence(self) -> int | None:
+        """Internal durable replay cursor; never part of websocket JSON/schema."""
+        return self._event_sequence
+
+    def with_event_sequence(self, sequence: int) -> Self:
+        if sequence < 1:
+            raise ValueError(f"event sequence must be >= 1, got {sequence}")
+        clone = self.model_copy()
+        clone._event_sequence = sequence
+        return clone
 
     @field_validator("timestamp", mode="before")
     @classmethod

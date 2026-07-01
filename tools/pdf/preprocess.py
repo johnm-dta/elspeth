@@ -62,9 +62,7 @@ def strip_standalone_hrules(text: str) -> str:
 # noise than navigation.  We strip the link and keep the label text so
 # the prose still reads naturally.
 
-_INTRAPACK_LINK = re.compile(
-    r"\[(?P<label>[^\]]+)\]\((?P<target>(?:\.{1,2}/)?[A-Za-z0-9_./-]+\.(?:md|json|dot|mmd|txt))\)"
-)
+_INTRAPACK_LINK = re.compile(r"\[(?P<label>[^\]]+)\]\((?P<target>(?:\.{1,2}/)?[A-Za-z0-9_./-]+\.(?:md|json|dot|mmd|txt))\)")
 
 
 def rewrite_intra_pack_links(text: str) -> str:
@@ -104,13 +102,14 @@ class MermaidOptions:
     alt: str = ""
 
     @classmethod
-    def parse(cls, raw: str) -> "MermaidOptions":
+    def parse(cls, raw: str) -> MermaidOptions:
         attrs = dict(_ATTR_PAIR.findall(raw or ""))
         return cls(
             size=attrs.get("size", "width: 75%"),
             orient=attrs.get("orient", "vertical"),
             alt=attrs.get("alt", ""),
         )
+
 
 def render_mermaid_blocks(
     text: str,
@@ -119,7 +118,7 @@ def render_mermaid_blocks(
 ) -> str:
     """Render every ``mermaid`` fence to high-resolution PNG for Typst.
 
-    Diagrams are rendered through ``mmdc`` (mermaid-cli) at 4× scale for
+    Diagrams are rendered through ``mmdc`` (mermaid-cli) at 4x scale for
     print-quality output (~300 DPI).  While SVG would be ideal, Typst's
     SVG renderer doesn't fully support mermaid's ``foreignObject`` text.
     If rendering fails the fence is left in place so the build surfaces
@@ -144,20 +143,23 @@ def render_mermaid_blocks(
             subprocess.run(
                 [
                     "mmdc",
-                    "-i", str(mmd_file),
-                    "-o", str(png_file),
-                    "-b", "white",
-                    "-t", "neutral",
-                    "-s", "4",  # 4× scale for ~300 DPI print quality
+                    "-i",
+                    str(mmd_file),
+                    "-o",
+                    str(png_file),
+                    "-b",
+                    "white",
+                    "-t",
+                    "neutral",
+                    "-s",
+                    "4",  # 4x scale for ~300 DPI print quality
                 ],
                 check=True,
                 capture_output=True,
                 timeout=60,
             )
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
-            sys.stderr.write(
-                f"  [warn] mermaid render failed for diagram-{counter}: {e}\n"
-            )
+            sys.stderr.write(f"  [warn] mermaid render failed for diagram-{counter}: {e}\n")
             return match.group(0)
 
         if not png_file.exists():
@@ -171,11 +173,7 @@ def render_mermaid_blocks(
         # List of Figures.  The alt text becomes the figure caption.
         alt_attr = f', alt: "{opts.alt}"' if opts.alt else ""
         caption = f", caption: [{opts.alt}]" if opts.alt else ""
-        return (
-            "```{=typst}\n"
-            f'#figure(kind: image{caption})[#image("{rel_path}", {opts.size}{alt_attr})]\n'
-            "```\n"
-        )
+        return f'```{{=typst}}\n#figure(kind: image{caption})[#image("{rel_path}", {opts.size}{alt_attr})]\n```\n'
 
     return _MERMAID_FENCE.sub(replace, text)
 
@@ -207,8 +205,7 @@ def main(argv: list[str] | None = None) -> int:
         "--mermaid-rel-base",
         type=Path,
         required=True,
-        help="Base path relative to which PNG references are emitted (the "
-             "directory containing the final .typ file).",
+        help="Base path relative to which PNG references are emitted (the directory containing the final .typ file).",
     )
     args = parser.parse_args(argv)
 

@@ -99,6 +99,7 @@ from elspeth.web.execution.schemas import (
     ValidationResult,
 )
 from elspeth.web.interpretation_state import InterpretationReviewPending, materialize_state_for_execution
+from elspeth.web.provider_config_policy import web_llm_retry_budget_policy_error, web_rag_provider_config_policy_error
 from elspeth.web.sessions.converters import state_from_record
 from elspeth.web.sessions.protocol import (
     SESSION_TERMINAL_RUN_STATUS_VALUES,
@@ -590,6 +591,66 @@ class ExecutionServiceImpl:
                             raise PathAllowlistViolationError(
                                 f"Transform '{node.id}' {key}='{value}' resolves outside allowed output directories"
                             )
+
+        if composition_state.nodes:
+            for node in composition_state.nodes:
+                if node.node_type != "transform":
+                    continue
+                provider_policy_error = web_rag_provider_config_policy_error(node.options)
+                if provider_policy_error is not None:
+                    raise PipelineValidationError(
+                        errors=(
+                            ValidationError(
+                                component_id=node.id,
+                                component_type="transform",
+                                message=provider_policy_error,
+                                suggestion="Use api_key authentication or an operator-controlled named connector/allowlist.",
+                                error_code=None,
+                            ),
+                        ),
+                        readiness=ValidationReadiness(
+                            authoring_valid=False,
+                            execution_ready=False,
+                            completion_ready=False,
+                            blockers=[
+                                ValidationReadinessBlocker(
+                                    code="managed_identity_policy",
+                                    component_id=node.id,
+                                    component_type="transform",
+                                    detail=f"transform {node.id} enables managed identity from web-authored provider_config",
+                                )
+                            ],
+                        ),
+                    )
+                llm_retry_policy_error = web_llm_retry_budget_policy_error(node.plugin, node.options)
+                if llm_retry_policy_error is not None:
+                    raise PipelineValidationError(
+                        errors=(
+                            ValidationError(
+                                component_id=node.id,
+                                component_type="transform",
+                                message=llm_retry_policy_error,
+                                suggestion=(
+                                    "Set max_capacity_retry_seconds to a small positive value "
+                                    "or configure pool_size > 1 for pooled retry handling."
+                                ),
+                                error_code=None,
+                            ),
+                        ),
+                        readiness=ValidationReadiness(
+                            authoring_valid=False,
+                            execution_ready=False,
+                            completion_ready=False,
+                            blockers=[
+                                ValidationReadinessBlocker(
+                                    code="llm_retry_budget_policy",
+                                    component_id=node.id,
+                                    component_type="transform",
+                                    detail=f"transform {node.id} uses an unsafe sequential multi-query LLM retry budget",
+                                )
+                            ],
+                        ),
+                    )
 
         # Fail-closed pre-run validation gate (notes/composer-advisor-surface-map-2026-06-08.md).
         # Previously execute() created a run and let an invalid pipeline fail OPAQUELY
@@ -1176,7 +1237,7 @@ class ExecutionServiceImpl:
                             blob_metadata=blob_metadata,
                         )
                     except BlobIntegrityError:
-                        _BLOB_INLINE_HASH_MISMATCH_TOTAL.add(1, {"run_id": run_id})
+                        _BLOB_INLINE_HASH_MISMATCH_TOTAL.add(1)
                         raise
                     self._call_async(
                         self._session_service.record_blob_inline_resolutions(
@@ -1806,7 +1867,7 @@ class ExecutionServiceImpl:
 
     def _persist_and_broadcast_run_event(self, run_id: str, run_event: RunEvent) -> BroadcastResult:
         try:
-            self._call_async(
+            record = self._call_async(
                 self._session_service.append_run_event(
                     run_id=UUID(run_id),
                     timestamp=run_event.timestamp,
@@ -1814,6 +1875,7 @@ class ExecutionServiceImpl:
                     data=run_event.data.model_dump(mode="json"),
                 )
             )
+            run_event = run_event.with_event_sequence(record.sequence)
         except (OSError, SQLAlchemyError) as exc:
             slog.error(
                 "run_event_persist_failed",

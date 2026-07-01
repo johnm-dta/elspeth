@@ -2,6 +2,39 @@
 
 Use this runbook when a web session schema-bootstrap change requires deleting or archiving a stale `sessions.db`. Historically the session database was reset in isolation from the Landscape audit database, payload storage, blobs, and Filigree tracker data. **From the Phase 4 hello-world tutorial schema cutover onward, any deploy that changes both `SESSION_SCHEMA_EPOCH` and `SQLITE_SCHEMA_EPOCH` must reset the session DB and Landscape audit DB together.** Phase 4 adds tutorial run/audit-story columns on both sides of the web/Landscape boundary; Phase 5b (commit `2e390fc0b`) adds the later cross-DB invariant where `interpretation_events.resolved_prompt_template_hash` is byte-equal to the matching Landscape `calls_table.resolved_prompt_template_hash`. See [Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) below. Payload storage, blobs outside the session DB, and Filigree tracker data are still out of scope for this runbook.
 
+## Current Cutover: 0.7.0 (single-DB reset)
+
+0.7.0 advances **only** `SESSION_SCHEMA_EPOCH` (now 25); it does **not**
+change the Landscape audit DB `SQLITE_SCHEMA_EPOCH`. The run/audit
+Landscape schema is unchanged, so this is a **single-DB** session-only
+cutover: follow the [Staging Reset](#staging-reset-for-elspethfoundrysidedev)
+procedure (or [Local Or Dev Reset](#local-or-dev-reset) off-host) on its
+**single-DB** path, and do **NOT** run the
+[Phase 5b: Two-DB Reset](#phase-5b-two-db-reset) procedure — there is no
+matching Landscape schema change for 0.7.0.
+
+Both epoch bumps in 0.7.0 ride in lockstep with `GUIDED_SESSION_SCHEMA_VERSION`
+changes to the `composition_states.composer_meta` JSON blob, so neither adds a
+SQL column:
+
+- **23→24 / `GUIDED_SESSION_SCHEMA_VERSION` 5→6** added the guided fields
+  (`profile`, `advisor_checkpoint_passes_used`, `advisor_signoff_escape_offered`).
+- **24→25 / `GUIDED_SESSION_SCHEMA_VERSION` 6→7** dropped the vestigial
+  `profile.entry_seed` key. Without the lockstep epoch bump a stale
+  `entry_seed`-bearing blob would slip past both version gates and
+  lazy-500 deep inside `WorkflowProfile.from_dict`'s closed-key-set check.
+
+Each epoch bump converts what the `GUIDED_SESSION_SCHEMA_VERSION` change would
+otherwise be — a lazy per-row HTTP 500 raised by `GuidedSession.from_dict` the
+first time a stale guided session is opened — into a loud, early boot
+fail-close over the **whole** session DB. 0.7.0 boot fails closed on a stale
+session DB via the `_assert_schema_sentinels` guard with
+`SessionSchemaError: Session DB schema version 24 does not match
+SESSION_SCHEMA_EPOCH=25. Pre-release ELSPETH does not migrate session
+databases. Delete the session DB file and restart.` `auth.db` and the
+Landscape `runs/audit.db` are separate files and are NOT reset — local
+user accounts and run/audit history survive this cutover.
+
 ## Current Cutover: 0.6.0 (two-DB reset)
 
 0.6.0 advances **both** epochs: `SESSION_SCHEMA_EPOCH` to 19 and the
@@ -263,7 +296,7 @@ For SQLite, `sessions.db`, `sessions.db-wal`, `sessions.db-shm`, and `sessions.d
 5. The Stop/Go Gates above have been run: Landscape code/schema must not reference web-session identifiers.
 6. The pre-cutover source ref compatible with the archived DB has been recorded. If rollback is needed, restore that ref and the archived DB together; never run the old DB under the new schema code.
 7. The live SQLite deployment is single-worker: `deploy/elspeth-web.service` has no `--workers` flag, `WEB_CONCURRENCY` is unset or `1`, and the startup multi-worker guard in `src/elspeth/web/app.py` remains enabled.
-8. The operator has explicitly signed off on the `user_secrets` blast radius. Either the archived DB is the accepted recovery point, or staging secrets have a documented re-entry/reseed procedure before users resume composer work.
+8. The operator has explicitly signed off on the `user_secrets` blast radius. Either the archived DB is the accepted recovery point, or staging secrets have a documented re-entry/reseed procedure before users resume composer work. **The archive is a long-lived copy of live encrypted secret material.** The `user_secrets` rows are encrypted with `settings.secret_key` (the same key the running app uses — `UserSecretStore` is constructed on the session engine with `settings.secret_key`). The archive is only inert if `settings.secret_key` is **rotated** as part of the deploy; if the key is reused, the archive remains decryptable with the running app's key. Decide the secret_key-rotation outcome up front and record it in the deploy plan.
 9. No other host-side process is writing the SQLite DB. The procedure stops `elspeth-web.service` and checks open handles before copying; if another process still has the main DB or a sidecar open, stop and identify it before continuing.
 
 ### Procedure
@@ -345,6 +378,20 @@ if command -v fuser >/dev/null 2>&1; then
     done
 fi
 
+# Checkpoint the WAL into the main DB FIRST so the archive captures a
+# self-contained copy. The session DB also stores the encrypted
+# UserSecretStore (constructed on the session engine in app.py:
+# `UserSecretStore(session_engine, settings.secret_key)`), so the -wal
+# sidecar can hold uncheckpointed encrypted secret material. Folding the
+# WAL into the main file means the long-lived archive does not depend on a
+# matched -wal/-shm sidecar set to be readable, and no secret rows are
+# stranded in a sidecar at archive time. Guard on existence: a missing DB
+# is the first-deploy case, and running sqlite3 against an absent path
+# would create a junk 0-byte file that the archive loop would then copy.
+if [ -e "$DB_PATH" ]; then
+    sqlite3 "$DB_PATH" 'PRAGMA wal_checkpoint(TRUNCATE);'
+fi
+
 FOUND_DB_ARTIFACT=0
 for artifact in "${DB_ARTIFACTS[@]}"; do
     if [ -e "$artifact" ]; then
@@ -377,7 +424,39 @@ sudo systemctl status "$SERVICE" --no-pager --lines=20
 
 After health checks pass, create a new session through the API or UI and confirm no `SessionSchemaError` appears in the service journal.
 
+#### 0.7.0 epoch + smoke verification
+
+Confirm the recreated session DB carries the new epoch sentinel, then
+drive a fresh guided session to completion to prove the 0.7.0 build is
+serving the recreated schema cleanly:
+
+```bash
+# Confirm the recreated session DB carries the new epoch sentinel.
+sqlite3 "$DB_PATH" 'PRAGMA user_version;'   # expect 24 (== SESSION_SCHEMA_EPOCH)
+```
+
+If `PRAGMA user_version` is anything other than `24`, the running process
+is serving a stale or non-recreated DB; stop and re-resolve the path per
+"Resolve Database Paths" before continuing.
+
+Then run a fresh-session smoke through the UI:
+
+1. Create a new session.
+2. Start the tutorial on the `TUTORIAL` profile.
+3. Drive the staged guided walk through to a `terminal=completed` state.
+4. Run the resulting pipeline.
+
+Confirm the service journal shows **no** `SessionSchemaError` (the boot
+guard passed), **no** per-row HTTP 500 from `GuidedSession.from_dict`
+(the guided-schema bump landed in the recreated DB, not lazily on a stale
+row), and **no** `UnresolvedInterpretationPlaceholderError` (proving the
+B1 interpretation-surfacing fix is in the deployed build). Any of these in
+the journal means the deploy is not clean — stop and inspect before
+handing staging back to users.
+
 Before handing staging back to users, verify the `user_secrets` outcome the operator chose in the preconditions. If secrets were intentionally cleared, confirm the affected composer/provider flow reports the expected missing-secret state and that the operator has re-entered or reseeded any required staging secrets. If rollback depends on the archive, confirm the archived DB is retained because it contains the pre-reset encrypted secret rows as well as chat/session data.
+
+At the **end of the deploy window**, destroy or secure the archive directories created above (`$SNAPSHOT_DIR` and any `*.failed-phase1.*` from a rollback). Each is a long-lived copy of live encrypted secret material. It is only inert if `settings.secret_key` was **rotated** during this deploy; if the key was reused, the archive is decryptable with the running app's key, so an unattended snapshot directory is equivalent to leaving a readable copy of every staging secret on disk. If you must retain an archive past the deploy window as a recovery point, rotate `settings.secret_key` (which invalidates the archived ciphertext under the new key) or move the archive to access-controlled storage.
 
 ### Rollback
 

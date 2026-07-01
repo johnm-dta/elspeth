@@ -129,6 +129,24 @@ evals_require_tools() {
   fi
 }
 
+# ---------- Curl secret hygiene ----------------------------------------------
+
+_evals_curl_temp_file_from_string() {
+  local content=$1
+  local tmp
+  tmp=$(mktemp -t evals-curl.XXXXXX)
+  chmod 600 "$tmp"
+  printf '%s' "$content" > "$tmp"
+  printf '%s' "$tmp"
+}
+
+_evals_auth_header_file() {
+  : "${EVALS_JWT_FILE:?EVALS_JWT_FILE not set}"
+  local jwt
+  jwt=$(cat "$EVALS_JWT_FILE")
+  _evals_curl_temp_file_from_string "Authorization: Bearer $jwt"$'\n'
+}
+
 # ---------- JWT --------------------------------------------------------------
 
 # evals_jwt_exp_seconds_remaining <jwt> -> echoes seconds until exp, or empty if undecodable.
@@ -157,14 +175,16 @@ evals_login() {
   : "${ELSPETH_EVAL_PASS:?ELSPETH_EVAL_PASS not set}"
 
   evals_log INFO "logging in as $ELSPETH_EVAL_USER"
-  local body resp http
+  local body body_file resp http
   body=$(jq -nc --arg u "$ELSPETH_EVAL_USER" --arg p "$ELSPETH_EVAL_PASS" \
            '{username:$u, password:$p}')
+  body_file=$(_evals_curl_temp_file_from_string "$body")
   resp=$(curl -sS --max-time "$ELSPETH_EVAL_CURL_MAX_TIME" \
            -X POST "$ELSPETH_EVAL_BASE_URL/api/auth/login" \
            -H 'Content-Type: application/json' \
-           -d "$body" \
-           -w '\n%{http_code}')
+           --data "@$body_file" \
+           -w '\n%{http_code}' || printf '\n000')
+  rm -f "$body_file"
   http=$(printf '%s' "$resp" | tail -n1)
   body=$(printf '%s' "$resp" | sed '$d')
   if [[ "$http" != "200" ]]; then
@@ -203,14 +223,6 @@ evals_login_if_needed() {
   fi
 }
 
-# Internal: emit Authorization header arg list.
-_evals_auth_args() {
-  : "${EVALS_JWT_FILE:?EVALS_JWT_FILE not set}"
-  local jwt
-  jwt=$(cat "$EVALS_JWT_FILE")
-  printf -- '-H\nAuthorization: Bearer %s\n' "$jwt"
-}
-
 # ---------- HTTP helpers -----------------------------------------------------
 
 # _evals_http_get <url> <out_file>
@@ -218,14 +230,15 @@ _evals_auth_args() {
 _evals_http_get() {
   local url=$1 out=$2
   evals_login_if_needed
-  local jwt http
-  jwt=$(cat "$EVALS_JWT_FILE")
+  local auth_header_file http
+  auth_header_file=$(_evals_auth_header_file)
   if ! http=$(curl -sS --max-time "$ELSPETH_EVAL_CURL_MAX_TIME" \
-                -H "Authorization: Bearer $jwt" \
+                -H "@$auth_header_file" \
                 -o "$out" -w '%{http_code}' \
                 "$url"); then
     http=000
   fi
+  rm -f "$auth_header_file"
   if [[ "$http" != 2* ]]; then
     local snippet
     snippet=$(head -c 500 "$out" 2>/dev/null || true)
@@ -239,14 +252,15 @@ _evals_http_get() {
 evals_try_get() {
   local url=$1 out=$2 code_out=${3:-}
   evals_login_if_needed
-  local jwt http
-  jwt=$(cat "$EVALS_JWT_FILE")
+  local auth_header_file http
+  auth_header_file=$(_evals_auth_header_file)
   if ! http=$(curl -sS --max-time "$ELSPETH_EVAL_CURL_MAX_TIME" \
-                -H "Authorization: Bearer $jwt" \
+                -H "@$auth_header_file" \
                 -o "$out" -w '%{http_code}' \
                 "$url"); then
     http=000
   fi
+  rm -f "$auth_header_file"
   if [[ -n "$code_out" ]]; then
     printf '%s' "$http" > "$code_out"
   fi
@@ -261,19 +275,21 @@ evals_try_get() {
 _evals_http_post_json() {
   local url=$1 body=$2 out=$3 code_out=${4:-}
   evals_login_if_needed
-  local jwt http data_arg=()
-  jwt=$(cat "$EVALS_JWT_FILE")
+  local auth_header_file http data_arg=() body_file=""
+  auth_header_file=$(_evals_auth_header_file)
   if [[ -f "$body" ]]; then
     data_arg=(--data "@$body")
   else
-    data_arg=(--data "$body")
+    body_file=$(_evals_curl_temp_file_from_string "$body")
+    data_arg=(--data "@$body_file")
   fi
   http=$(curl -sS --max-time "$ELSPETH_EVAL_CURL_MAX_TIME" \
            -X POST "$url" \
-           -H "Authorization: Bearer $jwt" \
+           -H "@$auth_header_file" \
            -H 'Content-Type: application/json' \
            "${data_arg[@]}" \
            -o "$out" -w '%{http_code}' || echo "000")
+  rm -f "$auth_header_file" "$body_file"
   if [[ -n "$code_out" ]]; then
     printf '%s' "$http" > "$code_out"
   fi
@@ -332,16 +348,17 @@ evals_post_message() {
   jq -n --rawfile c "$msg_file" '{content:$c}' > "$out/msg.t${turn}.req.json"
 
   evals_login_if_needed
-  local jwt http_time start end wall
-  jwt=$(cat "$EVALS_JWT_FILE")
+  local auth_header_file http_time start end wall
+  auth_header_file=$(_evals_auth_header_file)
   start=$(date +%s.%N)
   http_time=$(curl -sS --max-time "$ELSPETH_EVAL_CURL_MAX_TIME" \
                 -X POST "$ELSPETH_EVAL_BASE_URL/api/sessions/$sid/messages" \
-                -H "Authorization: Bearer $jwt" \
+                -H "@$auth_header_file" \
                 -H 'Content-Type: application/json' \
                 --data "@$out/msg.t${turn}.req.json" \
                 -o "$out/msg.t${turn}.resp.json" \
                 -w '%{http_code} %{time_total}\n' || echo "000 0.00")
+  rm -f "$auth_header_file"
   end=$(date +%s.%N)
   wall=$(awk "BEGIN{printf \"%.2f\", $end - $start}")
   printf '%s\n%.2f\n' "$http_time" "$wall" > "$out/msg.t${turn}.curl_meta"

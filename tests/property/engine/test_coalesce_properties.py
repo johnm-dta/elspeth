@@ -126,6 +126,7 @@ def make_mock_executor(clock: MockClock | None = None) -> _TestCoalesceExecutor:
     mock_execution.begin_node_state.return_value = MagicMock(state_id="state-001")
     mock_execution.complete_node_state.return_value = None
     mock_execution.get_completed_row_ids_for_nodes.return_value = []
+    mock_execution.has_completed_row_for_node.return_value = False
 
     mock_data_flow = MagicMock()
     mock_data_flow.record_token_outcome.return_value = None

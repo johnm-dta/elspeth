@@ -37,4 +37,17 @@ describe("LoginPage", () => {
     expect(spinner).not.toHaveAttribute("role");
     expect(spinner).not.toHaveAttribute("aria-label");
   });
+
+  it("renders the local-auth form with labelled inputs and a sign-in button", async () => {
+    vi.mocked(api.fetchAuthConfig).mockResolvedValue({
+      provider: "local",
+      oidc_issuer: null,
+      oidc_client_id: null,
+      authorization_endpoint: null,
+    });
+    render(<LoginPage />);
+    expect(await screen.findByLabelText("Username")).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /sign in/i })).toBeInTheDocument();
+  });
 });

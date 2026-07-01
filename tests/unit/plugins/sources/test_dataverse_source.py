@@ -332,12 +332,26 @@ class TestDataverseSourceConfigValidation:
         with pytest.raises(PluginConfigError, match="placeholder"):
             DataverseSourceConfig.from_dict(_base_config(entity=entity))
 
+    @pytest.mark.parametrize("entity", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_entity_names(self, entity: str) -> None:
+        from elspeth.plugins.sources.dataverse import DataverseSourceConfig
+
+        cfg = DataverseSourceConfig.from_dict(_base_config(entity=entity))
+        assert cfg.entity == entity
+
     @pytest.mark.parametrize("select_field", ["<OPERATOR_REQUIRED>", "operator required", "operator_required"])
     def test_select_placeholder_rejected(self, select_field: str) -> None:
         from elspeth.plugins.sources.dataverse import DataverseSourceConfig
 
         with pytest.raises(PluginConfigError, match="placeholder"):
             DataverseSourceConfig.from_dict(_base_config(select=[select_field]))
+
+    @pytest.mark.parametrize("select_field", ["todo", "unknown", "unset", "required", "<literal>"])
+    def test_plain_placeholder_words_can_be_select_fields(self, select_field: str) -> None:
+        from elspeth.plugins.sources.dataverse import DataverseSourceConfig
+
+        cfg = DataverseSourceConfig.from_dict(_base_config(select=[select_field]))
+        assert cfg.select == [select_field]
 
     def test_valid_fetchxml_config(self) -> None:
         """Accept a minimal valid FetchXML config."""
@@ -1881,8 +1895,8 @@ class TestFieldResolutionUnion:
 
 class TestFieldMappingCollisionPolarity:
     """B3.1: field_mapping-created collisions are config faults (crash), not data
-    faults (quarantine). Mirrors the azure test suite's
-    test_json_field_mapping_collision_crashes_not_quarantines."""
+    faults (quarantine). Azure Blob JSON differs because blob row field sets are
+    external source data and are quarantined per row."""
 
     def test_field_mapping_collision_crashes_not_quarantines(self) -> None:
         """A field_mapping that collapses two fields into one final name is a CONFIG

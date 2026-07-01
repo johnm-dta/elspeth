@@ -11,6 +11,7 @@
 //   "schema_form"             -> SchemaFormTurn
 //   "propose_chain"           -> ProposeChainTurn
 //   "recipe_offer"            -> SchemaFormTurn (mode="recipe_decision")
+//   "confirm_wiring"          -> WireStageTurn
 //
 // Exhaustiveness assertion:
 //   The `default:` branch contains `const _exhaustive: never = turn.type`.
@@ -44,26 +45,29 @@ import type {
   MultiSelectWithCustomPayload,
   SchemaFormPayload,
   ProposeChainPayload,
+  WireStageData,
 } from "@/types/guided";
-import type { InterpretationEvent } from "@/types/interpretation";
 import { SingleSelectTurn } from "./SingleSelectTurn";
 import { InspectAndConfirmTurn } from "./InspectAndConfirmTurn";
 import { MultiSelectWithCustomTurn } from "./MultiSelectWithCustomTurn";
 import { SchemaFormTurn } from "./SchemaFormTurn";
 import { ProposeChainTurn } from "./ProposeChainTurn";
-import { InterpretationReviewTurn } from "./InterpretationReviewTurn";
+import { WireStageTurn } from "./WireStageTurn";
 
 interface GuidedTurnProps {
   turn: TurnPayload;
   onSubmit: (body: GuidedRespondRequest) => void;
   disabled?: boolean;
+  /** Tutorial mode — forwarded to leaf widgets that surface worked-example
+   * teaching copy (e.g. SchemaFormTurn's on_validation_failure caveat). */
+  isTutorial?: boolean;
 }
 
 function guidedTurnInstanceKey(turn: TurnPayload): string {
   return JSON.stringify([turn.step_index, turn.type, turn.payload]);
 }
 
-export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps) {
+export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = false }: GuidedTurnProps) {
   const guardedSubmit = (body: GuidedRespondRequest) => {
     if (disabled) return;
     onSubmit(body);
@@ -74,12 +78,23 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
   const turnInstanceKey = guidedTurnInstanceKey(turn);
   switch (turn.type) {
     case "single_select":
+      // Tutorial is a PASSIVE teaching device: the learner advances by pressing
+      // Send (the locked prompt builds the step), never by picking from this
+      // menu. The chips are a live, submit-on-click RIVAL driver whose options
+      // don't even include the scripted source (the source step builds a
+      // web_scrape; the menu lists azure_blob/csv/dataverse/json/text), so
+      // clicking ANY chip submits an off-script choice and derails the scripted
+      // build. Omit the pick widget in tutorial mode — the decision collapses to
+      // its heading + "press Send" caption. Live guided KEEPS the menu (there it
+      // is the real path for both audiences).
+      if (isTutorial) return null;
       return (
         <SingleSelectTurn
           key={turnInstanceKey}
           payload={turn.payload as SingleSelectPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "inspect_and_confirm":
@@ -89,6 +104,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           payload={turn.payload as InspectAndConfirmPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "multi_select_with_custom":
@@ -98,6 +114,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           payload={turn.payload as MultiSelectWithCustomPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "schema_form":
@@ -107,6 +124,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           payload={turn.payload as SchemaFormPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "propose_chain":
@@ -116,6 +134,7 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           payload={turn.payload as ProposeChainPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
     case "recipe_offer":
@@ -125,25 +144,57 @@ export function GuidedTurn({ turn, onSubmit, disabled = false }: GuidedTurnProps
           payload={turn.payload as SchemaFormPayload}
           onSubmit={guardedSubmit}
           disabled={disabled}
+          isTutorial={isTutorial}
         />
       );
-    case "interpretation_review": {
-      // Phase 5b Task 4 — the interpretation-review widget owns its own
-      // wire submission (POST resolve / POST opt_out), not the guided
-      // /respond round-trip the other widget surfaces feed.  The event
-      // payload IS the turn payload (the backend includes the
-      // InterpretationEvent verbatim so the widget can render without a
-      // follow-up GET).  We extract sessionId from event.session_id —
-      // it's an authoritative server-emitted Tier-1 field.
-      const event = turn.payload as InterpretationEvent;
+    case "confirm_wiring":
       return (
-        <InterpretationReviewTurn
+        <WireStageTurn
           key={turnInstanceKey}
-          event={event}
-          sessionId={event.session_id}
+          data={turn.payload as WireStageData}
+          confirmDisabled={disabled}
+          onConfirm={() =>
+            guardedSubmit({
+              chosen: ["confirm"],
+              edited_values: null,
+              custom_inputs: null,
+              accepted_step_index: null,
+              edit_step_index: null,
+              control_signal: null,
+            })
+          }
+          onAskAdvisor={() =>
+            guardedSubmit({
+              chosen: null,
+              edited_values: null,
+              custom_inputs: null,
+              accepted_step_index: null,
+              edit_step_index: null,
+              control_signal: "request_advisor",
+            })
+          }
+          onExitToFreeform={() =>
+            guardedSubmit({
+              chosen: null,
+              edited_values: null,
+              custom_inputs: null,
+              accepted_step_index: null,
+              edit_step_index: null,
+              control_signal: "exit_to_freeform",
+            })
+          }
+          onCompleteWithoutSignoff={() =>
+            guardedSubmit({
+              chosen: ["complete_without_signoff"],
+              edited_values: null,
+              custom_inputs: null,
+              accepted_step_index: null,
+              edit_step_index: null,
+              control_signal: null,
+            })
+          }
         />
       );
-    }
     default: {
       // Exhaustiveness check: if a new TurnType is added to guided.ts without
       // a matching case here, TypeScript will report a compile error on this

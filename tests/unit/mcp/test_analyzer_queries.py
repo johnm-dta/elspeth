@@ -841,6 +841,26 @@ class TestGetRunSummary:
         assert "error" not in result
         assert result["counts"]["tokens"] == 1
 
+    def test_summary_counts_runtime_preflight_operations(self) -> None:
+        """Runtime preflight operations must appear in the summary breakdown."""
+        setup = _build_linear_pipeline(
+            run_id="summary-preflight-run",
+            source_node_id="source-0",
+            transform_node_id="llm-transform",
+            sink_node_id="sink-0",
+        )
+        setup["factory"].execution.begin_operation("summary-preflight-run", "source-0", "source_load")
+        setup["factory"].execution.begin_operation("summary-preflight-run", "sink-0", "sink_write")
+        setup["factory"].execution.begin_operation("summary-preflight-run", "llm-transform", "runtime_preflight")
+
+        result = get_run_summary(setup["db"], setup["factory"], "summary-preflight-run")
+
+        assert "error" not in result
+        assert result["counts"]["operations"] == 3
+        assert result["counts"]["source_loads"] == 1
+        assert result["counts"]["sink_writes"] == 1
+        assert result["counts"]["runtime_preflights"] == 1
+
     def test_summary_for_nonexistent_run(self) -> None:
         """get_run_summary returns error for unknown run_id."""
         setup = make_recorder_with_run()
@@ -1303,6 +1323,43 @@ class TestQueryDuplicateColumns:
         assert len(results) == 1
         assert "a_run_id" in results[0]
         assert "b_run_id" in results[0]
+
+
+class TestQueryResultLimit:
+    """Regression coverage for bounded raw MCP query results."""
+
+    def test_query_uses_fetchmany_not_fetchall(self) -> None:
+        """Raw query must not materialize every selected row before limiting."""
+        from elspeth.mcp.analyzers.queries import query
+
+        class FakeResult:
+            def keys(self) -> list[str]:
+                return ["value"]
+
+            def fetchall(self) -> list[tuple[int]]:
+                raise AssertionError("query() must use fetchmany(limit), not fetchall()")
+
+            def fetchmany(self, size: int) -> list[tuple[int]]:
+                assert size == 2
+                return [(1,), (2,)]
+
+        class FakeConnection:
+            def __enter__(self) -> FakeConnection:
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def execute(self, _statement: object, _params: dict[str, object]) -> FakeResult:
+                return FakeResult()
+
+        class FakeDB:
+            def read_only_connection(self) -> FakeConnection:
+                return FakeConnection()
+
+        results = query(cast(Any, FakeDB()), cast(Any, object()), "SELECT value FROM rows", limit=2)
+
+        assert results == [{"value": 1}, {"value": 2}]
 
 
 # ===========================================================================

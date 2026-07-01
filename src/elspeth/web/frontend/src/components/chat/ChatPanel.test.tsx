@@ -1,16 +1,24 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ChatPanel,
   deriveRowCount,
   findOriginatingMessageId,
+  hasExistingCompositionContent,
+  hasSafeInlineSourceDisambiguationBase,
   isAmbiguousInlineProposal,
   looksLikeData,
   parseProposedRowsFromUserInput,
 } from "./ChatPanel";
 import { useSessionStore } from "@/stores/sessionStore";
+import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
+import { useExecutionStore } from "@/stores/executionStore";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 import { resetStore } from "@/test/store-helpers";
 import { useComposer } from "@/hooks/useComposer";
 import { makeComposition } from "@/test/composerFixtures";
@@ -379,6 +387,13 @@ describe("ChatPanel mode discriminator", () => {
     vi.resetAllMocks();
     Element.prototype.scrollIntoView = vi.fn();
     resetStore(useSessionStore);
+    // P3.6: the guided-branch tests seed pendingBySession to exercise the
+    // interpretation-card block; reset it so a seeded card does not leak into
+    // sibling tests and spuriously disable their guided turn.
+    resetStore(useInterpretationEventsStore);
+    // Slice C: the verification-panel tests seed validationResult; reset the
+    // execution store so a seeded result does not leak into sibling tests.
+    resetStore(useExecutionStore);
     (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
       sendMessage: vi.fn(),
       retryMessage: vi.fn(),
@@ -402,6 +417,7 @@ describe("ChatPanel mode discriminator", () => {
       terminal: null,
       chat_history: [],
       chat_turn_seq: 0,
+      profile: null,
     };
   }
 
@@ -451,14 +467,33 @@ describe("ChatPanel mode discriminator", () => {
     expect(chatMain).not.toBeNull();
     expect(chatMain?.classList.contains("chat-panel--guided")).toBe(true);
 
-    // Phase A slice 4: ChatInput is rendered INSIDE the guided-active
-    // branch (below GuidedTurn + ExitToFreeformButton) so the user can
-    // ask scoped advisory questions of the LLM.  Previously this branch
-    // suppressed all ChatInput surfaces; the assertion is now positive.
-    // Per-step placeholder + onSend wiring are exercised in the two
-    // dedicated tests below.
+    // The intent ChatInput is rendered INSIDE the guided-active branch. For a
+    // non-tutorial session it now docks at the BOTTOM (below the decision), as
+    // the primary chat affordance; DOM order is asserted in the dedicated
+    // "docks ... BELOW the decision" test above. This test asserts presence
+    // only; per-step placeholder + onSend wiring are exercised below.
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
     expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
+  });
+
+  it("non-tutorial guided: no 'always start in freeform mode' opt-out checkbox", () => {
+    // Load preferences so the (now-removed) InlineOptOutCheckbox would render if
+    // it were still wired — it returns null until prefs load, so without this
+    // the assertion would pass vacuously.
+    usePreferencesStore.setState({ loaded: true, defaultMode: "guided" });
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByText(/always start new sessions in freeform mode/i),
+    ).toBeNull();
   });
 
   it("renders a persistent guided workflow stepper with the active step marked", () => {
@@ -473,11 +508,68 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     const workflow = screen.getByRole("list", { name: /guided workflow/i });
-    for (const label of ["Source", "Output", "Recipe", "Transforms", "Ready"]) {
+    for (const label of ["Source", "Output", "Transforms", "Wire", "Ready"]) {
       expect(workflow).toHaveTextContent(label);
     }
     expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
       "Source",
+    );
+  });
+
+  it("renders the chat box at step_3 with NO proposal (per-stage transforms entry, not a panel-less fall-through)", () => {
+    // STEP_3 begins with no server turn: the per-stage transforms prompt drives
+    // the build via /guided/chat (cold-start). The guided surface — crucially the
+    // chat box — MUST render so the operator can describe the transforms; a
+    // missing turn must NOT fall through to the freeform body / loading flash.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: null,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    const chatMain = container.querySelector("#chat-main");
+    expect(chatMain?.classList.contains("chat-panel--guided")).toBe(true);
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    // Transforms is the current stepper step (not the vestigial Recipe).
+    expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
+      "Transforms",
+    );
+  });
+
+  it("marks STEP_4_WIRE as the current guided workflow step", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_4_wire" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    const workflow = screen.getByRole("list", { name: /guided workflow/i });
+    expect(workflow).toHaveTextContent("Wire");
+    expect(screen.getByRole("listitem", { current: "step" })).toHaveTextContent(
+      "Wire",
+    );
+  });
+
+  it("lays the guided workflow stepper out one column per step, with a mobile breakpoint", () => {
+    const css = readFileSync(
+      join(process.cwd(), "src/components/chat/guided/guided.css"),
+      "utf8",
+    );
+    // 5 GUIDED_WORKFLOW_STEPS -> 5 columns. The prior repeat(6,...) left an
+    // empty trailing column.
+    expect(css).toContain("grid-template-columns: repeat(5, minmax(0, 1fr));");
+    // Narrow viewports drop to 2 columns so single-word labels (e.g.
+    // "Transforms") stay whole instead of shattering one character per line.
+    expect(css).toMatch(
+      /@media \(max-width: 640px\)[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/,
     );
   });
 
@@ -492,12 +584,299 @@ describe("ChatPanel mode discriminator", () => {
 
     render(<ChatPanel />);
 
+    // The decision now leads with the dynamic rationale (or, when no assistant
+    // turn exists for the step, the step-purpose fallback) AS the heading;
+    // "Current decision" is a decorative, aria-hidden eyebrow.
     expect(
-      screen.getByRole("heading", { name: /current decision/i }),
+      screen.getByRole("heading", {
+        level: 2,
+        name: /choose the input and confirm what elspeth can read/i,
+      }),
     ).toBeInTheDocument();
+  });
+
+  it("leads the decision with the assistant rationale heading when chat_history has one", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "assistant",
+            content: "Source created as a 3-row CSV.",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "t",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    // With an assistant rationale for the active step, it leads AS the heading
+    // (instead of the static step-purpose fallback).
     expect(
-      screen.getByText(/choose the input and confirm what elspeth can read/i),
+      screen.getByRole("heading", {
+        level: 2,
+        name: /source created as a 3-row csv/i,
+      }),
     ).toBeInTheDocument();
+  });
+
+  // ── Slice C: the guided verification panel ────────────────────────────────
+  //
+  // The panel (gloss + plain validation summary) leads the guided column for
+  // BOTH surfaces; the graph THUMBNAIL is tutorial-only (live-guided already
+  // renders GraphMiniView in the SideRail, so the column would otherwise
+  // duplicate it). No second GraphModal is mounted here — both surfaces expand
+  // into the App-root GraphModal.
+  function sourceLlmCsvComposition() {
+    return makeComposition(1, {
+      sources: { source: { plugin: "text", options: {} } },
+      nodes: [
+        {
+          id: "rater",
+          node_type: "transform",
+          plugin: "llm",
+          input: "source",
+          on_success: null,
+          on_error: null,
+          options: {},
+        },
+      ],
+      outputs: [{ name: "out", plugin: "csv", options: {} }],
+    });
+  }
+
+  it("mounts the guided verification panel (gloss + validation summary) and does NOT add a second graph thumbnail in live-guided", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // The verification panel leads the column.
+    expect(
+      screen.getByRole("region", { name: "Pipeline so far" }),
+    ).toBeInTheDocument();
+    // Gloss renders a plain-language sentence from the composition.
+    expect(screen.getByTestId("pipeline-gloss")).toHaveTextContent(
+      /this pipeline will read your data, rate each row, and write a csv\./i,
+    );
+    // Validation summary root is always present (neutral here — no result yet).
+    expect(
+      screen.getByTestId("pipeline-validation-summary"),
+    ).toBeInTheDocument();
+    // Live-guided: the column does NOT add a GraphMiniView (the SideRail owns
+    // the thumbnail); only the tutorial gets the in-column thumbnail.
+    expect(
+      screen.queryByRole("button", {
+        name: "Pipeline graph (click to expand)",
+      }),
+    ).toBeNull();
+    expect(container.querySelector(".graph-mini")).toBeNull();
+    // No second GraphModal is mounted in the column (App-root one serves both).
+    expect(screen.queryByTestId("graph-modal-backdrop")).toBeNull();
+    expect(container.querySelector(".graph-modal")).toBeNull();
+  });
+
+  it("renders the in-column graph thumbnail in the tutorial (which has no SideRail)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // Panel + gloss + summary present in the tutorial too.
+    expect(
+      screen.getByRole("region", { name: "Pipeline so far" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("pipeline-gloss")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("pipeline-validation-summary"),
+    ).toBeInTheDocument();
+    // The tutorial gets the in-column thumbnail (populated → the expand button).
+    expect(
+      screen.getByRole("button", {
+        name: "Pipeline graph (click to expand)",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("retains the per-step rationale prose below the verification panel (demoted, not deleted)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "assistant",
+            content: "Source created as a 3-row CSV.",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "t",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+
+    render(<ChatPanel />);
+
+    // The rationale prose is RETAINED as the decision heading...
+    const rationale = screen.getByRole("heading", {
+      level: 2,
+      name: /source created as a 3-row csv/i,
+    });
+    expect(rationale).toBeInTheDocument();
+    // ...but the verification panel now LEADS it (the graph/summary is the
+    // canonical "what I built"; the prose is supporting context below).
+    const panel = screen.getByRole("region", { name: "Pipeline so far" });
+    expect(
+      panel.compareDocumentPosition(rationale) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  // Shared validation-readiness stub (PipelineValidationSummary ignores it).
+  const READINESS = {
+    authoring_valid: true,
+    execution_ready: true,
+    completion_ready: true,
+    blockers: [],
+  };
+
+  it("D1: renders the guided verification panel from the store only — no source-DATA fetch", () => {
+    // Scope the spies to SOURCE-DATA endpoints (blob content / upload). The
+    // mode-agnostic auto-validate fires api.validatePipeline, which is
+    // metadata-only and D1-safe — it is intentionally NOT spied (a blanket
+    // api.* spy would false-fail). getBlobMetadata + previewBlobContent are
+    // already vi.fn() stubs from the module mock above.
+    const uploadSpy = vi.spyOn(apiClient, "uploadBlob");
+    const previewSnippetSpy = vi.spyOn(apiClient, "previewBlobContentSnippet");
+    const downloadSpy = vi.spyOn(apiClient, "downloadBlobContent");
+
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [],
+        readiness: READINESS,
+      },
+    } as never);
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The panel is built purely from compositionState + validationResult.
+    expect(screen.getByTestId("pipeline-gloss")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("pipeline-validation-summary"),
+    ).toHaveTextContent(/looks good/i);
+    expect(
+      screen.getByRole("button", {
+        name: "Pipeline graph (click to expand)",
+      }),
+    ).toBeInTheDocument();
+
+    // Zero source-DATA reads — D1 (consumable source, zero rows).
+    expect(uploadSpy).not.toHaveBeenCalled();
+    expect(previewSnippetSpy).not.toHaveBeenCalled();
+    expect(downloadSpy).not.toHaveBeenCalled();
+    expect(apiClient.previewBlobContent).not.toHaveBeenCalled();
+    expect(apiClient.getBlobMetadata).not.toHaveBeenCalled();
+  });
+
+  it("tutorial parity: the in-column validation summary reflects validationResult, and the thumbnail expands the App-root modal", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+    // validationResult populates in the tutorial too (the auto-validate
+    // subscription is version-keyed / mode-agnostic), so the in-column signal
+    // shows there — pin it.
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [
+          {
+            component_id: "rater",
+            component_type: "transform",
+            message: "Review the prompt wording",
+            suggestion: null,
+          },
+        ],
+        readiness: READINESS,
+      },
+    } as never);
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // (a) the summary reflects validationResult, with the PLAIN node name
+    // mapped from the finding's component_id (not the raw id).
+    const summary = screen.getByTestId("pipeline-validation-summary");
+    expect(summary).toHaveTextContent(/rate each row/);
+    expect(summary).toHaveTextContent(/review the prompt wording/i);
+
+    // (b) clicking the thumbnail dispatches OPEN_GRAPH_MODAL_EVENT, caught by
+    // the App-root GraphModal — no second modal is mounted in the column. The
+    // per-node MARKER assertion targets the modal GraphView (GraphView.test.tsx
+    // marker coverage), NOT GraphMiniView (which has no markers).
+    const openSpy = vi.fn();
+    window.addEventListener(OPEN_GRAPH_MODAL_EVENT, openSpy);
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Pipeline graph (click to expand)",
+      }),
+    );
+    window.removeEventListener(OPEN_GRAPH_MODAL_EVENT, openSpy);
+    expect(openSpy).toHaveBeenCalledTimes(1);
   });
 
   it("scrolls the guided log into view when the active step advances", () => {
@@ -533,7 +912,7 @@ describe("ChatPanel mode discriminator", () => {
     });
   });
 
-  it("visually separates guided sidecar chat as ask about this step", () => {
+  it("visually separates the guided intent box as describe what you want", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -545,7 +924,7 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     const chatRegion = screen.getByRole("region", {
-      name: /ask about this step/i,
+      name: /describe what you want/i,
     });
     expect(chatRegion).toContainElement(screen.getByTestId("chat-input"));
   });
@@ -595,6 +974,56 @@ describe("ChatPanel mode discriminator", () => {
     expect(respondGuidedSpy).not.toHaveBeenCalled();
   });
 
+  // D12 / P3.6: a pending user_approved interpretation card surfaced into the
+  // interpretationEventsStore must block guided advancement — the wizard turn's
+  // submit control is disabled until the card is resolved, even when no guided
+  // response is in flight (guidedResponsePending is false here).
+  it("disables the guided turn while a pending user_approved interpretation card exists", () => {
+    const pendingCard: InterpretationEvent = {
+      id: "card-1",
+      session_id: "session-guided",
+      composition_state_id: "state-1",
+      affected_node_id: "rate_node",
+      tool_call_id: "backend_auto_surface:abc",
+      user_term: "llm_model_choice:rate_node",
+      kind: "llm_model_choice",
+      llm_draft: "anthropic/claude-sonnet-4.6",
+      accepted_value: null,
+      choice: "pending",
+      created_at: "2026-06-22T00:00:00Z",
+      resolved_at: null,
+      actor: "system:composer",
+      interpretation_source: "user_approved",
+      model_identifier: "anthropic/claude-opus-4-7",
+      model_version: "anthropic/claude-opus-4-7",
+      provider: "anthropic",
+      composer_skill_hash: "0".repeat(64),
+      arguments_hash: null,
+      hash_domain_version: null,
+      runtime_model_identifier_at_resolve: null,
+      runtime_model_version_at_resolve: null,
+      resolved_prompt_template_hash: null,
+    };
+    useInterpretationEventsStore.setState({
+      pendingBySession: { "session-guided": { "card-1": pendingCard } },
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedResponsePending: false,
+    });
+
+    render(<ChatPanel />);
+
+    // Same query the pending-response test above uses: GuidedTurn's primary
+    // option button. InterpretationReviewTurn renders no "CSV" button, so this
+    // uniquely targets the wizard turn's submit control.
+    expect(screen.getByRole("button", { name: "CSV" })).toBeDisabled();
+  });
+
   it("renders the per-step placeholder for STEP_1_SOURCE", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
@@ -612,7 +1041,7 @@ describe("ChatPanel mode discriminator", () => {
     // string updates here.
     const chatInput = screen.getByTestId("chat-input");
     expect(chatInput.dataset.placeholder).toBe(
-      "Ask about source options, columns, or paste a sample row…",
+      "Describe the source you want — e.g. a CSV, a store query, or pages to scrape…",
     );
   });
 
@@ -628,8 +1057,163 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
-      "Ask about sink config, outputs, or schema mode…",
+      "Describe the output you want — the shape and fields the pipeline should produce…",
     );
+  });
+
+  it("renders the per-step placeholder for STEP_4_WIRE", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_4_wire" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
+      "Confirm how the steps connect, then continue.",
+    );
+  });
+
+  it("renders the per-step placeholder for STEP_2_5_RECIPE_MATCH", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      // The placeholder keys on guidedSession.step (not the turn type), so
+      // singleSelectTurn() is fine regardless of step (verified ChatPanel.tsx:1375).
+      guidedSession: { ...activeGuidedSession(), step: "step_2_5_recipe_match" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
+      "Describe how this recipe should change, or accept it as proposed…",
+    );
+  });
+
+  it("renders the per-step placeholder for STEP_3_TRANSFORMS", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: { ...activeGuidedSession(), step: "step_3_transforms" },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
+      "Describe what each row should become, or how to fix the proposed transforms…",
+    );
+  });
+
+  it("non-tutorial guided: docks the intent box BELOW the editable form (chat-window layout)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // Classnames are unchanged: the intent box keeps `.guided-step-chat`.
+    const intent = container.querySelector(".guided-step-chat");
+    const form = container.querySelector(".guided-current-decision");
+    expect(intent).not.toBeNull();
+    expect(form).not.toBeNull();
+    // Document-order (non-tutorial): the intent box docks at the BOTTOM, AFTER
+    // the decision form — mirroring the freeform body, where the ChatInput docks
+    // below the message log. compareDocumentPosition returns
+    // DOCUMENT_POSITION_FOLLOWING (4) when `intent` follows `form`.
+    expect(
+      form!.compareDocumentPosition(intent!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // The intent box's recaptioned heading is present.
+    expect(
+      screen.getByRole("region", { name: "Describe what you want" }),
+    ).toBeInTheDocument();
+  });
+
+  it("tutorial guided: two-column workspace — composer in the conversation column, decision in the sticky cards column", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The tutorial renders the two-column WORKSPACE (the future first-class
+    // hybrid): the composer lives in the LEFT conversation column, the decision
+    // cards in the RIGHT sticky column — not a single bottom dock.
+    const stream = container.querySelector(".guided-workspace-stream");
+    const cards = container.querySelector(".guided-workspace-decision");
+    expect(stream).not.toBeNull();
+    expect(cards).not.toBeNull();
+    expect(stream!.querySelector(".guided-step-chat")).not.toBeNull();
+    expect(cards!.querySelector(".guided-current-decision")).not.toBeNull();
+    // The decision is NOT in the conversation stream, and the composer is NOT in
+    // the cards column — they are genuinely separate columns.
+    expect(stream!.querySelector(".guided-current-decision")).toBeNull();
+    expect(cards!.querySelector(".guided-step-chat")).toBeNull();
+    // Tutorial suppresses the exit affordance, so there is no header/exit.
+    expect(
+      screen.queryByRole("button", { name: "Exit to freeform" }),
+    ).toBeNull();
+  });
+
+  it("tutorial: pins the decision into the bottom dock (out of the scroll region) and suppresses the rival source chips", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The decision exists, but is lifted OUT of the flex-grow scroll region so
+    // it docks at the bottom WITH the composer (they travel together; the
+    // short-content gap opens above the summary instead of between the decision
+    // and the composer).
+    expect(container.querySelector(".guided-current-decision")).not.toBeNull();
+    expect(
+      container.querySelector(".guided-scroll .guided-current-decision"),
+    ).toBeNull();
+
+    // The live, submit-on-click source chips are suppressed in the tutorial — a
+    // passive learner's only action is Send. (singleSelectTurn() asks
+    // "Which source plugin should we use?" with CSV / API options; clicking one
+    // would submit an off-script source and derail the scripted build.)
+    expect(
+      screen.queryByText("Which source plugin should we use?"),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "CSV" })).toBeNull();
+
+    // The "press Send" coaching note still leads the decision.
+    expect(
+      container.querySelector(".guided-current-decision-tutorial-note"),
+    ).not.toBeNull();
   });
 
   it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {
@@ -654,6 +1238,86 @@ describe("ChatPanel mode discriminator", () => {
     await waitFor(() => {
       expect(chatGuidedSpy).toHaveBeenCalledWith("test-chat-message");
     });
+  });
+
+  it("tutorial: keeps the retry chat box (not the 'Sent' line) when a Send-driven step was sent but produced no forward affordance", () => {
+    // Regression: a transient chain-solve failure at step_3 appends a user turn
+    // but returns next_turn=null. The 'Sent' line must NOT replace the box, or
+    // the passive learner is stranded with no widget and no exit.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_3_transforms",
+        chat_history: [
+          {
+            role: "user",
+            content: "do the transforms",
+            seq: 1,
+            step: "step_3_transforms",
+            ts_iso: "2026-05-12T10:00:00Z",
+          },
+        ],
+      },
+      guidedNextTurn: null,
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_3_transforms: "do the transforms" }}
+      />,
+    );
+
+    // Retry box present; the stranding "Sent" line absent; the "press Send"
+    // guidance still shown so the learner knows what to do.
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/your request is in the transcript above/i),
+    ).toBeNull();
+    expect(
+      container.querySelector(".guided-current-decision-tutorial-note"),
+    ).not.toBeNull();
+  });
+
+  it("tutorial: shows the 'Sent' line and drops the 'press Send' note once the step was sent AND a forward turn exists", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_1_source",
+        chat_history: [
+          {
+            role: "user",
+            content: "create the source",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-05-12T10:00:00Z",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    expect(
+      screen.getByText(/your request is in the transcript above/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    // The "press Send below" coaching note is gone once Sent.
+    expect(
+      container.querySelector(".guided-current-decision-tutorial-note"),
+    ).toBeNull();
   });
 
   it("passes the backend guided-chat message limit to the guided ChatInput", () => {
@@ -685,6 +1349,42 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
   });
 
+  it("shows the ComposingIndicator while guidedChatPending=true and keeps the input disabled (409-race pin)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // Silent-compute affordance: the "thinking" indicator appears during a
+    // /guided/chat build (queried by class — `.composing-indicator` is unique
+    // vs the other role="status" nodes on the guided surface).
+    expect(container.querySelector(".composing-indicator")).not.toBeNull();
+    // Regression pin (sits next to the guided-resend 409 fix): the input must
+    // STAY disabled while the build is in flight so a second send cannot race.
+    expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
+  });
+
+  it("does not show the ComposingIndicator on the guided surface when guidedChatPending=false", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: false,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    expect(container.querySelector(".composing-indicator")).toBeNull();
+  });
+
   it("renders CompletionSummary surface when terminal.kind === 'completed'", () => {
     const completedHistory: TurnRecord[] = [
       {
@@ -712,6 +1412,7 @@ describe("ChatPanel mode discriminator", () => {
         terminal,
         chat_history: [],
         chat_turn_seq: 0,
+        profile: null,
       },
       guidedTerminal: terminal,
     });
@@ -765,6 +1466,7 @@ describe("ChatPanel mode discriminator", () => {
         terminal,
         chat_history: [],
         chat_turn_seq: 0,
+        profile: null,
       },
       guidedTerminal: terminal,
     });
@@ -841,6 +1543,7 @@ describe("ChatPanel mode discriminator", () => {
         terminal,
         chat_history: [],
         chat_turn_seq: 0,
+        profile: null,
       },
       guidedNextTurn: null,
       guidedTerminal: terminal,
@@ -917,6 +1620,7 @@ describe("ChatPanel mode discriminator", () => {
         terminal,
         chat_history: [],
         chat_turn_seq: 0,
+        profile: null,
       },
       guidedTerminal: terminal,
     });
@@ -945,6 +1649,91 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.queryByRole("button", { name: "Exit to freeform" }),
     ).toBeNull();
+  });
+
+  it("suppresses ExitToFreeformButton when isTutorial (concern B)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    // The rival source-pick widget is SUPPRESSED in the tutorial — a passive
+    // learner advances via Send, not by picking from a live submit-on-click menu
+    // (whose options don't even include the scripted source). So the chip group
+    // is gone...
+    expect(
+      screen.queryByRole("group", { name: "Which source plugin should we use?" }),
+    ).toBeNull();
+    // ...as is the freeform exit affordance — a tutorial must never expose a
+    // switch-to-freeform path (spec §"Frontend" concern B).
+    expect(
+      screen.queryByRole("button", { name: "Exit to freeform" }),
+    ).toBeNull();
+  });
+
+  it("renders a guided placeholder (not the freeform body) when isTutorial and the session is still loading (concern B startup flash)", () => {
+    // TutorialGuidedShell clears guidedSession/guidedNextTurn to null before
+    // the async start resolves (TutorialGuidedShell.tsx:61-81). Without the
+    // tutorial guard, ChatPanel would fall through to the panel-less freeform
+    // body during that window.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: null,
+      guidedNextTurn: null,
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    // Guided placeholder present...
+    expect(
+      screen.getByTestId("tutorial-guided-loading"),
+    ).toBeInTheDocument();
+    // ...and the freeform composer input is NOT rendered.
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+  });
+
+  it("renders a guided placeholder (not the freeform body) when isTutorial and terminal is exited_to_freeform (concern B defensive)", () => {
+    const terminal: TerminalState = {
+      kind: "exited_to_freeform",
+      reason: "user_pressed_exit",
+      pipeline_yaml: null,
+    };
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_3_transforms",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedNextTurn: null,
+      guidedTerminal: terminal,
+    });
+
+    render(<ChatPanel isTutorial />);
+
+    expect(screen.getByTestId("tutorial-guided-loading")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    // The placeholder rail reflects the ACTUAL session step, not a hardcoded
+    // step_1 (GuidedWorkflowStepper marks the current step with
+    // aria-current="step", ChatPanel.tsx:1759). The transform-step rail item
+    // must be the current one.
+    const current = screen
+      .getByTestId("tutorial-guided-loading")
+      .querySelector('[aria-current="step"]');
+    expect(current).not.toBeNull();
+    expect(current).toHaveTextContent(/transform/i);
   });
 });
 
@@ -980,7 +1769,7 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
   };
 
   function activeGuidedSession(): GuidedSession {
-    return { step: "step_1_source", history: [], terminal: null, chat_history: [], chat_turn_seq: 0 };
+    return { step: "step_1_source", history: [], terminal: null, chat_history: [], chat_turn_seq: 0, profile: null };
   }
 
   // Options are intentionally distinct per step so that test 2's assertion at
@@ -1099,6 +1888,58 @@ describe("ChatPanel guided step-advance focus (spec §7.4)", () => {
 
     // Focus must remain on the API button; effect did not pull it back to CSV.
     expect(document.activeElement).toBe(apiButton);
+  });
+
+  it("moves focus to the new decision when a same-step build changes the turn type", async () => {
+    // The composer now docks at the BOTTOM for every session (tutorial
+    // included). A same-step `/guided/chat` Send replaces the turn with a
+    // different TYPE without advancing the step (single_select → schema_form at
+    // step 1; null → propose_chain at step 3). The just-built decision lands
+    // ABOVE the box the user Sent from, so the focus effect must re-fire on the
+    // type change and bring it into view — otherwise the passive learner is left
+    // looking at the docked box with the decision off-screen above it. This is
+    // the type-change counterpart to the same-type "does NOT re-focus" guard
+    // above; both share the [step_index, type] dependency.
+    useSessionStore.setState({
+      activeSessionId: "session-focus",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(0),
+    });
+
+    render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "CSV" }),
+      );
+    });
+
+    // Same step_index (0), different turn TYPE — the build result.
+    act(() => {
+      useSessionStore.setState({
+        guidedNextTurn: {
+          type: "schema_form",
+          step_index: 0,
+          payload: {
+            mode: "plugin_options",
+            plugin: "csv",
+            knobs: { fields: [] },
+            prefilled: {},
+          },
+        },
+      });
+    });
+
+    // Focus lands on the schema form's first control (the Edit toggle), proving
+    // the effect re-fired on the type change rather than stranding the user on
+    // the prior turn's "CSV" button.
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole("button", { name: "Edit" }),
+      );
+    });
   });
 });
 
@@ -1631,13 +2472,23 @@ describe("isAmbiguousInlineProposal", () => {
       affects: ["source"],
       arguments_redacted_json: {
         source: {
-          plugin: "inline_blob",
+          plugin: "csv",
+          on_success: "csv_rows",
+          blob_id: null,
+          options: "{}",
+          on_validation_failure: null,
           inline_blob: {
             filename: "chat.csv",
             mime_type: "text/csv",
             content: "<inline-blob:42-bytes>",
+            description: null,
           },
         },
+        sources: null,
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: null,
       },
       base_state_id: null,
       committed_state_id: null,
@@ -1701,10 +2552,311 @@ describe("isAmbiguousInlineProposal", () => {
       isAmbiguousInlineProposal(
         makeInlineProposal("I read your input as 3 rows.", {
           arguments_redacted_json: {
-            source: { plugin: "csv_file", options: { path: "x.csv" } },
+            source: {
+              plugin: "csv_file",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: '{"path":"<redacted-option-value>"}',
+              on_validation_failure: null,
+            },
+            sources: null,
+            nodes: [],
+            edges: [],
+            outputs: [],
+            metadata: null,
           },
         }),
       ),
+    ).toBe(false);
+  });
+
+  it("returns false when set_pipeline includes hidden full-pipeline changes", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: "{}",
+              on_validation_failure: null,
+              inline_blob: {
+                filename: "chat.csv",
+                mime_type: "text/csv",
+                content: "<inline-blob:42-bytes>",
+                description: null,
+              },
+            },
+            sources: null,
+            nodes: [],
+            edges: [],
+            outputs: [
+              {
+                sink_name: "exfil",
+                plugin: "webhook",
+                options: { url: "<redacted-option-value>" },
+              },
+            ],
+            metadata: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when set_pipeline includes hidden transform nodes", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: "{}",
+              on_validation_failure: null,
+              inline_blob: {
+                filename: "chat.csv",
+                mime_type: "text/csv",
+                content: "<inline-blob:42-bytes>",
+                description: null,
+              },
+            },
+            sources: null,
+            nodes: [
+              {
+                id: "unexpected_transform",
+                node_type: "transform",
+                plugin: "llm_filter",
+                input: "source",
+                options: { prompt: "<redacted-option-value>" },
+              },
+            ],
+            edges: [],
+            outputs: [],
+            metadata: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when the source carries validation-failure routing", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: "{}",
+              on_validation_failure: "unexpected_route",
+              inline_blob: {
+                filename: "chat.csv",
+                mime_type: "text/csv",
+                content: "<inline-blob:42-bytes>",
+                description: null,
+              },
+            },
+            sources: null,
+            nodes: [],
+            edges: [],
+            outputs: [],
+            metadata: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when the inline source carries extra source options", () => {
+    expect(
+      isAmbiguousInlineProposal(
+        makeInlineProposal("I read your input as 3 rows.", {
+          arguments_redacted_json: {
+            source: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              blob_id: null,
+              options: '{"delimiter":"|"}',
+              on_validation_failure: null,
+              inline_blob: {
+                filename: "chat.csv",
+                mime_type: "text/csv",
+                content: "<inline-blob:42-bytes>",
+                description: null,
+              },
+            },
+            sources: null,
+            nodes: [],
+            edges: [],
+            outputs: [],
+            metadata: null,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false when set_pipeline includes non-default metadata", () => {
+    const proposal = makeInlineProposal("I read your input as 3 rows.");
+    expect(
+      isAmbiguousInlineProposal({
+        ...proposal,
+        arguments_redacted_json: {
+          ...proposal.arguments_redacted_json,
+          metadata: { name: "Hidden pipeline name", description: null },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when set_pipeline includes alternate sources", () => {
+    const proposal = makeInlineProposal("I read your input as 3 rows.");
+    expect(
+      isAmbiguousInlineProposal({
+        ...proposal,
+        arguments_redacted_json: {
+          ...proposal.arguments_redacted_json,
+          sources: {
+            extra: {
+              plugin: "csv",
+              on_success: "csv_rows",
+              options: "{}",
+            },
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("returns false when the inline blob carries a non-default description", () => {
+    const proposal = makeInlineProposal("I read your input as 3 rows.");
+    const source = proposal.arguments_redacted_json[
+      "source"
+    ] as Record<string, unknown>;
+    const inlineBlob = source["inline_blob"] as Record<string, unknown>;
+    expect(
+      isAmbiguousInlineProposal({
+        ...proposal,
+        arguments_redacted_json: {
+          ...proposal.arguments_redacted_json,
+          source: {
+            ...source,
+            inline_blob: {
+              ...inlineBlob,
+              description: "Hidden source description",
+            },
+          },
+        },
+      }),
+    ).toBe(false);
+  });
+});
+
+describe("hasExistingCompositionContent", () => {
+  const proposal: CompositionProposal = {
+    id: "prop-1",
+    session_id: "session-1",
+    tool_call_id: "tc-1",
+    tool_name: "set_pipeline",
+    status: "pending",
+    summary: "I read your input as 3 rows.",
+    rationale: "",
+    affects: ["source"],
+    arguments_redacted_json: {},
+    base_state_id: null,
+    committed_state_id: null,
+    audit_event_id: null,
+    created_at: "2026-05-18T10:00:00Z",
+    updated_at: "2026-05-18T10:00:00Z",
+  };
+
+  it("returns false for null or empty composition state", () => {
+    expect(hasExistingCompositionContent(null)).toBe(false);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [],
+          outputs: [],
+          metadata: { name: null, description: null },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [],
+          outputs: [],
+          metadata: { name: "Untitled Pipeline", description: "" },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns true when any state content would be replaced by set_pipeline", () => {
+    expect(hasExistingCompositionContent(makeComposition(1))).toBe(true);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [
+            {
+              id: "edge-1",
+              from_node: "a",
+              to_node: "b",
+              edge_type: "on_success",
+              label: null,
+            },
+          ],
+          outputs: [],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [],
+          outputs: [],
+          metadata: { name: "demo", description: "" },
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      hasExistingCompositionContent(
+        makeComposition(1, {
+          sources: {},
+          nodes: [],
+          edges: [],
+          outputs: [],
+          metadata: { name: "Untitled Pipeline", description: "Custom notes" },
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("allows an unknown state only for proposals against a null base state", () => {
+    expect(hasSafeInlineSourceDisambiguationBase(proposal, null)).toBe(true);
+    expect(
+      hasSafeInlineSourceDisambiguationBase(
+        { ...proposal, base_state_id: "existing-state" },
+        null,
+      ),
+    ).toBe(false);
+  });
+
+  it("denies any proposal when the known composition has replaceable content", () => {
+    expect(
+      hasSafeInlineSourceDisambiguationBase(proposal, makeComposition(1)),
     ).toBe(false);
   });
 });
@@ -1823,13 +2975,23 @@ describe("ChatPanel inline-source disambiguation routing", () => {
       affects: ["source"],
       arguments_redacted_json: {
         source: {
-          plugin: "inline_blob",
+          plugin: "csv",
+          on_success: "csv_rows",
+          blob_id: null,
+          options: "{}",
+          on_validation_failure: null,
           inline_blob: {
             filename: "chat.csv",
             mime_type: "text/csv",
             content: "<inline-blob:42-bytes>",
+            description: null,
           },
         },
+        sources: null,
+        nodes: [],
+        edges: [],
+        outputs: [],
+        metadata: null,
       },
       base_state_id: null,
       committed_state_id: null,
@@ -1965,6 +3127,60 @@ describe("ChatPanel inline-source disambiguation routing", () => {
       screen.queryByRole("region", { name: /row count/i }),
     ).toBeNull();
     // Falls back to the standard banner.
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("routes inline_blob set_pipeline proposals with hidden outputs to the standard banner", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    const fullPipelineProposal: CompositionProposal = {
+      ...proposal,
+      arguments_redacted_json: {
+        ...proposal.arguments_redacted_json,
+        outputs: [
+          {
+            sink_name: "unexpected",
+            plugin: "jsonl",
+            options: { path: "<redacted-option-value>" },
+          },
+        ],
+      },
+    };
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [fullPipelineProposal],
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /row count/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("region", { name: /pending changes/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("routes ambiguous inline_blob proposals to the banner when accepting would replace existing state", () => {
+    const { proposal, userMessage, assistantMessage } =
+      makeAmbiguousProposalAndMessages();
+    useSessionStore.setState({
+      activeSessionId: sessionFixture.id,
+      sessions: [sessionFixture],
+      messages: [userMessage, assistantMessage],
+      compositionProposals: [proposal],
+      compositionState: makeComposition(1),
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("region", { name: /row count/i }),
+    ).toBeNull();
     expect(
       screen.getByRole("region", { name: /pending changes/i }),
     ).toBeInTheDocument();
@@ -2343,12 +3559,13 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     render(<ChatPanel />);
 
     expect(
-      screen.getByTestId("interpretation-review-inline-message"),
+      screen.getByTestId("acknowledgement-card"),
     ).toBeInTheDocument();
   });
 
-  // Test 14: guided mode → inline message NOT rendered (guided turn handles it).
-  it("does NOT render the inline message in guided mode (the guided turn handles it)", () => {
+  // Test 14: guided mode also unifies on the AcknowledgementStack — the same
+  // card renders (one surface for both modes; they can no longer drift).
+  it("renders the acknowledgement card in guided mode too (unified surface)", () => {
     const event = makeInterpretationEvent();
     useSessionStore.setState({
       activeSessionId: sessionFixture.id,
@@ -2360,6 +3577,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
         terminal: null,
         chat_history: [],
         chat_turn_seq: 0,
+        profile: null,
       },
       guidedNextTurn: {
         type: "single_select",
@@ -2379,11 +3597,9 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
 
     render(<ChatPanel />);
 
-    // The guided branch is rendered (no fall-through to the freeform body),
-    // so the inline-message widget is not in the DOM.
-    expect(
-      screen.queryByTestId("interpretation-review-inline-message"),
-    ).not.toBeInTheDocument();
+    // The guided branch mounts the same AcknowledgementStack at the top of its
+    // reply surface, so the card IS present in guided mode.
+    expect(screen.getByTestId("acknowledgement-card")).toBeInTheDocument();
   });
 
   // Test 15: two pending events → two inline messages in created_at-ascending order.
@@ -2417,7 +3633,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     render(<ChatPanel />);
 
     const widgets = screen.getAllByTestId(
-      "interpretation-review-inline-message",
+      "acknowledgement-card",
     );
     expect(widgets).toHaveLength(2);
     // The earlier-created event renders first (top-of-list).  Match by the
@@ -2452,7 +3668,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
 
     const { rerender } = render(<ChatPanel />);
     expect(
-      screen.getByTestId("interpretation-review-inline-message"),
+      screen.getByTestId("acknowledgement-card"),
     ).toBeInTheDocument();
 
     // Drive the opt-out via the store action — same surface the widget's
@@ -2465,7 +3681,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
 
     expect(optOutSpy).toHaveBeenCalledWith(sessionFixture.id);
     expect(
-      screen.queryByTestId("interpretation-review-inline-message"),
+      screen.queryByTestId("acknowledgement-card"),
     ).not.toBeInTheDocument();
   });
 
@@ -2531,7 +3747,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       ).toBeInTheDocument();
     });
     expect(
-      screen.queryByTestId("interpretation-review-inline-message"),
+      screen.queryByTestId("acknowledgement-card"),
     ).not.toBeInTheDocument();
   });
 
@@ -2571,7 +3787,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
 
     // Initially the inline widget is mounted; no confirmation yet.
     expect(
-      screen.getByTestId("interpretation-review-inline-message"),
+      screen.getByTestId("acknowledgement-card"),
     ).toBeInTheDocument();
     expect(
       screen.queryByTestId("interpretation-review-confirmation"),
@@ -2584,7 +3800,9 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     // unmounts (its event was removed from pendingBySession).
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: /Accept the LLM's interpretation/i }),
+        screen.getByRole("button", {
+          name: /Acknowledge the LLM's interpretation/i,
+        }),
       );
     });
 
@@ -2597,7 +3815,7 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
     );
     expect(confirmation.textContent).toMatch(/cool/);
     expect(
-      screen.queryByTestId("interpretation-review-inline-message"),
+      screen.queryByTestId("acknowledgement-card"),
     ).not.toBeInTheDocument();
     expect(resolveSpy).toHaveBeenCalledWith(
       sessionFixture.id,

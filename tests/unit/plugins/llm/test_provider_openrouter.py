@@ -78,13 +78,61 @@ def _make_http_response(
     )
 
 
-def _make_error_response(status_code: int, body: str = '{"error": "test"}') -> httpx.Response:
+def _make_error_response(
+    status_code: int,
+    body: str = '{"error": "test"}',
+    *,
+    content_type: str = "application/json",
+) -> httpx.Response:
     return httpx.Response(
         status_code=status_code,
         content=body.encode(),
-        headers={"content-type": "application/json"},
+        headers={"content-type": content_type},
         request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions"),
     )
+
+
+def _assert_provider_body_redacted(message: str, *forbidden_fragments: str) -> None:
+    assert "provider error body redacted" in message
+    assert "body_present=true" in message
+    for fragment in forbidden_fragments:
+        assert fragment not in message
+
+
+def test_provider_accepts_loopback_http_base_url(
+    mock_recorder: MagicMock,
+    mock_telemetry_emit: MagicMock,
+) -> None:
+    # Loopback HTTP is permitted for local OpenAI-compatible dev servers (the
+    # shipped ChaosLLM examples target http://127.0.0.1:8199/v1); the bearer
+    # token never leaves the machine. Remote HTTP is still rejected.
+    provider = OpenRouterLLMProvider(
+        api_key="test-key",
+        base_url="http://127.0.0.1:8199/v1",
+        timeout_seconds=30.0,
+        recorder=mock_recorder,
+        run_id="run-1",
+        telemetry_emit=mock_telemetry_emit,
+    )
+    assert provider._base_url == "http://127.0.0.1:8199/v1"
+
+
+def test_provider_rejects_remote_http_base_url(
+    mock_recorder: MagicMock,
+    mock_telemetry_emit: MagicMock,
+) -> None:
+    # The loopback exception must NOT widen to network-reachable hosts — a remote
+    # HTTP base_url would send the bearer token over plaintext. Guards against the
+    # allow_http_loopback exception being silently broadened.
+    with pytest.raises(ValueError, match="base_url"):
+        OpenRouterLLMProvider(
+            api_key="test-key",
+            base_url="http://api.example.com/v1",
+            timeout_seconds=30.0,
+            recorder=mock_recorder,
+            run_id="run-1",
+            telemetry_emit=mock_telemetry_emit,
+        )
 
 
 class TestExecuteQuery:
@@ -518,15 +566,15 @@ class TestHTTPErrorMapping:
                 )
 
     def test_400_context_length_raises_context_length_error(self, provider: OpenRouterLLMProvider) -> None:
+        provider_body = (
+            '{"error": {"message": "This model\'s maximum context length is 8192 tokens", "api_key": "sk-or-v1-context-secret"}}'
+        )
         with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
-            mock_client.post.return_value = _make_error_response(
-                400,
-                body='{"error": {"message": "This model\'s maximum context length is 8192 tokens"}}',
-            )
+            mock_client.post.return_value = _make_error_response(400, body=provider_body)
             mock_get.return_value = mock_client
 
-            with pytest.raises(ContextLengthError, match="Context length exceeded"):
+            with pytest.raises(ContextLengthError) as exc_info:
                 provider.execute_query(
                     messages=[{"role": "user", "content": "hi"}],
                     model="gpt-4o",
@@ -535,6 +583,15 @@ class TestHTTPErrorMapping:
                     state_id="state-1",
                     token_id="tok-1",
                 )
+
+            message = str(exc_info.value)
+            assert "Context length exceeded" in message
+            _assert_provider_body_redacted(
+                message,
+                "maximum context length",
+                "api_key",
+                "sk-or-v1-context-secret",
+            )
 
     def test_400_context_length_exceeded_pattern(self, provider: OpenRouterLLMProvider) -> None:
         with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
@@ -703,9 +760,9 @@ class TestRuntimePreflight:
        row processing. Run 8294aab2 on 2026-05-13 failed this way.
 
     2. When the provider returns a 4xx/5xx, the wrapped exception's message
-       must include (truncated) response body. Without the body, the operator
-       sees only "HTTP 400" + an MDN URL — the actual provider message
-       ("max_output_tokens below minimum") lives only in the audit DB.
+       must disclose that a provider error body existed without copying that
+       remote body into persisted diagnostics. The full body remains in the
+       audited HTTP payload, not web-visible exception text.
     """
 
     def test_preflight_request_max_tokens_meets_azure_floor(self, provider: OpenRouterLLMProvider) -> None:
@@ -726,11 +783,12 @@ class TestRuntimePreflight:
                 "Azure backend floor of 16; will 400 with integer_below_min_value."
             )
 
-    def test_preflight_400_includes_response_body_in_exception(self, provider: OpenRouterLLMProvider) -> None:
-        """A 4xx from the provider must surface the response body in the raised exception."""
+    def test_preflight_400_redacts_response_body_in_exception(self, provider: OpenRouterLLMProvider) -> None:
+        """A 4xx from the provider must not surface raw response-body text."""
         provider_body = (
             '{"error":{"message":"Invalid \'max_output_tokens\': integer below minimum '
-            'value. Expected a value >= 16, but got 4 instead.","code":400}}'
+            'value. Expected a value >= 16, but got 4 instead.",'
+            '"authorization":"Bearer sk-or-v1-secret","code":400}}'
         )
         with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
             mock_client = MagicMock()
@@ -742,14 +800,17 @@ class TestRuntimePreflight:
 
             message = str(exc_info.value)
             assert "HTTP 400" in message
-            assert "max_output_tokens" in message, (
-                "The provider's actual error message must be in the exception text; "
-                "operators cannot read the audit DB to discover what went wrong."
+            assert f"chars={len(provider_body)}" in message
+            _assert_provider_body_redacted(
+                message,
+                "max_output_tokens",
+                "authorization",
+                "sk-or-v1-secret",
             )
 
-    def test_preflight_429_includes_response_body_in_rate_limit_error(self, provider: OpenRouterLLMProvider) -> None:
-        """A 429 from the provider must surface the response body."""
-        provider_body = '{"error":{"message":"Rate limit exceeded: 60 RPM","code":429}}'
+    def test_preflight_429_redacts_response_body_in_rate_limit_error(self, provider: OpenRouterLLMProvider) -> None:
+        """A 429 from the provider must not surface raw response-body text."""
+        provider_body = '{"error":{"message":"Rate limit exceeded: 60 RPM","api_key":"sk-or-v1-rate-secret","code":429}}'
         with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(429, body=provider_body)
@@ -758,11 +819,16 @@ class TestRuntimePreflight:
             with pytest.raises(RateLimitError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
 
-            assert "60 RPM" in str(exc_info.value)
+            message = str(exc_info.value)
+            assert "Rate limited" in message
+            _assert_provider_body_redacted(message, "60 RPM", "api_key", "sk-or-v1-rate-secret")
 
-    def test_preflight_500_includes_response_body_in_server_error(self, provider: OpenRouterLLMProvider) -> None:
-        """A 5xx from the provider must surface the response body."""
-        provider_body = '{"error":{"message":"Upstream provider unavailable","code":500}}'
+    def test_preflight_500_redacts_response_body_in_server_error(self, provider: OpenRouterLLMProvider) -> None:
+        """A 5xx from the provider must not surface raw response-body text."""
+        provider_body = (
+            '{"error":{"message":"Upstream provider unavailable",'
+            '"request_echo":"Authorization: Bearer sk-or-v1-upstream-secret","code":500}}'
+        )
         with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(500, body=provider_body)
@@ -771,11 +837,18 @@ class TestRuntimePreflight:
             with pytest.raises(ServerError) as exc_info:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
 
-            assert "Upstream provider unavailable" in str(exc_info.value)
+            message = str(exc_info.value)
+            assert "Server error (HTTP 500)" in message
+            _assert_provider_body_redacted(
+                message,
+                "Upstream provider unavailable",
+                "Authorization",
+                "sk-or-v1-upstream-secret",
+            )
 
-    def test_execute_query_400_includes_response_body(self, provider: OpenRouterLLMProvider) -> None:
-        """The same body-surfacing contract applies to per-row execute_query calls."""
-        provider_body = '{"error":{"message":"Model openai/gpt-5-mini not found","code":400}}'
+    def test_execute_query_400_redacts_response_body(self, provider: OpenRouterLLMProvider) -> None:
+        """The same redaction contract applies to per-row execute_query calls."""
+        provider_body = '{"error":{"message":"Model openai/gpt-5-mini not found","token":"sk-or-v1-query-secret","code":400}}'
         with patch.object(provider, "_get_http_client") as mock_get, patch.object(provider, "_release_http_client"):
             mock_client = MagicMock()
             mock_client.post.return_value = _make_error_response(400, body=provider_body)
@@ -791,10 +864,17 @@ class TestRuntimePreflight:
                     token_id="tok-1",
                 )
 
-            assert "openai/gpt-5-mini not found" in str(exc_info.value)
+            message = str(exc_info.value)
+            assert "HTTP 400" in message
+            _assert_provider_body_redacted(
+                message,
+                "openai/gpt-5-mini not found",
+                "token",
+                "sk-or-v1-query-secret",
+            )
 
-    def test_preflight_truncates_oversized_response_body(self, provider: OpenRouterLLMProvider) -> None:
-        """Pathologically large response bodies are truncated to keep exception messages bounded."""
+    def test_preflight_redacts_oversized_response_body(self, provider: OpenRouterLLMProvider) -> None:
+        """Pathologically large response bodies are summarized without body text."""
         huge_body = '{"error":"' + ("x" * 10_000) + '"}'
         with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
             mock_client = MagicMock()
@@ -805,8 +885,67 @@ class TestRuntimePreflight:
                 provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
 
             message = str(exc_info.value)
-            assert len(message) < 2_000, (
+            assert len(message) < 600, (
                 f"Exception message length {len(message)} exceeds reasonable bound; "
-                "_summarize_http_error_body must truncate oversized bodies."
+                "_summarize_http_error_body must not copy oversized bodies."
             )
-            assert "…" in message, "Truncation marker should be present for oversized bodies."
+            assert "chars=10012" in message
+            assert "x" * 100 not in message
+
+    def test_preflight_redacts_malformed_content_type_metadata(self, provider: OpenRouterLLMProvider) -> None:
+        """Provider-controlled content-type metadata must not become a second diagnostic leak."""
+        provider_body = '{"error":{"message":"invalid","code":400}}'
+        content_type = "application/json authorization=Bearer sk-or-v1-header-secret"
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(400, body=provider_body, content_type=content_type)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(LLMClientError) as exc_info:
+                provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
+
+            message = str(exc_info.value)
+            _assert_provider_body_redacted(message, "authorization", "sk-or-v1-header-secret")
+            assert "content_type" not in message
+
+    def test_preflight_redacts_valid_secret_bearing_content_type_metadata(
+        self,
+        provider: OpenRouterLLMProvider,
+    ) -> None:
+        """Even syntactically valid media types are provider-controlled and not diagnostic text."""
+        provider_body = '{"error":{"message":"invalid","code":400}}'
+        content_type = "application/sk-or-v1-header-secret"
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(400, body=provider_body, content_type=content_type)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(LLMClientError) as exc_info:
+                provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
+
+            message = str(exc_info.value)
+            _assert_provider_body_redacted(message, "application/sk-or-v1-header-secret", "sk-or-v1-header-secret")
+            assert "content_type" not in message
+
+    def test_preflight_error_message_omits_request_url(self, mock_recorder: MagicMock) -> None:
+        """Configurable base URLs can carry query strings; exception text must not copy them."""
+        provider = OpenRouterLLMProvider(
+            api_key="test-key",
+            base_url="https://openrouter.ai/api/v1?token=sk-or-v1-url-secret",
+            timeout_seconds=30.0,
+            recorder=mock_recorder,
+            run_id="run-1",
+            telemetry_emit=MagicMock(),
+        )
+        provider_body = '{"error":{"message":"invalid","code":400}}'
+        with patch("elspeth.plugins.transforms.llm.providers.openrouter.AuditedHTTPClient") as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client.post.return_value = _make_error_response(400, body=provider_body)
+            mock_client_cls.return_value = mock_client
+
+            with pytest.raises(LLMClientError) as exc_info:
+                provider.runtime_preflight(operation_id="op-1", model="gpt-4o")
+
+            message = str(exc_info.value)
+            assert "HTTP 400" in message
+            _assert_provider_body_redacted(message, "sk-or-v1-url-secret", "openrouter.ai", "chat/completions")

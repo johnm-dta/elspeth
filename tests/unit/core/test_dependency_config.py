@@ -7,6 +7,7 @@ from types import MappingProxyType
 import pytest
 from pydantic import ValidationError
 
+from elspeth.core.config import ElspethSettings
 from elspeth.core.dependency_config import (
     CollectionProbeConfig,
     CommencementGateConfig,
@@ -15,6 +16,33 @@ from elspeth.core.dependency_config import (
     DependencyRunResult,
     PreflightResult,
 )
+
+
+def _minimal_settings_payload() -> dict[str, object]:
+    return {
+        "sources": {
+            "source": {
+                "plugin": "csv",
+                "on_success": "output",
+                "options": {
+                    "path": "input.csv",
+                    "schema": {"mode": "observed"},
+                    "on_validation_failure": "discard",
+                },
+            }
+        },
+        "sinks": {
+            "output": {
+                "plugin": "json",
+                "on_write_failure": "discard",
+                "options": {
+                    "path": "output.json",
+                    "schema": {"mode": "observed"},
+                    "format": "jsonl",
+                },
+            }
+        },
+    }
 
 
 class TestDependencyConfig:
@@ -39,6 +67,18 @@ class TestDependencyConfig:
     def test_rejects_empty_settings(self) -> None:
         with pytest.raises(ValidationError):
             DependencyConfig(name="x", settings="")
+
+
+class TestElspethSettingsDependencies:
+    def test_rejects_duplicate_dependency_names_at_config_boundary(self) -> None:
+        payload = _minimal_settings_payload()
+        payload["depends_on"] = [
+            {"name": "indexer", "settings": "./index-a.yaml"},
+            {"name": "indexer", "settings": "./index-b.yaml"},
+        ]
+
+        with pytest.raises(ValidationError, match="duplicate depends_on dependency name"):
+            ElspethSettings.model_validate(payload)
 
 
 class TestCommencementGateConfig:

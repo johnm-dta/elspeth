@@ -271,6 +271,22 @@ class RevertStateRequest(_RequestModel):
     state_id: UUID
 
 
+class StartGuidedRequest(_RequestModel):
+    """Request body for POST /api/sessions/{session_id}/guided/start.
+
+    ``profile`` is a raw boundary value whose valid form is a closed-enum
+    discriminator (``WorkflowProfileKind``). The route validates that the
+    value is a short string, maps it to the SERVER-owned WorkflowProfile
+    constant, and rejects anything else with a generic 400. Typing it as
+    ``object`` (not the enum) keeps a stale/hostile client's unknown or
+    object-shaped value out of a Pydantic 422 and away from the response —
+    the handler never echoes the raw value, so an attempted profile object
+    carrying injected fields cannot leak back through the error.
+    """
+
+    profile: object = "live"
+
+
 class RunResponse(_StrictResponse):
     """Response for GET /api/sessions/{id}/runs."""
 
@@ -320,6 +336,20 @@ class ChatTurnResponse(_StrictResponse):
     ts_iso: str
 
 
+class WorkflowProfileResponse(_StrictResponse):
+    """Wire-visible subset of a server-owned WorkflowProfile.
+
+    Mirrors :class:`elspeth.web.composer.guided.profile.WorkflowProfile`
+    (the four behavior flags). ``None`` at the parent
+    ``GuidedSessionResponse.profile`` level means the empty/live-guided profile.
+    """
+
+    coaching: bool
+    bookends: bool
+    recipe_match: bool
+    advisor_checkpoints: bool
+
+
 class GuidedSessionResponse(_StrictResponse):
     """Wire representation of the GuidedSession attached to a CompositionState."""
 
@@ -335,6 +365,11 @@ class GuidedSessionResponse(_StrictResponse):
     # standard, that is evidence tampering.
     chat_history: list[ChatTurnResponse]
     chat_turn_seq: int
+    # Server-owned WorkflowProfile (wire-visible subset). ``None`` for the
+    # empty/live-guided profile. Defaulted to ``None`` because most
+    # GuidedSessionResponse construction sites carry the empty profile; the
+    # start/GET path overrides it explicitly.
+    profile: WorkflowProfileResponse | None = None
 
 
 class TurnPayloadResponse(_StrictResponse):
@@ -362,6 +397,21 @@ class GetGuidedResponse(_StrictResponse):
     composition_state: CompositionStateResponse | None
 
 
+class TutorialSampleResponse(_StrictResponse):
+    """Response for GET /api/sessions/{id}/guided/tutorial-sample.
+
+    Runtime-derived inputs for the tutorial's prefilled worked example: the 3
+    synthetic sample-page URLs (appended to the locked STEP_1 prompt the learner
+    sends verbatim) for the active tutorial session's resolved origin. The URLs
+    are computed from the resolved base at request time (they cannot ride the
+    frozen profile constants). The tutorial's ``web_scrape`` node relies on the
+    plugin default ``allowed_hosts="public_only"`` — the pages are publicly
+    hosted, so the server injects no SSRF allowlist.
+    """
+
+    sample_urls: list[str]
+
+
 class GuidedRespondRequest(_RequestModel):
     """Request body for POST /api/sessions/{id}/guided/respond.
 
@@ -382,6 +432,11 @@ class GuidedRespondRequest(_RequestModel):
     accepted_step_index: int | None = None
     edit_step_index: int | None = None
     control_signal: str | None = None
+    # Optimistic-concurrency token (D16): the client's expected current step.
+    # When present, the route 409s if it does not match the session's live
+    # ``guided.step``. A plain ``str`` (not the enum) makes unknown values fail
+    # with a route-handler 400 rather than a Pydantic 422.
+    step_index: str | None = None
 
 
 class GuidedRespondResponse(_StrictResponse):

@@ -382,10 +382,7 @@ function App() {
           <div className="app-main" role="main">
             <Layout
               chat={
-                <ChatPanel
-                  onOpenSecrets={openSecrets}
-                  onOpenComposerPreferences={openComposerSettings}
-                />
+                <ChatPanel onOpenSecrets={openSecrets} />
               }
               siderail={
                 <SideRail

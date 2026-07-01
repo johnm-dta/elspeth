@@ -32,7 +32,8 @@ class RoutingAction:
     achieve "route to sink and continue" semantics.
 
     Invariants (enforced by __post_init__):
-    - CONTINUE must have empty destinations
+    - CONTINUE must have empty destinations and MOVE mode
+    - FORK_TO_PATHS must have one or more destinations
     - FORK_TO_PATHS must use COPY mode
     - ROUTE must have exactly one destination
     - ROUTE cannot use COPY mode (use FORK_TO_PATHS instead)
@@ -53,8 +54,11 @@ class RoutingAction:
         if self.kind == RoutingKind.CONTINUE and self.destinations:
             raise ValueError("CONTINUE must have empty destinations")
 
-        if self.kind == RoutingKind.CONTINUE and self.mode == RoutingMode.COPY:
-            raise ValueError("CONTINUE must use MOVE mode, not COPY")
+        if self.kind == RoutingKind.CONTINUE and self.mode != RoutingMode.MOVE:
+            raise ValueError(f"CONTINUE must use MOVE mode, not {self.mode.name}")
+
+        if self.kind == RoutingKind.FORK_TO_PATHS and not self.destinations:
+            raise ValueError("FORK_TO_PATHS requires at least one destination")
 
         if self.kind == RoutingKind.FORK_TO_PATHS and self.mode != RoutingMode.COPY:
             raise ValueError("FORK_TO_PATHS must use COPY mode")

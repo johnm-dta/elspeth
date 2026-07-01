@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from elspeth_lints.core.allowlist_governance import RULE_EXPIRED_ENTRY, RULE_STALE_ENTRY
 from elspeth_lints.core.protocols import RuleContext
 from elspeth_lints.rules.manifest.contract_manifest import RULE
 from elspeth_lints.rules.manifest.contract_manifest.metadata import RULE_MC1, RULE_MC2, RULE_MC3A, RULE_MC3B, RULE_MC3C
@@ -170,6 +171,58 @@ def test_contract_manifest_reports_trivial_marker_body(tmp_path: Path) -> None:
 
     assert [finding.rule_id for finding in findings] == [RULE_MC3C]
     assert "can_drop_rows::post_emission_check" in findings[0].fingerprint
+
+
+def test_contract_manifest_reports_expired_matching_allowlist_entry(tmp_path: Path) -> None:
+    source_root = tmp_path / "src" / "elspeth"
+    _write_manifest(source_root, {"can_drop_rows": ["post_emission_check"]})
+    _write_registration(
+        source_root,
+        "contracts/can_drop_rows.py",
+        "CanDropRowsContract",
+        "can_drop_rows",
+        marker_sites=["post_emission_check"],
+        trivial_body_sites=["post_emission_check"],
+    )
+    key = "src/elspeth/contracts/can_drop_rows.py:MC3c:can_drop_rows::post_emission_check"
+    allowlist_dir = _write_contract_allowlist(tmp_path, key=key, expires="2020-01-01")
+
+    findings = list(
+        RULE.analyze(
+            ast.Module(body=[], type_ignores=[]),
+            source_root,
+            RuleContext(root=source_root, allowlist_dir_override=allowlist_dir),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == [RULE_EXPIRED_ENTRY]
+    assert key in findings[0].message
+    assert "2020-01-01" in findings[0].message
+
+
+def test_contract_manifest_reports_stale_allowlist_entry(tmp_path: Path) -> None:
+    source_root = tmp_path / "src" / "elspeth"
+    _write_manifest(source_root, {"passes_through_input": ["post_emission_check"]})
+    _write_registration(
+        source_root,
+        "contracts/pass_through.py",
+        "PassThroughContract",
+        "passes_through_input",
+        marker_sites=["post_emission_check"],
+    )
+    key = "src/elspeth/contracts/ghost.py:MC3c:ghost::post_emission_check"
+    allowlist_dir = _write_contract_allowlist(tmp_path, key=key, expires="2099-01-01")
+
+    findings = list(
+        RULE.analyze(
+            ast.Module(body=[], type_ignores=[]),
+            source_root,
+            RuleContext(root=source_root, allowlist_dir_override=allowlist_dir),
+        )
+    )
+
+    assert [finding.rule_id for finding in findings] == [RULE_STALE_ENTRY]
+    assert key in findings[0].message
 
 
 def test_contract_manifest_rejects_shadowed_register_call(tmp_path: Path) -> None:
@@ -376,6 +429,32 @@ def _write_manifest(source_root: Path, entries: dict[str, list[str]]) -> None:
 def _write_contract(path: Path, source: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(textwrap.dedent(source), encoding="utf-8")
+
+
+def _write_contract_allowlist(tmp_path: Path, *, key: str, expires: str) -> Path:
+    allowlist_dir = tmp_path / "allowlists"
+    allowlist_dir.mkdir()
+    (allowlist_dir / "_defaults.yaml").write_text(
+        """
+version: 1
+defaults:
+  fail_on_stale: true
+  fail_on_expired: true
+""",
+        encoding="utf-8",
+    )
+    (allowlist_dir / "rules.yaml").write_text(
+        f"""
+allow_contracts:
+  - key: {key}
+    owner: tests
+    reason: synthetic fixture
+    task: tests
+    expires: {expires}
+""",
+        encoding="utf-8",
+    )
+    return allowlist_dir
 
 
 def _write_registration(

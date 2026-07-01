@@ -1007,6 +1007,12 @@ def _check_schema_contracts(
     contract_probe_failed_producers: set[str] = set()
     sink_names = {output.name for output in outputs}
     sink_names_frozen = frozenset(sink_names)
+    coalesce_branch_names = {
+        branch_name
+        for node in nodes
+        if node.node_type == "coalesce" and node.branches is not None
+        for branch_name in _coalesce_branch_names(node.branches)
+    }
     internal_connection_names: set[str] = set()
     source_map = sources
 
@@ -1157,6 +1163,10 @@ def _check_schema_contracts(
         )
 
     internal_connection_names.update(connection_name for connection_name, _node_id, _desc in consumer_claims)
+    # Runtime fork routing resolves coalesce branch names before sink names.
+    # A branch identity that also names a sink would make composer preview treat
+    # the branch as direct-to-sink while execution sends it to coalesce.
+    internal_connection_names.update(coalesce_branch_names)
     overlap = sorted(internal_connection_names & sink_names)
     if overlap:
         errors.append(

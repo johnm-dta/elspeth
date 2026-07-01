@@ -239,3 +239,17 @@ repos:
         # be set to false here (the framework's commit-msg stage passes the
         # message file path as the sole positional argument).
         always_run: true
+  - repo: local
+    hooks:
+      - id: wardline-scan
+        name: wardline scan
+        entry: wardline scan
+        # Arm the trust-boundary gate: exit 1 on any ERROR finding so the hook
+        # actually blocks the commit. Without --fail-on the scan reports
+        # `gate: NOT_EVALUATED` and exits 0, giving a false green. Mirrors the
+        # documented project gate `wardline scan . --fail-on ERROR` (AGENTS.md /
+        # CLAUDE.md). `.` scans the whole tree (pass_filenames is false).
+        args: ['.', '--fail-on', 'ERROR']
+        language: system
+        types: [python]
+        pass_filenames: false

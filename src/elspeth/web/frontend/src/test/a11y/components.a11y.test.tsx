@@ -30,7 +30,6 @@ import { axe } from "./axe-config";
 const AUDITED_COMPONENTS = [
   "ComposerPreferencesPanel",
   "UserMenu",
-  "InlineOptOutCheckbox",
   "DefaultModeChangedBanner",
   "AuditReadinessPanel",
   "ReadinessRowDetail",
@@ -49,6 +48,11 @@ const AUDITED_COMPONENTS = [
   "FilterChipStrip",
   "TemplateCards",
   "ShortcutsHelp",
+  "WireStageTurn",
+  "SchemaFormTurn",
+  "ModeSwitchButton",
+  "PipelineGloss",
+  "PipelineValidationSummary",
 ] as const;
 
 const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
@@ -63,16 +67,20 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "GraphMiniView",
   "HeaderSessionSwitcher",
   "HeaderVersionSelector",
-  "InlineOptOutCheckbox",
   "InlineSourceCreatedTurn",
   "InlineSourceDisambiguationTurn",
   "InlineSourceFallbackPrompt",
+  "ModeSwitchButton",
+  "PipelineGloss",
+  "PipelineValidationSummary",
   "PluginCard",
   "ReadinessRowDetail",
+  "SchemaFormTurn",
   "SideRail",
   "ShortcutsHelp",
   "TemplateCards",
   "UserMenu",
+  "WireStageTurn",
 ];
 
 describe("audit surface — coverage snapshot", () => {
@@ -115,7 +123,6 @@ vi.mock("../../api/auditReadiness", () => ({
 
 import { ComposerPreferencesPanel } from "@/components/settings/ComposerPreferencesPanel";
 import { UserMenu } from "@/components/common/UserMenu";
-import { InlineOptOutCheckbox } from "@/components/chat/guided/InlineOptOutCheckbox";
 import { DefaultModeChangedBanner } from "@/components/common/DefaultModeChangedBanner";
 import { AuditReadinessPanel } from "@/components/audit/AuditReadinessPanel";
 import { ReadinessRowDetail } from "@/components/audit/ReadinessRowDetail";
@@ -135,6 +142,11 @@ import { PluginCard } from "@/components/catalog/PluginCard";
 import { FilterChipStrip, type CatalogFilters } from "@/components/catalog/FilterChipStrip";
 import { TemplateCards } from "@/components/chat/TemplateCards";
 import { ShortcutsHelp } from "@/components/common/ShortcutsHelp";
+import { WireStageTurn } from "@/components/chat/guided/WireStageTurn";
+import { SchemaFormTurn } from "@/components/chat/guided/SchemaFormTurn";
+import { ModeSwitchButton } from "@/components/chat/guided/ModeSwitchButton";
+import { PipelineGloss } from "@/components/chat/guided/PipelineGloss";
+import { PipelineValidationSummary } from "@/components/chat/guided/PipelineValidationSummary";
 
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
@@ -145,6 +157,7 @@ import { resetStore } from "@/test/store-helpers";
 import type { InlineSourceSummary } from "@/types/api";
 import type { PluginSummary } from "@/types/index";
 import type { ReadinessRow, AuditReadinessSnapshot } from "@/types/api";
+import type { WireStageData, SchemaFormPayload } from "@/types/guided";
 
 // --- Shared store reset ----------------------------------------------------
 
@@ -204,9 +217,148 @@ describe("UserMenu", () => {
   });
 });
 
-describe("InlineOptOutCheckbox", () => {
-  it("has no axe violations", async () => {
-    const { container } = render(<InlineOptOutCheckbox />);
+describe("WireStageTurn", () => {
+  const wireBase: WireStageData = {
+    topology: {
+      sources: {
+        source: {
+          id: "source",
+          plugin: "inline_blob",
+          on_success: "chain_in",
+          on_validation_failure: "discard",
+        },
+      },
+      nodes: [
+        {
+          id: "scrape",
+          node_type: "transform",
+          plugin: "web_scrape",
+          input: "chain_in",
+          on_success: "scraped",
+          on_error: "scrape_error",
+          routes: null,
+          fork_to: null,
+          branches: null,
+        },
+        {
+          id: "mapper",
+          node_type: "transform",
+          plugin: "field_mapper",
+          input: "scraped",
+          on_success: "jsonl_out",
+          on_error: null,
+          routes: null,
+          fork_to: null,
+          branches: null,
+        },
+      ],
+      outputs: [
+        {
+          id: "output:jsonl_out",
+          sink_name: "jsonl_out",
+          plugin: "json",
+          on_write_failure: "discard",
+        },
+      ],
+    },
+    edge_contracts: [
+      {
+        from: "scrape",
+        to: "mapper",
+        producer_guarantees: ["body"],
+        consumer_requires: ["body"],
+        missing_fields: [],
+        satisfied: true,
+      },
+    ],
+    semantic_contracts: [],
+    warnings: [
+      {
+        type: "prompt_shield",
+        message: "Prompt shield advisory: source text was reviewed.",
+      },
+    ],
+  };
+
+  // Initial confirm turn (no outcome): the bare "Confirm wiring" action area.
+  it("has no axe violations (initial confirm)", async () => {
+    const { container } = render(
+      <WireStageTurn data={wireBase} onConfirm={() => {}} confirmDisabled={false} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // Revise: findings block + the cost-disclosing Ask-advisor button + Exit.
+  it("has no axe violations (revise: findings + Ask advisor + Exit)", async () => {
+    const { container } = render(
+      <WireStageTurn
+        data={{
+          ...wireBase,
+          signoff_outcome: "revise",
+          advisor_findings: "FLAGGED: tighten the source allowlist.",
+          passes_remaining: 2,
+        }}
+        onConfirm={() => {}}
+        confirmDisabled={false}
+        onAskAdvisor={() => {}}
+        onExitToFreeform={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // Escape: the complete-without-sign-off button (only emitted here) + Exit.
+  it("has no axe violations (escape_unavailable: complete-without-signoff + Exit)", async () => {
+    const { container } = render(
+      <WireStageTurn
+        data={{
+          ...wireBase,
+          signoff_outcome: "escape_unavailable",
+          advisor_findings: "Advisor unreachable.",
+          passes_remaining: 0,
+        }}
+        onConfirm={() => {}}
+        confirmDisabled={false}
+        onCompleteWithoutSignoff={() => {}}
+        onExitToFreeform={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("SchemaFormTurn", () => {
+  // The guided decision surface now defaults to a read-only summary (<dl> rows +
+  // role=note caveat) with a non-tutorial Edit toggle that reveals the editable
+  // KnobFieldRenderer form. Audit all three states the redesign introduced: the
+  // default summary, the revealed edit form (newly axe-covered), and the
+  // tutorial summary (no Edit affordance).
+  const auditPayload: SchemaFormPayload = {
+    mode: "plugin_options",
+    plugin: "csv",
+    knobs: {
+      fields: [
+        { name: "encoding", label: "Encoding", kind: "text", required: false, nullable: false },
+        { name: "on_validation_failure", label: "On Validation Failure", kind: "text", required: true, nullable: false },
+        { name: "schema", label: "Schema", kind: "json-object", required: false, nullable: false },
+      ],
+    },
+    prefilled: { encoding: "utf-8", on_validation_failure: "discard", schema: { mode: "observed" } },
+  };
+
+  it("has no axe violations in the default summary view", async () => {
+    const { container } = render(<SchemaFormTurn payload={auditPayload} onSubmit={() => {}} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in the revealed edit form", async () => {
+    const { container } = render(<SchemaFormTurn payload={auditPayload} onSubmit={() => {}} />);
+    await userEvent.click(screen.getByRole("button", { name: "Edit" }));
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations in tutorial summary mode", async () => {
+    const { container } = render(<SchemaFormTurn payload={auditPayload} onSubmit={() => {}} isTutorial />);
     expect(await axe(container)).toHaveNoViolations();
   });
 });
@@ -464,6 +616,61 @@ describe("TemplateCards", () => {
 describe("ShortcutsHelp", () => {
   it("has no axe violations", async () => {
     const { container } = render(<ShortcutsHelp onClose={() => {}} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("ModeSwitchButton", () => {
+  it("has no axe violations (resting)", async () => {
+    const { container } = render(
+      <ModeSwitchButton target="guided" hasWork={false} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations (confirm state)", async () => {
+    const { container } = render(
+      <ModeSwitchButton target="freeform" hasWork />,
+    );
+    // Reveal the two-step confirm (the new interactive surface).
+    await userEvent.click(
+      screen.getByRole("button", { name: "Exit to freeform" }),
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("PipelineGloss", () => {
+  it("has no axe violations", async () => {
+    const { container } = render(
+      <PipelineGloss
+        compositionState={useSessionStore.getState().compositionState}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("PipelineValidationSummary", () => {
+  it("has no axe violations (warning state with a tinted glyph)", async () => {
+    // Exercise the richest DOM (glyph + plain status text), not the neutral
+    // null state, so the axe pass covers the aria-hidden glyph + role=status.
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [
+          {
+            component_id: "select_columns",
+            component_type: "transform",
+            message: "Review the optional mapping",
+            suggestion: null,
+          },
+        ],
+      },
+    } as never);
+    const { container } = render(<PipelineValidationSummary />);
     expect(await axe(container)).toHaveNoViolations();
   });
 });

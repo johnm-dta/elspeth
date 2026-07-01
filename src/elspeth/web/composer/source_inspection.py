@@ -25,6 +25,7 @@ import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
@@ -104,6 +105,7 @@ def inspect_blob_content(
     mime_type: str,
     blob_id: UUID | None = None,
     content_hash: str | None = None,
+    total_size_bytes: int | None = None,
 ) -> SourceInspectionFacts:
     """Inspect raw blob bytes and return bounded structural facts.
 
@@ -113,12 +115,13 @@ def inspect_blob_content(
     """
     inspected = content[:_MAX_BYTES]
     byte_range = (0, len(inspected))
-    truncated = len(content) > _MAX_BYTES
+    byte_size = len(content) if total_size_bytes is None else total_size_bytes
+    truncated = byte_size > len(inspected)
 
     redacted_identity = _redacted_identity(
         filename=filename,
         mime_type=mime_type,
-        byte_size=len(content),
+        byte_size=byte_size,
         blob_id=blob_id,
         content_hash=content_hash,
     )
@@ -149,6 +152,44 @@ def inspect_blob_content(
         url_candidates=_url_candidates_from_text(_safe_decode(inspected)),
         warnings=(f"unrecognised mime_type {mime_type!r} and filename {filename!r}",),
     )
+
+
+def observed_columns_from_content(*, content: bytes, filename: str, mime_type: str) -> tuple[str, ...]:
+    """Derive observed column names from inline source content.
+
+    A thin wrapper over :func:`inspect_blob_content` that returns just the
+    observed headers (the empty tuple when none are detectable). Used to
+    backfill ``observed_columns`` for an inline chat-resolved source when the
+    LLM's ``resolve_source`` left them empty — ``observed_columns`` is a *fact*
+    about the data, not a Tier-3 claim to trust, so deriving it authoritatively
+    from the bytes is the right move when the model omits it.
+
+    Caveat (deliberate): the underlying scan is bounded to ``_MAX_BYTES`` /
+    ``_MAX_ROWS``, so callers should prefer a non-empty LLM-supplied column list
+    when one exists (it may have seen the full, possibly ragged, content) and
+    fall back to this only when that list is empty.
+    """
+    facts = inspect_blob_content(content=content, filename=filename, mime_type=mime_type)
+    return facts.observed_headers or ()
+
+
+def observed_columns_from_path(*, path: Path, filename: str, mime_type: str) -> tuple[str, ...]:
+    """Bounded-read variant of :func:`observed_columns_from_content` for a file.
+
+    Reads at most ``_MAX_BYTES`` from ``path`` — the exact window
+    :func:`inspect_blob_content` would inspect — instead of slurping the whole
+    file, so backfilling a header from a large blob does not allocate the entire
+    upload. A missing or unreadable file (``OSError`` — not found, permission
+    denied, is-a-directory, or a mid-read I/O failure) degrades to ``()``:
+    column backfill is best-effort enrichment, never a gate on committing the
+    source. The read bound stays private to this module.
+    """
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(_MAX_BYTES)
+    except OSError:
+        return ()
+    return observed_columns_from_content(content=prefix, filename=filename, mime_type=mime_type)
 
 
 def inspect_csv_source_content(
@@ -265,13 +306,34 @@ def _decode_csv_sample(sample: bytes) -> tuple[str, str | None]:
 
 
 def _redact_url_candidate(raw_url: str) -> str:
-    """Keep URL routing structure while removing query/fragment values."""
+    """Reduce a URL to scheme + host (+ port); drop everything else.
+
+    Every URL component except scheme/host/port is an egress vector:
+    ``netloc`` carries ``user:password@`` userinfo (embedded credentials);
+    ``path`` carries reset tokens, email addresses, and other per-record PII
+    (``/reset-password/<token>``, ``/users/<email>/``); ``query`` and
+    ``fragment`` carry signing params and the like. The hint only needs to
+    convey *which host* a source references, so we rebuild from
+    ``parts.hostname`` (userinfo-stripped, port-less) plus the explicit port.
+    ``urlsplit`` keeps userinfo inside ``netloc``, so reusing ``netloc`` —
+    as the prior implementation did — left credentials intact.
+
+    Never-raise contract (this runs over arbitrary blob cell content, same as
+    ``_decode_csv_sample``): ``parts.port`` RAISES ``ValueError`` on a
+    malformed or out-of-range port (``h:99999``, ``h:abc``) — and ``_URL_PATTERN``
+    matches those — so the port access is guarded and a bad port is simply
+    dropped (host hint preserved) rather than propagated up through inspection.
+    """
     parts = urlsplit(raw_url)
-    if not parts.scheme or not parts.netloc:
+    host = parts.hostname
+    if not parts.scheme or not host:
         return _REDACTED_URL_PART
-    query = _REDACTED_URL_PART if parts.query else ""
-    fragment = _REDACTED_URL_PART if parts.fragment else ""
-    return urlunsplit((parts.scheme, parts.netloc, parts.path, query, fragment))
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((parts.scheme, netloc, "", "", ""))
 
 
 def _url_candidates_from_text(text: str) -> tuple[str, ...]:

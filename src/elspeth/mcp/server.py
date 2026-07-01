@@ -34,6 +34,7 @@ from mcp.types import TextContent, Tool
 from elspeth.contracts.enums import RunStatus
 from elspeth.core.landscape.database import SchemaCompatibilityError
 from elspeth.mcp.analyzer import LandscapeAnalyzer
+from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT, MCP_RESULT_LIMIT_MAX
 from elspeth.mcp.types import OPERATION_STATUS_VALUES, OPERATION_TYPE_VALUES
 
 __all__ = [
@@ -47,6 +48,40 @@ logger = logging.getLogger(__name__)
 
 _MCP_STATUS_TOOL_NAME = "get_mcp_status"
 _MCP_SCHEMA_FAILURE_PREFIX = "Landscape MCP server cannot open the configured audit database."
+_MCP_INT_ARG_MAXIMUMS = {"limit": MCP_RESULT_LIMIT_MAX}
+
+
+def _schema_properties_with_int_bounds(args: "_ArgSpec", schema_properties: Mapping[str, Any]) -> dict[str, Any]:
+    """Return schema properties with validation bounds advertised."""
+    properties: dict[str, Any] = {name: dict(prop) for name, prop in schema_properties.items()}
+    for field_name, minimum in args.optional_int_min:
+        if field_name in properties:
+            properties[field_name]["minimum"] = minimum
+    for field_name, maximum in _MCP_INT_ARG_MAXIMUMS.items():
+        if any(field_name == candidate for candidate, _default in args.optional_int) and field_name in properties:
+            properties[field_name]["maximum"] = maximum
+    return properties
+
+
+def _freeze_schema_properties(schema_properties: Mapping[str, Any]) -> dict[str, Any]:
+    return {name: _freeze_schema_value(prop) for name, prop in schema_properties.items()}
+
+
+def _freeze_schema_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_schema_value(child) for key, child in value.items()})
+    if isinstance(value, list):
+        return [_freeze_schema_value(child) for child in value]
+    return value
+
+
+def _json_schema_value(value: Any) -> Any:
+    """Return a JSON-serializable copy of a frozen schema value."""
+    if isinstance(value, Mapping):
+        return {key: _json_schema_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_json_schema_value(child) for child in value]
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +112,11 @@ class _ToolDef:
     schema_properties: Mapping[str, Any]
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "schema_properties", MappingProxyType(dict(self.schema_properties)))
+        object.__setattr__(
+            self,
+            "schema_properties",
+            MappingProxyType(_freeze_schema_properties(_schema_properties_with_int_bounds(self.args, self.schema_properties))),
+        )
 
 
 _TOOLS: dict[str, _ToolDef] = {
@@ -310,15 +349,19 @@ _TOOLS: dict[str, _ToolDef] = {
         description="Execute a read-only SQL query against the audit database (SELECT only)",
         args=_ArgSpec(
             required_str=("sql",),
+            optional_int=(("limit", MCP_QUERY_DEFAULT_LIMIT),),
             optional_dict=("params",),
+            optional_int_min=(("limit", 1),),
         ),
         handler=lambda a, args: a.query(
             sql=args["sql"],
             params=args["params"],
+            limit=args["limit"],
         ),
         schema_properties={
             "sql": {"type": "string", "description": "SQL SELECT query"},
             "params": {"type": ["object", "null"], "description": "Optional query parameters"},
+            "limit": {"type": "integer", "description": "Max rows to return", "default": MCP_QUERY_DEFAULT_LIMIT},
         },
     ),
     "get_dag_structure": _ToolDef(
@@ -444,9 +487,10 @@ _TOOLS: dict[str, _ToolDef] = {
 def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Validate MCP tool arguments at the Tier 3 boundary.
 
-    Checks required fields exist, validates types (str, int, dict), and
-    applies defaults for optional fields. Returns a new dict with only
-    the declared fields, preventing unexpected keys from leaking through.
+    Checks required fields exist, validates types (str, int, dict), enforces
+    advertised enum constraints, and applies defaults for optional fields.
+    Returns a new dict with only the declared fields, preventing unexpected
+    keys from leaking through.
 
     Raises:
         ValueError: Missing required field or unknown tool.
@@ -459,24 +503,39 @@ def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     spec = defn.args
     validated: dict[str, Any] = {}
 
+    def validate_advertised_enum(fname: str, value: str) -> None:
+        schema = defn.schema_properties.get(fname, {})
+        enum_values = schema.get("enum")
+        if enum_values is None:
+            return
+        if not isinstance(enum_values, list):
+            raise TypeError(f"'{name}': '{fname}' schema enum must be a list")
+        if value not in enum_values:
+            valid_values = ", ".join(repr(candidate) for candidate in enum_values)
+            raise ValueError(f"'{name}': '{fname}' must be one of: {valid_values}")
+
     for fname in spec.required_str:
         if fname not in arguments:
             raise ValueError(f"'{name}' requires '{fname}'")
         val = arguments[fname]
         if not isinstance(val, str):
             raise TypeError(f"'{name}': '{fname}' must be string, got {type(val).__name__}")
+        validate_advertised_enum(fname, val)
         validated[fname] = val
 
     for fname in spec.optional_str:
         val = arguments.get(fname)
         if val is not None and not isinstance(val, str):
             raise TypeError(f"'{name}': '{fname}' must be string or null, got {type(val).__name__}")
+        if isinstance(val, str):
+            validate_advertised_enum(fname, val)
         validated[fname] = val
 
     for fname, str_default in spec.optional_str_defaults:
         val = arguments.get(fname, str_default)
         if not isinstance(val, str):
             raise TypeError(f"'{name}': '{fname}' must be string, got {type(val).__name__}")
+        validate_advertised_enum(fname, val)
         validated[fname] = val
 
     int_mins = dict(spec.optional_int_min)
@@ -489,6 +548,8 @@ def _validate_tool_args(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             raise TypeError(f"'{name}': '{fname}' must be integer, got {type(val).__name__}")
         if fname in int_mins and val < int_mins[fname]:
             raise ValueError(f"'{name}': '{fname}' must be >= {int_mins[fname]}, got {val}")
+        if fname in _MCP_INT_ARG_MAXIMUMS and val > _MCP_INT_ARG_MAXIMUMS[fname]:
+            raise ValueError(f"'{name}': '{fname}' must be <= {_MCP_INT_ARG_MAXIMUMS[fname]}, got {val}")
         validated[fname] = val
 
     for fname, bool_default in spec.optional_bool:
@@ -604,7 +665,7 @@ def create_server(database_url: str, *, passphrase: str | None = None) -> Server
                 description=defn.description,
                 inputSchema={
                     "type": "object",
-                    "properties": dict(defn.schema_properties),
+                    "properties": _json_schema_value(defn.schema_properties),
                     **({"required": list(defn.args.required_str)} if defn.args.required_str else {}),
                 },
             )
@@ -783,14 +844,14 @@ def main() -> None:
         epilog="""
 Examples:
     # Run with SQLite database
-    elspeth-mcp --database sqlite:///./state/audit.db
+    elspeth-mcp --database sqlite:///./data/audit.db
 
     # Run with PostgreSQL
     elspeth-mcp --database postgresql://user@host/dbname
 
     # Run with SQLCipher-encrypted database
     export ELSPETH_AUDIT_KEY="<set-out-of-band>"
-    elspeth-mcp --database sqlite:///./state/audit.db --passphrase-env ELSPETH_AUDIT_KEY
+    elspeth-mcp --database sqlite:///./data/audit.db --passphrase-env ELSPETH_AUDIT_KEY
 
     # Interactive mode - finds and prompts for databases
     elspeth-mcp

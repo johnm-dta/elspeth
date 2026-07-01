@@ -12,6 +12,7 @@ from typing import Any
 from elspeth.core.landscape.database import LandscapeDB
 from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.mcp.analyzers import contracts, diagnostics, queries, reports
+from elspeth.mcp.limits import MCP_QUERY_DEFAULT_LIMIT
 from elspeth.mcp.types import (
     CallDetail,
     CollisionRecord,
@@ -142,8 +143,8 @@ class LandscapeAnalyzer:
     def list_collisions(self, run_id: str, limit: int = 100) -> list[CollisionRecord]:
         return queries.list_collisions(self._db, self._factory, run_id, limit=limit)
 
-    def query(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        return queries.query(self._db, self._factory, sql, params=params)
+    def query(self, sql: str, params: dict[str, Any] | None = None, limit: int = MCP_QUERY_DEFAULT_LIMIT) -> list[dict[str, Any]]:
+        return queries.query(self._db, self._factory, sql, params=params, limit=limit)
 
     def get_run_summary(self, run_id: str) -> RunSummaryReport | ErrorResult:
         return reports.get_run_summary(self._db, self._factory, run_id)

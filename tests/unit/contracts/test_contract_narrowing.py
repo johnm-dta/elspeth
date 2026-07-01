@@ -70,6 +70,34 @@ def test_narrow_contract_field_rename():
     assert result.fields[0].source == "inferred"
 
 
+def test_narrow_contract_rename_over_existing_target_preserves_source_metadata():
+    """Rename-overwrite keeps source metadata so the output row validates."""
+    input_contract = SchemaContract(
+        mode="FLEXIBLE",
+        fields=(
+            make_field("name", str, original_name="Name", required=True, source="declared"),
+            make_field("age", int, original_name="Age", required=True, source="declared"),
+        ),
+        locked=True,
+    )
+
+    output_row = {"age": "Alice"}
+
+    result = narrow_contract_to_output(
+        input_contract,
+        output_row,
+        renamed_fields={"name": "age"},
+    )
+
+    assert len(result.fields) == 1
+    renamed_field = result.get_field("age")
+    assert renamed_field.original_name == "Name"
+    assert renamed_field.python_type is str
+    assert renamed_field.source == "declared"
+    assert renamed_field.required is True
+    assert result.validate(output_row) == []
+
+
 def test_narrow_contract_mixed_operations():
     """Test mixed: input has [a, old, c], output has [a, new, d]."""
     input_contract = SchemaContract(

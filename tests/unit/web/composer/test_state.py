@@ -3887,6 +3887,54 @@ class TestSchemaContractValidation:
         assert sink_contract.consumer_requires == ("text",)
         assert sink_contract.satisfied is False
 
+    def test_fork_branch_name_cannot_overlap_coalesce_branch_and_sink(self) -> None:
+        """Composer must reject branch names that runtime routes to coalesce before sink."""
+        state = self._empty_state()
+        state = state.with_source(
+            self._make_source(
+                on_success="gate_in",
+                options={"schema": {"mode": "fixed", "fields": ["text: str"]}},
+            )
+        )
+        state = state.with_node(
+            NodeSpec(
+                id="g1",
+                node_type="gate",
+                plugin=None,
+                input="gate_in",
+                on_success=None,
+                on_error=None,
+                options={},
+                condition="True",
+                routes={"true": "fork", "false": "fork"},
+                fork_to=("main", "review"),
+                branches=None,
+                policy=None,
+                merge=None,
+            )
+        )
+        state = state.with_node(
+            self._make_coalesce(
+                "merge",
+                "branches",
+                "merged",
+                branches=("main", "review"),
+            )
+        )
+        state = state.with_output(self._make_output("main"))
+        state = state.with_output(self._make_output("merged"))
+        state = state.with_edge(self._make_edge("e1", "source", "g1"))
+        state = state.with_edge(EdgeSpec(id="e2", from_node="g1", to_node="main", edge_type="fork", label="main"))
+        state = state.with_edge(EdgeSpec(id="e3", from_node="g1", to_node="merge", edge_type="fork", label="review"))
+
+        result = state.validate()
+
+        assert not result.is_valid
+        assert any(
+            "Connection names overlap with sink names" in error.message and "main" in error.message
+            for error in result.errors
+        )
+
     def test_multi_hop_transform_no_schema_breaks_chain(self) -> None:
         """A schema-less transform breaks downstream guarantees across hops."""
         state = self._empty_state()

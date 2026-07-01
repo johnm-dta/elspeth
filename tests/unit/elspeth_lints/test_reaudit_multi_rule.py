@@ -36,13 +36,14 @@ import os
 import textwrap
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from elspeth_lints.core.allowlist import AllowlistEntry, JudgeVerdict
-from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL
+from elspeth_lints.core.judge import DEFAULT_JUDGE_MODEL, JUDGE_POLICY_HASH, JudgeRequest, JudgeResponse
 from elspeth_lints.core.reaudit import (
     _EXCLUDED_FROM_REAUDIT,
     _RULE_VOCABULARY_REGISTRY,
@@ -293,6 +294,77 @@ def test_generic_dispatch_reaudits_composer_catch_order_end_to_end(tmp_path: Pat
     assert outcome.fresh_verdict is JudgeVerdict.ACCEPTED
     assert "ComposerServiceError" in outcome.code_snapshot
     assert client_class.return_value.chat.completions.create.call_count == 1
+
+
+def test_reaudit_uses_non_tier_rule_definition_for_generic_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-tier-model reaudit judge call receives the active rule's definition."""
+    monkeypatch.setenv("ELSPETH_JUDGE_METADATA_HMAC_KEY", _TEST_JUDGE_METADATA_HMAC_KEY)
+    root = tmp_path / "src_root"
+    target = root / "models.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        textwrap.dedent(
+            """\
+            from dataclasses import dataclass
+            from types import MappingProxyType
+
+
+            @dataclass(frozen=True)
+            class FrozenConfig:
+                values: dict[str, str]
+
+                def __post_init__(self) -> None:
+                    object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
+            """
+        ),
+        encoding="utf-8",
+    )
+    findings = _scan_via_rule_analyze(
+        rule_filter="immutability.freeze_guards",
+        target_file=target,
+        root=root,
+    )
+    finding = next(finding for finding in findings if finding.rule_id == "FG1")
+    allowlist_dir = tmp_path / "allowlist"
+    allowlist_dir.mkdir()
+    (allowlist_dir / "_defaults.yaml").write_text(
+        "version: 1\ndefaults:\n  fail_on_stale: false\n  fail_on_expired: false\n",
+        encoding="utf-8",
+    )
+    _write_pre_judge_allow_hit(allowlist_dir / "freeze.yaml", key=finding.canonical_key())
+    captured: dict[str, str] = {}
+
+    def _fake_call_judge(request: JudgeRequest, **_kwargs: object) -> JudgeResponse:
+        captured["rule_definition"] = request.rule_definition
+        return JudgeResponse(
+            verdict=JudgeVerdict.ACCEPTED,
+            model_id=DEFAULT_JUDGE_MODEL,
+            judge_rationale="freeze guard suppression still warranted",
+            recorded_at=datetime.now(UTC),
+            should_use_decorator=None,
+            confidence=0.91,
+            prompt_tokens_total=4000,
+            prompt_tokens_cached=0,
+            policy_hash=JUDGE_POLICY_HASH,
+            judge_transport="openrouter",
+        )
+
+    monkeypatch.setattr("elspeth_lints.core.reaudit.call_judge", _fake_call_judge)
+
+    report = reaudit_entries(
+        root=root.resolve(),
+        allowlist_dir=allowlist_dir,
+        rule_filter="immutability.freeze_guards",
+        since=None,
+        limit=None,
+        include_pre_judge=True,
+    )
+
+    assert report.outcomes[0].divergence is ReauditDivergence.PRE_JUDGE_FRESH_ACCEPT
+    assert "FG1" in captured["rule_definition"]
+    assert "Bare MappingProxyType wrap" in captured["rule_definition"]
+    assert "recursive immutability" in captured["rule_definition"]
+    assert "no definition available" not in captured["rule_definition"]
 
 
 def _single_catch_order_finding(*, root: Path, target: Path):

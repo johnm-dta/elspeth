@@ -85,7 +85,7 @@ class ReportAssemble(BaseTransform):
     name = "report_assemble"
     determinism = Determinism.DETERMINISTIC
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:82cc05ca5602c9f9"
+    source_file_hash: str | None = "sha256:d02f6d1bec09b5de"
     config_model = ReportAssembleConfig
     is_batch_aware = True
 
@@ -181,7 +181,8 @@ class ReportAssemble(BaseTransform):
         # body elements; the title-to-body separator is a per-format constant
         # (plain_text/markdown use "\n\n"; html_fragment uses "\n" because
         # block-level HTML elements don't require blank-line separation).
-        paragraphs = self._join_with.join(f"<p>{html.escape(line)}</p>" for line in lines)
+        join_with = html.escape(self._join_with)
+        paragraphs = join_with.join(f"<p>{html.escape(line)}</p>" for line in lines)
         if self._title:
             return f"<h1>{html.escape(self._title)}</h1>\n{paragraphs}" if paragraphs else f"<h1>{html.escape(self._title)}</h1>"
         return paragraphs

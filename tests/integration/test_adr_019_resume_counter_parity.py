@@ -418,7 +418,7 @@ def test_derive_rows_processed_expand_counts_source_rows_not_children() -> None:
 # refuses a non-exhausted source), so run_B interrupts on its FINAL source row
 # (all rows processed, EOF flushes not yet run) and the interruption is
 # reshaped into the exhausted-then-crashed-EOF-flush state exactly as
-# tests/integration/pipeline/test_rc6_eof_resume_proof.py does:
+# tests/integration/pipeline/test_eof_resume_proof.py does:
 # run_sources.lifecycle_state='exhausted' (what finalize_source_iteration
 # records before the EOF flush) + runs.status='failed' (what the failure
 # ceremony records when that flush crashes).
@@ -622,7 +622,7 @@ def test_resume_derives_rows_coalesce_failed_from_durable_audit() -> None:
         pass
 
     # Reshape the interruption into the exhausted-then-crashed-EOF-flush state
-    # (same construction as test_rc6_eof_resume_proof.py): 'exhausted' is what
+    # (same construction as test_eof_resume_proof.py): 'exhausted' is what
     # finalize_source_iteration records before the EOF flushes run; 'failed' is
     # what the failure ceremony records when an EOF flush crashes. This is the
     # resumable shape on the multi-source branch — a mid-source interrupt is

@@ -29,6 +29,7 @@ Test-file organisation:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -473,6 +474,11 @@ def test_reaudit_amplification_attack_makes_zero_openrouter_calls(tmp_path: Path
             "ssh_public_key",
         ),
         # PEM private-key header (the most load-bearing signal).
+        (
+            "pem_private_key_block",
+            "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAexampleBody\n-----END RSA PRIVATE KEY-----",
+            "pem_private_key_block",
+        ),
         ("pem_private_key_header", "-----BEGIN RSA PRIVATE KEY-----", "pem_private_key_header"),
         ("pem_private_key_footer", "-----END RSA PRIVATE KEY-----", "pem_private_key_footer"),
         # .env-style assignment.
@@ -599,16 +605,17 @@ def test_justify_excerpt_with_aws_key_does_not_exfiltrate_literal(tmp_path: Path
 
 
 def test_justify_excerpt_with_pem_block_does_not_exfiltrate_literal(tmp_path: Path) -> None:
-    """A planted PEM private-key header is redacted before transit."""
+    """A planted PEM private-key block is redacted before transit."""
     root = tmp_path / "src_root"
     (root / "plugins").mkdir(parents=True)
     target = root / "plugins" / "widget.py"
+    body_line = "MIIEpAIBAAKCAQEAuYz7d4r6p0tW5qS8vL1nB2mC3xZ4aS5dF6gH7jK8lQ9"  # secret-scan: allow-this-line
     target.write_text(
         '"""Module with planted PEM block."""\n\n\n'
         "class Widget:\n"
         "    def lookup(self, payload: dict) -> str:\n"
         "        # -----BEGIN RSA PRIVATE KEY-----\n"
-        "        # MIIEpAIBAAKCAQEA...\n"
+        f"        # {body_line}\n"
         "        # -----END RSA PRIVATE KEY-----\n"
         "        # R1 on next line:\n"
         '        return payload.get("name", "anonymous")\n',
@@ -637,10 +644,10 @@ def test_justify_excerpt_with_pem_block_does_not_exfiltrate_literal(tmp_path: Pa
     user_prompt = _captured_user_prompt(client_class)
     assert "-----BEGIN RSA PRIVATE KEY-----" not in user_prompt
     assert "-----END RSA PRIVATE KEY-----" not in user_prompt
+    assert body_line not in user_prompt
     assert "[REDACTED-SECRET-" in user_prompt
     written = (allowlist_dir / "plugins.yaml").read_text(encoding="utf-8")
-    assert "pattern: pem_private_key_header" in written
-    assert "pattern: pem_private_key_footer" in written
+    assert "pattern: pem_private_key_block" in written
 
 
 # =====================================================================
@@ -1173,13 +1180,15 @@ def test_extract_safe_excerpt_redacts_ssh_private_key_body(tmp_path: Path) -> No
     """
     root = tmp_path / "src_root"
     root.mkdir()
-    # PEM-shaped file with realistic 64-char base64 body lines (the
-    # length the ``openssl`` writer produces).
+    # Key-body file with realistic 64-char base64 body lines (the length
+    # the ``openssl`` writer produces). Complete PEM blocks are covered by
+    # ``pem_private_key_block``; this pins the path-hinted loose-body
+    # fallback.
     body_line_one = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDXAAAAAAAAAAAA"
     body_line_two = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
     pem_path = root / "id_rsa"
     pem_path.write_text(
-        f"-----BEGIN OPENSSH PRIVATE KEY-----\n{body_line_one}\n{body_line_two}\n-----END OPENSSH PRIVATE KEY-----\n",
+        f"{body_line_one}\n{body_line_two}\n",
         encoding="utf-8",
     )
     excerpt = extract_safe_excerpt(root=root, target_file=pem_path, line=2, context_lines=5)
@@ -1189,14 +1198,124 @@ def test_extract_safe_excerpt_redacts_ssh_private_key_body(tmp_path: Path) -> No
         "If the unit test still passes, the cause is render/scrub ordering."
     )
     assert body_line_two not in excerpt.text
-    # Header and footer also redacted (different patterns).
     body_pattern_names = {r.pattern_name for r in excerpt.redactions}
     assert "ssh_private_key_body" in body_pattern_names
-    assert "pem_private_key_header" in body_pattern_names
-    assert "pem_private_key_footer" in body_pattern_names
     # Line-number prefix preserved on the rendered output (the body
     # was scrubbed; the structural prefix remains).
     assert ">>" in excerpt.text or "  " in excerpt.text
+
+
+def test_extract_safe_excerpt_redacts_embedded_pem_private_key_block_body(tmp_path: Path) -> None:
+    """PEM private-key bodies redact even when embedded in ordinary source."""
+    root = tmp_path / "src_root"
+    (root / "plugins").mkdir(parents=True)
+    body_line_one = "MIIEowIBAAKCAQEAuYz7d4r6p0tW5qS8vL1nB2mC3xZ4aS5dF6gH7jK8lQ9"  # secret-scan: allow-this-line
+    body_line_two = "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh"  # secret-scan: allow-this-line
+    target = root / "plugins" / "widget.py"
+    target.write_text(
+        '"""Module with embedded PEM material."""\n\n'
+        "class Widget:\n"
+        "    PEM = '''-----BEGIN RSA PRIVATE KEY-----\n"
+        f"{body_line_one}\n"
+        f"{body_line_two}\n"
+        "-----END RSA PRIVATE KEY-----'''\n",
+        encoding="utf-8",
+    )
+
+    excerpt = extract_safe_excerpt(root=root, target_file=target, line=4, context_lines=5)
+
+    assert "-----BEGIN RSA PRIVATE KEY-----" not in excerpt.text
+    assert "-----END RSA PRIVATE KEY-----" not in excerpt.text
+    assert body_line_one not in excerpt.text
+    assert body_line_two not in excerpt.text
+    pattern_names = {r.pattern_name for r in excerpt.redactions}
+    assert "pem_private_key_block" in pattern_names
+
+
+def test_extract_safe_excerpt_redacts_pem_block_after_splitlines_only_boundaries(tmp_path: Path) -> None:
+    """PEM block location must use the same line model as excerpt windowing."""
+    root = tmp_path / "src_root"
+    (root / "plugins").mkdir(parents=True)
+    body_lines = [
+        "MIIEowIBAAKCAQEAw5Vq5Wk0L2w3n4p5q6r7s8t9u0v1x2y3z4A5B6C7D8",
+        "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFh",
+        "QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJC",
+    ]
+    target = root / "plugins" / "widget.py"
+    text = (
+        '"""Module with embedded PEM material after form-feed separators."""\n'
+        "class Widget:\n"
+        "    marker = 1\f\f"
+        "    PEM = '''-----BEGIN RSA PRIVATE KEY-----\n"
+        f"{body_lines[0]}\n"
+        f"{body_lines[1]}\n"
+        f"{body_lines[2]}\n"
+        "-----END RSA PRIVATE KEY-----'''\n"
+    )
+    target.write_text(text, encoding="utf-8")
+    target_line = text.splitlines().index(body_lines[1]) + 1
+
+    excerpt = extract_safe_excerpt(root=root, target_file=target, line=target_line, context_lines=50)
+
+    assert "-----BEGIN RSA PRIVATE KEY-----" not in excerpt.text
+    assert "-----END RSA PRIVATE KEY-----" not in excerpt.text
+    for body_line in body_lines:
+        assert body_line not in excerpt.text
+    pattern_names = {r.pattern_name for r in excerpt.redactions}
+    assert "pem_private_key_block" in pattern_names
+
+
+@pytest.mark.parametrize(
+    ("case_name", "line", "context_lines", "leaked_body_indexes"),
+    [
+        ("header_only_window", 4, 2, (0, 1)),
+        ("body_only_window", 12, 1, (6, 7, 8)),
+        ("footer_only_window", 25, 2, (18, 19)),
+    ],
+)
+def test_extract_safe_excerpt_redacts_embedded_pem_private_key_block_partial_windows(
+    case_name: str,
+    line: int,
+    context_lines: int,
+    leaked_body_indexes: tuple[int, ...],
+    tmp_path: Path,
+) -> None:
+    """A PEM block is masked when only part of it intersects the excerpt."""
+    root = tmp_path / "src_root"
+    (root / "plugins").mkdir(parents=True)
+    body_lines = [f"MIIE{idx:02d}" + ("A" * 60) for idx in range(20)]
+    target = root / "plugins" / "widget.py"
+    file_lines = [
+        '"""Module with a large embedded PEM block."""',
+        "",
+        "class Widget:",
+        "    PEM = '''-----BEGIN RSA PRIVATE KEY-----",
+        *body_lines,
+        "-----END RSA PRIVATE KEY-----'''",
+    ]
+    target.write_text("\n".join(file_lines) + "\n", encoding="utf-8")
+
+    excerpt = extract_safe_excerpt(root=root, target_file=target, line=line, context_lines=context_lines)
+
+    assert "-----BEGIN RSA PRIVATE KEY-----" not in excerpt.text
+    assert "-----END RSA PRIVATE KEY-----" not in excerpt.text
+    for index in leaked_body_indexes:
+        assert body_lines[index] not in excerpt.text, case_name
+    pattern_names = {r.pattern_name for r in excerpt.redactions}
+    assert "pem_private_key_block" in pattern_names
+    expected_line_count = min(25, line + context_lines) - max(1, line - context_lines) + 1
+    assert len(excerpt.text.split("\n")) == expected_line_count
+    assert f">> {line:5d}" in excerpt.text
+    expected_start_line = max(1, line - context_lines)
+    expected_end_line = min(len(file_lines), line + context_lines)
+    visible_start_line = max(4, expected_start_line)
+    visible_end_line = min(len(file_lines), expected_end_line)
+    visible_segment = "\n".join(file_lines[visible_start_line - 1 : visible_end_line])
+    expected_hash = hashlib.sha256(visible_segment.encode("utf-8") + excerpt.file_fingerprint.encode("utf-8")).hexdigest()[:16]
+    block_records = [r for r in excerpt.redactions if r.pattern_name == "pem_private_key_block"]
+    assert len(block_records) == 1
+    assert block_records[0].byte_count == len(visible_segment.encode("utf-8"))
+    assert block_records[0].redacted_hash == expected_hash
 
 
 # Pattern contract cases: one row per entry in ``_SECRET_PATTERNS``.
@@ -1206,6 +1325,11 @@ def test_extract_safe_excerpt_redacts_ssh_private_key_body(tmp_path: Path) -> No
 # survive the prefix-then-scrub previously and now the scrub-then-prefix
 # pipeline.
 _PATTERN_CONTRACT_CASES: tuple[tuple[str, str, str], ...] = (
+    (
+        "pem_private_key_block",
+        "mod.py",
+        "x = 1\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEAexampleBody\n-----END RSA PRIVATE KEY-----\ny = 2\n",
+    ),
     (
         "pem_private_key_header",
         "mod.py",

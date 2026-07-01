@@ -2,7 +2,8 @@
 
 Verifies the dispatcher's step routing, intra-step turn progression, and
 the happy-path walk from step 1 (SINGLE_SELECT) through step 2.5
-(RECIPE_OFFER) to a COMPLETED terminal state.
+(RECIPE_OFFER) to the wire-confirm stage. Valid wiring confirmation is covered
+by direct chain tests; invalid recipe wiring re-emits the wire turn.
 
 HTTP transport: SyncASGITestClient (in-process, synchronous — same pattern
 as test_get_guided.py).  The full roundtrip exercises:
@@ -18,10 +19,11 @@ Per spec §3.1, §3.2, §3.3, §5.3:
     server emits SINGLE_SELECT (step 2 initial)
   - SINGLE_SELECT at step 2 → server emits SCHEMA_FORM (intra-step)
   - SCHEMA_FORM at step 2 → server emits MULTI_SELECT_WITH_CUSTOM (intra-step)
-  - MULTI_SELECT_WITH_CUSTOM at step 2 → handle_step_2_sink + advance;
-    server emits RECIPE_OFFER if recipe matched
-  - RECIPE_OFFER chosen=["accept"] → handle_step_2_5_recipe_apply;
-    terminal=COMPLETED
+  - MULTI_SELECT_WITH_CUSTOM at step 2 → handle_step_2_sink + advance to step 3;
+    server solves the transform chain and emits PROPOSE_CHAIN
+  - PROPOSE_CHAIN chosen=["accept"] → handle_step_3_chain_accept;
+    server emits CONFIRM_WIRING
+  - CONFIRM_WIRING chosen=["confirm"] → terminal=COMPLETED
 
 Error paths (exit_to_freeform, 409 after terminal) live in test_error_paths.py
 (Task 3.6).
@@ -36,6 +38,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
+from elspeth.web.composer.redaction import REDACTED_BLOB_SOURCE_PATH
 from tests.unit.web._sync_asgi_client import SyncASGITestClient as TestClient
 
 # ---------------------------------------------------------------------------
@@ -62,6 +65,19 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=kwargs)
     assert resp.status_code == 200, resp.json()
     return resp.json()
+
+
+def _confirm_wiring(client: TestClient, session_id: str) -> dict:
+    return _respond(
+        client,
+        session_id,
+        chosen=["confirm"],
+        edited_values=None,
+        custom_inputs=None,
+        accepted_step_index=None,
+        edit_step_index=None,
+        control_signal=None,
+    )
 
 
 def _seed_blob(client: TestClient, session_id: str) -> tuple[str, str]:
@@ -213,6 +229,16 @@ class TestStep1Advance:
         assert cs is not None
         assert cs["sources"].get("source") is not None
         assert cs["sources"]["source"]["plugin"] == "csv"
+        # Egress (the OTHER path the original leak was demonstrated on — the
+        # schema_form submit via /guided/respond, not just /guided/chat): this
+        # blob-backed source's absolute storage_path must NOT reach the wire. The
+        # committed source carries no blob_ref (manual set_source strips it), so
+        # redact_guided_snapshot_storage_paths cross-references the GuidedSession
+        # snapshot's retained blob_ref to mask both the committed source path AND
+        # the composer_meta snapshot path.
+        assert cs["sources"]["source"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+        assert cs["composer_meta"]["guided_session"]["step_1_result"]["options"]["path"] == REDACTED_BLOB_SOURCE_PATH
+        assert storage_path not in json.dumps(body)
 
     def test_step_2_single_select_lists_sink_plugins(self, composer_test_client: TestClient) -> None:
         """The step-2 initial turn is single_select listing registered sink plugins."""
@@ -303,8 +329,12 @@ class TestStep2IntraStep:
         assert "text" in option_ids
         assert "label" in option_ids
 
-    def test_multi_select_response_advances_to_step_2_5_with_recipe(self, composer_test_client: TestClient) -> None:
-        """MULTI_SELECT_WITH_CUSTOM response advances to step 2.5 with a RECIPE_OFFER turn."""
+    def test_multi_select_response_advances_to_step_3_propose_chain(self, composer_test_client: TestClient) -> None:
+        """MULTI_SELECT_WITH_CUSTOM response advances straight to STEP_3 with a PROPOSE_CHAIN turn.
+
+        The recipe-offer deviation was removed: the sink commit now hops directly
+        to the chain solver, which builds the transform chain from the request.
+        """
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
         _respond(composer_test_client, session_id, chosen=["json"])
@@ -326,42 +356,46 @@ class TestStep2IntraStep:
             },
         )
 
-        # Confirm required fields via chosen — "label" matches the classify-rows recipe's
-        # keyword set.  The backend reconstructs SinkOutputResolved from step_2_sink_intent
-        # (plugin + options) plus these required_fields.
-        body = _respond(
-            composer_test_client,
-            session_id,
-            chosen=["text", "label"],
-            custom_inputs=[],
-        )
+        # Confirm required fields via chosen. The backend reconstructs
+        # SinkOutputResolved from step_2_sink_intent (plugin + options) plus these
+        # required_fields and commits the sink. Committing the sink no longer
+        # auto-builds the transform chain: it advances to step_3_transforms with
+        # NO proposal (next_turn=None). The chain is built by the per-stage
+        # transforms chat prompt, on which the SAME chain_solver mock fires.
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough_for_step_index_tests(),
+        ):
+            body = _respond(
+                composer_test_client,
+                session_id,
+                chosen=["text", "label"],
+                custom_inputs=[],
+            )
+            assert body["next_turn"] is None
+            assert body["guided_session"]["step"] == "step_3_transforms"
 
-        assert body["guided_session"]["step"] == "step_2_5_recipe_match"
+            chat_resp = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/chat",
+                json={"message": "fetch each page and summarise it", "step_index": "step_3_transforms"},
+            )
+            assert chat_resp.status_code == 200, chat_resp.json()
+            body = chat_resp.json()
+
+        assert body["guided_session"]["step"] == "step_3_transforms"
         assert body["next_turn"] is not None
-        assert body["next_turn"]["type"] == "recipe_offer"
+        assert body["next_turn"]["type"] == "propose_chain"
         payload = body["next_turn"]["payload"]
-        assert payload["mode"] == "recipe_decision"
-        assert payload["recipe_context"]["recipe_name"] == "classify-rows-llm-jsonl"
-        assert payload["prefilled"]["label_field"] == "label"
-        # Recipe offers now expose the unsatisfied required slots as KnobSchema
-        # fields so the same SchemaFormTurn renderer handles plugin options and
-        # recipe decisions.
-        unsatisfied_names = {entry["name"] for entry in payload["knobs"]["fields"]}
-        assert unsatisfied_names == {
-            "classifier_template",
-            "model",
-            "api_key_secret",
-        }
-        for entry in payload["knobs"]["fields"]:
-            assert entry["required"] is True
+        assert payload["steps"][0]["plugin"] == "passthrough"
+        assert payload["blockers"] == []
 
     def test_multi_select_response_commits_sink_to_state(self, composer_test_client: TestClient) -> None:
-        """M1: MULTI_SELECT_WITH_CUSTOM → step 2.5 transition commits sink to composition_state.outputs.
+        """MULTI_SELECT_WITH_CUSTOM → STEP_3 transition commits the sink to composition_state.outputs.
 
-        Verifies C2 fix: handle_step_2_sink IS called on the MULTI_SELECT_WITH_CUSTOM
-        → step 2.5 transition.  Before the fix, state.outputs was empty because
-        handle_step_2_sink was never called; the recipe-apply path (step 2.5) would
-        then fail with a missing sink when generating YAML.
+        handle_step_2_sink IS called on the MULTI_SELECT_WITH_CUSTOM → STEP_3
+        transition (before the chain solver fires); state.outputs must be
+        non-empty so the proposed chain has a sink to wire into.
         """
         session_id = _create_session(composer_test_client)
         self._drive_to_step_2_single_select(composer_test_client, session_id)
@@ -384,396 +418,29 @@ class TestStep2IntraStep:
             },
         )
 
-        # The MULTI_SELECT response that triggers step 2 → 2.5 advance.
+        # The MULTI_SELECT response that triggers step 2 → step 3 advance.
         # chosen carries the required field names; the backend reads plugin + options
         # from GuidedSession.step_2_sink_intent (persisted by the SCHEMA_FORM dispatcher).
-        body = _respond(
-            composer_test_client,
-            session_id,
-            chosen=["text", "label"],
-            custom_inputs=[],
-        )
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough_for_step_index_tests(),
+        ):
+            body = _respond(
+                composer_test_client,
+                session_id,
+                chosen=["text", "label"],
+                custom_inputs=[],
+            )
 
-        # Step advanced to 2.5.
-        assert body["guided_session"]["step"] == "step_2_5_recipe_match"
+        # Step advanced to 3.
+        assert body["guided_session"]["step"] == "step_3_transforms"
 
         # Composition state must have at least one output — sink was committed.
         cs = body["composition_state"]
         assert cs is not None, "composition_state missing from response"
         outputs = cs.get("outputs", {})
-        assert outputs, "composition_state.outputs is empty after MULTI_SELECT advance — handle_step_2_sink was not called (C2 regression)"
-
-
-# ---------------------------------------------------------------------------
-# Step 2.5 — RECIPE_OFFER accept → terminal=COMPLETED
-# ---------------------------------------------------------------------------
-
-
-class TestStep25RecipeAccept:
-    def _drive_to_recipe_offer(self, client: TestClient, session_id: str) -> tuple[dict, str]:
-        """Drive to the RECIPE_OFFER state. Returns (last body, blob_id).
-
-        blob_id is returned for use as ``source_blob_id`` in the recipe-accept
-        slots, where _execute_apply_pipeline_recipe resolves it via the session DB.
-        storage_path is used as the source ``path`` option for the step-1 commit
-        (``_execute_set_source`` requires the path to be under {data_dir}/blobs/).
-        """
-        blob_id, storage_path = _seed_blob(client, session_id)
-        output_path = _outputs_path(client, "out.jsonl")
-
-        _get_guided(client, session_id)
-        # Step 1: pick csv
-        _respond(client, session_id, chosen=["csv"])
-        # Step 1: fill csv options — path must be under {data_dir}/blobs/
-        _respond(
-            client,
-            session_id,
-            edited_values={
-                "plugin": "csv",
-                "options": {"path": storage_path, "schema": {"mode": "observed"}},
-                "observed_columns": ["text", "category"],
-                "sample_rows": [{"text": "Hello", "category": "greeting"}],
-            },
-        )
-        # Step 2: pick json sink
-        _respond(client, session_id, chosen=["json"])
-        # Step 2: fill json options — path must be under {data_dir}/outputs/.
-        # collision_policy is required by the json sink validator.
-        # Must include "plugin" so the dispatcher persists step_2_sink_intent.
-        _respond(
-            client,
-            session_id,
-            edited_values={
-                "plugin": "json",
-                "options": {
-                    "path": output_path,
-                    "schema": {"mode": "observed"},
-                    "mode": "write",
-                    "collision_policy": "auto_increment",
-                },
-                "observed_columns": [],
-                "sample_rows": [],
-            },
-        )
-        # Step 2: declare required fields via chosen ("category" matches classify keyword).
-        # The backend reads plugin + options from GuidedSession.step_2_sink_intent and
-        # combines with chosen to construct SinkOutputResolved.
-        # output_path must be under {data_dir}/outputs/ and collision_policy must
-        # be set (handle_step_2_sink calls _execute_set_output which validates).
-        body = _respond(
-            client,
-            session_id,
-            chosen=["text", "category"],
-            custom_inputs=[],
-        )
-        return body, blob_id
-
-    def test_recipe_offer_accept_produces_terminal_completed(self, composer_test_client: TestClient) -> None:
-        """Accepting the recipe offer produces terminal.kind=completed with pipeline YAML."""
-        session_id = _create_session(composer_test_client)
-        recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
-
-        # Verify recipe was offered
-        assert recipe_body["next_turn"]["type"] == "recipe_offer"
-        payload = recipe_body["next_turn"]["payload"]
-        offered_recipe = payload["recipe_context"]["recipe_name"]
-
-        # Accept the recipe — output_path must be under {data_dir}/outputs/
-        body = _respond(
-            composer_test_client,
-            session_id,
-            chosen=["accept"],
-            edited_values={
-                "recipe_name": offered_recipe,
-                "slots": {
-                    **payload["prefilled"],
-                    "source_blob_id": blob_id,
-                    "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
-                    "required_input_fields": ["text"],
-                    "label_field": "category",
-                    "output_path": output_path,
-                },
-            },
-        )
-
-        assert body["terminal"] is not None
-        assert body["terminal"]["kind"] == "completed"
-        assert body["terminal"]["pipeline_yaml"] is not None
-        assert "source:" in body["terminal"]["pipeline_yaml"]
-        assert body["next_turn"] is None
-
-    def test_completed_terminal_reflected_in_guided_session(self, composer_test_client: TestClient) -> None:
-        """After recipe accept, guided_session.terminal is COMPLETED."""
-        session_id = _create_session(composer_test_client)
-        _recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
-
-        body = _respond(
-            composer_test_client,
-            session_id,
-            chosen=["accept"],
-            edited_values={
-                "recipe_name": "classify-rows-llm-jsonl",
-                "slots": {
-                    "source_blob_id": blob_id,
-                    "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
-                    "required_input_fields": ["text"],
-                    "label_field": "category",
-                    "output_path": output_path,
-                },
-            },
-        )
-
-        gs = body["guided_session"]
-        assert gs["terminal"] is not None
-        assert gs["terminal"]["kind"] == "completed"
-        assert gs["terminal"]["reason"] is None
-
-    def test_recipe_state_survives_roundtrip(self, composer_test_client: TestClient) -> None:
-        """After the full walk, a GET /guided re-fetch returns terminal state from DB."""
-        session_id = _create_session(composer_test_client)
-        recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
-        payload = recipe_body["next_turn"]["payload"]
-        offered_recipe = payload["recipe_context"]["recipe_name"]
-
-        _respond(
-            composer_test_client,
-            session_id,
-            chosen=["accept"],
-            edited_values={
-                "recipe_name": offered_recipe,
-                "slots": {
-                    **payload["prefilled"],
-                    "source_blob_id": blob_id,
-                    "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
-                    "required_input_fields": ["text"],
-                    "label_field": "category",
-                    "output_path": output_path,
-                },
-            },
-        )
-
-        # Re-fetch from DB
-        get_body = _get_guided(composer_test_client, session_id)
-        gs = get_body["guided_session"]
-        assert gs["terminal"] is not None
-        assert gs["terminal"]["kind"] == "completed"
-
-    # ---- Contract-violation negative tests for chosen=["accept"] -----------
-    # Defends against silent ``.get()`` defaults that rewrite a malformed
-    # ``edited_values`` payload into bogus-but-shape-valid data (e.g.
-    # ``recipe_name=""``). The widget contract is
-    # ``{"recipe_name": str, "slots": Mapping}``; missing keys, a null
-    # payload, or a non-string ``recipe_name`` MUST surface as an HTTP 400
-    # with the contract cited in the message — not flow downstream as an
-    # "unknown recipe ''" error.
-
-    def test_recipe_offer_accept_null_edited_values_returns_400(self, composer_test_client: TestClient) -> None:
-        """``edited_values=null`` on accept is a protocol violation (HTTP 400)."""
-        session_id = _create_session(composer_test_client)
-        self._drive_to_recipe_offer(composer_test_client, session_id)
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={"chosen": ["accept"], "edited_values": None},
-        )
-        assert resp.status_code == 400, resp.json()
-        detail = resp.json()["detail"]
-        assert "edited_values" in detail
-        assert "null" in detail
-
-    def test_recipe_offer_accept_missing_slots_returns_400(self, composer_test_client: TestClient) -> None:
-        """Missing ``slots`` key on accept is a protocol violation (HTTP 400)."""
-        session_id = _create_session(composer_test_client)
-        self._drive_to_recipe_offer(composer_test_client, session_id)
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "chosen": ["accept"],
-                "edited_values": {"recipe_name": "classify-rows-llm-jsonl"},
-            },
-        )
-        assert resp.status_code == 400, resp.json()
-        assert "slots" in resp.json()["detail"]
-
-    def test_recipe_offer_accept_missing_recipe_name_returns_400(self, composer_test_client: TestClient) -> None:
-        """Missing ``recipe_name`` key on accept is a protocol violation (HTTP 400)."""
-        session_id = _create_session(composer_test_client)
-        _recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "chosen": ["accept"],
-                "edited_values": {
-                    "slots": {
-                        "source_blob_id": blob_id,
-                        "classifier_template": "Classify: {{ row['text'] }}",
-                        "model": "anthropic/claude-3.5-sonnet",
-                        "api_key_secret": "OPENROUTER_API_KEY",
-                        "required_input_fields": ["text"],
-                        "label_field": "category",
-                        "output_path": output_path,
-                    },
-                },
-            },
-        )
-        assert resp.status_code == 400, resp.json()
-        assert "recipe_name" in resp.json()["detail"]
-
-    def test_recipe_offer_accept_empty_recipe_name_returns_400(self, composer_test_client: TestClient) -> None:
-        """Empty-string ``recipe_name`` on accept is a protocol violation (HTTP 400).
-
-        Specifically defends against the silent ``str(edited.get("recipe_name", ""))``
-        pattern that would have routed ``""`` downstream into ``_RecipeMatch`` and
-        failed far away with "unknown recipe ''".
-        """
-        session_id = _create_session(composer_test_client)
-        _recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "chosen": ["accept"],
-                "edited_values": {
-                    "recipe_name": "",
-                    "slots": {
-                        "source_blob_id": blob_id,
-                        "classifier_template": "Classify: {{ row['text'] }}",
-                        "model": "anthropic/claude-3.5-sonnet",
-                        "api_key_secret": "OPENROUTER_API_KEY",
-                        "required_input_fields": ["text"],
-                        "label_field": "category",
-                        "output_path": output_path,
-                    },
-                },
-            },
-        )
-        assert resp.status_code == 400, resp.json()
-        assert "recipe_name" in resp.json()["detail"]
-
-    # ---- Binding check: accept must reference the offered recipe -----------
-
-    def test_recipe_accept_wrong_recipe_name_returns_400(self, composer_test_client: TestClient) -> None:
-        """Accepting with a recipe_name that differs from the offered one is rejected.
-
-        The server offers ``classify-rows-llm-jsonl``; the client sends
-        ``split-by-numeric-threshold``. The binding check must surface this as
-        HTTP 400 naming both the offered and the client-supplied recipe_name.
-
-        Asymmetry probe: removing the binding check from the accept branch
-        causes this test to fail — the wrong recipe is accepted and produces
-        a 400 from ``_execute_apply_pipeline_recipe`` with a recipe-not-found
-        or slot-mismatch error, not the binding-violation message.
-        """
-        session_id = _create_session(composer_test_client)
-        _recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "chosen": ["accept"],
-                "edited_values": {
-                    "recipe_name": "split-by-numeric-threshold",  # wrong — was offered classify
-                    "slots": {
-                        "source_blob_id": blob_id,
-                        "classifier_template": "Classify: {{ row['text'] }}",
-                        "model": "anthropic/claude-3.5-sonnet",
-                        "api_key_secret": "OPENROUTER_API_KEY",
-                        "label_field": "category",
-                        "output_path": output_path,
-                    },
-                },
-            },
-        )
-        assert resp.status_code == 400, resp.json()
-        detail = resp.json()["detail"]
-        # Detail must name both the offered recipe and the client-supplied recipe.
-        assert "classify-rows-llm-jsonl" in detail, f"offered recipe absent from: {detail}"
-        assert "split-by-numeric-threshold" in detail, f"client recipe absent from: {detail}"
-        assert "mismatch" in detail.lower(), f"binding message absent from: {detail}"
-
-    def test_recipe_accept_tampered_prefilled_slot_returns_400(self, composer_test_client: TestClient) -> None:
-        """Accepting with a changed server-prefilled slot is rejected.
-
-        The browser renders ``payload.prefilled`` as read-only, but a crafted
-        API client can still submit edited slot values.  The server must bind
-        those prefilled slot values to the staged offer, while still allowing
-        unsatisfied slots to be filled by the operator.
-        """
-        session_id = _create_session(composer_test_client)
-        recipe_body, blob_id = self._drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out.jsonl")
-        payload = recipe_body["next_turn"]["payload"]
-        offered_recipe = payload["recipe_context"]["recipe_name"]
-
-        tampered_slots = {
-            **payload["prefilled"],
-            "source_blob_id": blob_id,
-            "classifier_template": "Classify: {{ row['text'] }}",
-            "model": "anthropic/claude-3.5-sonnet",
-            "api_key_secret": "OPENROUTER_API_KEY",
-            "required_input_fields": ["text"],
-            "label_field": "text",  # wrong — server prefilled "category"
-            "output_path": output_path,
-        }
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "chosen": ["accept"],
-                "edited_values": {
-                    "recipe_name": offered_recipe,
-                    "slots": tampered_slots,
-                },
-            },
-        )
-        assert resp.status_code == 400, resp.json()
-        detail = resp.json()["detail"]
-        assert "prefilled" in detail.lower(), f"prefilled binding message absent from: {detail}"
-        assert "label_field" in detail, f"mismatched slot name absent from: {detail}"
-        assert "mismatch" in detail.lower(), f"binding message absent from: {detail}"
-
-    def test_recipe_accept_without_prior_offer_returns_400(self, composer_test_client: TestClient) -> None:
-        """Accepting a recipe when no recipe was ever offered is rejected with 400.
-
-        Drives only to Step 1 (source), then sends a crafted accept directly
-        targeting STEP_2_5.  With no step_2_5_recipe_offer staged, the server
-        must return 400 with a message explaining the session has not reached
-        the recipe-offer state.
-        """
-        session_id = _create_session(composer_test_client)
-        # Drive to Step 1 SCHEMA_FORM only — no sink, no recipe offer.
-        _get_guided(composer_test_client, session_id)
-        _respond(composer_test_client, session_id, chosen=["csv"])
-
-        # Crafted accept sent while session is still at STEP_1_SOURCE / SCHEMA_FORM.
-        # The dispatcher has no step_2_5_recipe_offer; the bind check fires.
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={
-                "chosen": ["accept"],
-                "edited_values": {
-                    "recipe_name": "classify-rows-llm-jsonl",
-                    "slots": {"source_blob_id": "fake-blob", "classifier_template": "x"},
-                },
-            },
-        )
-        # The response may be 400 from the binding check or from a step-mismatch
-        # guard earlier in the dispatcher.  Either way it must not be 200.
-        assert resp.status_code in (400, 422), resp.json()
+        assert outputs, "composition_state.outputs is empty after MULTI_SELECT advance — handle_step_2_sink was not called"
 
 
 # ---------------------------------------------------------------------------
@@ -1297,10 +964,6 @@ class TestRespondErrorPaths:
 # server bugs from client faults.  The symmetric `except ValueError → 400`
 # was missing; these tests verify it is now present at both catch sites.
 #
-# Site A: step_advance() ValueError — unexpected ``chosen`` on recipe_offer
-#   turn (state_machine._advance_step_2_5 line 700).  Fires at the
-#   step_advance try/except in post_guided_respond.
-#
 # Site B: solve_chain() — chain_solver raises only InvariantError (server
 #   bugs); no client-fault ValueError path exists there.  The new catch
 #   provides defence-in-depth but has no direct client trigger.
@@ -1313,68 +976,6 @@ class TestRespondErrorPaths:
 
 class TestValueErrorMappedTo400:
     """ValueError from step_advance or the dispatcher maps to HTTP 400 (Codex #8, #15)."""
-
-    def _drive_to_recipe_offer(self, client: TestClient, session_id: str) -> None:
-        """Drive session to the RECIPE_OFFER state (step 2.5)."""
-        _blob_id, storage_path = _seed_blob(client, session_id)
-        output_path = _outputs_path(client, "out_ve400.jsonl")
-
-        _get_guided(client, session_id)
-        _respond(client, session_id, chosen=["csv"])
-        _respond(
-            client,
-            session_id,
-            edited_values={
-                "plugin": "csv",
-                "options": {"path": storage_path, "schema": {"mode": "observed"}},
-                "observed_columns": ["text", "category"],
-                "sample_rows": [{"text": "Hello", "category": "greeting"}],
-            },
-        )
-        _respond(client, session_id, chosen=["json"])
-        _respond(
-            client,
-            session_id,
-            edited_values={
-                "plugin": "json",
-                "options": {
-                    "path": output_path,
-                    "schema": {"mode": "observed"},
-                    "mode": "write",
-                    "collision_policy": "auto_increment",
-                },
-                "observed_columns": [],
-                "sample_rows": [],
-            },
-        )
-        _respond(client, session_id, chosen=["text", "category"], custom_inputs=[])
-
-    def test_site_a_unexpected_chosen_on_recipe_offer_returns_400(
-        self,
-        composer_test_client: TestClient,
-    ) -> None:
-        """Site A (Codex #8): unexpected ``chosen`` on recipe_offer maps to HTTP 400.
-
-        state_machine._advance_step_2_5 raises ValueError for any chosen value
-        other than ``["accept"]`` or ``["build_manually"]``.  The step_advance
-        try/except must catch this and re-raise as HTTPException(400), not let
-        the framework return 500.
-
-        Asymmetry probe: this test is the one used to verify the catch is
-        load-bearing — see task report for revert evidence.
-        """
-        session_id = _create_session(composer_test_client)
-        self._drive_to_recipe_offer(composer_test_client, session_id)
-
-        resp = composer_test_client.post(
-            f"/api/sessions/{session_id}/guided/respond",
-            json={"chosen": ["not_a_valid_choice"]},
-        )
-        assert resp.status_code == 400, resp.json()
-        detail = resp.json()["detail"]
-        # Detail must cite the guided-mode protocol contract (not a naked traceback).
-        assert "Guided-mode protocol error" in detail
-        assert "not_a_valid_choice" in detail
 
     def test_site_c_unknown_source_plugin_returns_400(
         self,
@@ -1712,8 +1313,23 @@ def _drive_to_step_3_propose_chain_for_step_idx(
             "sample_rows": [],
         },
     )
-    # Non-classifier required field -> no recipe match -> chain solver fires.
-    _respond(client, session_id, chosen=["text"], custom_inputs=[])
+    # Non-classifier required field -> sink commit. Committing the sink no
+    # longer auto-builds the transform chain: it advances to step_3_transforms
+    # with no proposal (next_turn=None).
+    sink_body = _respond(client, session_id, chosen=["text"], custom_inputs=[])
+    assert sink_body["next_turn"] is None
+    assert sink_body["guided_session"]["step"] == "step_3_transforms"
+
+    # The per-stage transforms chat prompt drives the chain solver and emits
+    # the propose_chain turn (the SAME chain_solver mock fires on this call).
+    chat_resp = client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={"message": "fetch each page and summarise it", "step_index": "step_3_transforms"},
+    )
+    assert chat_resp.status_code == 200, chat_resp.json()
+    chat_body = chat_resp.json()
+    assert chat_body["guided_session"]["step"] == "step_3_transforms"
+    assert chat_body["next_turn"]["type"] == "propose_chain"
 
 
 class TestCodex7StepIndexValidation:

@@ -271,6 +271,88 @@ class TestStatusCorrectnessProperties:
 
 
 # =============================================================================
+# Exception Rendering Properties
+# =============================================================================
+
+
+class TestExceptionRenderingProperties:
+    """Operation audit errors must honor exception sanitization."""
+
+    def test_exception_str_redaction_is_preserved(self) -> None:
+        """Property: a redacting __str__ controls the persisted audit error."""
+
+        class RedactingException(Exception):
+            def __str__(self) -> str:
+                return "provider failure (credentials redacted)"
+
+        recorder = FakeRecorder()
+        ctx = FakePluginContext()
+        raw_secret = "sk-live-secret-value"
+        exc = RedactingException(f"provider rejected credential {raw_secret}")
+
+        with pytest.raises(RedactingException), track_operation(
+            _as_execution_repo(recorder),
+            "run-1",
+            "node-1",
+            "source_load",
+            _as_ctx(ctx),
+        ):
+            raise exc
+
+        assert len(recorder.completions) == 1
+        assert recorder.completions[0].error == "provider failure (credentials redacted)"
+        assert raw_secret not in (recorder.completions[0].error or "")
+
+    def test_broken_exception_str_falls_back_to_class_name(self) -> None:
+        """Property: audit completion survives an exception with a broken __str__."""
+
+        class BrokenStrException(Exception):
+            def __str__(self) -> str:
+                raise RuntimeError("rendering leaked secret")
+
+        recorder = FakeRecorder()
+        ctx = FakePluginContext()
+        exc = BrokenStrException("raw credential should not be rendered")
+
+        with pytest.raises(BrokenStrException), track_operation(
+            _as_execution_repo(recorder),
+            "run-1",
+            "node-1",
+            "source_load",
+            _as_ctx(ctx),
+        ):
+            raise exc
+
+        assert len(recorder.completions) == 1
+        assert recorder.completions[0].error == "BrokenStrException"
+        assert "raw credential" not in (recorder.completions[0].error or "")
+        assert "rendering leaked secret" not in (recorder.completions[0].error or "")
+
+    def test_empty_exception_str_falls_back_to_class_name(self) -> None:
+        """Property: operation audit errors are never stored as empty strings."""
+
+        class EmptyStrException(Exception):
+            def __str__(self) -> str:
+                return ""
+
+        recorder = FakeRecorder()
+        ctx = FakePluginContext()
+        exc = EmptyStrException()
+
+        with pytest.raises(EmptyStrException), track_operation(
+            _as_execution_repo(recorder),
+            "run-1",
+            "node-1",
+            "sink_write",
+            _as_ctx(ctx),
+        ):
+            raise exc
+
+        assert len(recorder.completions) == 1
+        assert recorder.completions[0].error == "EmptyStrException"
+
+
+# =============================================================================
 # Exception Transparency Properties
 # =============================================================================
 

@@ -38,6 +38,14 @@ PROMPT_SHIELD_WARNING_DRAFT: Final[str] = (
     "exposure on untrusted remote content, but continuing without it is allowed. "
     "[user_term: prompt_injection_shield_recommendation]"
 )
+PROMPT_SHIELD_AVAILABLE_DRAFT: Final[str] = (
+    "An authorized prompt-injection shield (azure_prompt_shield) IS available in "
+    "this deployment. Wire it between the external-content fetch step and this LLM: "
+    "untrusted remote text routed straight into the LLM is a prompt-injection "
+    "exposure, and the shield is configured and ready to use. Wiring it in is "
+    "strongly recommended, but you may proceed without it. "
+    "[user_term: prompt_injection_shield_recommendation]"
+)
 
 _RAW_HTML_CLEANUP_DRAFT_MARKERS: Final[tuple[str, ...]] = ("raw html", "fingerprint")
 
@@ -129,6 +137,7 @@ def validate_pipeline_decision_semantics(
     user_term: str,
     draft: str | None,
     context: str,
+    web_scrape_raw_fields: frozenset[str],
 ) -> None:
     """Validate that reviewed pipeline-shaping decisions match node behavior."""
 
@@ -136,29 +145,47 @@ def validate_pipeline_decision_semantics(
         return
     if plugin != "field_mapper":
         raise ValueError(
-            f"{context}: raw-html cleanup decision {user_term!r} must be implemented by a field_mapper node; "
-            f"node {node_id!r} has plugin {plugin!r}"
+            f"{context}: raw-html cleanup decision must be implemented by a field_mapper node; node {node_id!r} has plugin {plugin!r}"
         )
     if options.get("select_only") is not True:
-        raise ValueError(f"{context}: raw-html cleanup decision {user_term!r} requires field_mapper.select_only=true on node {node_id!r}")
+        raise ValueError(f"{context}: raw-html cleanup decision requires field_mapper.select_only=true on node {node_id!r}")
     mapping = options.get("mapping")
     if not isinstance(mapping, Mapping) or not mapping:
-        raise ValueError(
-            f"{context}: raw-html cleanup decision {user_term!r} requires a non-empty field_mapper.mapping on node {node_id!r}"
-        )
+        raise ValueError(f"{context}: raw-html cleanup decision requires a non-empty field_mapper.mapping on node {node_id!r}")
     preserved_raw_fields = sorted(
         {
             field_name
             for source_field, target_field in mapping.items()
             for field_name in _validated_mapping_pair(source_field, target_field, context=context, node_id=node_id)
-            if _looks_like_raw_html_field(field_name)
+            if _looks_like_raw_html_field(field_name) or field_name in web_scrape_raw_fields
         }
     )
     if preserved_raw_fields:
         raise ValueError(
-            f"{context}: raw-html cleanup decision {user_term!r} preserves raw HTML/fingerprint field(s) "
+            f"{context}: raw-html cleanup decision preserves raw HTML/fingerprint field(s) "
             f"on node {node_id!r}: {preserved_raw_fields}. Remove them from mapping when select_only=true."
         )
+
+
+def validate_pipeline_decision_node_semantics(
+    *,
+    node: NodeSpec,
+    all_nodes: Sequence[NodeSpec],
+    user_term: str,
+    draft: str | None,
+    context: str,
+) -> None:
+    """Validate a pipeline decision using full-state context for raw fields."""
+
+    validate_pipeline_decision_semantics(
+        node_id=node.id,
+        plugin=node.plugin,
+        options=node.options,
+        user_term=user_term,
+        draft=draft,
+        context=context,
+        web_scrape_raw_fields=_web_scrape_raw_fields(all_nodes),
+    )
 
 
 def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | None:
@@ -167,7 +194,7 @@ def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | Non
     if not web_scrape_raw_fields:
         return None
     for node in state.nodes:
-        requirement_error = _raw_html_cleanup_requirement_contract_error(node)
+        requirement_error = _raw_html_cleanup_requirement_contract_error(node, web_scrape_raw_fields=web_scrape_raw_fields)
         if requirement_error is not None:
             return requirement_error
     for node in state.nodes:
@@ -186,7 +213,7 @@ def raw_html_cleanup_review_contract_error(state: CompositionState) -> str | Non
         if preserved_raw_fields:
             continue
         requirements = _requirements(node.options)
-        if _requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION) is None:
+        if _raw_html_cleanup_requirement(requirements) is None:
             return (
                 f"Node {node.id!r} drops web-scrape raw field(s) {sorted(web_scrape_raw_fields)} with "
                 "field_mapper.select_only=true. Stage a pending pipeline_decision interpretation_requirements "
@@ -206,38 +233,56 @@ def composition_review_contract_error(state: CompositionState) -> str | None:
 
     Only blocking contracts are aggregated here. The prompt-injection-shield
     recommendation is advisory, not blocking (see
-    :func:`prompt_shield_recommendation_warning_pairs` and filigree
-    elspeth-abb2cb0931): shield availability is not yet testable, so an
-    unshielded LLM-over-untrusted-content composition surfaces a warning rather
-    than failing the contract. Composition is therefore gated solely on the
+    :func:`prompt_shield_recommendation_warning_pairs`): an unshielded
+    LLM-over-untrusted-content composition surfaces a warning rather than
+    failing the contract. Composition is therefore gated solely on the
     raw-HTML-cleanup review contract here.
     """
 
     return raw_html_cleanup_review_contract_error(state)
 
 
-def prompt_shield_recommendation_warning_pairs(state: CompositionState) -> tuple[tuple[str, str], ...]:
-    """Return advisory warnings for unshielded untrusted content entering an LLM."""
+def prompt_shield_recommendation_warning_pairs(
+    state: CompositionState,
+    *,
+    shield_available: bool | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Return always-on advisory warnings for unshielded LLM nodes.
+
+    The review is now ALWAYS-ON per LLM node, decoupled from whether an
+    untrusted remote producer (web_scrape) is upstream:
+
+    - **State A** (an authorized shield is reachable upstream) — silent, no warning.
+    - **State B** (``shield_available is True``) — an authorized shield IS
+      configured for this deployment; strong "wire it in" advisory.
+    - **State C** (``shield_available`` is ``False`` or ``None``) — no shield
+      available, or availability is undeterminable; high-risk "reconsider"
+      advisory. ``None`` is the FAIL-SAFE default because the pure
+      :meth:`CompositionState.validate` caller has no deployment/secret context
+      to distinguish B from C.
+
+    Advisory only — the caller appends these at "medium" severity into the
+    ``warnings`` list and they are excluded from the blocking contract.
+    """
 
     producer_by_output_stream = _producer_by_output_stream(state.nodes)
     warnings: list[tuple[str, str]] = []
     for node in state.nodes:
         if node.plugin != "llm":
             continue
-        if not _llm_consumes_untrusted_remote_content(node, producer_by_output_stream):
-            continue
+        if _llm_has_authorized_shield_upstream(node, producer_by_output_stream):
+            continue  # State A — already shielded, silent
         if _llm_has_shield_recommendation(node):
-            continue
-        warnings.append(
-            (
-                f"node:{node.id}",
-                (
-                    f"LLM node {node.id!r} consumes externally-fetched content from a web_scrape upstream "
-                    "without an authorized prompt-injection shield between them. "
-                    f"{PROMPT_SHIELD_WARNING_DRAFT}"
-                ),
-            )
+            continue  # review already staged on this node
+        draft = PROMPT_SHIELD_AVAILABLE_DRAFT if shield_available is True else PROMPT_SHIELD_WARNING_DRAFT
+        consumes_untrusted = _llm_consumes_untrusted_remote_content(node, producer_by_output_stream)
+        lead = (
+            f"LLM node {node.id!r} consumes externally-fetched content from a web_scrape upstream "
+            "without an authorized prompt-injection shield between them. "
+            if consumes_untrusted
+            else f"LLM node {node.id!r} has no authorized prompt-injection shield in front of it. "
         )
+        warnings.append((f"node:{node.id}", f"{lead}{draft}"))
     return tuple(warnings)
 
 
@@ -289,6 +334,94 @@ def _llm_consumes_untrusted_remote_content(
     return False
 
 
+def _llm_has_authorized_shield_upstream(
+    node: NodeSpec,
+    producer_by_output_stream: Mapping[str, NodeSpec],
+) -> bool:
+    """Walk upstream from ``node``; return True iff an authorized prompt-injection
+    shield is reachable on the input chain.
+
+    This is the always-on **State A** detector: it is judged on its own, NOT
+    coupled to first reaching an untrusted producer (the deliberate decoupling
+    from :func:`_llm_consumes_untrusted_remote_content`). A shielded LLM stays
+    silent regardless of what produces its input.
+    """
+
+    if node.plugin != "llm":
+        return False
+    stream = node.input
+    visited: set[str] = set()
+    while stream and stream not in visited:
+        visited.add(stream)
+        if stream not in producer_by_output_stream:
+            return False
+        producer = producer_by_output_stream[stream]
+        if producer.plugin in _AUTHORIZED_PROMPT_SHIELD_PLUGINS:
+            return True
+        stream = producer.input
+    return False
+
+
+def prompt_shield_state_for_node(
+    node: NodeSpec,
+    all_nodes: Sequence[NodeSpec],
+    *,
+    shield_available: bool,
+) -> str:
+    """Return the prompt-shield review state for ``node``: ``"A"`` / ``"B"`` / ``"C"``.
+
+    - ``"A"`` — an authorized shield is reachable upstream (silent; no advisory).
+    - ``"B"`` — no upstream shield, but an authorized shield IS available in this
+      deployment (``shield_available is True``): strong "wire it in" advisory.
+    - ``"C"`` — no upstream shield and no shield available (``shield_available is
+      False``): high-risk "reconsider" advisory.
+
+    The caller resolves ``shield_available`` from deployment context (see
+    :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`);
+    the contract default when availability is undeterminable is ``False`` (State C,
+    fail-safe).
+    """
+
+    if node.plugin != "llm":
+        return "A"
+    producer_by_output_stream = _producer_by_output_stream(all_nodes)
+    if _llm_has_authorized_shield_upstream(node, producer_by_output_stream):
+        return "A"
+    return "B" if shield_available else "C"
+
+
+def refine_prompt_shield_warnings_for_availability(
+    warnings: Sequence[Mapping[str, Any]],
+    *,
+    shield_available: bool,
+) -> list[dict[str, Any]]:
+    """Post-process already-serialised wire-turn warnings for B-vs-C shield state.
+
+    ``validate()`` always emits State-C wording (``PROMPT_SHIELD_WARNING_DRAFT``)
+    because it is called without deployment context.  This function upgrades
+    those entries to State-B wording (``PROMPT_SHIELD_AVAILABLE_DRAFT``) when the
+    route layer has confirmed that the authorized shield is present.
+
+    Non-shield warnings and the ``severity`` / ``component`` fields are
+    passed through unchanged.  The input sequence is not mutated.
+
+    Args:
+        warnings: Sequence of already-serialised warning dicts
+            (``{"component": str, "message": str, "severity": str}``).
+        shield_available: ``True`` iff
+            :func:`elspeth.web.composer.tools._shield_availability.azure_prompt_shield_available`
+            returned ``True`` for this request.
+    """
+    result: list[dict[str, Any]] = [dict(entry) for entry in warnings]
+    if not shield_available:
+        return result
+    for entry in result:
+        message = entry.get("message")
+        if isinstance(message, str) and PROMPT_SHIELD_WARNING_DRAFT in message:
+            entry["message"] = message.replace(PROMPT_SHIELD_WARNING_DRAFT, PROMPT_SHIELD_AVAILABLE_DRAFT)
+    return result
+
+
 def _llm_has_shield_recommendation(node: NodeSpec) -> bool:
     requirements = _requirements(node.options)
     if requirements is None:
@@ -301,7 +434,11 @@ def _llm_has_shield_recommendation(node: NodeSpec) -> bool:
     return False
 
 
-def _raw_html_cleanup_requirement_contract_error(node: NodeSpec) -> str | None:
+def _raw_html_cleanup_requirement_contract_error(
+    node: NodeSpec,
+    *,
+    web_scrape_raw_fields: frozenset[str],
+) -> str | None:
     try:
         requirements = _requirements(node.options)
     except (KeyError, TypeError, ValueError) as exc:
@@ -321,6 +458,7 @@ def _raw_html_cleanup_requirement_contract_error(node: NodeSpec) -> str | None:
                 user_term=requirement["user_term"],
                 draft=requirement["draft"],
                 context="raw-html cleanup review contract",
+                web_scrape_raw_fields=web_scrape_raw_fields,
             )
         except ValueError as exc:
             return str(exc)
@@ -361,6 +499,17 @@ def _preserved_mapping_fields(mapping: Mapping[str, Any]) -> frozenset[str]:
         if isinstance(target_field, str):
             fields.add(target_field.strip())
     return frozenset(fields)
+
+
+def _raw_html_cleanup_requirement(requirements: Sequence[InterpretationRequirement] | None) -> InterpretationRequirement | None:
+    if requirements is None:
+        return None
+    for requirement in requirements:
+        if InterpretationKind(requirement["kind"]) is not InterpretationKind.PIPELINE_DECISION:
+            continue
+        if _is_raw_html_cleanup_decision(user_term=requirement["user_term"], draft=requirement["draft"]):
+            return requirement
+    return None
 
 
 def interpretation_sites(state: CompositionState) -> tuple[InterpretationReviewSite, ...]:
@@ -602,7 +751,7 @@ def _missing_raw_html_cleanup_review_sites(
     if node.plugin != "field_mapper":
         return ()
     requirements = _requirements(node.options)
-    if _requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION) is not None:
+    if _raw_html_cleanup_requirement(requirements) is not None:
         return ()
     if node.options.get("select_only") is not True:
         return ()
@@ -1000,10 +1149,9 @@ def _validate_pipeline_decision_review(node: NodeSpec, all_nodes: Sequence[NodeS
     resolved = _resolved_requirement_for_kind(requirements, InterpretationKind.PIPELINE_DECISION)
     if resolved is None:
         return
-    validate_pipeline_decision_semantics(
-        node_id=node.id,
-        plugin=node.plugin,
-        options=node.options,
+    validate_pipeline_decision_node_semantics(
+        node=node,
+        all_nodes=all_nodes,
         user_term=resolved["user_term"],
         draft=resolved["draft"],
         context="interpretation_state",

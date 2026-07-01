@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { runTutorialPipeline } from "@/api/client";
+import { AlertBanner } from "@/components/ui";
 import type { TutorialRunResponse } from "@/types/api";
-import { TUTORIAL_RUN_PREAMBLE, TURN_4_PRIMARY_BUTTON } from "./copy";
+import { TUTORIAL_RUN_PREAMBLE, TUTORIAL_SHIELD_OVERRIDE_CAVEAT, TURN_4_PRIMARY_BUTTON } from "./copy";
 import type { RunResultRow, TutorialRunResult } from "./tutorialMachine";
 
 interface TutorialTurn4RunProps {
@@ -9,7 +10,13 @@ interface TutorialTurn4RunProps {
   prompt: string;
   onCompleted: (result: TutorialRunResult) => void;
   onCancelled: () => void;
-  onBack: () => void;
+  /**
+   * Back affordance. Omitted (undefined) when the run turn has no real prior
+   * step to return to — once the guided wizard is completed it is terminal and
+   * non-returnable (`previousStep(run)` is null), so HelloWorldTutorial passes
+   * no `onBack`. When undefined the Back button is not rendered.
+   */
+  onBack?: () => void;
 }
 
 /**
@@ -164,7 +171,10 @@ export function TutorialTurn4Run({
       <h2 id="tutorial-run-title" ref={headingRef} tabIndex={-1}>
         Running your pipeline.
       </h2>
-      <p className="tutorial-muted">{TUTORIAL_RUN_PREAMBLE}</p>
+      <AlertBanner tone="info" className="tutorial-disclosure">
+        {TUTORIAL_RUN_PREAMBLE}
+      </AlertBanner>
+      <p className="tutorial-callout">{TUTORIAL_SHIELD_OVERRIDE_CAVEAT}</p>
       {result === null && error === null && (
         <>
           <div
@@ -201,13 +211,15 @@ export function TutorialTurn4Run({
             >
               Retry
             </button>
-            <button
-              type="button"
-              className="tutorial-link-button"
-              onClick={onBack}
-            >
-              Back
-            </button>
+            {onBack !== undefined && (
+              <button
+                type="button"
+                className="tutorial-link-button"
+                onClick={onBack}
+              >
+                Back
+              </button>
+            )}
           </div>
         </>
       )}
@@ -234,14 +246,16 @@ export function TutorialTurn4Run({
             >
               {TURN_4_PRIMARY_BUTTON}
             </button>
-            <button
-              type="button"
-              className="tutorial-link-button"
-              onClick={onBack}
-              aria-label="Back: edit prompt and start over"
-            >
-              Back
-            </button>
+            {onBack !== undefined && (
+              <button
+                type="button"
+                className="tutorial-link-button"
+                onClick={onBack}
+                aria-label="Back: edit prompt and start over"
+              >
+                Back
+              </button>
+            )}
           </div>
         </>
       )}
@@ -295,7 +309,7 @@ function TutorialResultTable({ rows }: { rows: RunResultRow[] }): JSX.Element {
 function preferredColumns(rows: RunResultRow[]): string[] {
   const keys = new Set<string>();
   rows.forEach((row) => Object.keys(row).forEach((key) => keys.add(key)));
-  const preferred = ["url", "page", "title", "score", "coolness", "rationale", "error"];
+  const preferred = ["url", "summary", "error"];
   const ordered = preferred.filter((key) => keys.has(key));
   for (const key of keys) {
     if (!ordered.includes(key)) {

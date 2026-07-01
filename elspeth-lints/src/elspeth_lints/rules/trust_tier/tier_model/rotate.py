@@ -75,7 +75,9 @@ from elspeth_lints.core.allowlist import (
     JUDGE_METADATA_SIGNATURE_PREFIXES,
     AllowlistEntry,
     PerFileRule,
+    _verify_judge_metadata_signature_at_load,
 )
+from elspeth_lints.core.allowlist_io import AllowlistIOError, parse_allow_hits
 from elspeth_lints.core.atomic_io import atomic_update_text
 
 from .rule import (
@@ -113,6 +115,7 @@ class _AllowHitKeyRecord:
     key: str
     source_binding: tuple[str, object, object] | None
     judge_metadata_signature: object | None
+    judge_metadata_signature_verified: bool = False
 
 
 def identity_prefix(canonical_key: str) -> str:
@@ -300,6 +303,7 @@ def scan_for_rotations(
     source_root: Path,
     allowlist_path: Path,
     allow_symmetric_pairing: bool = True,
+    exclude_judge_gated: bool = False,
 ) -> RotationPlan:
     """Scan + classify wrapper around ``plan_rotations``.
 
@@ -307,6 +311,17 @@ def scan_for_rotations(
     classification to ``plan_rotations``. Keep ``plan_rotations`` separate
     so unit tests can exercise the algorithm without touching the
     filesystem or running the rule's full visitor.
+
+    ``exclude_judge_gated`` (default ``False``) preserves the standalone
+    ``rotate`` CLI's raise-by-design: a judge-gated entry with positional
+    (fp) drift is refused at scan time inside ``plan_rotations``
+    (``_refuse_rotation_of_judge_gated_entry``). The read-only survey/verify
+    paths that feed ``sign-bundle`` pass ``True`` to filter
+    ``allowlist.entries`` to ``judge_verdict is None`` *before* delegating, so
+    the raise can never fire on a read-only scan over the canonical
+    (mostly judge-gated) corpus. Judge-gated drift is not silently lost -- it is
+    independently surfaced by ``diagnose_judge_signatures`` -> the drift_repair
+    lane.
     """
     findings: list[Finding] = list(scan_directory(source_root))
     layer_violations, layer_warnings = scan_layer_imports_directory(source_root)
@@ -314,10 +329,13 @@ def scan_for_rotations(
     findings.extend(layer_warnings)
 
     allowlist = _load_tier_model_allowlist(allowlist_path)
+    entries = allowlist.entries
+    if exclude_judge_gated:
+        entries = [entry for entry in entries if entry.judge_verdict is None]
 
     return plan_rotations(
         findings=findings,
-        allowlist_entries=allowlist.entries,
+        allowlist_entries=entries,
         per_file_rules=allowlist.per_file_rules,
         allow_symmetric_pairing=allow_symmetric_pairing,
     )
@@ -493,6 +511,26 @@ class RotationAuditViolation:
 
 
 @dataclass(frozen=True, slots=True)
+class _RotationAuditRequirement:
+    """One HEAD key that needs manifest coverage from a plausible baseline key."""
+
+    allowlist_file: str
+    allowlist_dir: str
+    source_file: str
+    candidate_old_keys: tuple[str, ...]
+    new_key: str
+
+    def to_violation(self) -> RotationAuditViolation:
+        return RotationAuditViolation(
+            allowlist_file=self.allowlist_file,
+            allowlist_dir=self.allowlist_dir,
+            source_file=self.source_file,
+            old_key=self.candidate_old_keys[0],
+            new_key=self.new_key,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class RotationAuditCoverageReport:
     """Result of checking PR rotations against ``.elspeth/rotations.log``."""
 
@@ -520,10 +558,13 @@ def apply_plan(
 ) -> dict[str, ApplyResult]:
     """Apply rotations (and optionally stale-entry removals) to YAML files.
 
-    Rotations use surgical full-string replacement keyed on the entire
-    ``old_key``. Governance forbids duplicate canonical keys within a YAML
-    file, so a single ``str.replace`` is sufficient and preserves all
-    surrounding structure (comments, ordering, indentation).
+    Rotations replace the ``old_key`` by its YAML-AST node span via
+    ``_replace_allow_hit_key``, preserving all surrounding structure
+    (comments, ordering, indentation). Governance forbids duplicate canonical
+    keys within a YAML file, and the span replacer enforces it: it raises
+    ``RuntimeError`` if the ``old_key`` span count is not exactly one
+    (``> 1`` -> "occurs Nx"; ``0`` -> "not found"), so a duplicated key can
+    never have both copies deleted.
 
     Stale removal walks the YAML line-by-line, deletes the ``- key: <STALE>``
     line and the indented child lines that belong to that entry block,
@@ -700,9 +741,9 @@ def check_rotation_audit_coverage(
     )
     recorded_rotations = _load_rotation_manifest_records(rotation_log_path=rotation_log_path, repo_root=repo_root)
     violations = [
-        rotation
-        for rotation in expected_rotations
-        if not _rotation_is_covered_by_manifest(rotation=rotation, recorded_rotations=recorded_rotations)
+        requirement.to_violation()
+        for requirement in expected_rotations
+        if not _rotation_requirement_is_covered_by_manifest(requirement=requirement, recorded_rotations=recorded_rotations)
     ]
     resolved_log = rotation_log_path if rotation_log_path.is_absolute() else repo_root / rotation_log_path
     return RotationAuditCoverageReport(
@@ -718,13 +759,13 @@ def _rotation_requirements_from_git_diff(
     allowlist_root: Path,
     baseline_ref: str,
     repo_root: Path,
-) -> tuple[RotationAuditViolation, ...]:
+) -> tuple[_RotationAuditRequirement, ...]:
     rel_root = _relative_to_repo(allowlist_root, repo_root)
     result = _run_git(["diff", "--name-only", "-z", "--diff-filter=ACMRT", baseline_ref, "HEAD", "--", rel_root], repo_root=repo_root)
     if result.returncode != 0:
         raise RotationAuditError(f"git diff could not inspect baseline-ref {baseline_ref!r}: {_git_failure_detail(result)}")
 
-    requirements: list[RotationAuditViolation] = []
+    requirements: list[_RotationAuditRequirement] = []
     for rel_path in (path for path in result.stdout.split("\0") if path.endswith((".yaml", ".yml"))):
         head_path = repo_root / rel_path
         if not head_path.is_file():
@@ -738,25 +779,72 @@ def _rotation_requirements_from_git_diff(
         allowlist_dir = Path(rel_path).parent.as_posix()
         source_file = Path(rel_path).name
         for prefix in sorted(set(old_by_prefix) & set(new_by_prefix)):
-            old_records = sorted(old_by_prefix[prefix], key=lambda record: record.key)
-            new_records = sorted(new_by_prefix[prefix], key=lambda record: record.key)
-            if len(old_records) != len(new_records):
-                continue
-            for old_record, new_record in zip(old_records, new_records, strict=True):
-                if old_record.key == new_record.key:
-                    continue
-                if _is_rejudged_key_change(old_record, new_record):
-                    continue
-                requirements.append(
-                    RotationAuditViolation(
-                        allowlist_file=rel_path,
-                        allowlist_dir=allowlist_dir,
-                        source_file=source_file,
-                        old_key=old_record.key,
-                        new_key=new_record.key,
-                    )
+            requirements.extend(
+                _rotation_requirements_for_prefix(
+                    allowlist_file=rel_path,
+                    allowlist_dir=allowlist_dir,
+                    source_file=source_file,
+                    old_records=old_by_prefix[prefix],
+                    new_records=new_by_prefix[prefix],
                 )
+            )
     return tuple(requirements)
+
+
+def _rotation_requirements_for_prefix(
+    *,
+    allowlist_file: str,
+    allowlist_dir: str,
+    source_file: str,
+    old_records: list[_AllowHitKeyRecord],
+    new_records: list[_AllowHitKeyRecord],
+) -> list[_RotationAuditRequirement]:
+    old_records = sorted(old_records, key=lambda record: record.key)
+    new_records = sorted(new_records, key=lambda record: record.key)
+    unchanged_keys = {record.key for record in old_records} & {record.key for record in new_records}
+    changed_old_records = [record for record in old_records if record.key not in unchanged_keys]
+    changed_new_records = [record for record in new_records if record.key not in unchanged_keys]
+    if not changed_old_records or not changed_new_records:
+        return []
+
+    if len(changed_old_records) > len(changed_new_records):
+        candidates_by_new = [(new_record, tuple(changed_old_records)) for new_record in changed_new_records]
+    else:
+        candidates_by_new = [
+            (new_record, (old_record,)) for old_record, new_record in zip(changed_old_records, changed_new_records, strict=False)
+        ]
+
+    requirements: list[_RotationAuditRequirement] = []
+    for new_record, candidate_old_records in candidates_by_new:
+        if any(_is_rejudged_key_change(old_record, new_record) for old_record in candidate_old_records):
+            continue
+        requirements.append(
+            _RotationAuditRequirement(
+                allowlist_file=allowlist_file,
+                allowlist_dir=allowlist_dir,
+                source_file=source_file,
+                candidate_old_keys=tuple(record.key for record in candidate_old_records),
+                new_key=new_record.key,
+            )
+        )
+    return requirements
+
+
+def _rotation_requirement_is_covered_by_manifest(
+    *,
+    requirement: _RotationAuditRequirement,
+    recorded_rotations: set[tuple[str, str, str, str]],
+) -> bool:
+    return any(
+        _rotation_key_pair_is_covered_by_manifest(
+            allowlist_dir=requirement.allowlist_dir,
+            source_file=requirement.source_file,
+            old_key=old_key,
+            new_key=requirement.new_key,
+            recorded_rotations=recorded_rotations,
+        )
+        for old_key in requirement.candidate_old_keys
+    )
 
 
 def _rotation_is_covered_by_manifest(
@@ -766,25 +854,42 @@ def _rotation_is_covered_by_manifest(
 ) -> bool:
     """Return whether manifest records cover ``rotation`` directly or via adjacent hops."""
 
-    direct_record = (rotation.allowlist_dir, rotation.source_file, rotation.old_key, rotation.new_key)
+    return _rotation_key_pair_is_covered_by_manifest(
+        allowlist_dir=rotation.allowlist_dir,
+        source_file=rotation.source_file,
+        old_key=rotation.old_key,
+        new_key=rotation.new_key,
+        recorded_rotations=recorded_rotations,
+    )
+
+
+def _rotation_key_pair_is_covered_by_manifest(
+    *,
+    allowlist_dir: str,
+    source_file: str,
+    old_key: str,
+    new_key: str,
+    recorded_rotations: set[tuple[str, str, str, str]],
+) -> bool:
+    direct_record = (allowlist_dir, source_file, old_key, new_key)
     if direct_record in recorded_rotations:
         return True
 
     next_keys_by_old_key: dict[str, set[str]] = defaultdict(set)
-    for allowlist_dir, source_file, old_key, new_key in recorded_rotations:
-        if allowlist_dir != rotation.allowlist_dir or source_file != rotation.source_file:
+    for record_allowlist_dir, record_source_file, record_old_key, record_new_key in recorded_rotations:
+        if record_allowlist_dir != allowlist_dir or record_source_file != source_file:
             continue
-        next_keys_by_old_key[old_key].add(new_key)
+        next_keys_by_old_key[record_old_key].add(record_new_key)
 
     visited: set[str] = set()
-    frontier = [rotation.old_key]
+    frontier = [old_key]
     while frontier:
         current_key = frontier.pop()
         if current_key in visited:
             continue
         visited.add(current_key)
         for next_key in sorted(next_keys_by_old_key.get(current_key, ())):
-            if next_key == rotation.new_key:
+            if next_key == new_key:
                 return True
             if next_key not in visited:
                 frontier.append(next_key)
@@ -811,7 +916,7 @@ def _allow_hit_key_records_by_prefix(text: str, *, source_label: str) -> dict[st
         key = raw_entry.get("key")
         if not isinstance(key, str) or _FP_TAG not in key:
             continue
-        by_prefix[identity_prefix(key)].append(_allow_hit_key_record(key=key, raw_entry=raw_entry))
+        by_prefix[identity_prefix(key)].append(_allow_hit_key_record(key=key, raw_entry=raw_entry, source_label=source_label))
     return by_prefix
 
 
@@ -826,7 +931,12 @@ def _binding_field_for(raw_entry: dict[object, object]) -> str:
     return "scope_fingerprint" if version == 2 else "file_fingerprint"
 
 
-def _allow_hit_key_record(*, key: str, raw_entry: dict[object, object]) -> _AllowHitKeyRecord:
+def _allow_hit_key_record(
+    *,
+    key: str,
+    raw_entry: dict[object, object],
+    source_label: str = "<memory>",
+) -> _AllowHitKeyRecord:
     if not _has_complete_rejudge_metadata(raw_entry):
         return _AllowHitKeyRecord(
             key=key,
@@ -842,6 +952,7 @@ def _allow_hit_key_record(*, key: str, raw_entry: dict[object, object]) -> _Allo
         key=key,
         source_binding=(key, raw_entry[binding_field], raw_entry["ast_path"]),
         judge_metadata_signature=raw_entry["judge_metadata_signature"],
+        judge_metadata_signature_verified=_raw_entry_has_authoritative_judge_metadata_signature(raw_entry, source_label=source_label),
     )
 
 
@@ -874,7 +985,21 @@ def _is_rejudged_key_change(old_record: _AllowHitKeyRecord, new_record: _AllowHi
         return False
     if old_record.source_binding == new_record.source_binding:
         return False
-    return old_record.judge_metadata_signature != new_record.judge_metadata_signature
+    return new_record.judge_metadata_signature_verified and old_record.judge_metadata_signature != new_record.judge_metadata_signature
+
+
+def _raw_entry_has_authoritative_judge_metadata_signature(raw_entry: dict[object, object], *, source_label: str) -> bool:
+    try:
+        parsed = parse_allow_hits({"allow_hits": [raw_entry]}, source_file=source_label)
+        entry = parsed[0]
+        _verify_judge_metadata_signature_at_load(
+            entry,
+            context=f"rotation-audit {source_label}:{entry.key}",
+            allow_shape_only=False,
+        )
+    except (AllowlistIOError, ValueError, IndexError):
+        return False
+    return True
 
 
 def _load_rotation_manifest_records(*, rotation_log_path: Path, repo_root: Path) -> set[tuple[str, str, str, str]]:

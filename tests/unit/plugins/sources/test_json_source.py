@@ -1638,7 +1638,40 @@ class TestJSONSourceKeyNormalization:
         rows = list(source.load(ctx))
 
         assert [row.is_quarantined for row in rows] == [False, False, True]
-        assert "exceeds maximum inferred schema fields" in rows[2].quarantine_error
+        sparse_error = rows[2].quarantine_error
+        assert sparse_error is not None
+        assert "exceeds maximum inferred schema fields" in sparse_error
+
+    def test_observed_first_row_over_contract_field_cap_is_quarantined(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An over-wide first JSON row must follow quarantine routing."""
+        import elspeth.contracts.contract_builder as contract_builder
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        monkeypatch.setattr(contract_builder, "_MAX_INFERRED_CONTRACT_FIELDS", 2, raising=False)
+
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps([{"a": 1, "b": 2, "c": 3}]))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 1
+        assert rows[0].is_quarantined is True
+        first_row_error = rows[0].quarantine_error
+        assert first_row_error is not None
+        assert "exceeds maximum inferred schema fields" in first_row_error
 
     def test_first_row_quarantined_key_rebuild(self, tmp_path: Path, ctx: PluginContext) -> None:
         """When first row is quarantined and second row has different keys, resolution rebuilds.
@@ -1712,6 +1745,50 @@ class TestJSONSourceKeyNormalization:
         assert "email" in mapping, "field 'email' from row 2 must be present"
         assert "id" in mapping
 
+    def test_sparse_field_resolution_extends_without_rebuilding_full_history(
+        self,
+        tmp_path: Path,
+        ctx: PluginContext,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Sparse rows must not re-normalize every previously seen key."""
+        import elspeth.plugins.sources.json_source as json_source_module
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        raw_header_lengths: list[int] = []
+        original_resolve = json_source_module.__dict__["resolve_field_names"]
+
+        def spy_resolve_field_names(*args: Any, **kwargs: Any):
+            raw_headers = kwargs.get("raw_headers")
+            if raw_headers is not None:
+                raw_header_lengths.append(len(raw_headers))
+            return original_resolve(*args, **kwargs)
+
+        monkeypatch.setattr(json_source_module, "resolve_field_names", spy_resolve_field_names)
+
+        json_file = tmp_path / "data.jsonl"
+        json_file.write_text("\n".join(json.dumps({f"field_{index}": index}) for index in range(5)) + "\n")
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "format": "jsonl",
+                "schema": {"mode": "observed"},
+                "on_validation_failure": "quarantine",
+            }
+        )
+
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 5
+        assert all(not row.is_quarantined for row in rows)
+        assert raw_header_lengths == [1]
+
+        resolution = source.get_field_resolution()
+        assert resolution is not None
+        mapping, _version = resolution
+        assert set(mapping) == {f"field_{index}" for index in range(5)}
+
     def test_field_mapping_collision_crashes_not_quarantines(self, tmp_path: Path, ctx: PluginContext) -> None:
         """B3.1: A field_mapping that collapses two fields into one is a CONFIG fault
         and must crash (ValueError propagates), not be silently quarantined.
@@ -1720,8 +1797,8 @@ class TestJSONSourceKeyNormalization:
         causes check_mapping_collisions to raise a plain ValueError.  Before the fix,
         the broad 'except ValueError' in _validate_and_yield masked it as a per-row
         quarantine; after the fix only ExternalHeaderError (data faults) is caught.
-        Mirrors test_json_field_mapping_collision_crashes_not_quarantines in the azure
-        test suite.
+        Azure Blob JSON differs because blob row field sets are external source
+        data and are quarantined per row.
         """
         from elspeth.plugins.sources.json_source import JSONSource
 
@@ -1767,7 +1844,9 @@ class TestJSONSourceKeyNormalization:
         quarantined = [r for r in rows if r.is_quarantined]
         assert len(valid) == 2
         assert len(quarantined) == 1
-        assert "Expected JSON object" in quarantined[0].quarantine_error
+        quarantine_error = quarantined[0].quarantine_error
+        assert quarantine_error is not None
+        assert "Expected JSON object" in quarantine_error
 
     def test_fixed_schema_fast_path_sets_contract_in_init(self, tmp_path: Path) -> None:
         """FIXED schema sets contract immediately in __init__ without waiting for first row."""

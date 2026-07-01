@@ -19,6 +19,7 @@ import structlog
 from fastapi import FastAPI
 from sqlalchemy.pool import StaticPool
 
+from elspeth.core.payload_store import FilesystemPayloadStore
 from elspeth.web.auth.middleware import get_current_user
 from elspeth.web.auth.models import UserIdentity
 from elspeth.web.blobs.routes import create_blobs_router
@@ -86,6 +87,7 @@ def composer_test_client(tmp_path: Path) -> Iterator[TestClient]:
     app.state.session_service = session_service
     app.state.session_engine = engine  # for guided step-2.5 recipe application
     app.state.blob_service = blob_service
+    app.state.payload_store = FilesystemPayloadStore(tmp_path / "payloads")
     app.state.settings = WebSettings(
         data_dir=tmp_path,
         composer_max_composition_turns=15,

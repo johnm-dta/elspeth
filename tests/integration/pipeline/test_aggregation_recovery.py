@@ -886,6 +886,7 @@ class TestAggregationRecoveryIntegration:
         run = factory.run_lifecycle.begin_run(
             config={"aggregation": {"trigger": {"timeout_seconds": 60}}},
             canonical_version="sha256-rfc8785-v1",
+            leader_worker_id="seeder",
         )
 
         self._register_nodes_raw(db, run.run_id)

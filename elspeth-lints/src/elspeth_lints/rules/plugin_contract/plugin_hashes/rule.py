@@ -45,6 +45,16 @@ EXCLUDED_FILES = frozenset(
 EXPECTED_PLUGIN_COUNT = 37
 _HASH_LINE_PATTERN = re.compile(rb'(\s*source_file_hash\s*(?::[^=]+=\s*|=\s*))"sha256:[^"]+"')
 _NORMALIZED_HASH_VALUE = b'"sha256:0000000000000000"'
+_PLUGIN_BASE_CLASS_NAMES = frozenset(
+    {
+        "BaseSource",
+        "BaseSink",
+        "BaseTransform",
+        # Azure safety plugins share an abstract project base that inherits
+        # BaseTransform; runtime discovery accepts those concrete subclasses.
+        "BaseAzureSafetyTransform",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +70,7 @@ class PluginAttributes:
 class PluginHashesRule:
     """Detect missing or stale plugin version/hash declarations."""
 
-    min_plugins: int = 0
+    min_plugins: int = EXPECTED_PLUGIN_COUNT
     id: str = RULE_ID
     scope: RuleScope = RuleScope.WHOLE_REPO
     metadata: RuleMetadata = RULE_METADATA
@@ -71,7 +81,7 @@ class PluginHashesRule:
         return scan_root(context.root, min_plugins=self.min_plugins)
 
 
-def scan_root(root: Path, *, min_plugins: int = 0) -> list[Finding]:
+def scan_root(root: Path, *, min_plugins: int = EXPECTED_PLUGIN_COUNT) -> list[Finding]:
     """Scan plugin files for PH1/PH2/PH3 findings."""
     plugin_files = discover_plugin_files(root)
     plugin_count = sum(len(extract_plugin_attributes(path)) for path in plugin_files)
@@ -167,10 +177,12 @@ def extract_plugin_attributes(file_path: Path) -> list[PluginAttributes]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
             continue
+        if not _has_plugin_base_class(node):
+            continue
         if not _has_name_class_attribute(node, module_string_constants):
             continue
-        version_value, _ = _get_class_attribute_value(node, "plugin_version")
-        hash_value, _ = _get_class_attribute_value(node, "source_file_hash")
+        version_value, _ = _get_class_attribute_value(node, "plugin_version", module_string_constants)
+        hash_value, _ = _get_class_attribute_value(node, "source_file_hash", module_string_constants)
         results.append(
             PluginAttributes(
                 class_name=node.name,
@@ -232,6 +244,18 @@ def _get_class_attribute_value(
 def _has_name_class_attribute(node: ast.ClassDef, module_string_constants: dict[str, str]) -> bool:
     value, _ = _get_class_attribute_value(node, "name", module_string_constants)
     return isinstance(value, str)
+
+
+def _base_class_name(base: ast.expr) -> str | None:
+    if isinstance(base, ast.Name):
+        return base.id
+    if isinstance(base, ast.Attribute):
+        return base.attr
+    return None
+
+
+def _has_plugin_base_class(node: ast.ClassDef) -> bool:
+    return any(_base_class_name(base) in _PLUGIN_BASE_CLASS_NAMES for base in node.bases)
 
 
 def _finding(*, rule_id: str, file_path: str, class_name: str, message: str, suggestion: str) -> Finding:

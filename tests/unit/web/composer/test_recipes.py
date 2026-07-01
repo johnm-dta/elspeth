@@ -14,10 +14,14 @@ Covers:
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+from typing import ClassVar
 from uuid import uuid4
 
 import pytest
 
+import elspeth.web.composer.recipes as recipes_module
 from elspeth.web.composer.recipes import (
     RecipeSpec,
     RecipeValidationError,
@@ -25,6 +29,7 @@ from elspeth.web.composer.recipes import (
     apply_recipe,
     get_recipe,
     list_recipes,
+    recipe_catalog_content_hash,
 )
 
 # --------------------------------------------------------------------------
@@ -39,6 +44,7 @@ class TestRecipeRegistry:
             "classify-rows-llm-jsonl",
             "split-by-numeric-threshold",
             "fork-coalesce-truncate-jsonl",
+            "web-scrape-llm-rate-jsonl",
         }
 
     def test_get_recipe_by_name(self) -> None:
@@ -566,6 +572,109 @@ class TestForkCoalesceTruncateRecipe:
                 },
             )
         assert "create_blob" in str(exc_info.value)
+
+
+class TestWebScrapeRecipeBuild:
+    """The web-scrape recipe deterministically emits
+    source → web_scrape → llm → field_mapper(cleanup) → jsonl."""
+
+    _SLOTS: ClassVar[dict[str, str]] = {
+        "source_blob_id": str(uuid4()),
+        "source_plugin": "json",
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key_secret": "OPENROUTER_API_KEY",
+        "abuse_contact": "web-scrape-contact@dta.gov.au",
+        "scraping_reason": "Tutorial exercise: fetch public pages for rating",
+        "output_path": "outputs/ratings.jsonl",
+    }
+
+    def _build(self) -> dict:
+        return apply_recipe("web-scrape-llm-rate-jsonl", self._SLOTS)
+
+    def test_head_source_node_uses_resolved_source_plugin(self) -> None:
+        args = self._build()
+        assert args["source"]["plugin"] == "json"
+        assert args["source"]["blob_id"] == self._SLOTS["source_blob_id"]
+        assert args["source"]["on_success"] == "rows"
+
+    def test_csv_url_source_stays_csv(self) -> None:
+        slots = {**self._SLOTS, "source_plugin": "csv"}
+        args = apply_recipe("web-scrape-llm-rate-jsonl", slots)
+        assert args["source"]["plugin"] == "csv"
+        assert args["source"]["blob_id"] == slots["source_blob_id"]
+
+    def test_canonical_chain_order(self) -> None:
+        args = self._build()
+        plugins = [n["plugin"] for n in args["nodes"]]
+        assert plugins == ["web_scrape", "llm", "field_mapper"]
+
+    def test_chain_is_wired_by_connection_labels(self) -> None:
+        args = self._build()
+        by_plugin = {n["plugin"]: n for n in args["nodes"]}
+        assert by_plugin["web_scrape"]["input"] == "rows"
+        assert by_plugin["web_scrape"]["on_success"] == "scraped"
+        assert by_plugin["llm"]["input"] == "scraped"
+        assert by_plugin["llm"]["on_success"] == "rated"
+        assert by_plugin["field_mapper"]["input"] == "rated"
+        assert by_plugin["field_mapper"]["on_success"] == "clean"
+        assert args["outputs"][0]["sink_name"] == "clean"
+        assert args["outputs"][0]["plugin"] == "json"
+        assert args["outputs"][0]["options"]["format"] == "jsonl"
+
+    def test_field_mapper_select_only_excludes_raw_content_and_fingerprint(self) -> None:
+        """Data-minimization: the cleanup sink field set EXCLUDES the raw
+        web_scrape content/fingerprint fields (pin the actual output set)."""
+        args = self._build()
+        fm = next(n for n in args["nodes"] if n["plugin"] == "field_mapper")
+        assert fm["options"]["select_only"] is True
+        mapping = fm["options"]["mapping"]
+        preserved = set(mapping) | set(mapping.values())
+        assert "content" not in preserved
+        assert "content_fingerprint" not in preserved
+        # Positive pin: the rating + url ARE preserved (the user-facing output).
+        assert "rating" in preserved
+        assert "url" in preserved
+
+    def test_field_mapper_stages_pipeline_decision_cleanup_requirement(self) -> None:
+        """The raw-HTML cleanup pipeline_decision is staged on the field_mapper
+        node so the blocking cleanup contract passes (tools/sessions.py:670 →
+        raw_html_cleanup_review_contract_error)."""
+        from elspeth.web.interpretation_state import (
+            INTERPRETATION_REQUIREMENTS_KEY,
+            RAW_HTML_CLEANUP_REVIEW_DRAFT,
+            RAW_HTML_CLEANUP_USER_TERM,
+        )
+
+        args = self._build()
+        fm = next(n for n in args["nodes"] if n["plugin"] == "field_mapper")
+        reqs = fm["options"][INTERPRETATION_REQUIREMENTS_KEY]
+        decision = next(r for r in reqs if r["kind"] == "pipeline_decision")
+        assert decision["user_term"] == RAW_HTML_CLEANUP_USER_TERM
+        assert decision["draft"] == RAW_HTML_CLEANUP_REVIEW_DRAFT
+        assert decision["status"] == "pending"
+
+    def test_web_scrape_node_declares_content_and_fingerprint_fields(self) -> None:
+        """web_scrape must name content_field/fingerprint_field so
+        _web_scrape_raw_fields can compute the raw set the cleanup drops."""
+        args = self._build()
+        ws = next(n for n in args["nodes"] if n["plugin"] == "web_scrape")
+        assert ws["options"]["url_field"] == "url"
+        assert ws["options"]["content_field"] == "content"
+        assert ws["options"]["fingerprint_field"] == "content_fingerprint"
+
+    def test_http_identity_options_are_operator_supplied_slots(self) -> None:
+        args = self._build()
+        ws = next(n for n in args["nodes"] if n["plugin"] == "web_scrape")
+        assert ws["options"]["http"]["abuse_contact"] == self._SLOTS["abuse_contact"]
+        assert ws["options"]["http"]["scraping_reason"] == self._SLOTS["scraping_reason"]
+
+    def test_no_azure_prompt_shield_hard_node(self) -> None:
+        """rev 4: omit the unbuildable azure_prompt_shield hard node
+        (elspeth-abb2cb0931 — composer cannot instantiate it without
+        configured endpoint+api_key secrets)."""
+        args = self._build()
+        plugins = {n["plugin"] for n in args["nodes"]}
+        assert "azure_prompt_shield" not in plugins
 
 
 # --------------------------------------------------------------------------
@@ -1535,3 +1644,78 @@ class TestFixedSchemaSingleKeyFormNoFalseOmitDiagnostic:
         # the test fully pins the "declared {col:type} fields match observed
         # headers" contract).
         assert "csv_source_blob_header_mismatch" not in codes, diagnostics
+
+
+# --------------------------------------------------------------------------
+# Recipe catalog content hash (tutorial cache input #5)
+# --------------------------------------------------------------------------
+
+
+def test_recipe_catalog_content_hash_covers_recipes_module() -> None:
+    """The hash folds recipes.py byte content.
+
+    recipes.py authors the deterministic pipeline including option-level
+    content; it is the operator-controlled cache input that must be keyed.
+    """
+    recipes_path = Path(recipes_module.__file__)
+    h = hashlib.sha256()
+    h.update(recipes_path.read_bytes())
+    assert recipe_catalog_content_hash() == h.hexdigest()
+
+
+def test_recipe_catalog_content_hash_is_deterministic() -> None:
+    assert recipe_catalog_content_hash() == recipe_catalog_content_hash()
+
+
+class TestRecipeProviderGuard:
+    """The LLM recipes wire only the OpenRouter provider.
+
+    The ``provider`` slot accepts a string, but these recipes emit only
+    provider/model/api_key on the llm node — never the deployment_name/endpoint
+    that AzureOpenAIConfig requires — so ``provider='azure'`` must fail loud at
+    build time (RecipeValidationError) rather than producing an unbuildable
+    Azure pipeline that dies in config validation with "missing Azure fields".
+    """
+
+    _CLASSIFY_SLOTS: ClassVar[dict] = {
+        "classifier_template": "Classify {{ row.text }}.",
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key_secret": "OPENROUTER_API_KEY",
+    }
+    _WEB_SCRAPE_SLOTS: ClassVar[dict] = {
+        "source_plugin": "json",
+        "model": "anthropic/claude-sonnet-4.6",
+        "api_key_secret": "OPENROUTER_API_KEY",
+        "abuse_contact": "noreply@dta.gov.au",
+        "scraping_reason": "DTA technical demonstration",
+    }
+
+    def test_classify_recipe_rejects_azure_provider(self) -> None:
+        with pytest.raises(RecipeValidationError, match="only 'openrouter'"):
+            apply_recipe(
+                "classify-rows-llm-jsonl",
+                {"source_blob_id": str(uuid4()), **self._CLASSIFY_SLOTS, "provider": "azure"},
+            )
+
+    def test_classify_recipe_builds_with_openrouter(self) -> None:
+        args = apply_recipe(
+            "classify-rows-llm-jsonl",
+            {"source_blob_id": str(uuid4()), **self._CLASSIFY_SLOTS, "provider": "openrouter"},
+        )
+        llm_node = next(node for node in args["nodes"] if node["plugin"] == "llm")
+        assert llm_node["options"]["provider"] == "openrouter"
+
+    def test_web_scrape_recipe_rejects_azure_provider(self) -> None:
+        with pytest.raises(RecipeValidationError, match="only 'openrouter'"):
+            apply_recipe(
+                "web-scrape-llm-rate-jsonl",
+                {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS, "provider": "azure"},
+            )
+
+    def test_web_scrape_recipe_builds_with_openrouter(self) -> None:
+        args = apply_recipe(
+            "web-scrape-llm-rate-jsonl",
+            {"source_blob_id": str(uuid4()), **self._WEB_SCRAPE_SLOTS, "provider": "openrouter"},
+        )
+        llm_node = next(node for node in args["nodes"] if node["plugin"] == "llm")
+        assert llm_node["options"]["provider"] == "openrouter"

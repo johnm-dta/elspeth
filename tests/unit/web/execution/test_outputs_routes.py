@@ -22,11 +22,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
 from httpx import ASGITransport, AsyncClient
 from starlette.routing import Route
 
 from elspeth.web.auth.models import UserIdentity
+from elspeth.web.execution import routes as execution_routes
 from elspeth.web.execution.outputs import RunOutputsAuditUnavailableError
 from elspeth.web.execution.schemas import (
     RunOutputArtifact,
@@ -191,7 +191,7 @@ class TestRunOutputContentEndpoint:
         run_id = uuid4()
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        sink_file = outputs_dir / "results.jsonl"
+        sink_file = outputs_dir / 'results "é".jsonl'
         sink_bytes = b'{"interaction_id":"INT-1001"}\n'
         sink_file.write_bytes(sink_bytes)
 
@@ -228,9 +228,231 @@ class TestRunOutputContentEndpoint:
         settings.data_dir = str(tmp_path)
 
         app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/content")
+
+        assert response.status_code == 200
+        assert response.content == sink_bytes
+        assert "filename*" in response.headers["content-disposition"]
+        assert sink_file.read_bytes() == b'{"interaction_id":"INT-1001"}\n'
+
+    @pytest.mark.asyncio
+    async def test_content_serves_decoded_file_uri_candidate_when_raw_percent_file_also_exists(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        decoded_file = outputs_dir / "results?token=literal.csv"
+        raw_percent_file = outputs_dir / "results%3Ftoken%3Dliteral.csv"
+        audited_bytes = b"id,name\n1,alice\n"
+        decoded_file.write_bytes(audited_bytes)
+        raw_percent_file.write_bytes(b"id,name\n2,bob\n")
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(
+            monkeypatch,
+            artifacts=[
+                RunOutputArtifact(
+                    artifact_id="art-encoded",
+                    sink_node_id="results",
+                    artifact_type="file",
+                    path_or_uri=f"file://{outputs_dir}/results%3Ftoken%3Dliteral.csv",
+                    content_hash=hashlib.sha256(audited_bytes).hexdigest(),
+                    size_bytes=len(audited_bytes),
+                    created_at=datetime.now(UTC),
+                    exists_now=True,
+                    downloadable=True,
+                )
+            ],
+            run_id=run_id,
+        )
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-encoded/content")
+
+        assert response.status_code == 200
+        assert response.content == audited_bytes
+
+    @pytest.mark.asyncio
+    async def test_content_streams_verified_bytes_when_file_rewritten_after_integrity_check(self, monkeypatch, tmp_path) -> None:
+        """The bytes returned must be the bytes that passed artifact integrity verification."""
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "results.jsonl"
+        original = b'{"interaction_id":"INT-1001"}\n'
+        sink_file.write_bytes(original)
+        rewritten = b'{"interaction_id":"INT-9999"}\n'
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+
+        def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
+            return RunOutputsResponse(
+                run_id=str(run_id),
+                landscape_run_id=str(run_id),
+                artifacts=[
+                    RunOutputArtifact(
+                        artifact_id="art-1",
+                        sink_node_id="results",
+                        artifact_type="file",
+                        path_or_uri=f"file://{sink_file}",
+                        content_hash=hashlib.sha256(original).hexdigest(),
+                        size_bytes=len(original),
+                        created_at=datetime.now(UTC),
+                        exists_now=True,
+                        downloadable=True,
+                    )
+                ],
+            )
+
+        real_snapshot = execution_routes._copy_artifact_to_temp_snapshot
+
+        def fake_copy_artifact_to_temp_snapshot(path: Path, snapshot_dir: Path) -> execution_routes._ArtifactFileSnapshot:
+            assert path == sink_file
+            assert snapshot_dir == tmp_path / ".run-output-snapshots"
+            snapshot = real_snapshot(path, snapshot_dir)
+            sink_file.write_bytes(rewritten)
+            return snapshot
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes._copy_artifact_to_temp_snapshot",
+            fake_copy_artifact_to_temp_snapshot,
+        )
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/content")
+
+        assert response.status_code == 200
+        assert response.content == original
+        assert response.content != rewritten
+
+    @pytest.mark.asyncio
+    async def test_content_supports_single_range_request_from_verified_snapshot(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "results.jsonl"
+        sink_bytes = b"0123456789"
+        sink_file.write_bytes(sink_bytes)
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+
+        def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
+            return RunOutputsResponse(
+                run_id=str(run_id),
+                landscape_run_id=str(run_id),
+                artifacts=[
+                    RunOutputArtifact(
+                        artifact_id="art-1",
+                        sink_node_id="results",
+                        artifact_type="file",
+                        path_or_uri=f"file://{sink_file}",
+                        content_hash=hashlib.sha256(sink_bytes).hexdigest(),
+                        size_bytes=len(sink_bytes),
+                        created_at=datetime.now(UTC),
+                        exists_now=True,
+                        downloadable=True,
+                    )
+                ],
+            )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                f"/api/runs/{run_id}/outputs/art-1/content",
+                headers={"Range": "bytes=2-5"},
+            )
+
+        assert response.status_code == 206
+        assert response.content == b"2345"
+        assert response.headers["content-range"] == "bytes 2-5/10"
+        assert response.headers["accept-ranges"] == "bytes"
+
+    @pytest.mark.asyncio
+    async def test_content_removes_temp_snapshot_when_send_fails(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "results.jsonl"
+        sink_bytes = b'{"interaction_id":"INT-1001"}\n'
+        sink_file.write_bytes(sink_bytes)
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+
+        def fake_load(*args: object, **kwargs: object) -> RunOutputsResponse:
+            return RunOutputsResponse(
+                run_id=str(run_id),
+                landscape_run_id=str(run_id),
+                artifacts=[
+                    RunOutputArtifact(
+                        artifact_id="art-1",
+                        sink_node_id="results",
+                        artifact_type="file",
+                        path_or_uri=f"file://{sink_file}",
+                        content_hash=hashlib.sha256(sink_bytes).hexdigest(),
+                        size_bytes=len(sink_bytes),
+                        created_at=datetime.now(UTC),
+                        exists_now=True,
+                        downloadable=True,
+                    )
+                ],
+            )
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        snapshot_paths: list[Path] = []
+        real_snapshot = execution_routes._copy_artifact_to_temp_snapshot
+
+        def fake_copy_artifact_to_temp_snapshot(path: Path, snapshot_dir: Path) -> execution_routes._ArtifactFileSnapshot:
+            snapshot = real_snapshot(path, snapshot_dir)
+            snapshot_paths.append(snapshot.path)
+            return snapshot
+
+        monkeypatch.setattr("elspeth.web.execution.routes.load_run_outputs_for_settings", fake_load)
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes._copy_artifact_to_temp_snapshot",
+            fake_copy_artifact_to_temp_snapshot,
+        )
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
         endpoint = _route_endpoint(app, "get_run_output_content")
         request = MagicMock()
         request.app = app
+        request.headers = {}
         response = await endpoint(
             run_id=run_id,
             artifact_id="art-1",
@@ -238,10 +460,34 @@ class TestRunOutputContentEndpoint:
             user=UserIdentity(user_id=_TEST_USER_ID, username="testuser"),
             service=svc,
         )
+        assert len(snapshot_paths) == 1
+        snapshot_path = snapshot_paths[0]
+        assert snapshot_path.exists()
+        assert snapshot_path.parent == tmp_path / ".run-output-snapshots"
 
-        assert isinstance(response, FileResponse)
-        assert response.path == sink_file
-        assert sink_file.read_bytes() == b'{"interaction_id":"INT-1001"}\n'
+        async def receive() -> dict[str, object]:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message: dict[str, object]) -> None:
+            if message["type"] == "http.response.body":
+                raise RuntimeError("client disconnected")
+
+        with pytest.raises(RuntimeError, match="client disconnected"):
+            await response(
+                {
+                    "type": "http",
+                    "asgi": {"spec_version": "2.4"},
+                    "method": "GET",
+                    "path": "/download",
+                    "headers": [],
+                    "extensions": {"http.response.pathsend": {}},
+                },
+                receive,
+                send,
+            )
+
+        assert not snapshot_path.exists()
+        assert sink_file.read_bytes() == sink_bytes
 
     @pytest.mark.asyncio
     async def test_409_when_file_content_drifts_under_same_size(self, monkeypatch, tmp_path) -> None:
@@ -454,12 +700,13 @@ def _file_artifact_in_outputs(
     artifact_id: str = "art-1",
     sink_node_id: str = "results",
 ) -> RunOutputArtifact:
+    content = sink_file.read_bytes()
     return RunOutputArtifact(
         artifact_id=artifact_id,
         sink_node_id=sink_node_id,
         artifact_type="file",
         path_or_uri=f"file://{sink_file}",
-        content_hash="a" * 64,
+        content_hash=hashlib.sha256(content).hexdigest(),
         size_bytes=sink_file.stat().st_size,
         created_at=datetime.now(UTC),
         exists_now=True,
@@ -489,6 +736,155 @@ def _install_manifest_loader(
 
 class TestRunOutputPreviewEndpoint:
     """GET /api/runs/{run_id}/outputs/{artifact_id}/preview"""
+
+    @pytest.mark.asyncio
+    async def test_preview_uses_verified_bytes_when_file_rewritten_after_integrity_check(self, monkeypatch, tmp_path) -> None:
+        """Preview must be built from the bytes that passed artifact integrity verification."""
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "results.jsonl"
+        original = b'{"interaction_id":"INT-1001"}\n'
+        sink_file.write_bytes(original)
+        rewritten = b'{"interaction_id":"INT-9999"}\n'
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(
+            monkeypatch,
+            artifacts=[
+                RunOutputArtifact(
+                    artifact_id="art-1",
+                    sink_node_id="results",
+                    artifact_type="file",
+                    path_or_uri=f"file://{sink_file}",
+                    content_hash=hashlib.sha256(original).hexdigest(),
+                    size_bytes=len(original),
+                    created_at=datetime.now(UTC),
+                    exists_now=True,
+                    downloadable=True,
+                )
+            ],
+            run_id=run_id,
+        )
+
+        real_preview_head = execution_routes._read_artifact_preview_head
+
+        def fake_read_artifact_preview_head(path: Path, *, byte_cap: int) -> execution_routes._ArtifactPreviewHeadSnapshot:
+            assert path == sink_file
+            snapshot = real_preview_head(path, byte_cap=byte_cap)
+            sink_file.write_bytes(rewritten)
+            return snapshot
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("elspeth.web.execution.routes.run_sync_in_worker", fake_to_thread)
+        monkeypatch.setattr(
+            "elspeth.web.execution.routes._read_artifact_preview_head",
+            fake_read_artifact_preview_head,
+        )
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/preview")
+
+        assert response.status_code == 200
+        assert "INT-1001" in response.json()["preview_text"]
+        assert "INT-9999" not in response.json()["preview_text"]
+
+    @pytest.mark.asyncio
+    async def test_preview_serves_legacy_raw_percent_candidate_when_it_matches_audit(self, monkeypatch, tmp_path) -> None:
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        legacy_raw_file = outputs_dir / "results%3Ftoken=literal.jsonl"
+        decoded_decoy = outputs_dir / "results?token=literal.jsonl"
+        audited_bytes = b'{"legacy":true}\n'
+        legacy_raw_file.write_bytes(audited_bytes)
+        decoded_decoy.write_bytes(b'{"legacy":false}\n')
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(
+            monkeypatch,
+            artifacts=[
+                RunOutputArtifact(
+                    artifact_id="art-legacy",
+                    sink_node_id="results",
+                    artifact_type="file",
+                    path_or_uri=f"file://{outputs_dir}/results%3Ftoken=literal.jsonl",
+                    content_hash=hashlib.sha256(audited_bytes).hexdigest(),
+                    size_bytes=len(audited_bytes),
+                    created_at=datetime.now(UTC),
+                    exists_now=True,
+                    downloadable=True,
+                )
+            ],
+            run_id=run_id,
+        )
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-legacy/preview")
+
+        assert response.status_code == 200
+        assert response.json()["preview_text"] == '{"legacy":true}\n'
+
+    @pytest.mark.asyncio
+    async def test_409_when_preview_file_content_drifts_under_same_size(self, monkeypatch, tmp_path) -> None:
+        """Preview must not expose bytes that no longer match the artifact audit row."""
+        run_id = uuid4()
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        sink_file = outputs_dir / "results.jsonl"
+        original = b'{"interaction_id":"INT-1001"}\n'
+        sink_file.write_bytes(original)
+        recorded_hash = hashlib.sha256(original).hexdigest()
+        recorded_size = len(original)
+
+        tampered = b'{"interaction_id":"INT-9999"}\n'
+        assert len(tampered) == len(original)
+        sink_file.write_bytes(tampered)
+
+        svc = MagicMock()
+        svc.get_status = AsyncMock(return_value=_running_status(run_id))
+        _install_manifest_loader(
+            monkeypatch,
+            artifacts=[
+                RunOutputArtifact(
+                    artifact_id="art-1",
+                    sink_node_id="results",
+                    artifact_type="file",
+                    path_or_uri=f"file://{sink_file}",
+                    content_hash=recorded_hash,
+                    size_bytes=recorded_size,
+                    created_at=datetime.now(UTC),
+                    exists_now=True,
+                    downloadable=True,
+                )
+            ],
+            run_id=run_id,
+        )
+
+        settings = MagicMock()
+        settings.auth_provider = "local"
+        settings.data_dir = str(tmp_path)
+
+        app = _create_test_app(execution_service=svc, settings=settings)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(f"/api/runs/{run_id}/outputs/art-1/preview")
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["error_type"] == "artifact_content_drift"
 
     @pytest.mark.asyncio
     async def test_returns_csv_preview_for_small_file(self, monkeypatch, tmp_path) -> None:

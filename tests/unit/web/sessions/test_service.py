@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 import structlog
@@ -304,16 +304,24 @@ class TestRunEvents:
         )
         await service.append_run_event(
             run_id=run_id,
-            timestamp=created_at + timedelta(milliseconds=1),
+            timestamp=created_at,
             event_type="error",
             data={"message": "bad row", "node_id": None, "row_id": None},
+        )
+        await service.append_run_event(
+            run_id=run_id,
+            timestamp=created_at,
+            event_type="failed",
+            data={"status": "failed", "detail": "boom", "node_id": None},
         )
 
         records = await service.list_run_events(run_id)
 
-        assert [record.event_type for record in records] == ["progress", "error"]
+        assert [record.event_type for record in records] == ["progress", "error", "failed"]
+        assert [record.sequence for record in records] == [1, 2, 3]
         assert records[0].data == {"source_rows_processed": 1}
         assert records[1].data["message"] == "bad row"
+        assert records[2].data["detail"] == "boom"
         with engine.connect() as conn:
             assert conn.execute(select(run_events_table.c.id)).fetchall()
 

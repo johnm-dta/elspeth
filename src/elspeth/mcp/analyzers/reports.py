@@ -95,6 +95,16 @@ def get_run_summary(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> R
             or 0
         )
 
+        # Count runtime_preflight operations
+        runtime_preflight_count = (
+            conn.execute(
+                select(func.count())
+                .select_from(operations_table)
+                .where((operations_table.c.run_id == run_id) & (operations_table.c.operation_type == "runtime_preflight"))
+            ).scalar()
+            or 0
+        )
+
         # Count validation errors
         validation_error_count = (
             conn.execute(
@@ -158,6 +168,7 @@ def get_run_summary(db: LandscapeDB, factory: RecorderFactory, run_id: str) -> R
             "operations": operation_count,
             "source_loads": source_load_count,
             "sink_writes": sink_write_count,
+            "runtime_preflights": runtime_preflight_count,
         },
         "errors": {
             "validation": validation_error_count,

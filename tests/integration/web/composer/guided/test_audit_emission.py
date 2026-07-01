@@ -168,58 +168,16 @@ def _extract_guided_invocations(client: TestClient, session_id: str) -> dict[str
     return result
 
 
+def _assert_payload_ref_retrievable(client: TestClient, *, payload_ref: str, expected_hash: str) -> None:
+    assert payload_ref, "guided audit payload refs must be non-empty"
+    assert payload_ref == expected_hash
+    stored = client.app.state.payload_store.retrieve(payload_ref)
+    assert stored, "guided audit payload ref must retrieve stored canonical payload bytes"
+
+
 # ---------------------------------------------------------------------------
 # Scenario drivers
 # ---------------------------------------------------------------------------
-
-
-def _drive_to_recipe_offer(client: TestClient, session_id: str) -> tuple[dict, str]:
-    """Drive the wizard to the Step 2.5 RECIPE_OFFER state.
-
-    Uses ``text`` + ``category`` columns with the JSON sink so the
-    ``classify-rows-llm-jsonl`` recipe predicate is satisfied.
-
-    Returns (last_response_body, blob_id).  ``blob_id`` is needed for the
-    recipe-accept slots where ``_resolve_source_blob`` reads the session DB.
-    """
-    blob_id, storage_path = _seed_blob(client, session_id)
-    output_path = _outputs_path(client, "out_recipe.jsonl")
-
-    _get_guided(client, session_id)
-    _respond(client, session_id, chosen=["csv"])
-    _respond(
-        client,
-        session_id,
-        edited_values={
-            "plugin": "csv",
-            "options": {"path": storage_path, "schema": {"mode": "observed"}},
-            "observed_columns": ["text", "category"],
-            "sample_rows": [{"text": "Hello", "category": "greeting"}],
-        },
-    )
-    _respond(client, session_id, chosen=["json"])
-    _respond(
-        client,
-        session_id,
-        edited_values={
-            "plugin": "json",
-            "options": {
-                "path": output_path,
-                "schema": {"mode": "observed"},
-                "mode": "write",
-                "collision_policy": "auto_increment",
-            },
-            "observed_columns": [],
-            "sample_rows": [],
-        },
-    )
-    body = _respond(
-        client,
-        session_id,
-        chosen=["text", "category"],
-        custom_inputs=[],
-    )
-    return body, blob_id
 
 
 def _drive_to_step_3_propose_chain(client: TestClient, session_id: str) -> tuple[dict, str, str]:
@@ -304,153 +262,120 @@ def _fake_llm_bad_plugin() -> SimpleNamespace:
     )
 
 
+def _fake_llm_passthrough() -> SimpleNamespace:
+    """LiteLLM-shaped response proposing a valid single-step passthrough chain."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    tool_calls=[
+                        SimpleNamespace(
+                            function=SimpleNamespace(
+                                name="emit_turn",
+                                arguments=json.dumps(
+                                    {
+                                        "turn_type": "propose_chain",
+                                        "payload": {
+                                            "steps": [
+                                                {
+                                                    "plugin": "passthrough",
+                                                    "options": {"schema": {"mode": "observed"}},
+                                                    "rationale": "identity chain",
+                                                }
+                                            ],
+                                            "why": "rows already match the sink schema",
+                                        },
+                                    }
+                                ),
+                            )
+                        )
+                    ],
+                )
+            )
+        ]
+    )
+
+
+def _chat_propose_chain(client: TestClient, session_id: str) -> dict:
+    """Drive the per-stage transforms chat that emits the ``propose_chain`` turn.
+
+    CHANGE 1: committing the sink no longer auto-runs ``solve_chain``.  The
+    sink-commit now lands at ``step_3_transforms`` with ``next_turn: null`` and
+    NO proposal.  The transform chain — and its ``guided_turn_emitted`` audit —
+    now ride the per-stage transforms chat posted here, which calls
+    ``solve_chain`` and therefore fires the SAME
+    ``chain_solver._litellm_acompletion`` mock the caller has patched.
+
+    Any transforms-intent string works; the mock ignores it.  The call MUST be
+    made inside the caller's ``with patch(...)`` block so the mock covers it.
+
+    Asserting ``propose_chain`` here (not just status 200) is diagnostic: if
+    ``solve_chain`` ever fell through to advisory prose the proposal would stay
+    unset and a downstream accept would 400 with "No turn has been emitted".
+    The bad-plugin proposal surfaced as a ``propose_chain`` turn in the old
+    auto-build path, so it must surface the same way through the chat.
+    """
+    resp = client.post(
+        f"/api/sessions/{session_id}/guided/chat",
+        json={"message": "fetch each page and summarise it", "step_index": "step_3_transforms"},
+    )
+    assert resp.status_code == 200, resp.json()
+    body = resp.json()
+    assert body["guided_session"]["step"] == "step_3_transforms", body
+    assert body["next_turn"] is not None, body
+    assert body["next_turn"]["type"] == "propose_chain", body
+    return body
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — Recipe-match happy path audit emission
 # ---------------------------------------------------------------------------
 
 
-class TestRecipeMatchAuditEmission:
-    """Assert spec §9.1 audit events fire (and don't fire) across the recipe-match happy path.
-
-    The happy path terminates at Step 2.5 RECIPE_MATCH via recipe-accept.
-    The chain solver is never invoked.  No LLM patches needed.
-    """
-
-    def test_recipe_accept_emits_turn_emitted_events(self, composer_test_client: TestClient) -> None:
-        """guided_turn_emitted fires at least once across the full recipe-accept lifecycle."""
+class TestWireAuditEmission:
+    def test_direct_chain_accept_to_wire_emits_user_advanced(self, composer_test_client: TestClient) -> None:
         session_id = _create_session(composer_test_client)
-        recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough(),
+        ):
+            _drive_to_step_3_propose_chain(composer_test_client, session_id)
+            # Sink-commit no longer auto-builds; the propose_chain turn now
+            # rides the per-stage transforms chat (same chain_solver mock).
+            _chat_propose_chain(composer_test_client, session_id)
+            body = _respond(composer_test_client, session_id, chosen=["accept"])
 
-        assert recipe_body["next_turn"]["type"] == "recipe_offer"
-        payload = recipe_body["next_turn"]["payload"]
-        offered_recipe = payload["recipe_context"]["recipe_name"]
-
-        _respond(
-            composer_test_client,
-            session_id,
-            chosen=["accept"],
-            edited_values={
-                "recipe_name": offered_recipe,
-                "slots": {
-                    **payload["prefilled"],
-                    "source_blob_id": blob_id,
-                    "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
-                    "required_input_fields": ["text"],
-                    "label_field": "category",
-                    "output_path": output_path,
-                },
-            },
-        )
-
+        assert body["next_turn"]["type"] == "confirm_wiring"
         guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
-        assert len(guided_invocations["guided_turn_emitted"]) >= 1, (
-            f"expected at least one guided_turn_emitted event; got none. All guided events: {guided_invocations}"
+        assert any(
+            event["prev_step"] == "step_3_transforms" and event["next_step"] == "step_4_wire" and event["reason"] == "user_advanced"
+            for event in guided_invocations["guided_step_advanced"]
         )
 
-    def test_recipe_accept_emits_turn_answered_events(self, composer_test_client: TestClient) -> None:
-        """guided_turn_answered fires at least once across the full recipe-accept lifecycle."""
+    def test_repair_success_to_wire_emits_auto_advanced(self, composer_test_client: TestClient) -> None:
         session_id = _create_session(composer_test_client)
-        recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_bad_plugin(),
+        ):
+            _drive_to_step_3_propose_chain(composer_test_client, session_id)
+            # The (bad) proposal now rides the per-stage transforms chat.
+            _chat_propose_chain(composer_test_client, session_id)
 
-        payload = recipe_body["next_turn"]["payload"]
-        offered_recipe = payload["recipe_context"]["recipe_name"]
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            side_effect=[_fake_llm_passthrough()],
+        ):
+            body = _respond(composer_test_client, session_id, chosen=["accept"])
 
-        _respond(
-            composer_test_client,
-            session_id,
-            chosen=["accept"],
-            edited_values={
-                "recipe_name": offered_recipe,
-                "slots": {
-                    **payload["prefilled"],
-                    "source_blob_id": blob_id,
-                    "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
-                    "required_input_fields": ["text"],
-                    "label_field": "category",
-                    "output_path": output_path,
-                },
-            },
-        )
-
+        assert body["next_turn"]["type"] == "confirm_wiring"
         guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
-        assert len(guided_invocations["guided_turn_answered"]) >= 1, (
-            f"expected at least one guided_turn_answered event; got none. All guided events: {guided_invocations}"
-        )
-
-    def test_recipe_accept_emits_step_advanced_events(self, composer_test_client: TestClient) -> None:
-        """guided_step_advanced fires at least once across the full recipe-accept lifecycle."""
-        session_id = _create_session(composer_test_client)
-        recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
-
-        payload = recipe_body["next_turn"]["payload"]
-        offered_recipe = payload["recipe_context"]["recipe_name"]
-
-        _respond(
-            composer_test_client,
-            session_id,
-            chosen=["accept"],
-            edited_values={
-                "recipe_name": offered_recipe,
-                "slots": {
-                    **payload["prefilled"],
-                    "source_blob_id": blob_id,
-                    "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
-                    "required_input_fields": ["text"],
-                    "label_field": "category",
-                    "output_path": output_path,
-                },
-            },
-        )
-
-        guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
-        assert len(guided_invocations["guided_step_advanced"]) >= 1, (
-            f"expected at least one guided_step_advanced event; got none. All guided events: {guided_invocations}"
-        )
-
-    def test_recipe_accept_emits_no_drop_events(self, composer_test_client: TestClient) -> None:
-        """guided_dropped_to_freeform fires ZERO times on the recipe-accept happy path."""
-        session_id = _create_session(composer_test_client)
-        recipe_body, blob_id = _drive_to_recipe_offer(composer_test_client, session_id)
-        output_path = _outputs_path(composer_test_client, "out_recipe.jsonl")
-
-        payload = recipe_body["next_turn"]["payload"]
-        offered_recipe = payload["recipe_context"]["recipe_name"]
-
-        final_body = _respond(
-            composer_test_client,
-            session_id,
-            chosen=["accept"],
-            edited_values={
-                "recipe_name": offered_recipe,
-                "slots": {
-                    **payload["prefilled"],
-                    "source_blob_id": blob_id,
-                    "classifier_template": "Classify: {{ row['text'] }}",
-                    "model": "anthropic/claude-3.5-sonnet",
-                    "api_key_secret": "OPENROUTER_API_KEY",
-                    "required_input_fields": ["text"],
-                    "label_field": "category",
-                    "output_path": output_path,
-                },
-            },
-        )
-
-        # Confirm this is actually the COMPLETED terminal (not a drop).
-        assert final_body["terminal"] is not None
-        assert final_body["terminal"]["kind"] == "completed", f"expected terminal.kind=completed, got: {final_body['terminal']}"
-
-        guided_invocations = _extract_guided_invocations(composer_test_client, session_id)
-        assert guided_invocations["guided_dropped_to_freeform"] == [], (
-            f"expected no guided_dropped_to_freeform events on happy path; got: {guided_invocations['guided_dropped_to_freeform']}"
+        assert any(
+            event["prev_step"] == "step_3_transforms" and event["next_step"] == "step_4_wire" and event["reason"] == "auto_advanced"
+            for event in guided_invocations["guided_step_advanced"]
         )
 
 
@@ -480,13 +405,16 @@ class TestAutoDropAuditEmission:
         """
         session_id = _create_session(composer_test_client)
 
-        # Drive Steps 1 + 2 to PROPOSE_CHAIN with a bad LLM response.
+        # Drive Steps 1 + 2 to step_3_transforms, then build the (bad) chain
+        # via the per-stage transforms chat (CHANGE 1: sink-commit no longer
+        # auto-builds — the propose_chain turn rides the chat solve).
         with patch(
             "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
             new_callable=AsyncMock,
             return_value=_fake_llm_bad_plugin(),
         ):
             _drive_to_step_3_propose_chain(composer_test_client, session_id)
+            _chat_propose_chain(composer_test_client, session_id)
 
         # Accept the (bad) chain — initial commit fails, repair also fails → auto-drop.
         with patch(
@@ -542,6 +470,9 @@ class TestAutoDropAuditEmission:
             return_value=_fake_llm_bad_plugin(),
         ):
             _drive_to_step_3_propose_chain(composer_test_client, session_id)
+            # Build the (bad) chain via the chat so the accept below genuinely
+            # reaches the auto-drop path this test claims to exercise.
+            _chat_propose_chain(composer_test_client, session_id)
 
         with patch(
             "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
@@ -718,7 +649,7 @@ class TestRejectionPathAuditDrain:
         that triggers the 400 path.  Assert the response is still 400 —
         not 500 from the persist failure.
         """
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -759,7 +690,7 @@ class TestRejectionPathAuditDrain:
         """
         from structlog.testing import capture_logs
 
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)
@@ -808,7 +739,7 @@ class TestRejectionPathAuditDrain:
         must preserve the original HTTPException instead of surfacing a logger
         pipeline error to the browser.
         """
-        from elspeth.web.sessions.routes import composer as composer_module
+        from elspeth.web.sessions.routes.composer import guided as composer_module
 
         session_id = _create_session(composer_test_client)
         _get_guided(composer_test_client, session_id)

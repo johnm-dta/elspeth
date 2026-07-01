@@ -14,15 +14,19 @@ orchestrator context.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import textwrap
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from typer.testing import CliRunner
 
 import elspeth.contracts.errors as contract_errors
-from elspeth.cli import _close_orchestrator_resources
+from elspeth.cli import _close_orchestrator_resources, app
 
 
 class _CloseRaises:
@@ -158,3 +162,46 @@ def test_interactive_success_propagates_db_close_failure():
             graph=MagicMock(),
             plugins=MagicMock(),
         )
+
+
+def test_explain_exit_not_masked_by_db_close_failure():
+    """The explain command's intended CLI exit must survive database close failure."""
+    mock_db = MagicMock()
+    mock_db.close.side_effect = RuntimeError("close failed")
+
+    with (
+        patch("elspeth.cli_helpers.resolve_database_url", return_value=("sqlite:///audit.db", None)),
+        patch("elspeth.cli_helpers.resolve_audit_passphrase", return_value=None),
+        patch("elspeth.cli_helpers.resolve_run_id", return_value=None),
+        patch("elspeth.core.landscape.LandscapeDB") as mock_db_cls,
+        patch("elspeth.core.landscape.factory.RecorderFactory", return_value=MagicMock()),
+    ):
+        mock_db_cls.from_url.return_value = mock_db
+        result = CliRunner().invoke(
+            app,
+            ["explain", "--run", "latest", "--row", "row-1", "--no-tui", "--database", "audit.db"],
+        )
+
+    assert result.exit_code == 1
+    assert getattr(result.exception, "code", None) == 1
+    assert "No runs found in database" in result.output
+    assert "close failed" not in str(result.exception)
+
+
+def test_cli_db_commands_use_failure_preserving_close_helper():
+    """Resume, explain, and purge must not use bare db.close() teardown."""
+    import elspeth.cli as cli
+
+    for command in (cli.resume, cli.explain, cli.purge):
+        source = textwrap.dedent(inspect.getsource(command))
+        assert "_close_landscape_db" in source, command.__name__
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "close"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "db"
+            ):
+                pytest.fail(f"{command.__name__} uses bare db.close() instead of _close_landscape_db()")

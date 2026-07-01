@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -31,15 +32,15 @@ CHECK_SCRIPT = REPO_ROOT / "scripts" / "cicd" / "check_redaction_direction.py"
 ASSERT_SCRIPT = REPO_ROOT / "scripts" / "cicd" / "assert_redaction_label.py"
 
 
-def _write_snapshot(path: Path, content: dict) -> Path:
+def _write_snapshot(path: Path, content: Mapping[str, object]) -> Path:
     path.write_text(json.dumps(content, sort_keys=True), encoding="utf-8")
     return path
 
 
 def _run_direction(
     tmp_path: Path,
-    base: dict,
-    head: dict,
+    base: Mapping[str, object],
+    head: Mapping[str, object],
 ) -> tuple[str, subprocess.CompletedProcess[str]]:
     """Run the direction script; return (direction, completed-process)."""
     base_file = _write_snapshot(tmp_path / "base.json", base)
@@ -168,6 +169,37 @@ def test_combination_d_strengthening_with_weaken_label_fails(tmp_path: Path) -> 
 
 
 # Edge cases beyond the four canonical combinations -----------------------
+
+
+def test_mixed_entry_changes_with_any_sensitive_count_drop_yield_weaken(tmp_path: Path) -> None:
+    """A per-entry redaction drop must not be hidden by an unrelated increase."""
+    base = {
+        "tool_a": {"hash": "a1", "sensitive_path_count": 3, "shape": "type_driven"},
+        "tool_b": {"hash": "b1", "sensitive_path_count": 0, "shape": "declarative"},
+    }
+    head = {
+        "tool_a": {"hash": "a2", "sensitive_path_count": 1, "shape": "type_driven"},
+        "tool_b": {"hash": "b2", "sensitive_path_count": 2, "shape": "declarative"},
+    }
+
+    direction, _ = _run_direction(tmp_path, base, head)
+
+    assert direction == "weaken"
+
+
+def test_same_count_sensitive_entry_replacement_yields_weaken(tmp_path: Path) -> None:
+    """A changed existing sensitive entry with equal count needs weakening review.
+
+    The snapshot does not carry stable sensitive-path identities, so a hash
+    change at the same count can be a path/key replacement that removes coverage
+    for the original field.
+    """
+    base = {"tool_a": {"hash": "api-key-policy", "sensitive_path_count": 1, "shape": "declarative"}}
+    head = {"tool_a": {"hash": "token-policy", "sensitive_path_count": 1, "shape": "declarative"}}
+
+    direction, _ = _run_direction(tmp_path, base, head)
+
+    assert direction == "weaken"
 
 
 def test_weaken_label_without_rationale_section_fails(tmp_path: Path) -> None:

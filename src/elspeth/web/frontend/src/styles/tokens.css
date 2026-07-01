@@ -34,6 +34,17 @@
   /* ── Borders — teal-tinted ───────────────────────────────────────────────── */
   --color-border:            rgba(143, 200, 200, 0.12);
   --color-border-strong:     rgba(143, 200, 200, 0.25);
+  /* Interactive-option (chip) border. A brighter accent-green than --color-accent
+     (#1a7a52, only ~2.2:1 on the chip surface) so the resting button affordance
+     clears WCAG 1.4.11 (3:1) in the dark default theme: #3fa980 ≈ 4:1 vs
+     --color-surface-elevated #1a3d47. Light theme overrides to the plain accent
+     (already ~7.5:1 on white). */
+  --color-chip-border:       #3fa980;
+  /* Resting form-input boundary — the input fill ~matches surface, so the
+     border is the sole affordance and must clear WCAG 1.4.11 (3:1). 1px
+     --color-border-strong is only ~1.7:1; this solid teal-grey is ~3.1:1 on
+     --color-surface-elevated. */
+  --color-input-border:      #608a8a;
 
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
   --color-bubble-user:           rgba(40, 130, 100, 0.14);
@@ -71,9 +82,9 @@
   --color-badge-coalesce-border:    rgba(24, 194, 192, 0.3);
 
   /* ── Semantic colours — DTA/GOLD dark theme ──────────────────────────────── */
-  --color-success:           #14b0ae;
-  --color-error:             #e85653;
-  --color-warning:           #e38444;
+  --color-success:           #16bab8;
+  --color-error:             #ef8784;
+  --color-warning:           #e79761;
   --color-info:              #61daff;
   --color-state-positive:    #14b0ae;
 
@@ -107,15 +118,15 @@
   /* ── Status badges ───────────────────────────────────────────────────────── */
   --color-status-pending:    #7a9a9a;
   --color-status-running:    #61daff;
-  --color-status-completed:  #14b0ae;
-  --color-status-failed:     #e85653;
-  --color-status-cancelled:  #e38444;
+  --color-status-completed:  #16bab8;
+  --color-status-failed:     #ef8784;
+  --color-status-cancelled:  #e79761;
   /* Phase 2.2 (elspeth-0de989c56d): EMPTY uses a distinct neutral grey,
      darker than --color-status-pending so the two non-success-but-clean
      statuses are visually distinguishable.  COMPLETED_WITH_FAILURES
      reuses --color-status-completed (teal) and signals "with caveats"
      via the warning glyph rather than a different colour. */
-  --color-status-empty:      #888888;
+  --color-status-empty:      #a4a4a4;
 
   /* ── Surface variants ─────────────────────────────────────────────────── */
   --color-surface-raised:    #1a3d47;
@@ -163,6 +174,15 @@
   --line-height-snug:    1.35;  /* chat bubble body — tighter than normal but readable for multi-line responses */
   --line-height-normal:  1.5;
   --line-height-relaxed: 1.7;
+
+  /* ── Font weights ────────────────────────────────────────────────────────── */
+  --font-weight-regular:  400;
+  --font-weight-medium:   500;
+  --font-weight-semibold: 600;
+  --font-weight-bold:     700;
+
+  /* ── Brand wordmark tracking — JetBrains Mono, uppercase ─────────────────── */
+  --tracking-wordmark: 0.18em;
 
   /* ── Spacing ─────────────────────────────────────────────────────────────── */
   --space-2xs: 2px;          /* chip insets, badge padding (covers the 2px axis) */
@@ -248,6 +268,9 @@
   /* ── Borders — darker for light backgrounds ───────────────────────────── */
   --color-border:            rgba(15, 45, 53, 0.12);
   --color-border-strong:     rgba(15, 45, 53, 0.25);
+  /* Light theme: the plain accent already clears 3:1 on the white chip surface. */
+  --color-chip-border:       var(--color-accent);
+  --color-input-border:      #6c919d;
 
   /* ── Chat bubbles ────────────────────────────────────────────────────────── */
   --color-bubble-user:           rgba(40, 130, 100, 0.10);
@@ -272,9 +295,9 @@
      colorContrast.test.ts. The semantic-colour-on-tinted-bg pairings (e.g.
      --color-info on --color-info-bg) become slightly higher-contrast, which
      is the desired direction. */
-  --color-success:           #0d8a88;
-  --color-error:             #c93b38;
-  --color-warning:           #b86830;
+  --color-success:           #0b6e6c;
+  --color-error:             #b23331;
+  --color-warning:           #905126;
   --color-info:              #176d8a;
   --color-state-positive:    #056e6c;
 
@@ -323,10 +346,10 @@
 
   /* ── Status badges ───────────────────────────────────────────────────────── */
   --color-status-pending:    #5a7a84;
-  --color-status-running:    #2890b8;
-  --color-status-completed:  #0d8a88;
+  --color-status-running:    #237c9f;
+  --color-status-completed:  #0b6e6c;
   --color-status-failed:     #c93b38;
-  --color-status-cancelled:  #b86830;
+  --color-status-cancelled:  #905126;
   --color-status-empty:      #4d6a73;
 
   /* ── Scrollbar — darker for light backgrounds ─────────────────────────── */

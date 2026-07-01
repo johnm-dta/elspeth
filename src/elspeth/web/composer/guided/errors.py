@@ -72,3 +72,43 @@ class InvariantError(Exception):
     is consistent with this project's "delete the DB on migration" policy for
     the composer state blob (no Alembic path for ``guided_session``).
     """
+
+
+class ChainSolverResponseShapeError(Exception):
+    """The LLM produced a tool-call/response that violated the chain solver's
+    contract — either an ``emit_turn`` of the wrong tool name / turn_type /
+    malformed payload, OR a discovery tool call whose arguments did not decode
+    to a JSON object.
+
+    Distinct from :class:`InvariantError` (server-side bug) and ``ValueError``
+    (client-payload bug): this exception means an *external system* (the LLM)
+    produced an unexpected response shape. ``solve_chain_with_auto_drop``
+    catches this class and routes the request through the SOLVER_EXHAUSTED
+    auto-drop path -- the same bucket as other malformed-response-shape
+    failures (``IndexError`` from empty ``choices``, ``json.JSONDecodeError``
+    on tool-call arguments, etc.).
+
+    NOT a subclass of ``ValueError`` because the auto-drop wrapper docstring
+    explicitly excludes ``ValueError`` to preserve client-payload-bug routing.
+    NOT a subclass of ``InvariantError`` because that class is documented as
+    "server invariant violated" -- the wrong category for "external LLM
+    misbehaved."
+
+    Inside ``solve_chain`` the audit wrap's typed-except clause maps this
+    class to :attr:`ComposerLLMCallStatus.MALFORMED_RESPONSE` -- semantically
+    the LLM did respond, but the response failed contract.
+
+    Lives here (the guided exception taxonomy), NOT in ``chain_solver``, so the
+    discovery loop (``_discovery``, which ``chain_solver`` imports) can raise it
+    on malformed tool-call arguments without a circular import. ``chain_solver``
+    re-exports it for backward compatibility.
+
+    Spec gap (tracked separately):
+        Spec §5.4 case 1 calls for "reject + grant one retry → second illegal
+        emission triggers auto-drop with reason=protocol_violation."  The
+        current implementation single-shots the auto-drop with
+        reason=solver_exhausted (the existing wrapper's outcome) because
+        wiring the retry state machine is feature work, not a bug fix.  The
+        spec-mandated retry-then-PROTOCOL_VIOLATION flow is filed as a
+        follow-up observation.
+    """

@@ -80,7 +80,7 @@
 .markdown-body h3,
 .markdown-body h4 {
   margin: 12px 0 6px;
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text);
 }
 
@@ -130,7 +130,7 @@
 
 .markdown-body th {
   background-color: var(--color-surface-elevated);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
 }
 
 .markdown-body .inline-code {
@@ -286,7 +286,7 @@
 .command-palette-group-header {
   padding: var(--space-xs) var(--space-md);
   font-size: var(--font-size-xs);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--color-text-muted);
@@ -370,7 +370,7 @@
 .error-boundary-title {
   margin: 0;
   font-size: var(--font-size-base);
-  font-weight: 600;
+  font-weight: var(--font-weight-semibold);
   color: var(--color-text);
 }
 

@@ -666,4 +666,49 @@ describe("GraphView", () => {
       expect(opts).toEqual({ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 });
     });
   });
+
+  describe("accessible node list (C2/C3, elspeth-ef897110dd / elspeth-d37b7217c9)", () => {
+    it("exposes every component as a keyboard-operable item with type + validity", () => {
+      useSessionStore.setState({
+        compositionState: makeState({
+          sources: { in: { plugin: "csv", on_success: "t1", options: {} } } as never,
+          nodes: [
+            makeNode({
+              id: "classify",
+              node_type: "transform",
+              plugin: "llm_transform",
+              input: "t1",
+              on_success: "out",
+            }),
+          ],
+          outputs: [{ name: "out", plugin: "jsonl", options: {} }] as never,
+        }),
+      });
+      render(<GraphView />);
+      const list = screen.getByRole("list", {
+        name: /pipeline components in source-to-sink order/i,
+      });
+      const items = within(list).getAllByRole("button");
+      // source + 1 transform + sink = 3 accessible entries.
+      expect(items).toHaveLength(3);
+      const text = items.map((b) => b.textContent ?? "");
+      expect(text.some((t) => /source:.*csv/i.test(t))).toBe(true);
+      expect(text.some((t) => /transform: classify \(llm_transform\)/i.test(t))).toBe(true);
+      expect(text.some((t) => /sink:.*jsonl/i.test(t))).toBe(true);
+      // Validity is announced, not colour-only.
+      expect(text.every((t) => /valid|warning|error|not yet validated/i.test(t))).toBe(true);
+    });
+
+    it("selects a node via keyboard activation (drives the inspector path)", async () => {
+      const selectNode = vi.fn();
+      useSessionStore.setState({
+        selectNode,
+        compositionState: makeState({ nodes: [makeNode({ id: "classify" })] }),
+      } as never);
+      render(<GraphView />);
+      const list = screen.getByRole("list", { name: /pipeline components/i });
+      await userEvent.click(within(list).getByRole("button", { name: /classify/i }));
+      expect(selectNode).toHaveBeenCalledWith("classify");
+    });
+  });
 });

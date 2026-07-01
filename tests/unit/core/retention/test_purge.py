@@ -115,12 +115,20 @@ def _create_row(
     )
 
 
-def _create_token(conn: Connection, run_id: str, row_id: str, token_id: str) -> None:
+def _create_token(
+    conn: Connection,
+    run_id: str,
+    row_id: str,
+    token_id: str,
+    *,
+    token_data_ref: str | None = None,
+) -> None:
     conn.execute(
         tokens_table.insert().values(
             token_id=token_id,
             row_id=row_id,
             run_id=run_id,
+            token_data_ref=token_data_ref,
             created_at=datetime.now(UTC),
         )
     )
@@ -584,6 +592,54 @@ class TestFindExpiredPayloadRefs:
         assert "ref-op-input-expired" not in refs
         assert "ref-op-res-expired" not in refs
 
+    def test_find_expired_payload_refs_includes_token_refs_and_excludes_active_shared_token_refs(self, db: LandscapeDB) -> None:
+        manager = PurgeManager(db, MockPayloadStore())
+        now = datetime(2026, 2, 8, tzinfo=UTC)
+        old = now - timedelta(days=40)
+        recent = now - timedelta(days=1)
+
+        with db.connection() as conn:
+            _create_run(conn, "expired-token-run", status=RunStatus.COMPLETED, completed_at=old)
+            _create_node(conn, "expired-token-run", "expired-token-node")
+            _create_row(conn, "expired-token-run", "expired-token-node", "expired-token-row", row_index=0, source_data_ref=None)
+            _create_token(
+                conn,
+                "expired-token-run",
+                "expired-token-row",
+                "expired-token",
+                token_data_ref="ref-token-expired",
+            )
+            _create_row(
+                conn,
+                "expired-token-run",
+                "expired-token-node",
+                "expired-shared-token-row",
+                row_index=1,
+                source_data_ref=None,
+            )
+            _create_token(
+                conn,
+                "expired-token-run",
+                "expired-shared-token-row",
+                "expired-shared-token",
+                token_data_ref="ref-token-shared",
+            )
+
+            _create_run(conn, "active-token-run", status=RunStatus.COMPLETED, completed_at=recent)
+            _create_node(conn, "active-token-run", "active-token-node")
+            _create_row(conn, "active-token-run", "active-token-node", "active-token-row", row_index=0, source_data_ref=None)
+            _create_token(
+                conn,
+                "active-token-run",
+                "active-token-row",
+                "active-token",
+                token_data_ref="ref-token-shared",
+            )
+
+        refs = set(manager.find_expired_payload_refs(retention_days=30, as_of=now))
+        assert "ref-token-expired" in refs
+        assert "ref-token-shared" not in refs
+
     def test_find_affected_run_ids_covers_row_state_call_op_call_and_routing_refs(self, db: LandscapeDB) -> None:
         manager = PurgeManager(db, MockPayloadStore())
         now = datetime(2026, 2, 8, tzinfo=UTC)
@@ -690,6 +746,18 @@ class TestFindExpiredPayloadRefs:
             ["ref-row", "ref-state-call", "ref-op-call", "ref-op-input", "ref-op-output", "ref-routing"]
         )
         assert affected == {"run-row", "run-state-call", "run-op-call", "run-op-io", "run-routing"}
+
+    def test_find_affected_run_ids_covers_token_data_refs(self, db: LandscapeDB) -> None:
+        manager = PurgeManager(db, MockPayloadStore())
+        old = datetime(2026, 2, 8, tzinfo=UTC) - timedelta(days=40)
+
+        with db.connection() as conn:
+            _create_run(conn, "run-token-ref", status=RunStatus.COMPLETED, completed_at=old)
+            _create_node(conn, "run-token-ref", "node-token-ref")
+            _create_row(conn, "run-token-ref", "node-token-ref", "row-token-ref", row_index=0, source_data_ref=None)
+            _create_token(conn, "run-token-ref", "row-token-ref", "tok-token-ref", token_data_ref="ref-token-data")
+
+        assert manager._find_affected_run_ids(["ref-token-data"]) == {"run-token-ref"}
 
 
 class TestPurgePayloads:

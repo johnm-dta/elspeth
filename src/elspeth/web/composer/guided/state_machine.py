@@ -20,10 +20,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import Any, cast
 
 from elspeth.contracts.freeze import deep_thaw, freeze_fields
 from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 from elspeth.web.composer.guided.resolved import (
     SinkOutputResolved as SinkOutputResolved,
@@ -36,17 +37,69 @@ from elspeth.web.composer.guided.resolved import (
 )
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, facts_from_dict, facts_to_dict
 
-# Pre-v5 persisted sessions are intentionally incompatible with v5: the
+# Pre-v7 persisted sessions are intentionally incompatible with v7: the
 # operator must delete the guided sessions DB before deploying this change.
-GUIDED_SESSION_SCHEMA_VERSION = 5
+# (v6->v7 dropped the vestigial ``entry_seed`` key from the nested
+# WorkflowProfile sub-shape; bumped in lockstep with SESSION_SCHEMA_EPOCH.)
+GUIDED_SESSION_SCHEMA_VERSION = 7
 
-if TYPE_CHECKING:
-    # Imported for type annotations only — avoids a circular dependency.
-    # recipe_match.py imports state_machine.py (SourceResolved, SinkResolved);
-    # a runtime import of RecipeMatch here would create a cycle.
-    # RecipeMatch is a frozen dataclass; no freeze_fields needed on GuidedSession
-    # for this field — frozen dataclass instances are already immutable.
-    from elspeth.web.composer.guided.recipe_match import RecipeMatch
+
+def _require_guided_int(value: Any, field_name: str) -> int:
+    if type(value) is not int:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be int")
+    return value
+
+
+def _require_guided_non_negative_int(value: Any, field_name: str) -> int:
+    parsed = _require_guided_int(value, field_name)
+    if parsed < 0:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be a non-negative int")
+    return parsed
+
+
+def _require_guided_bool(value: Any, field_name: str) -> bool:
+    if type(value) is not bool:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be bool")
+    return value
+
+
+def _require_guided_optional_str(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str:
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be str or None")
+    return value
+
+
+def _require_guided_sequence(value: Any, field_name: str) -> Sequence[Any]:
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
+        raise InvariantError(f"GuidedSession.from_dict: {field_name} must be a sequence")
+    return cast(Sequence[Any], value)
+
+
+def _chat_turn_from_guided_dict(entry: Any) -> ChatTurn:
+    if not isinstance(entry, Mapping):
+        raise InvariantError("GuidedSession.from_dict: chat_history entries must be mappings")
+    role_raw = entry["role"]
+    content_raw = entry["content"]
+    seq_raw = entry["seq"]
+    step_raw = entry["step"]
+    ts_iso_raw = entry["ts_iso"]
+    if type(role_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.role must be str")
+    if type(step_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.step must be str")
+    if type(content_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.content must be str")
+    if type(ts_iso_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.ts_iso must be str")
+    return ChatTurn(
+        role=ChatRole(role_raw),
+        content=content_raw,
+        seq=_require_guided_non_negative_int(seq_raw, "chat_history.seq"),
+        step=GuidedStep(step_raw),
+        ts_iso=ts_iso_raw,
+    )
 
 
 class TerminalKind(StrEnum):
@@ -284,16 +337,6 @@ class GuidedSession:
     reconstruct the full SinkOutputResolved and clears it in the same atomic
     replace(); it is always None after Step 2 completes.
 
-    ``step_2_5_recipe_offer`` is a mid-Step-2.5 staging field.  The Step 2.5
-    dispatcher writes the emitted ``RecipeMatch`` into it immediately before
-    emitting the RECIPE_OFFER turn.  The recipe-accept branch in the dispatcher
-    reads it to verify that the client-supplied ``recipe_name`` matches the
-    recipe that was actually offered — binding the acceptance to the server-emitted
-    offer and preventing a crafted client from accepting a different recipe.  The
-    field is cleared (set to None) in the same atomic replace() that consumes it
-    (the terminal=COMPLETED path).  It is always None when the session is not at
-    STEP_2_5_RECIPE_MATCH.
-
     ``step_2_chosen_plugin`` is a mid-Step-2 staging field.  The Step-2
     SINGLE_SELECT dispatcher writes the chosen sink plugin name into it
     immediately before emitting the SCHEMA_FORM turn.  The SCHEMA_FORM
@@ -312,13 +355,15 @@ class GuidedSession:
     step_1_result: SourceResolved | None
     step_2_result: SinkResolved | None
     step_3_proposal: ChainProposal | None
+    profile: WorkflowProfile = EMPTY_PROFILE
+    advisor_checkpoint_passes_used: int = 0
+    advisor_signoff_escape_offered: bool = False
     step_1_inspection_facts: SourceInspectionFacts | None = None
     step_1_chosen_plugin: str | None = None
     terminal: TerminalState | None = None
     transition_consumed: bool = False
     step_1_source_intent: SourceIntent | None = None
     step_2_sink_intent: SinkIntent | None = None
-    step_2_5_recipe_offer: RecipeMatch | None = None
     step_2_chosen_plugin: str | None = None
     step_3_edit_index: int | None = None
     # Phase A slice 5 — per-step chat history persistence.
@@ -332,6 +377,12 @@ class GuidedSession:
     chat_turn_seq: int = 0
 
     def __post_init__(self) -> None:
+        if type(self.profile) is not WorkflowProfile:
+            raise TypeError(f"profile must be WorkflowProfile, got {type(self.profile).__name__}")
+        if type(self.advisor_checkpoint_passes_used) is not int or self.advisor_checkpoint_passes_used < 0:
+            raise TypeError("advisor_checkpoint_passes_used must be a non-negative int")
+        if type(self.advisor_signoff_escape_offered) is not bool:
+            raise TypeError(f"advisor_signoff_escape_offered must be bool, got {type(self.advisor_signoff_escape_offered).__name__}")
         if self.step_1_inspection_facts is not None and type(self.step_1_inspection_facts) is not SourceInspectionFacts:
             raise TypeError(
                 f"step_1_inspection_facts must be SourceInspectionFacts or None, got {type(self.step_1_inspection_facts).__name__}"
@@ -340,13 +391,14 @@ class GuidedSession:
             raise TypeError(f"step_1_chosen_plugin must be str or None, got {type(self.step_1_chosen_plugin).__name__}")
 
     @classmethod
-    def initial(cls) -> GuidedSession:
+    def initial(cls, profile: WorkflowProfile = EMPTY_PROFILE) -> GuidedSession:
         return cls(
             step=GuidedStep.STEP_1_SOURCE,
             history=(),
             step_1_result=None,
             step_2_result=None,
             step_3_proposal=None,
+            profile=profile,
             terminal=None,
         )
 
@@ -368,13 +420,15 @@ class GuidedSession:
             "step_1_result": self.step_1_result.to_dict() if self.step_1_result is not None else None,
             "step_2_result": self.step_2_result.to_dict() if self.step_2_result is not None else None,
             "step_3_proposal": self.step_3_proposal.to_dict() if self.step_3_proposal is not None else None,
+            "profile": self.profile.to_dict(),
+            "advisor_checkpoint_passes_used": self.advisor_checkpoint_passes_used,
+            "advisor_signoff_escape_offered": self.advisor_signoff_escape_offered,
             "step_1_inspection_facts": facts_to_dict(self.step_1_inspection_facts) if self.step_1_inspection_facts is not None else None,
             "step_1_chosen_plugin": self.step_1_chosen_plugin,
             "terminal": self.terminal.to_dict() if self.terminal is not None else None,
             "transition_consumed": self.transition_consumed,
             "step_1_source_intent": self.step_1_source_intent.to_dict() if self.step_1_source_intent is not None else None,
             "step_2_sink_intent": self.step_2_sink_intent.to_dict() if self.step_2_sink_intent is not None else None,
-            "step_2_5_recipe_offer": self.step_2_5_recipe_offer.to_dict() if self.step_2_5_recipe_offer is not None else None,
             "step_2_chosen_plugin": self.step_2_chosen_plugin,
             "step_3_edit_index": self.step_3_edit_index,
             "chat_history": [
@@ -398,61 +452,65 @@ class GuidedSession:
         KeyError, ValueError, and TypeError all indicate Tier 1 corruption.
         """
         try:
-            schema_version = int(d["schema_version"])
+            schema_version = _require_guided_int(d["schema_version"], "schema_version")
             if schema_version != GUIDED_SESSION_SCHEMA_VERSION:
                 raise InvariantError(f"GuidedSession.from_dict: unsupported schema_version {schema_version}")
             history = tuple(TurnRecord.from_dict(r) for r in d["history"])
             step_1_raw = d["step_1_result"]
             step_2_raw = d["step_2_result"]
             step_3_raw = d["step_3_proposal"]
+            profile_raw = d["profile"]
+            advisor_checkpoint_passes_used_raw = d["advisor_checkpoint_passes_used"]
+            advisor_signoff_escape_offered_raw = d["advisor_signoff_escape_offered"]
+            try:
+                profile = WorkflowProfile.from_dict(profile_raw)
+            except InvariantError as exc:
+                raise InvariantError("GuidedSession.from_dict: malformed profile") from exc
+            if type(advisor_checkpoint_passes_used_raw) is not int or advisor_checkpoint_passes_used_raw < 0:
+                raise InvariantError("GuidedSession.from_dict: advisor_checkpoint_passes_used must be a non-negative int")
+            if type(advisor_signoff_escape_offered_raw) is not bool:
+                raise InvariantError("GuidedSession.from_dict: advisor_signoff_escape_offered must be bool")
             inspection_facts_raw = d["step_1_inspection_facts"]
             step_1_chosen_plugin_raw = d["step_1_chosen_plugin"]
             terminal_raw = d["terminal"]
             source_intent_raw = d["step_1_source_intent"]
             sink_intent_raw = d["step_2_sink_intent"]
-            recipe_offer_raw = d["step_2_5_recipe_offer"]
             step_2_chosen_plugin_raw = d["step_2_chosen_plugin"]
             step_3_edit_index_raw = d["step_3_edit_index"]
-            # Deferred import to avoid a circular dependency at module level.
-            # recipe_match.py imports from state_machine.py; importing RecipeMatch
-            # at module level here would create a cycle.
-            from elspeth.web.composer.guided.recipe_match import RecipeMatch as _RecipeMatch
-
+            transition_consumed = _require_guided_bool(d["transition_consumed"], "transition_consumed")
+            step_1_chosen_plugin = _require_guided_optional_str(step_1_chosen_plugin_raw, "step_1_chosen_plugin")
+            step_2_chosen_plugin = _require_guided_optional_str(step_2_chosen_plugin_raw, "step_2_chosen_plugin")
+            step_3_edit_index = (
+                _require_guided_non_negative_int(step_3_edit_index_raw, "step_3_edit_index") if step_3_edit_index_raw is not None else None
+            )
             # Phase A slice 5 chat-history fields.  Tier-1 strict: every entry
             # must declare role / content / seq / step / ts_iso.  Per CLAUDE.md
             # "Our data crash on any anomaly" — no coercion of missing keys
             # to defaults.  An empty list (default for sessions created before
             # slice 5 landed in production) is valid; the entries themselves
             # must be well-formed.
-            chat_history_raw = d["chat_history"]
-            chat_turn_seq_raw = d["chat_turn_seq"]
-            chat_history: tuple[ChatTurn, ...] = tuple(
-                ChatTurn(
-                    role=ChatRole(entry["role"]),
-                    content=entry["content"],
-                    seq=entry["seq"],
-                    step=GuidedStep(entry["step"]),
-                    ts_iso=entry["ts_iso"],
-                )
-                for entry in chat_history_raw
-            )
+            chat_history_raw = _require_guided_sequence(d["chat_history"], "chat_history")
+            chat_turn_seq = _require_guided_non_negative_int(d["chat_turn_seq"], "chat_turn_seq")
+            chat_history: tuple[ChatTurn, ...] = tuple(_chat_turn_from_guided_dict(entry) for entry in chat_history_raw)
             return cls(
                 step=GuidedStep(d["step"]),
                 history=history,
                 step_1_result=SourceResolved.from_dict(step_1_raw) if step_1_raw is not None else None,
                 step_2_result=SinkResolved.from_dict(step_2_raw) if step_2_raw is not None else None,
                 step_3_proposal=ChainProposal.from_dict(step_3_raw) if step_3_raw is not None else None,
+                profile=profile,
+                advisor_checkpoint_passes_used=advisor_checkpoint_passes_used_raw,
+                advisor_signoff_escape_offered=advisor_signoff_escape_offered_raw,
                 step_1_inspection_facts=facts_from_dict(inspection_facts_raw) if inspection_facts_raw is not None else None,
-                step_1_chosen_plugin=str(step_1_chosen_plugin_raw) if step_1_chosen_plugin_raw is not None else None,
+                step_1_chosen_plugin=step_1_chosen_plugin,
                 terminal=TerminalState.from_dict(terminal_raw) if terminal_raw is not None else None,
-                transition_consumed=d["transition_consumed"],
+                transition_consumed=transition_consumed,
                 step_1_source_intent=SourceIntent.from_dict(source_intent_raw) if source_intent_raw is not None else None,
                 step_2_sink_intent=SinkIntent.from_dict(sink_intent_raw) if sink_intent_raw is not None else None,
-                step_2_5_recipe_offer=_RecipeMatch.from_dict(recipe_offer_raw) if recipe_offer_raw is not None else None,
-                step_2_chosen_plugin=str(step_2_chosen_plugin_raw) if step_2_chosen_plugin_raw is not None else None,
-                step_3_edit_index=int(step_3_edit_index_raw) if step_3_edit_index_raw is not None else None,
+                step_2_chosen_plugin=step_2_chosen_plugin,
+                step_3_edit_index=step_3_edit_index,
                 chat_history=chat_history,
-                chat_turn_seq=int(chat_turn_seq_raw),
+                chat_turn_seq=chat_turn_seq,
             )
         except (KeyError, ValueError, TypeError) as exc:
             raise InvariantError(f"GuidedSession.from_dict: malformed record {d!r}") from exc
@@ -547,10 +605,10 @@ def step_advance(
         return _advance_step_1(session, response, current_turn_type)
     if session.step is GuidedStep.STEP_2_SINK:
         return _advance_step_2(session, response, current_turn_type)
-    if session.step is GuidedStep.STEP_2_5_RECIPE_MATCH:
-        return _advance_step_2_5(session, response, current_turn_type)
     if session.step is GuidedStep.STEP_3_TRANSFORMS:
         return _advance_step_3(session, response, current_turn_type)
+    if session.step is GuidedStep.STEP_4_WIRE:
+        return _advance_step_4(session, response, current_turn_type)
     raise InvariantError(f"unhandled step: {session.step}")
 
 
@@ -676,64 +734,21 @@ def _advance_step_2(
             tool_name="guided_step_advanced",
             arguments={
                 "prev_step": GuidedStep.STEP_2_SINK.value,
-                "next_step": GuidedStep.STEP_2_5_RECIPE_MATCH.value,
+                "next_step": GuidedStep.STEP_3_TRANSFORMS.value,
                 "reason": "user_advanced",
             },
         ),
     ]
+    # The sink commit advances straight to the transform build. The composer
+    # builds the chain from the user's originating request (mirror freeform);
+    # there is no STEP_2_5 recipe-match interstitial.
     new_sess = replace(
         session,
-        step=GuidedStep.STEP_2_5_RECIPE_MATCH,
+        step=GuidedStep.STEP_3_TRANSFORMS,
         step_2_result=sink,
         step_2_sink_intent=None,  # consumed; clear to prevent misread by later steps
     )
     return (new_sess, None, None, directives)
-
-
-def _advance_step_2_5(
-    session: GuidedSession,
-    response: TurnResponse,
-    turn_type: TurnType,
-) -> _StepAdvanceResult:
-    """Handle a Step 2.5 (recipe match) response.
-
-    Two valid paths:
-    - chosen == ["accept"]: the session stays at STEP_2_5 with no directive.
-      The endpoint handler (Task 3.3 / Errata C2) detects response["chosen"] ==
-      ["accept"] and invokes ``_execute_apply_pipeline_recipe`` to commit the
-      recipe and produce a COMPLETED terminal. step_advance is pure and does not
-      run apply_recipe; emitting emit_turn_answered is the handler's
-      responsibility.
-    - chosen == ["build_manually"]: advance to STEP_3_TRANSFORMS with a
-      ``guided_step_advanced`` directive.
-
-    Any other chosen value is a protocol violation — raises ValueError.
-    Non-RECIPE_OFFER turn types are intra-step turns; no advance.
-    """
-    if turn_type is not TurnType.RECIPE_OFFER:
-        return (session, None, None, [])
-
-    chosen = response["chosen"] or []
-    if list(chosen) == ["accept"]:
-        # Endpoint handler reads response["chosen"] == ["accept"] and runs
-        # apply_recipe (Errata C2). step_advance leaves the session at
-        # STEP_2_5 unchanged; the handler advances to terminal=COMPLETED after
-        # committing. No directive here — the handler emits emit_turn_answered.
-        return (session, None, None, [])
-    if list(chosen) == ["build_manually"]:
-        directives = [
-            GuidedAuditDirective(
-                tool_name="guided_step_advanced",
-                arguments={
-                    "prev_step": GuidedStep.STEP_2_5_RECIPE_MATCH.value,
-                    "next_step": GuidedStep.STEP_3_TRANSFORMS.value,
-                    "reason": "user_advanced",
-                },
-            ),
-        ]
-        new_sess = replace(session, step=GuidedStep.STEP_3_TRANSFORMS)
-        return (new_sess, None, None, directives)
-    raise ValueError(f"unexpected chosen for recipe_offer: {chosen!r}")
 
 
 def _advance_step_3(
@@ -774,6 +789,24 @@ def _advance_step_3(
         f"_advance_step_3: unexpected turn_type {turn_type!r} — Step 3 only "
         "emits PROPOSE_CHAIN, SINGLE_SELECT, and SCHEMA_FORM turns; any other type in the "
         "history record indicates a server-side emitter bug."
+    )
+
+
+def _advance_step_4(
+    session: GuidedSession,
+    response: TurnResponse,
+    turn_type: TurnType,
+) -> _StepAdvanceResult:
+    """Handle Step 4 (wire skeleton) responses.
+
+    Step 4 advancement is owned by the dispatcher/handler path in later work.
+    The state-machine branch is intentionally a pure self-loop for the
+    CONFIRM_WIRING turn and must not stamp terminal state.
+    """
+    if turn_type is TurnType.CONFIRM_WIRING:
+        return (session, None, None, [])
+    raise InvariantError(
+        f"_advance_step_4: unexpected turn_type {turn_type!r} for {GuidedStep.STEP_4_WIRE.name}; Step 4 only emits CONFIRM_WIRING turns."
     )
 
 

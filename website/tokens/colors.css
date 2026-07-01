@@ -35,6 +35,11 @@
   /* ── Borders — teal-tinted ───────────────────────────────────────────────── */
   --color-border:            rgba(143, 200, 200, 0.12);
   --color-border-strong:     rgba(143, 200, 200, 0.25);
+  /* Interactive-option (chip) border — brighter accent-green clearing 1.4.11
+     (3:1) on chip surfaces. Mirrors the product token. */
+  --color-chip-border:       #3fa980;
+  /* Resting form-input boundary (WCAG 1.4.11, ~3.1:1 on --color-surface-elevated). */
+  --color-input-border:      #608a8a;
 
   /* ── Interactive / accent ────────────────────────────────────────────────── */
   --color-accent:            #1a7a52;
@@ -49,9 +54,9 @@
   --color-selected-ring:     rgba(26, 122, 82, 0.55);
 
   /* ── Semantic colours ────────────────────────────────────────────────────── */
-  --color-success:           #14b0ae;
-  --color-error:             #e85653;
-  --color-warning:           #e38444;
+  --color-success:           #16bab8;
+  --color-error:             #ef8784;
+  --color-warning:           #e79761;
   --color-info:              #61daff;
   --color-state-positive:    #14b0ae;
 
@@ -102,10 +107,10 @@
   /* ── Run status badges ───────────────────────────────────────────────────── */
   --color-status-pending:    #7a9a9a;
   --color-status-running:    #61daff;
-  --color-status-completed:  #14b0ae;
-  --color-status-failed:     #e85653;
-  --color-status-cancelled:  #e38444;
-  --color-status-empty:      #888888;
+  --color-status-completed:  #16bab8;
+  --color-status-failed:     #ef8784;
+  --color-status-cancelled:  #e79761;
+  --color-status-empty:      #a4a4a4;
 
   /* ── Scrollbar — teal-tinted ─────────────────────────────────────────────── */
   --color-scrollbar-track:       var(--color-bg);
@@ -146,6 +151,8 @@
 
   --color-border:            rgba(15, 45, 53, 0.12);
   --color-border-strong:     rgba(15, 45, 53, 0.25);
+  --color-chip-border:       var(--color-accent);
+  --color-input-border:      #6c919d;
 
   --color-accent:            #156048;
   --color-accent-muted:      rgba(21, 96, 72, 0.12);
@@ -158,9 +165,9 @@
   --color-highlight:         rgba(21, 96, 72, 0.12);
   --color-selected-ring:     rgba(21, 96, 72, 0.45);
 
-  --color-success:           #0d8a88;
-  --color-error:             #c93b38;
-  --color-warning:           #b86830;
+  --color-success:           #0b6e6c;
+  --color-error:             #b23331;
+  --color-warning:           #905126;
   --color-info:              #176d8a;
   --color-state-positive:    #056e6c;
 
@@ -206,10 +213,10 @@
   --color-node-unchecked: var(--color-border-strong);
 
   --color-status-pending:    #5a7a84;
-  --color-status-running:    #2890b8;
-  --color-status-completed:  #0d8a88;
+  --color-status-running:    #237c9f;
+  --color-status-completed:  #0b6e6c;
   --color-status-failed:     #c93b38;
-  --color-status-cancelled:  #b86830;
+  --color-status-cancelled:  #905126;
   --color-status-empty:      #4d6a73;
 
   --color-scrollbar-track:       var(--color-bg);

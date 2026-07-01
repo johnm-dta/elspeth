@@ -196,6 +196,14 @@ describe("CatalogDrawer", () => {
     expect(await screen.findByText("CSV file source")).toBeInTheDocument();
   });
 
+  it("announces a catalog load failure through an assertive alert (WCAG 4.1.3)", async () => {
+    vi.mocked(listSources).mockRejectedValueOnce(new Error("catalog unavailable"));
+    render(<CatalogDrawer isOpen={true} onClose={vi.fn()} />);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to load plugin catalog.");
+  });
+
   it("escape key closes drawer", async () => {
     const onClose = vi.fn();
     render(<CatalogDrawer isOpen={true} onClose={onClose} />);
@@ -344,7 +352,12 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
     // Then click the "Network call" audit chip (only azure has external_call).
     await userEvent.click(screen.getByRole("button", { name: /network call/i }));
     // Plugin list is now empty with active filters.
-    expect(screen.getByText("No plugins match the active filters.")).toBeInTheDocument();
+    const empty = screen.getByText("No plugins match the active filters.");
+    expect(empty).toBeInTheDocument();
+    // M05 (WCAG 4.1.3): the empty state is a polite live region so a
+    // screen-reader user hears it when filters eliminate every plugin.
+    expect(empty).toHaveAttribute("role", "status");
+    expect(empty).toHaveAttribute("aria-live", "polite");
     // Synthetic entry must STILL be visible — it is a pinned affordance.
     expect(screen.getByText(/inline data from chat/i)).toBeInTheDocument();
   });
@@ -353,12 +366,42 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
     // B3 regression gate: empty-state message with no active filters.
     vi.mocked(api.listSources).mockResolvedValue([] as never);
     render(<CatalogDrawer isOpen onClose={() => {}} />);
-    await waitFor(() =>
-      expect(screen.getByText("No plugins available.")).toBeInTheDocument(),
-    );
+    const empty = await screen.findByText("No plugins available.");
+    // M05 (WCAG 4.1.3): announced through a polite live region.
+    expect(empty).toHaveAttribute("role", "status");
+    expect(empty).toHaveAttribute("aria-live", "polite");
     // Synthetic entry must still be visible — no filters are active and
     // the list is empty, but InlineChatSourceEntry is always pinned.
     expect(screen.getByText(/inline data from chat/i)).toBeInTheDocument();
+  });
+
+  it("announces the visible plugin count through a polite live region (M05)", async () => {
+    // Two sources load → "2 plugins"; narrowing to one via a capability
+    // filter updates the same live region to the singular "1 plugin".
+    render(<CatalogDrawer isOpen onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("azure_blob")).toBeInTheDocument());
+
+    const count = screen.getByText("2 plugins");
+    expect(count).toHaveAttribute("role", "status");
+    expect(count).toHaveAttribute("aria-live", "polite");
+
+    // Filter to the single csv plugin — count switches to the singular form.
+    await userEvent.click(screen.getByRole("button", { name: /^csv$/i }));
+    expect(screen.getByText("1 plugin")).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("exposes the plugin cards as a list with one listitem per plugin (M06)", async () => {
+    // WCAG 1.3.1: the flat run of cards now carries list semantics so AT
+    // announces "list, N items". The pinned InlineChatSourceEntry is a
+    // role="region", NOT a listitem, so it does not inflate the count.
+    render(<CatalogDrawer isOpen onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("azure_blob")).toBeInTheDocument());
+
+    expect(screen.getByRole("list")).toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(2);
+    // Each card is an article named by its plugin name (M06 second half).
+    expect(screen.getByRole("article", { name: "csv" })).toBeInTheDocument();
+    expect(screen.getByRole("article", { name: "azure_blob" })).toBeInTheDocument();
   });
 
   it("InlineChatSourceEntry and empty-state message are simultaneously visible when filters eliminate all real plugins", async () => {

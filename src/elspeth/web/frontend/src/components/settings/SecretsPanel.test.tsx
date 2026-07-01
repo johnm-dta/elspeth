@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { SecretsPanel } from "./SecretsPanel";
 import { useSecretsStore } from "@/stores/secretsStore";
@@ -192,7 +192,7 @@ describe("SecretsPanel", () => {
   });
 
   describe("submit failure recovery", () => {
-    it("re-enables the form after createSecret throws", async () => {
+    it("preserves the name and re-enables the form after createSecret throws", async () => {
       const user = userEvent.setup();
       const failing = vi.fn(async () => {
         throw new Error("network");
@@ -201,19 +201,134 @@ describe("SecretsPanel", () => {
 
       render(<SecretsPanel onClose={onClose} />);
 
-      await user.type(screen.getByLabelText("Name"), "OPENAI_API_KEY");
-      await user.type(screen.getByLabelText("Value"), "sk-test");
+      const nameInput = screen.getByLabelText("Name");
+      const valueInput = screen.getByLabelText("Value");
+
+      await user.type(nameInput, "OPENAI_API_KEY");
+      await user.type(valueInput, "sk-test");
       await user.click(screen.getByRole("button", { name: /save/i }));
 
       expect(failing).toHaveBeenCalledOnce();
 
-      // After failure the fields are cleared (security contract) and
-      // isSubmitting is reset to false. Re-filling the fields must
-      // produce an enabled submit button — if isSubmitting were stuck
-      // the button would remain disabled regardless of field content.
-      await user.type(screen.getByLabelText("Name"), "ANOTHER_KEY");
-      await user.type(screen.getByLabelText("Value"), "sk-other");
+      // WCAG 3.3.7: even when the store contract is violated (a thrown error
+      // rather than a recorded one), the name survives so the user can retry
+      // without re-typing. SECURITY: the value is always cleared.
+      expect(nameInput).toHaveValue("OPENAI_API_KEY");
+      expect(valueInput).toHaveValue("");
+
+      // isSubmitting must have reset — re-filling the value re-enables submit.
+      // (If isSubmitting were stuck the button would stay disabled.)
+      await user.type(valueInput, "sk-retry");
       expect(screen.getByRole("button", { name: /save/i })).not.toBeDisabled();
+    });
+
+    it("preserves the name and keeps the inline error on it when the store records a failure (WCAG 3.3.7)", async () => {
+      const user = userEvent.setup();
+      // Mirror the real store contract: createSecret swallows the error and
+      // records it on the store rather than re-throwing.
+      const failing = vi.fn(async () => {
+        useSecretsStore.setState({ error: "Failed to save secret." });
+      });
+      useSecretsStore.setState({ createSecret: failing });
+
+      render(<SecretsPanel onClose={onClose} />);
+
+      const nameInput = screen.getByLabelText("Name");
+      const valueInput = screen.getByLabelText("Value");
+
+      await user.type(nameInput, "OPENAI_API_KEY");
+      await user.type(valueInput, "sk-test");
+      await user.click(screen.getByRole("button", { name: /save/i }));
+
+      // WCAG 3.3.7: the name persists so the inline error keeps describing a
+      // populated field; SECURITY: the value is still wiped.
+      expect(nameInput).toHaveValue("OPENAI_API_KEY");
+      expect(valueInput).toHaveValue("");
+      await waitFor(() => {
+        expect(nameInput).toHaveAttribute("aria-invalid", "true");
+      });
+      expect(nameInput).toHaveAttribute("aria-describedby", "secret-form-error");
+    });
+  });
+
+  describe("delete confirmation (WCAG 3.3.4)", () => {
+    it("does not delete immediately — it opens a danger confirm dialog naming the secret", async () => {
+      const user = userEvent.setup();
+      const deleteSecret = vi.fn().mockResolvedValue(undefined);
+      useSecretsStore.setState({ deleteSecret });
+
+      render(<SecretsPanel onClose={onClose} />);
+
+      await user.click(screen.getByLabelText("Delete secret OPENAI_API_KEY"));
+
+      // The destructive action is staged, not fired.
+      expect(deleteSecret).not.toHaveBeenCalled();
+      expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+      expect(
+        screen.getByText(/Delete secret "OPENAI_API_KEY"\?/),
+      ).toBeInTheDocument();
+    });
+
+    it("deletes the named secret only after confirming", async () => {
+      const user = userEvent.setup();
+      const deleteSecret = vi.fn().mockResolvedValue(undefined);
+      useSecretsStore.setState({ deleteSecret });
+
+      render(<SecretsPanel onClose={onClose} />);
+
+      await user.click(screen.getByLabelText("Delete secret OPENAI_API_KEY"));
+      const dialog = screen.getByRole("alertdialog");
+      await user.click(within(dialog).getByRole("button", { name: "Delete secret" }));
+
+      expect(deleteSecret).toHaveBeenCalledTimes(1);
+      expect(deleteSecret).toHaveBeenCalledWith("OPENAI_API_KEY");
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    });
+
+    it("leaves the secret intact when the dialog is cancelled", async () => {
+      const user = userEvent.setup();
+      const deleteSecret = vi.fn().mockResolvedValue(undefined);
+      useSecretsStore.setState({ deleteSecret });
+
+      render(<SecretsPanel onClose={onClose} />);
+
+      await user.click(screen.getByLabelText("Delete secret OPENAI_API_KEY"));
+      const dialog = screen.getByRole("alertdialog");
+      await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+
+      expect(deleteSecret).not.toHaveBeenCalled();
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    });
+
+    it("Escape cancels the pending delete without tearing down the panel", async () => {
+      const user = userEvent.setup();
+      const deleteSecret = vi.fn().mockResolvedValue(undefined);
+      useSecretsStore.setState({ deleteSecret });
+
+      render(<SecretsPanel onClose={onClose} />);
+
+      await user.click(screen.getByLabelText("Delete secret OPENAI_API_KEY"));
+      expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+
+      await user.keyboard("{Escape}");
+
+      // The confirm dialog owns Escape: it closes, the delete never fires, and
+      // the surrounding panel stays open (onClose must NOT have been called).
+      expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+      expect(deleteSecret).not.toHaveBeenCalled();
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+    });
+
+    it("only user-scoped secrets expose a delete control", () => {
+      render(<SecretsPanel onClose={onClose} />);
+      // OPENAI_API_KEY is user-scoped → deletable; SERVER_KEY is server-scoped → not.
+      expect(
+        screen.getByLabelText("Delete secret OPENAI_API_KEY"),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByLabelText("Delete secret SERVER_KEY"),
+      ).not.toBeInTheDocument();
     });
   });
 });

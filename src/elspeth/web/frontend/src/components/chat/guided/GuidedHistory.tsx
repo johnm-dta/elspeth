@@ -3,7 +3,7 @@
 // Guided-mode decision summary. This is deliberately not a protocol log: the
 // operator needs a visible recap of choices made so far, while low-level
 // emitter/type/hash details stay out of the default workflow surface.
-import type { GuidedStep, TurnRecord, TurnType } from "@/types/guided";
+import type { GuidedStep, TurnRecord } from "@/types/guided";
 
 // ── Display mappings ─────────────────────────────────────────────────────────
 
@@ -17,24 +17,7 @@ const STEP_LABELS: Record<GuidedStep, string> = {
   step_2_sink: "Output",
   step_2_5_recipe_match: "Recipe",
   step_3_transforms: "Transforms",
-};
-
-/**
- * Human-readable labels for turn types.
- * CLOSED LIST — mirrors TurnType in types/guided.ts:15-21.
- */
-const TURN_TYPE_LABELS: Record<TurnType, string> = {
-  inspect_and_confirm: "Inspect and confirm",
-  single_select: "Single select",
-  multi_select_with_custom: "Multi-select with custom fields",
-  schema_form: "Schema form",
-  propose_chain: "Proposed chain",
-  recipe_offer: "Recipe offer",
-  // Phase 5b — interpretation-review history label.  The widget itself lands
-  // in Task 4 of 18b-phase-5b-frontend.md; this label entry exists so the
-  // Record<TurnType, string> exhaustive-keys contract holds the moment the
-  // TurnType union widens.
-  interpretation_review: "Interpretation review",
+  step_4_wire: "Wire",
 };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -42,6 +25,13 @@ const TURN_TYPE_LABELS: Record<TurnType, string> = {
 interface Props {
   /** Completed turn records from GuidedSession.history. */
   history: TurnRecord[];
+  /**
+   * The step the learner is currently on. The in-progress step is NOT a
+   * completed decision, so its turns are excluded even when an already-answered
+   * sub-turn (e.g. the source single_select before the source schema_form) has
+   * recorded a summary.
+   */
+  currentStep: GuidedStep;
 }
 
 /**
@@ -50,9 +40,29 @@ interface Props {
  * Returns null when history is empty — the parent should not render this
  * widget unless there are completed steps to show.
  */
-export function GuidedHistory({ history }: Props): React.ReactElement | null {
+export function GuidedHistory({ history, currentStep }: Props): React.ReactElement | null {
   // Empty history: nothing to show.
   if (history.length === 0) {
+    return null;
+  }
+
+  // One row per COMPLETED step — a step the learner has moved PAST. The current
+  // step is in progress (its answered single_select may already carry a summary
+  // while a schema_form sub-turn is still pending), so it is never "decided" yet
+  // and is excluded outright. Among past steps, keep the most-recent summarised
+  // turn (Map.set on the chronological history wins last); a step that produced
+  // no summary at all contributes nothing. The Map preserves first-seen order.
+  const latestByStep = new Map<GuidedStep, TurnRecord>();
+  for (const turn of history) {
+    if (turn.step === currentStep) continue;
+    if (turn.summary === null) continue;
+    latestByStep.set(turn.step, turn);
+  }
+  const rows = [...latestByStep.values()];
+
+  // No completed decisions yet (e.g. still on the first step before any Send):
+  // render nothing rather than an empty "Decisions so far" card.
+  if (rows.length === 0) {
     return null;
   }
 
@@ -65,13 +75,16 @@ export function GuidedHistory({ history }: Props): React.ReactElement | null {
         Decisions so far
       </h2>
       <ol className="guided-history-list">
-        {history.map((turn, idx) => (
-          <li key={`${turn.step}-${idx}`} className="guided-history-item">
+        {rows.map((turn) => (
+          <li key={turn.step} className="guided-history-item">
             <span className="guided-history-step-name">
               {STEP_LABELS[turn.step]}
             </span>
+            {/* Only past, summarised steps reach here (the current step and
+                summary-null turns are filtered above), so every row has a real
+                summary — no fallback needed. */}
             <span className="guided-history-summary">
-              {turn.summary ?? TURN_TYPE_LABELS[turn.turn_type]}
+              {turn.summary}
             </span>
           </li>
         ))}

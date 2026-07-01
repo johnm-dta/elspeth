@@ -376,6 +376,32 @@ def test_chat_turn_raw_status_string_rejected_at_construction() -> None:
         _make_chat_turn(status="success")
 
 
+@pytest.mark.parametrize(
+    ("overrides", "exc_type", "match"),
+    [
+        ({"step": ""}, ValueError, "step must be non-empty"),
+        ({"model": ""}, ValueError, "model must be non-empty"),
+        ({"user_message_hash": ""}, ValueError, "user_message_hash must be non-empty"),
+        ({"assistant_message_hash": ""}, ValueError, "assistant_message_hash must be non-empty"),
+        ({"started_at": "2026-05-13T12:00:00Z"}, TypeError, "started_at must be datetime"),
+        ({"finished_at": "2026-05-13T12:00:00Z"}, TypeError, "finished_at must be datetime"),
+        ({"finished_at": datetime(2026, 5, 13, 11, 59, 59, tzinfo=UTC)}, ValueError, "finished_at must be >= started_at"),
+        (
+            {"status": ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE, "error_class": ""},
+            ValueError,
+            "error_class must be non-empty",
+        ),
+    ],
+)
+def test_chat_turn_rejects_invalid_audit_shape(
+    overrides: dict[str, object],
+    exc_type: type[Exception],
+    match: str,
+) -> None:
+    with pytest.raises(exc_type, match=match):
+        _make_chat_turn(**overrides)
+
+
 def test_chat_turn_success_requires_no_error_class() -> None:
     with pytest.raises(ValueError, match="error_class"):
         _make_chat_turn(status=ComposerChatTurnStatus.SUCCESS, error_class="TimeoutError")

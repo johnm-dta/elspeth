@@ -13,14 +13,16 @@ they never touch HTTP, session storage, or audit emission directly.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import Engine
 
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.guided.errors import InvariantError
-from elspeth.web.composer.guided.recipe_match import RecipeMatch
+from elspeth.web.composer.guided.protocol import BLOB_REF_PATH_PREFIX, GuidedStep
 from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
@@ -29,17 +31,18 @@ from elspeth.web.composer.guided.state_machine import (
     TerminalKind,
     TerminalState,
 )
+from elspeth.web.composer.source_inspection import observed_columns_from_path
 from elspeth.web.composer.state import CompositionState
 from elspeth.web.composer.tools import (
     ToolContext,
     ToolResult,
-    _execute_apply_pipeline_recipe,
     _execute_set_output,
     _execute_set_pipeline,
     _execute_set_source,
+    _sync_get_blob_by_id,
     _sync_get_blob_by_storage_path,
 )
-from elspeth.web.composer.yaml_generator import generate_yaml
+from elspeth.web.composer.yaml_generator import generate_public_yaml
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +62,39 @@ class StepHandlerResult:
     state: CompositionState
     session: GuidedSession
     tool_result: ToolResult
+
+
+def _resolve_blob_ref_path(
+    resolved: SourceResolved,
+    *,
+    session_engine: Engine | None,
+    session_id: str | None,
+) -> SourceResolved:
+    """Re-resolve a masked ``blob:<ref>`` source path to the real storage_path.
+
+    ``build_step_1_schema_form_turn_from_resolved`` renders a blob-backed
+    source's ``path`` knob as ``blob:<blob_ref>`` so the absolute storage_path
+    (deploy dir + OS username) never reaches the wire. On commit we must restore
+    the real path or the pipeline cannot read the blob. The lookup is
+    authoritative (by-id DB query, session-scoped), mirroring the storage_path
+    enrichment below.
+
+    A non-sentinel path — an operator-typed path, or a first chat-resolve commit
+    that already carries the real path — is returned unchanged.
+    """
+    path_value = resolved.options.get("path")
+    if not (isinstance(path_value, str) and path_value.startswith(BLOB_REF_PATH_PREFIX)):
+        return resolved
+    blob_ref = path_value[len(BLOB_REF_PATH_PREFIX) :]
+    if session_engine is None or session_id is None:
+        raise InvariantError(
+            "handle_step_1_source: a blob:<ref> source path requires session_engine and session_id to resolve, but they were not provided."
+        )
+    blob = _sync_get_blob_by_id(session_engine, blob_ref, session_id)
+    if blob is None:
+        raise InvariantError(f"handle_step_1_source: blob:<ref> path references blob {blob_ref!r}, which no longer exists in this session.")
+    restored = {**dict(resolved.options), "path": blob["storage_path"]}
+    return dataclasses.replace(resolved, options=restored)
 
 
 def handle_step_1_source(
@@ -92,23 +128,28 @@ def handle_step_1_source(
     a blob row is found the blob UUID is injected as ``blob_ref`` into the
     stored ``step_1_result.options`` (the ``SourceResolved`` snapshot).
 
-    This lets the recipe slot resolvers in ``recipe_match.py`` read
-    ``source.options["blob_ref"]`` even when the operator supplied the path
-    via the guided SchemaForm rather than the ``set_source_from_blob`` tool.
-    The lookup is authoritative (DB query) rather than path-parsing, so it
-    cannot be fooled by paths that coincidentally look like blob paths but
-    aren't registered blobs.
+    This records the blob UUID on ``source.options["blob_ref"]`` even when the
+    operator supplied the path via the guided SchemaForm rather than the
+    ``set_source_from_blob`` tool. The lookup is authoritative (DB query) rather
+    than path-parsing, so it cannot be fooled by paths that coincidentally look
+    like blob paths but aren't registered blobs.
 
     If no matching blob is found (path-only source, not blob-backed), the
-    enrichment is silently skipped — recipe matching will not populate
-    ``source_blob_id`` and the recipe offer is omitted, which is the correct
-    behavior for non-blob sources.
+    enrichment is silently skipped, which is the correct behavior for non-blob
+    sources.
     """
+    # Restore the real storage_path from a masked blob:<ref> path (emitted to keep
+    # the absolute path off the wire) before committing, so the pipeline can read
+    # the blob. No-op for non-sentinel paths.
+    resolved = _resolve_blob_ref_path(resolved, session_engine=session_engine, session_id=session_id)
     args = {
         "plugin": resolved.plugin,
         "options": dict(resolved.options),
         "on_success": "main",
-        "on_validation_failure": "discard",
+        # The composer (chat resolution) owns this routing choice; commit what it
+        # picked. Manual / schema_form-submission resolved values carry the
+        # "discard" default, so this remains "discard" for those paths.
+        "on_validation_failure": resolved.on_validation_failure,
     }
 
     tool_result = _execute_set_source(args, state, ToolContext(catalog=catalog, data_dir=data_dir))
@@ -128,18 +169,49 @@ def handle_step_1_source(
     if source_path is not None and session_engine is not None and session_id is not None:
         blob = _sync_get_blob_by_storage_path(session_engine, str(source_path), session_id)
         if blob is not None:
-            # Inject blob_ref into the SourceResolved snapshot so that
-            # _classify_slot_resolver (recipe_match.py) can read it.
-            # The original options are Tier-3 (user-submitted SchemaForm
-            # values); we add blob_ref as an authoritative overlay from our
-            # own DB (Tier 1 source), so no .get() or coercion needed here.
+            # Inject blob_ref into the SourceResolved snapshot as an
+            # authoritative overlay. The original options are Tier-3
+            # (user-submitted SchemaForm values); we add blob_ref from our own DB
+            # (Tier 1 source), so no .get() or coercion needed here.
             enriched_options: dict[str, Any] = {**dict(resolved.options), "blob_ref": blob["id"]}
-            enriched_resolved = dataclasses.replace(resolved, options=enriched_options)
+            # observed_columns is a FACT about the data. The LLM's resolve_source
+            # sometimes returns observed_columns=[]; downstream transform-chain
+            # building keys on observed_columns (the `url` signal), so an empty
+            # list silently routes the canonical web-scrape tutorial to a
+            # degenerate chain. When empty, backfill from the blob content
+            # authoritatively (same overlay rationale as blob_ref). Keep non-empty
+            # LLM columns — its full-content view can be richer than the bounded
+            # inspect scan. This is the commit convergence point, so both the
+            # chat-resolve and schema_form re-submit paths get the backfill.
+            observed_columns = resolved.observed_columns or _observed_columns_from_blob(blob)
+            enriched_resolved = dataclasses.replace(resolved, options=enriched_options, observed_columns=observed_columns)
 
     return StepHandlerResult(
         state=tool_result.updated_state,
         session=dataclasses.replace(session, step_1_result=enriched_resolved),
         tool_result=tool_result,
+    )
+
+
+def _observed_columns_from_blob(blob: Mapping[str, Any]) -> tuple[str, ...]:
+    """Derive observed column names from a registered blob's content, or ``()``.
+
+    Reads the blob file at its ``storage_path`` and runs the bounded source
+    inspector. A missing/unreadable file degrades to ``()`` (the caller then
+    keeps whatever columns it had) rather than failing the commit — column
+    backfill is best-effort enrichment, never a gate on committing the source.
+    """
+    storage_path = blob.get("storage_path")
+    if not storage_path:
+        return ()
+    # observed_columns_from_path reads only the bounded prefix the inspector
+    # actually scans (the whole-file read here could allocate hundreds of MB for
+    # a large blob just to recover a header) and degrades a missing/unreadable
+    # file to () itself — so no separate existence pre-check is needed.
+    return observed_columns_from_path(
+        path=Path(str(storage_path)),
+        filename=str(blob.get("filename") or ""),
+        mime_type=str(blob.get("mime_type") or ""),
     )
 
 
@@ -215,65 +287,6 @@ def handle_step_2_sink(
     )
 
 
-def handle_step_2_5_recipe_apply(
-    *,
-    state: CompositionState,
-    session: GuidedSession,
-    match: RecipeMatch,
-    catalog: CatalogService,
-    data_dir: str | None = None,
-    session_engine: Engine | None = None,
-    session_id: str | None = None,
-) -> StepHandlerResult:
-    """Apply the matched recipe and mark the session COMPLETED.
-
-    On success the returned state is the recipe-applied pipeline,
-    session.terminal is TerminalState(COMPLETED, reason=None,
-    pipeline_yaml=<rendered>), and tool_result is the canonical
-    ToolResult from _execute_apply_pipeline_recipe.
-
-    On failure the state and session are unchanged, tool_result
-    reflects the failure; the route layer will re-emit the recipe-
-    offer turn with the validation errors attached.
-    """
-    arguments: dict[str, object] = {
-        "recipe_name": match.recipe_name,
-        "slots": dict(match.slots),
-    }
-
-    tool_result = _execute_apply_pipeline_recipe(
-        arguments,
-        state,
-        ToolContext(
-            catalog=catalog,
-            data_dir=data_dir,
-            session_engine=session_engine,
-            session_id=session_id,
-        ),
-    )
-
-    if not tool_result.success:
-        return StepHandlerResult(
-            state=state,
-            session=session,
-            tool_result=tool_result,
-        )
-
-    yaml_text = generate_yaml(tool_result.updated_state)
-    terminal = TerminalState(
-        kind=TerminalKind.COMPLETED,
-        reason=None,
-        pipeline_yaml=yaml_text,
-    )
-    new_session = dataclasses.replace(session, terminal=terminal)
-
-    return StepHandlerResult(
-        state=tool_result.updated_state,
-        session=new_session,
-        tool_result=tool_result,
-    )
-
-
 def handle_step_3_chain_accept(
     *,
     state: CompositionState,
@@ -284,7 +297,7 @@ def handle_step_3_chain_accept(
     session_engine: Engine | None = None,
     session_id: str | None = None,
 ) -> StepHandlerResult:
-    """Commit *proposal* atomically via _execute_set_pipeline and terminate the session.
+    """Commit *proposal* atomically via _execute_set_pipeline and redirect to wire.
 
     Reconstructs the full pipeline spec from the existing single guided source
     + state.outputs and the new transforms from the proposal.
@@ -300,10 +313,10 @@ def handle_step_3_chain_accept(
         idx=N-1: input=f"chain_{N-2}", on_success="main"          (N>1)
         outputs: unchanged — still consume "main"
 
-    On _execute_set_pipeline success the session terminal is COMPLETED with
-    rendered YAML and step_3_proposal is recorded. On failure the state and
-    session are unchanged and the route layer re-emits the propose_chain turn
-    with the validation errors.
+    On _execute_set_pipeline success the session moves to STEP_4_WIRE and
+    step_3_proposal is recorded; the wire confirm handler owns the COMPLETED
+    terminal stamp. On failure the state and session are unchanged and the
+    route layer re-emits the propose_chain turn with the validation errors.
 
     Args:
         state: Current composition state. MUST have a committed source and
@@ -335,6 +348,7 @@ def handle_step_3_chain_accept(
     for idx, step in enumerate(proposal.steps):
         input_label = "chain_in" if idx == 0 else f"chain_{idx - 1}"
         on_success_label = "main" if idx == n - 1 else f"chain_{idx}"
+        options = dict(step["options"])
         node_args.append(
             {
                 "id": f"guided_xform_{idx}",
@@ -342,7 +356,7 @@ def handle_step_3_chain_accept(
                 "plugin": step["plugin"],
                 "input": input_label,
                 "on_success": on_success_label,
-                "options": dict(step["options"]),
+                "options": options,
             }
         )
 
@@ -387,16 +401,11 @@ def handle_step_3_chain_accept(
             tool_result=tool_result,
         )
 
-    yaml_text = generate_yaml(tool_result.updated_state)
-    terminal = TerminalState(
-        kind=TerminalKind.COMPLETED,
-        reason=None,
-        pipeline_yaml=yaml_text,
-    )
     new_session = dataclasses.replace(
         session,
+        step=GuidedStep.STEP_4_WIRE,
         step_3_proposal=proposal,
-        terminal=terminal,
+        terminal=None,
     )
 
     return StepHandlerResult(
@@ -404,3 +413,36 @@ def handle_step_3_chain_accept(
         session=new_session,
         tool_result=tool_result,
     )
+
+
+def handle_step_4_wire_confirm(
+    *,
+    state: CompositionState,
+    session: GuidedSession,
+) -> StepHandlerResult:
+    """Confirm wiring and stamp COMPLETED only when validation is clean.
+
+    This is the terminal-stamp gate for guided mode. Recipe apply and chain
+    accept already commit the pipeline and move the session to STEP_4_WIRE; this
+    handler re-runs validation and either stamps the completed terminal with
+    rendered YAML or leaves the session open for another wire-stage turn.
+    """
+    validation = state.validate()
+    tool_result = ToolResult(
+        success=validation.is_valid,
+        updated_state=state,
+        validation=validation,
+        affected_nodes=(),
+        data=None,
+    )
+    if not validation.is_valid:
+        return StepHandlerResult(state=state, session=session, tool_result=tool_result)
+
+    yaml_text = generate_public_yaml(state)
+    terminal = TerminalState(
+        kind=TerminalKind.COMPLETED,
+        reason=None,
+        pipeline_yaml=yaml_text,
+    )
+    new_session = dataclasses.replace(session, terminal=terminal)
+    return StepHandlerResult(state=state, session=new_session, tool_result=tool_result)

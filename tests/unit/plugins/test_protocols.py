@@ -193,6 +193,7 @@ class TestTransformProtocol:
             example_use: str | None = None
             capability_tags: tuple[str, ...] = ()
             audit_characteristics: DeclaredAuditCharacteristics = frozenset()
+            discovery_secret_requirements: ClassVar[dict[str, tuple[str, ...]]] = {}
             # Lifecycle guards managed by BaseTransform; declared here for the
             # hand-rolled structural fake to satisfy TransformProtocol's
             # @runtime_checkable structural typing.

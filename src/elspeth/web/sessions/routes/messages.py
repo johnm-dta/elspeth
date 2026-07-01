@@ -884,7 +884,7 @@ def register_message_routes(router: APIRouter) -> None:
         # pagination. The service remains the durable audit store; this route
         # is the user-facing conversation channel. The eval harness can opt in
         # to LLM-call sidecars, which contain model/usage/cost metadata but not
-        # raw prompts, tool arguments, or tool results.
+        # raw prompts, provider reasoning artifacts, tool arguments, or tool results.
         messages = await service.get_messages(session.id, limit=None)
         if include_tool_rows and include_llm_audit:
             conversation_messages = _composer_conversation_tool_or_llm_audit_messages(messages)

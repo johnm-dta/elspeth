@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 
 from elspeth.composer_mcp.server import _build_tool_defs, _dispatch_tool
 from elspeth.web.catalog.protocol import CatalogService
@@ -434,6 +435,55 @@ class TestDispatchTool:
         )
         assert result["success"] is True
         assert isinstance(result["data"], str)
+
+    def test_generate_yaml_strips_blob_bound_source_storage_path(self, scratch_dir: Path) -> None:
+        storage_path = "/data/blobs/session/98b1357d_input.csv"
+        state = CompositionState(
+            source=SourceSpec(
+                plugin="csv",
+                on_success="main",
+                options={
+                    "path": storage_path,
+                    "blob_ref": "98b1357d-5aab-4fb3-85b4-5ad643912e84",
+                    "mode": "bind_source",
+                    "schema": {"mode": "observed"},
+                },
+                on_validation_failure="quarantine",
+            ),
+            nodes=(),
+            edges=(),
+            outputs=(
+                OutputSpec(
+                    name="main",
+                    plugin="csv",
+                    options={
+                        "path": "outputs/out.csv",
+                        "schema": {"mode": "observed"},
+                        "mode": "write",
+                        "collision_policy": "auto_increment",
+                    },
+                    on_write_failure="discard",
+                ),
+            ),
+            metadata=PipelineMetadata(),
+            version=1,
+        )
+
+        result = _dispatch_tool(
+            "generate_yaml",
+            {},
+            state,
+            _mock_catalog(),
+            scratch_dir,
+        )
+
+        assert result["success"] is True
+        assert storage_path not in result["data"]
+        options = yaml.safe_load(result["data"])["sources"]["source"]["options"]
+        assert "path" not in options
+        assert "blob_ref" not in options
+        assert "mode" not in options
+        assert options["schema"] == {"mode": "observed"}
 
     def test_generate_yaml_rejects_state_missing_file_sink_collision_policy(self, scratch_dir: Path) -> None:
         state = CompositionState(

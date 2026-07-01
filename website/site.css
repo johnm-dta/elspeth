@@ -1,5 +1,16 @@
-/* site.css — shared styles for the ELSPETH marketing site (multi-page).
+/* site.css — shared styles for the ELSPETH project site (multi-page).
    Built on the design-system tokens (styles.css). */
+
+:root {
+  /* Website display scale. The product's console tokens cap at 32px (an
+     information-dense operator UI); a public landing layer needs larger, fluid
+     display sizes, so the display layer is tokenised here rather than left as
+     scattered px literals. Body and card sizes intentionally ride the app scale. */
+  --site-display: clamp(2.5rem, 1.6rem + 3vw, 3.5rem);    /* 40 → 56px  hero h1 */
+  --site-h1:      clamp(2rem, 1.55rem + 1.5vw, 2.75rem);  /* 32 → 44px  page-head h1 */
+  --site-h2:      clamp(1.9rem, 1.62rem + 1vw, 2.25rem);  /* ~30 → 36px ctaband h2 */
+  --site-h3:      clamp(1.75rem, 1.55rem + 0.6vw, 2rem);  /* 28 → 32px  section-head h2 */
+}
 
 html, body { height: auto; overflow-x: hidden; }
 body { background: var(--color-bg); color: var(--color-text); margin: 0; }
@@ -8,6 +19,25 @@ a { color: inherit; text-decoration: none; }
 .eyebrow { font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: .16em; text-transform: uppercase; color: var(--color-text-muted); }
 .dotgrid { background-image: radial-gradient(var(--color-canvas-grid) 1px, transparent 1px); background-size: 22px 22px; }
 .muted { color: var(--color-text-secondary); }
+
+/* A11y: lift muted text to clear WCAG AA (4.5:1) on dark surfaces (5.0:1 on the
+   lightest, surface-elevated). Scoped to dark; the light theme already passes. */
+[data-theme="dark"] { --color-text-muted: #8fb0b0; }
+
+/* A11y: the success + code-accent tokens dip below WCAG AA (4.5:1) as small text
+   on the LIGHT terminal/code surface (--color-surface-nav #e8edf3). Re-tint these
+   *text* uses (not the tokens themselves) so they clear AA on light; the dark
+   theme already passes. Guarded by check-contrast.mjs. */
+[data-theme="light"] .term-body .ok,
+[data-theme="light"] .step pre .ok,
+[data-theme="light"] .proof .term-body .hl { color: #0b6b69; }   /* 5.37:1 on #e8edf3 */
+[data-theme="light"] pre.code .key { color: #1c6a87; }           /* 5.15:1 on #e8edf3 */
+[data-theme="light"] pre.code .str { color: #1f6b57; }           /* 5.41:1 on #e8edf3 */
+
+/* Skip link + visually-hidden utility (site-owned, independent of the token mirror). */
+.skip-link { position: absolute; left: 12px; top: -56px; z-index: 1000; background: var(--color-surface-elevated); color: var(--color-text); border: 1px solid var(--color-border-strong); border-radius: var(--radius-md); padding: 10px 16px; font-size: 14px; transition: top .15s ease; }
+.skip-link:focus { top: 12px; }
+.vh { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
 
 /* Nav */
 .nav { position: sticky; top: 0; z-index: 20; background: color-mix(in srgb, var(--color-surface-nav) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--color-border); }
@@ -24,12 +54,12 @@ a { color: inherit; text-decoration: none; }
 
 /* Page header (non-home) */
 .page-head { padding: 64px 0 8px; }
-.page-head h1 { font-size: 44px; line-height: 1.08; letter-spacing: -0.02em; margin: 14px 0 0; max-width: 18ch; font-weight: 700; text-wrap: balance; }
+.page-head h1 { font-size: var(--site-h1); line-height: 1.08; letter-spacing: -0.02em; margin: 14px 0 0; max-width: 18ch; font-weight: 700; text-wrap: balance; }
 .page-head p { font-size: 18px; line-height: 1.55; color: var(--color-text-secondary); max-width: 60ch; margin: 18px 0 0; }
 
 /* Hero */
 .hero { padding: 76px 0 60px; position: relative; }
-.hero h1 { font-size: 56px; line-height: 1.05; letter-spacing: -0.02em; margin: 18px 0 0; max-width: 16ch; font-weight: 700; text-wrap: balance; }
+.hero h1 { font-size: var(--site-display); line-height: 1.05; letter-spacing: -0.02em; margin: 18px 0 0; max-width: 16ch; font-weight: 700; text-wrap: balance; }
 .hero .sub { font-size: 19px; line-height: 1.55; color: var(--color-text-secondary); max-width: 56ch; margin: 22px 0 0; }
 .cta-row { display: flex; gap: 12px; margin-top: 32px; flex-wrap: wrap; }
 .hero-grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 48px; align-items: center; }
@@ -48,7 +78,7 @@ a { color: inherit; text-decoration: none; }
 /* Sections */
 section { padding: 60px 0; }
 .section-head { max-width: 60ch; }
-.section-head h2 { font-size: 32px; line-height: 1.15; letter-spacing: -0.01em; margin: 10px 0 0; font-weight: 700; }
+.section-head h2 { font-size: var(--site-h3); line-height: 1.15; letter-spacing: -0.01em; margin: 10px 0 0; font-weight: 700; }
 .section-head p { font-size: 17px; color: var(--color-text-secondary); line-height: 1.55; margin: 14px 0 0; }
 .divider { border: 0; border-top: 1px solid var(--color-border); margin: 0; }
 
@@ -74,7 +104,11 @@ section { padding: 60px 0; }
 .sda { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch; gap: 14px; margin-top: 36px; }
 .sda-step { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 22px; }
 .sda-step .k { font-family: var(--font-mono); font-size: 12px; text-transform: uppercase; letter-spacing: .12em; font-weight: 700; }
-.sda-step h4 { font-size: 17px; margin: 8px 0 0; font-weight: 650; }
+/* "Act" (sink) label: theme-aware so it clears WCAG AA on both surfaces — the
+   token passes in light (#ad502d, 5.3:1); a lighter tint is needed in dark. */
+.sda-step .k.k-act { color: var(--color-badge-sink); }
+[data-theme="dark"] .sda-step .k.k-act { color: #f0926a; }
+.sda-step h3 { font-size: 17px; margin: 8px 0 0; font-weight: 650; }
 .sda-step p { font-size: 14px; color: var(--color-text-muted); margin: 6px 0 0; line-height: 1.5; }
 .sda-arrow { align-self: center; color: var(--color-border-strong); font-size: 22px; }
 
@@ -87,25 +121,25 @@ section { padding: 60px 0; }
 .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 40px; }
 .feature { padding: 22px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
 .feature .fi { width: 34px; height: 34px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-md); background: var(--color-accent-muted); color: var(--color-success); }
-.feature h4 { font-size: 16px; margin: 14px 0 0; font-weight: 650; }
+.feature h3 { font-size: 16px; margin: 14px 0 0; font-weight: 650; }
 .feature p { font-size: 14px; color: var(--color-text-secondary); line-height: 1.5; margin: 8px 0 0; }
 
 /* Trust tiers */
 .tiers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 36px; }
 .tier { padding: 22px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
 .tier .tlabel { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--color-text-muted); }
-.tier h4 { font-size: 17px; margin: 8px 0 0; font-weight: 650; }
+.tier h3 { font-size: 17px; margin: 8px 0 0; font-weight: 650; }
 .tier p { font-size: 14px; color: var(--color-text-secondary); line-height: 1.5; margin: 8px 0 0; }
 .tier .trust { display: inline-block; margin-top: 12px; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: var(--radius-sm); }
 
-/* Use cases */
-.cases { margin-top: 36px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); overflow: hidden; }
-.case-row { display: grid; grid-template-columns: 1.2fr 1fr 1.4fr 1.2fr; gap: 16px; padding: 16px 20px; border-bottom: 1px solid var(--color-border); align-items: baseline; }
-.case-row:last-child { border-bottom: 0; }
-.case-row.head { background: var(--color-surface-elevated); }
-.case-row.head span { font-family: var(--font-mono); font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--color-text-muted); }
-.case-row .dom { font-weight: 650; font-size: 15px; }
-.case-row .c { font-size: 14px; color: var(--color-text-secondary); }
+/* Use cases — semantic tables (real <table>, horizontal-scroll wrapper on narrow viewports) */
+.table-scroll { margin-top: 36px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); overflow-x: auto; }
+.cases { width: 100%; border-collapse: collapse; min-width: 640px; }
+.cases th, .cases td { text-align: left; padding: 16px 20px; border-bottom: 1px solid var(--color-border); vertical-align: baseline; }
+.cases tr:last-child th, .cases tr:last-child td { border-bottom: 0; }
+.cases thead th { background: var(--color-surface-elevated); font-family: var(--font-mono); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .1em; color: var(--color-text-muted); }
+.cases tbody th { font-weight: 650; font-size: 15px; color: var(--color-text); }
+.cases td { font-size: 14px; color: var(--color-text-secondary); }
 
 /* Code block */
 .codewrap { display: grid; grid-template-columns: 0.8fr 1.2fr; gap: 40px; align-items: center; margin-top: 8px; }
@@ -118,33 +152,98 @@ pre.code .cm { color: var(--color-text-muted); }
 .steps { display: grid; gap: 14px; margin-top: 36px; }
 .step { display: grid; grid-template-columns: 36px 1fr; gap: 16px; align-items: start; padding: 20px; border: 1px solid var(--color-border); border-radius: var(--radius-lg); background: var(--color-surface); }
 .step .num { width: 36px; height: 36px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-pill); background: var(--color-accent-muted); color: var(--color-success); font-family: var(--font-mono); font-weight: 700; }
-.step h4 { margin: 4px 0 0; font-size: 17px; font-weight: 650; }
+.step h3 { margin: 4px 0 0; font-size: 17px; font-weight: 650; }
 .step p { margin: 6px 0 0; font-size: 14px; color: var(--color-text-secondary); line-height: 1.5; }
 .step pre { margin: 12px 0 0; padding: 12px 14px; background: var(--color-surface-nav); border: 1px solid var(--color-border); border-radius: var(--radius-md); font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-secondary); overflow: auto; }
 .step pre .pr { color: var(--color-badge-source); }
+.step pre .ok { color: var(--color-success); }
+.step pre .mut, .step pre .cm { color: var(--color-text-muted); }
 
 /* CTA band */
 .ctaband { text-align: center; padding: 76px 0; background: var(--color-surface-nav); border-top: 1px solid var(--color-border); border-bottom: 1px solid var(--color-border); }
-.ctaband h2 { font-size: 36px; margin: 14px 0 0; font-weight: 700; letter-spacing: -0.01em; }
+.ctaband h2 { font-size: var(--site-h2); margin: 14px 0 0; font-weight: 700; letter-spacing: -0.01em; }
 .ctaband p { font-size: 17px; color: var(--color-text-secondary); margin: 14px auto 0; max-width: 52ch; }
 
+/* Lineage proof — real `explain` output beside its reading (assurance) */
+.proof { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 32px; align-items: start; margin-top: 36px; }
+.proof .term-body { font-size: 12.5px; line-height: 1.65; }
+.proof .term-body .hl { color: var(--color-success); font-weight: 600; }
+.proof .term-body .sec { color: var(--color-text-secondary); }
+.proof-notes { display: flex; flex-direction: column; gap: 18px; }
+.proof-note { border-left: 2px solid var(--color-accent); padding-left: 14px; }
+.proof-note h4 { font-size: 14px; margin: 0; font-weight: 650; }
+.proof-note p { font-size: 13px; color: var(--color-text-secondary); line-height: 1.55; margin: 6px 0 0; }
+.proof-note code { font-family: var(--font-mono); font-size: 12px; color: var(--color-text); }
+.proof-src { margin-top: 18px; font-size: 13px; color: var(--color-text-muted); }
+.proof-src code { font-family: var(--font-mono); font-size: 12px; color: var(--color-text-secondary); }
+
+/* Fork → coalesce diagram (authoring) */
+.forkflow { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 36px; flex-wrap: wrap; }
+.fork-node { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 14px 16px; text-align: center; min-width: 104px; }
+.fork-node .fn-k { font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .1em; color: var(--color-text-muted); display: block; }
+.fork-node .fn-v { font-size: 14px; font-weight: 650; margin-top: 5px; display: block; }
+.fork-branches { display: flex; flex-direction: column; gap: 10px; }
+.fork-branch { background: var(--color-surface-elevated); border: 1px dashed var(--color-border-strong); border-radius: var(--radius-md); padding: 10px 14px; font-family: var(--font-mono); font-size: 12.5px; color: var(--color-text-secondary); text-align: center; }
+.fork-arrow { color: var(--color-border-strong); font-size: 20px; }
+.fork-caption { margin-top: 24px; font-size: 15px; color: var(--color-text-secondary); line-height: 1.6; max-width: 72ch; }
+.fork-caption code { font-family: var(--font-mono); font-size: 13px; color: var(--color-text); }
+
 /* Footer */
-footer { padding: 44px 0; }
-.foot { display: flex; justify-content: space-between; align-items: center; gap: 20px; flex-wrap: wrap; }
-.foot .links { display: flex; gap: 20px; }
-.foot .links a { font-size: 13px; color: var(--color-text-muted); }
-.foot .links a:hover { color: var(--color-text); }
-.foot .copy { font-size: 13px; color: var(--color-text-muted); }
+footer { padding: 56px 0 40px; }
+.foot { display: grid; grid-template-columns: 1.3fr 1.7fr; gap: 40px; align-items: start; }
+.foot-brand .brand { font-size: 15px; }
+.foot-prov { font-size: 13px; color: var(--color-text-muted); line-height: 1.6; margin: 12px 0 0; max-width: 44ch; }
+.foot-cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.foot-col { display: flex; flex-direction: column; gap: 9px; }
+.foot-h { font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--color-text-secondary); margin-bottom: 3px; }
+.foot-col a { font-size: 13px; color: var(--color-text-muted); }
+.foot-col a:hover { color: var(--color-text); }
+.foot-bottom { margin-top: 36px; padding-top: 20px; border-top: 1px solid var(--color-border); }
+.foot-bottom .copy { font-size: 13px; color: var(--color-text-muted); }
 
 .btn-lg { min-height: 48px; padding: 0 22px; font-size: 16px; border-radius: var(--radius-md); }
 
+/* Mobile nav disclosure — a CSS-only <details> menu shown ≤900px (no JS).
+   Native <summary> gives keyboard focus + expanded-state semantics for free. */
+.nav-menu { position: relative; display: none; }
+.nav-menu > summary { list-style: none; cursor: pointer; }
+.nav-menu > summary::-webkit-details-marker { display: none; }
+.nav-menu > summary::marker { content: ""; }
+.nav-menu > summary i, .nav-menu > summary svg { width: 20px; height: 20px; }
+.nav-menu-panel {
+  position: absolute; top: calc(100% + 12px); right: 0; z-index: 30;
+  display: flex; flex-direction: column; gap: 2px; min-width: 208px; padding: 8px;
+  background: var(--color-surface-elevated); border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md); box-shadow: 0 12px 32px rgba(0,0,0,0.30);
+}
+.nav-menu-panel a { padding: 10px 12px; font-size: 15px; color: var(--color-text-secondary); border-radius: var(--radius-sm); }
+.nav-menu-panel a:hover { background: var(--color-surface-hover); color: var(--color-text); }
+.nav-menu-panel hr { border: 0; border-top: 1px solid var(--color-border); margin: 6px 4px; }
+
+/* Copy-to-clipboard button on command/config blocks (added by site.js; the
+   button only exists when JS runs, so blocks stay clean without it). */
+pre.copyable { position: relative; }
+.copy-btn {
+  position: absolute; top: 8px; right: 8px; width: 30px; height: 30px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-surface-elevated); color: var(--color-text-secondary);
+  cursor: pointer; opacity: .55; transition: opacity .15s ease, color .15s ease, border-color .15s ease;
+}
+pre.copyable:hover .copy-btn, .copy-btn:hover, .copy-btn:focus-visible { opacity: 1; }
+.copy-btn:hover { color: var(--color-text); border-color: var(--color-border-strong); }
+.copy-btn.copied { color: var(--color-success); border-color: var(--color-success); opacity: 1; }
+.copy-btn i, .copy-btn svg { width: 15px; height: 15px; }
+
 @media (max-width: 900px) {
-  .hero-grid, .codewrap { grid-template-columns: 1fr; }
+  .hero-grid, .codewrap, .proof, .foot { grid-template-columns: 1fr; }
   .surfaces, .types, .features, .props, .tiers { grid-template-columns: 1fr; }
   .sda { grid-template-columns: 1fr; }
-  .sda-arrow { display: none; }
-  .hero h1 { font-size: 40px; }
-  .page-head h1 { font-size: 34px; }
+  .sda-arrow, .fork-arrow { display: none; }
+  .forkflow { flex-direction: column; align-items: stretch; }
+  .foot-cols { grid-template-columns: repeat(2, 1fr); }
+  /* Collapse the inline nav links + text action buttons into the disclosure menu. */
   .nav-links { display: none; }
-  .case-row { grid-template-columns: 1fr 1fr; }
+  .nav-menu { display: block; }
+  .nav-right .btn-compact { display: none; }
 }

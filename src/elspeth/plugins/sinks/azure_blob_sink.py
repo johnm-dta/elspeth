@@ -31,7 +31,7 @@ from elspeth.contracts.diversion import SinkWriteResult
 from elspeth.contracts.errors import AuditIntegrityError
 from elspeth.contracts.header_modes import HeaderMode, parse_header_mode
 from elspeth.contracts.plugin_assistance import PluginAssistance
-from elspeth.contracts.wire_visible_identity import reject_placeholder_value
+from elspeth.contracts.wire_visible_identity import reject_operator_required_placeholder_value
 from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSink
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig, validate_headers_value
@@ -247,7 +247,7 @@ class AzureBlobSinkConfig(DataPluginConfig):
         """Validate that container is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("container cannot be empty")
-        return reject_placeholder_value(v, field_name="container")
+        return reject_operator_required_placeholder_value(v, field_name="container")
 
     @field_validator("blob_path")
     @classmethod
@@ -255,7 +255,7 @@ class AzureBlobSinkConfig(DataPluginConfig):
         """Validate that blob_path is not empty or whitespace-only."""
         if not v or not v.strip():
             raise ValueError("blob_path cannot be empty")
-        return reject_placeholder_value(v, field_name="blob_path")
+        return reject_operator_required_placeholder_value(v, field_name="blob_path")
 
     @model_validator(mode="after")
     def validate_blob_path_template(self) -> Self:
@@ -309,7 +309,7 @@ class AzureBlobSink(BaseSink):
     name = "azure_blob"
     determinism = Determinism.IO_WRITE
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f7d25a366d121488"
+    source_file_hash: str | None = "sha256:bfa2e83797938e0d"
     config_model = AzureBlobSinkConfig
     # determinism inherited from BaseSink (IO_WRITE)
 

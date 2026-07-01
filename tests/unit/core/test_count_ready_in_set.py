@@ -69,7 +69,7 @@ def _single_run() -> tuple[RecorderSetup, TokenSchedulerRepository]:
 
 def make_recorder_setup(run_id: str) -> RecorderSetup:
     """A fresh run+source+NODE_ID on its own DB (per-run isolation)."""
-    setup = make_recorder_with_run(run_id=run_id, source_node_id="source-1")
+    setup = make_recorder_with_run(run_id=run_id, source_node_id="source-1", leader_worker_id=LEASE_OWNER)
     register_test_node(setup.data_flow, setup.run_id, NODE_ID)
     return setup
 
@@ -258,7 +258,7 @@ def test_large_in_list_does_not_break_on_sqlite_variable_limit() -> None:
 # count_failed_in_set — the FAILED-status refusal arm of the M1 discriminator.
 # ---------------------------------------------------------------------------
 
-LEASE_OWNER_LEADER = "leader"
+LEASE_OWNER_LEADER = LEASE_OWNER
 
 
 def test_count_failed_empty_input_returns_zero() -> None:
@@ -307,8 +307,14 @@ def test_count_failed_is_run_scoped() -> None:
     scheduler = factory.scheduler
 
     def _make_failed(run_id: str, sequence: int) -> str:
+        lease_owner = f"{LEASE_OWNER_LEADER}-{run_id}"
         run = factory.run_lifecycle.begin_run(
-            config={}, canonical_version="v1", run_id=run_id, openrouter_catalog_sha256="0" * 64, openrouter_catalog_source="bundled"
+            config={},
+            canonical_version="v1",
+            run_id=run_id,
+            openrouter_catalog_sha256="0" * 64,
+            openrouter_catalog_source="bundled",
+            leader_worker_id=lease_owner,
         )
         node = factory.data_flow.register_node(
             run_id=run.run_id,
@@ -337,9 +343,9 @@ def test_count_failed_is_run_scoped() -> None:
             available_at=NOW,
             row_payload_json=_PAYLOAD,
         )
-        claimed = scheduler.claim_ready(run_id=run.run_id, lease_owner=LEASE_OWNER_LEADER, lease_seconds=300, now=NOW)
+        claimed = scheduler.claim_ready(run_id=run.run_id, lease_owner=lease_owner, lease_seconds=300, now=NOW)
         assert claimed is not None
-        scheduler.mark_failed(work_item_id=item.work_item_id, now=NOW + timedelta(seconds=1), expected_lease_owner=LEASE_OWNER_LEADER)
+        scheduler.mark_failed(work_item_id=item.work_item_id, now=NOW + timedelta(seconds=1), expected_lease_owner=lease_owner)
         return item.work_item_id
 
     a_id = _make_failed("failed-run-A", 0)

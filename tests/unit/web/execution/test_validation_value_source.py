@@ -202,7 +202,7 @@ class TestWalkerL2Direct:
     def test_catalog_check_skipped_when_applies_when_predicate_fails(self) -> None:
         """Predicated catalog check (elspeth-ea207837d9): when the config's
         sibling field doesn't match the ``applies_when`` predicate (e.g.
-        base_url overridden to a chaos test endpoint), the catalog check
+        base_url overridden to a private compatible endpoint), the catalog check
         skips entirely — the catalog isn't authoritative for this config.
         Supports chaos test pipelines using fake model identifiers
         (``chaosllm/fake-gpt-4``) against errorworks/chaosllm servers.
@@ -211,7 +211,7 @@ class TestWalkerL2Direct:
             config_class=_FakeOpenRouterConfigWithBaseUrl,
             config_kwargs={
                 "model": "chaosllm/fake-gpt-4",
-                "base_url": "http://127.0.0.1:8199/v1",
+                "base_url": "https://chaos.example.test/v1",
             },
             settings_name="chaos_node_1",
         )

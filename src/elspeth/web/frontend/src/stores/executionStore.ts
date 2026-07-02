@@ -56,14 +56,25 @@ interface ExecutionState {
   isExecuting: boolean;
   wsDisconnected: boolean;
   error: string | null;
+  /**
+   * Sessions whose user ticked "don't ask again" on the pre-run egress
+   * disclosure (elspeth-c18ad229cc). In-memory only (a page reload re-arms
+   * the disclosure) and deliberately preserved across reset() so switching
+   * sessions does not re-arm a session the user already opted out of.
+   * Cleared on auth identity change via stores/subscriptions.ts.
+   */
+  runDisclosureAckBySession: Record<string, boolean>;
 
   validate: (sessionId: string, options?: ValidateOptions) => Promise<boolean>;
   setValidationResult: (result: ValidationResult | null) => void;
   execute: (sessionId: string, fanoutAck?: ExecutionFanoutAck) => Promise<string | null>;
   confirmFanoutExecution: () => Promise<string | null>;
   dismissFanoutGuard: () => void;
+  acknowledgeRunDisclosure: (sessionId: string) => void;
+  clearRunDisclosureAcks: () => void;
   cancel: (runId: string) => Promise<void>;
   loadRuns: (sessionId: string) => Promise<void>;
+  rehydrateActiveRun: (sessionId: string) => Promise<void>;
   loadRunDiagnostics: (runId: string) => Promise<void>;
   evaluateRunDiagnostics: (runId: string) => Promise<void>;
   connectWebSocket: (runId: string) => void;
@@ -326,6 +337,7 @@ const initialExecutionState = {
   isExecuting: false,
   wsDisconnected: false,
   error: null as string | null,
+  runDisclosureAckBySession: {} as Record<string, boolean>,
 };
 
 export const useExecutionStore = create<ExecutionState>((set, get) => ({
@@ -472,6 +484,19 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
     });
   },
 
+  acknowledgeRunDisclosure(sessionId: string) {
+    set((state) => ({
+      runDisclosureAckBySession: {
+        ...state.runDisclosureAckBySession,
+        [sessionId]: true,
+      },
+    }));
+  },
+
+  clearRunDisclosureAcks() {
+    set({ runDisclosureAckBySession: {} });
+  },
+
   connectWebSocket(runId: string) {
     // Close any existing WebSocket connection
     wsConnection?.close();
@@ -592,6 +617,51 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
     }
   },
 
+  /**
+   * Reload-resilience (elspeth-90db33baac). A page reload or session switch
+   * during a running pipeline loses the in-memory activeRunId and the
+   * WebSocket, which made the run uncancellable from the UI (ProgressView's
+   * Cancel is gated on both). Called from stores/subscriptions.ts whenever
+   * the active session changes: if the backend reports a live (pending or
+   * running) run for the session, restore activeRunId, seed a progress
+   * snapshot, and re-open the WebSocket so ProgressView reattaches.
+   */
+  async rehydrateActiveRun(sessionId: string) {
+    let runs: Run[];
+    try {
+      runs = await api.fetchRuns(sessionId);
+    } catch {
+      // Non-critical — same posture as loadRuns; InlineRunResults' polling
+      // and the next session activation retry.
+      return;
+    }
+    if (!shouldApplyRunListResult(sessionId)) return;
+    set({ runs });
+    const liveRun = runs.find(
+      (run) => run.status === "running" || run.status === "pending",
+    );
+    if (!liveRun) return;
+    // execute() already owns a run for this tab (it set activeRunId and
+    // connected the WebSocket itself) — do not stomp its connection.
+    if (get().activeRunId !== null) return;
+    set({
+      activeRunId: liveRun.id,
+      progress: {
+        source_rows_processed: 0,
+        tokens_succeeded: 0,
+        tokens_failed: 0,
+        tokens_quarantined: 0,
+        tokens_routed_success: 0,
+        tokens_routed_failure: 0,
+        cancel_requested: liveRun.cancel_requested === true,
+        accounting: liveRun.accounting,
+        recent_errors: [],
+        status: liveRun.status,
+      },
+    });
+    get().connectWebSocket(liveRun.id);
+  },
+
   async loadRunDiagnostics(runId: string) {
     set((state) => ({
       diagnosticsLoadingByRunId: {
@@ -689,6 +759,13 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
     executionRequestSeq += 1;
     wsConnection?.close();
     wsConnection = null;
-    set(initialExecutionState);
+    // runDisclosureAckBySession survives reset(): reset fires on every
+    // session switch (hooks/useSession.ts), and the pre-run disclosure
+    // opt-out is per composer session, not per activation. It is cleared
+    // on auth identity change (stores/subscriptions.ts).
+    set({
+      ...initialExecutionState,
+      runDisclosureAckBySession: get().runDisclosureAckBySession,
+    });
   },
 }));

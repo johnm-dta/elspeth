@@ -12,9 +12,10 @@
 // Empty state when no nodes.
 // ============================================================================
 
-import { useMemo, useCallback } from "react";
+import { useMemo, useCallback, useEffect, useRef } from "react";
 import {
   ReactFlow,
+  ReactFlowProvider,
   type Node,
   type Edge,
   type NodeMouseHandler,
@@ -263,12 +264,19 @@ function ConfigRows({
 function NodeConfigPanel({
   config,
   onClose,
+  panelRef,
 }: {
   config: SelectedComponentConfig;
   onClose: () => void;
+  panelRef?: React.Ref<HTMLElement>;
 }): JSX.Element {
   return (
     <aside
+      ref={panelRef}
+      // Programmatic focus target: keyboard selection via the a11y list
+      // moves focus here so the opened panel is announced and reachable
+      // without tabbing back through the whole canvas (elspeth-37f6f13132).
+      tabIndex={-1}
       className="graph-config-panel"
       role="complementary"
       aria-label={`${config.id} configuration`}
@@ -375,6 +383,23 @@ export function GraphView() {
     () => selectedComponentConfig(compositionState, selectedNodeId),
     [compositionState, selectedNodeId],
   );
+
+  // Keyboard-selection focus hand-off (elspeth-37f6f13132): activating an
+  // a11y-list item flips aria-pressed, but the resulting NodeConfigPanel
+  // opened silently elsewhere in the DOM. When the selection came from the
+  // keyboard list, move focus to the panel once it renders. Mouse clicks on
+  // canvas nodes do not set the flag, so pointer users keep their focus.
+  const configPanelRef = useRef<HTMLElement | null>(null);
+  const focusPanelOnOpenRef = useRef(false);
+  useEffect(() => {
+    if (selectedConfig && focusPanelOnOpenRef.current) {
+      focusPanelOnOpenRef.current = false;
+      configPanelRef.current?.focus();
+    }
+    if (!selectedConfig) {
+      focusPanelOnOpenRef.current = false;
+    }
+  }, [selectedConfig]);
 
   const miniMapNodeKindById = useMemo(
     () => buildMiniMapNodeKindById(compositionState),
@@ -807,7 +832,8 @@ export function GraphView() {
   }, [compositionState, nodeValidationMap, nodeMessageMap, selectedNodeId]);
 
   // Accessible, keyboard-operable equivalent of the visual DAG. The React Flow
-  // canvas is a visual diagram (role="img"); this list is its text alternative
+  // diagram is a visual image (role="img", scoped to the diagram element
+  // only); this list is its text alternative
   // (WCAG 1.1.1 — elspeth-ef897110dd) AND the keyboard path to node inspection,
   // since onNodeClick is mouse-only (WCAG 2.1.1 — elspeth-d37b7217c9). Activating
   // an item drives the same selectedNodeId store that opens NodeConfigPanel.
@@ -865,66 +891,84 @@ export function GraphView() {
   const ariaLabel = `Pipeline graph with ${nodeCount} component${nodeCount !== 1 ? "s" : ""} (source, transforms, sinks).`;
 
   return (
-    <div
-      className="graph-view-shell"
-    >
-      {/* Accessible + keyboard-operable equivalent of the visual DAG.
-          The canvas below stays role="img" (a visual diagram); THIS list is its
-          text alternative (WCAG 1.1.1) and the keyboard path to node inspection
-          (WCAG 2.1.1), since onNodeClick is mouse-only. Visually hidden until a
-          child is focused (.graph-a11y-list, inspector.css) — a real keyboard
-          target with a visible focus state, not an invisible tab trap. */}
-      <ol
-        className="graph-a11y-list"
-        aria-label={`Pipeline components in source-to-sink order (${accessibleNodes.length})`}
-      >
-        {accessibleNodes.map((node) => (
-          <li key={node.id}>
-            <button
-              type="button"
-              aria-pressed={selectedNodeId === node.id}
-              onClick={() =>
-                selectNode(selectedNodeId === node.id ? null : node.id)
-              }
-            >
-              {node.label}. Activate to inspect.
-            </button>
-          </li>
-        ))}
-      </ol>
+    // ReactFlowProvider lets Controls/MiniMap render OUTSIDE the <ReactFlow>
+    // element while sharing its store — required so they can live outside the
+    // role="img" diagram scope below (elspeth-37f6f13132).
+    <ReactFlowProvider>
       <div
-        className="graph-view-canvas"
-        aria-label={ariaLabel}
-        aria-roledescription="Pipeline DAG diagram"
-        role="img"
+        className="graph-view-shell"
       >
-        {pendingProposalCount > 0 && (
-          <div
-            role="status"
-            className="pending-overlay-pill"
-            aria-label={`${pendingProposalCount} pending graph proposal${pendingProposalCount === 1 ? "" : "s"}`}
-          >
-            pending #{pendingProposalCount}
-          </div>
-        )}
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          nodesDraggable={false}
-          nodesConnectable={false}
-          // Visual nodes are display-only; keyboard node selection is provided
-          // by the .graph-a11y-list above, so the canvas nodes are not extra
-          // (invisible, role="img"-hidden) tab stops.
-          nodesFocusable={false}
-          elementsSelectable={true}
-          onNodeClick={onNodeClick}
-          onPaneClick={onPaneClick}
-          colorMode={resolvedTheme}
-          onInit={handleInit}
-          fitViewOptions={{ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 }}
-          proOptions={{ hideAttribution: true }}
+        {/* Accessible + keyboard-operable equivalent of the visual DAG.
+            The diagram below stays role="img" (a visual diagram); THIS list is
+            its text alternative (WCAG 1.1.1) and the keyboard path to node
+            inspection (WCAG 2.1.1), since onNodeClick is mouse-only. Visually
+            hidden until a child is focused (.graph-a11y-list, inspector.css) —
+            a real keyboard target with a visible focus state, not an invisible
+            tab trap. */}
+        <ol
+          className="graph-a11y-list"
+          aria-label={`Pipeline components in source-to-sink order (${accessibleNodes.length})`}
         >
-          <Background gap={16} size={1} color="var(--color-canvas-grid)" />
+          {accessibleNodes.map((node) => (
+            <li key={node.id}>
+              <button
+                type="button"
+                aria-pressed={selectedNodeId === node.id}
+                onClick={() => {
+                  const nextNodeId =
+                    selectedNodeId === node.id ? null : node.id;
+                  // Keyboard path: hand focus to the config panel once it
+                  // opens (see the focusPanelOnOpen effect above).
+                  focusPanelOnOpenRef.current = nextNodeId !== null;
+                  selectNode(nextNodeId);
+                }}
+              >
+                {node.label}. Activate to inspect.
+              </button>
+            </li>
+          ))}
+        </ol>
+        {/* role="img" is children-presentational: everything inside it is
+            pruned from the accessibility tree. It therefore scopes the
+            DIAGRAM ONLY — the live "pending #N" pill and the interactive
+            zoom/fit Controls are siblings so AT can still reach them
+            (WCAG 4.1.3 / 1.3.1, elspeth-37f6f13132). */}
+        <div className="graph-view-canvas">
+          {pendingProposalCount > 0 && (
+            <div
+              role="status"
+              className="pending-overlay-pill"
+              aria-label={`${pendingProposalCount} pending graph proposal${pendingProposalCount === 1 ? "" : "s"}`}
+            >
+              pending #{pendingProposalCount}
+            </div>
+          )}
+          <div
+            className="graph-view-diagram"
+            aria-label={ariaLabel}
+            aria-roledescription="Pipeline DAG diagram"
+            role="img"
+          >
+            <ReactFlow
+              nodes={nodes}
+              edges={edges}
+              nodesDraggable={false}
+              nodesConnectable={false}
+              // Visual nodes are display-only; keyboard node selection is
+              // provided by the .graph-a11y-list above, so the canvas nodes
+              // are not extra (invisible, role="img"-hidden) tab stops.
+              nodesFocusable={false}
+              elementsSelectable={true}
+              onNodeClick={onNodeClick}
+              onPaneClick={onPaneClick}
+              colorMode={resolvedTheme}
+              onInit={handleInit}
+              fitViewOptions={{ padding: 0.15, maxZoom: 1.5, minZoom: 0.3 }}
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background gap={16} size={1} color="var(--color-canvas-grid)" />
+            </ReactFlow>
+          </div>
           <Controls showInteractive={false} />
           {nodes.length > MINIMAP_NODE_COUNT_THRESHOLD && (
             <MiniMap
@@ -937,14 +981,15 @@ export function GraphView() {
               style={{ bottom: 8, right: 8, width: 120, height: 80 }}
             />
           )}
-        </ReactFlow>
+        </div>
+        {selectedConfig && (
+          <NodeConfigPanel
+            config={selectedConfig}
+            onClose={() => selectNode(null)}
+            panelRef={configPanelRef}
+          />
+        )}
       </div>
-      {selectedConfig && (
-        <NodeConfigPanel
-          config={selectedConfig}
-          onClose={() => selectNode(null)}
-        />
-      )}
-    </div>
+    </ReactFlowProvider>
   );
 }

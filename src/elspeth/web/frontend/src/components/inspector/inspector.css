@@ -153,6 +153,18 @@
 }
 
 .graph-view-canvas {
+  /* Positioned so the React Flow Controls/MiniMap panels — rendered as
+     SIBLINGS of the role="img" diagram (elspeth-37f6f13132) — anchor to the
+     canvas box rather than an arbitrary ancestor. */
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* The role="img" scope: contains ONLY the React Flow diagram. The live
+   pending pill and the interactive Controls/MiniMap sit outside it so
+   role="img"'s children-presentational semantics cannot swallow them. */
+.graph-view-diagram {
   width: 100%;
   height: 100%;
 }

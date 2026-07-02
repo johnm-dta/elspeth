@@ -16,6 +16,11 @@ let previousSessionIds: Set<string> = new Set();
 let initialized = false;
 let unsubscribe: (() => void) | null = null;
 
+// Tracks the last-seen activeSessionId so the run-rehydration subscriber
+// fires once per session activation, not on every sessionStore write.
+let previousActiveSessionId: string | null = null;
+let unsubscribeRunRehydration: (() => void) | null = null;
+
 // Module-level state for the executionStore subscriber.
 // Must be reset in _resetSubscriptionsForTesting().
 let previousValidationFingerprint: string | null = null;
@@ -119,6 +124,10 @@ function resetPerUserState(): void {
   previousSessionIds = new Set();
   lastValidatedVersionBySession.clear();
   pendingValidateTarget = null;
+  // Pre-run disclosure opt-outs are per user: the ack map survives
+  // executionStore.reset() (session switches) by design, so the identity
+  // transition is the one place it must be flushed.
+  useExecutionStore.getState().clearRunDisclosureAcks();
 }
 
 /**
@@ -138,6 +147,13 @@ function resetPerUserState(): void {
  * - Auto-validate when compositionState.version increments, with a correctness
  *   loop that re-fires after in-flight validation settles if a newer version
  *   arrived in the meantime.
+ * - Rehydrate a live run on session activation (elspeth-90db33baac): when
+ *   activeSessionId changes, executionStore.rehydrateActiveRun re-attaches
+ *   activeRunId + the progress WebSocket if the backend reports a pending or
+ *   running run, so a page reload during execution keeps its Cancel control.
+ *   Lives here rather than in sessionStore because sessionStore must not
+ *   depend on execution wiring (same circular-import break as the rest of
+ *   this module).
  */
 export function initStoreSubscriptions(): void {
   if (initialized) return;
@@ -170,6 +186,20 @@ export function initStoreSubscriptions(): void {
       }
     }
     previousSessionIds = currentIds;
+  });
+
+  // Run/WebSocket rehydration on session activation. Seeded from current
+  // state (like previousSessionIds above) so init itself does not fire a
+  // rehydrate for a session that was already active before wiring.
+  previousActiveSessionId = useSessionStore.getState().activeSessionId;
+  unsubscribeRunRehydration = useSessionStore.subscribe((state) => {
+    const sessionId = state.activeSessionId;
+    if (sessionId === previousActiveSessionId) return;
+    previousActiveSessionId = sessionId;
+    if (!sessionId) return;
+    // Fire-and-forget: rehydrateActiveRun guards internally against the
+    // session changing again while its fetch is in flight.
+    void useExecutionStore.getState().rehydrateActiveRun(sessionId);
   });
 
   const VALIDATION_MSG_ID = "system-validation-current";
@@ -370,6 +400,9 @@ export function _resetSubscriptionsForTesting(): void {
   unsubscribeAutoValidate = null;
   unsubscribeAuth?.();
   unsubscribeAuth = null;
+  unsubscribeRunRehydration?.();
+  unsubscribeRunRehydration = null;
+  previousActiveSessionId = null;
   previousVersion = null;
   previousValidationFingerprint = null;
   previousWasPendingReview = false;

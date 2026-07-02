@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RunsHistoryDrawer } from "./RunsHistoryDrawer";
 import { useExecutionStore } from "@/stores/executionStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import type { RunDiagnostics } from "@/types/index";
 
 vi.mock("@/components/inspector/RunOutputsPanel", () => ({
@@ -94,6 +95,10 @@ describe("RunsHistoryDrawer", () => {
       diagnosticsExplanationByRunId: {},
       diagnosticsWorkingViewByRunId: {},
     } as never);
+    useSessionStore.setState({
+      activeSessionId: null,
+      sessions: [],
+    } as never);
   });
 
   it("lists every run from the store", () => {
@@ -120,6 +125,110 @@ describe("RunsHistoryDrawer", () => {
     useExecutionStore.setState({ runs: [] } as never);
     render(<RunsHistoryDrawer onClose={vi.fn()} />);
     expect(screen.getByText(/no prior runs/i)).toBeInTheDocument();
+  });
+
+  // elspeth-ef8c18a6cb (line-item): the empty state must follow the
+  // title-first convention (HeaderSessionSwitcher), never the raw UUID.
+  it("names the session by title, not UUID, in the empty state", () => {
+    const sessionId = "3f2c9a10-0000-0000-0000-00000000abcd";
+    useExecutionStore.setState({ runs: [] } as never);
+    useSessionStore.setState({
+      activeSessionId: sessionId,
+      sessions: [
+        {
+          id: sessionId,
+          title: "Colour survey",
+          created_at: "",
+          updated_at: "",
+        },
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    expect(screen.getByText(/no prior runs for "Colour survey"/i)).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(sessionId))).not.toBeInTheDocument();
+  });
+
+  it("falls back to 'this session' in the empty state when no title is known", () => {
+    useExecutionStore.setState({ runs: [] } as never);
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    expect(screen.getByText(/no prior runs for this session/i)).toBeInTheDocument();
+  });
+
+  // ── REST-backed cancel (elspeth-90db33baac) ────────────────────────────────
+  //
+  // ProgressView's Cancel needs the in-memory activeRunId + WebSocket; after
+  // a reload those are gone. The drawer offers cancel on live rows via the
+  // REST endpoint, gated by the same ConfirmDialog pattern.
+
+  it("offers Cancel only on non-terminal runs", () => {
+    useExecutionStore.setState({
+      runs: [
+        { id: "r1", status: "completed" } as never,
+        { id: "r2", status: "running" } as never,
+        { id: "r3", status: "pending" } as never,
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("button", { name: /cancel run r1/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /cancel run r2/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /cancel run r3/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("cancels a running run through confirm", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({
+      runs: [{ id: "r2", status: "running" } as never],
+      cancel,
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /cancel run r2/i }));
+
+    // Confirm gates the REST call.
+    expect(cancel).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: /^cancel pipeline$/i }),
+    );
+    expect(cancel).toHaveBeenCalledWith("r2");
+  });
+
+  it("does not cancel when the confirm dialog is dismissed", async () => {
+    const cancel = vi.fn().mockResolvedValue(undefined);
+    useExecutionStore.setState({
+      runs: [{ id: "r2", status: "running" } as never],
+      cancel,
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /cancel run r2/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^cancel$/i }));
+
+    expect(cancel).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("disables the row Cancel while cancellation is draining", () => {
+    useExecutionStore.setState({
+      runs: [
+        { id: "r2", status: "running", cancel_requested: true } as never,
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    const button = screen.getByRole("button", { name: /cancel run r2/i });
+    expect(button).toBeDisabled();
+    expect(button).toHaveTextContent(/cancelling/i);
   });
 
   it("loads and renders diagnostics detail for a selected run", async () => {

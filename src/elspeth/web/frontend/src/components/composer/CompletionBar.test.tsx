@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { CompletionBar } from "./CompletionBar";
 import { ExportYamlModal } from "@/components/sidebar/ExportYamlModal";
 import { useShareableReviewStore } from "@/stores/shareableReviewStore";
@@ -211,9 +211,10 @@ describe("CompletionBar", () => {
   });
 
   // Plan 19b:231 — AC 6: Clicking Run-pipeline calls the existing Execute
-  // action from executionStore. The ExecuteButton primitive carries the
-  // signature `execute(activeSessionId)` (see ExecuteButton.tsx line 74).
-  it("clicking Run-pipeline calls executionStore.execute with the active session id (plan 19b:231, AC 6)", () => {
+  // action from executionStore, via the pre-run egress disclosure
+  // (elspeth-c18ad229cc): the ConfirmDialog gates execute(), so the click
+  // opens it and confirming fires `execute(activeSessionId)`.
+  it("clicking Run-pipeline calls executionStore.execute with the active session id after the egress disclosure (plan 19b:231, AC 6)", () => {
     const executeSpy = vi.fn();
     useSessionStore.setState({ activeSessionId: "sess-RUN" } as never);
     useExecutionStore.setState({
@@ -221,6 +222,7 @@ describe("CompletionBar", () => {
       isExecuting: false,
       progress: null,
       execute: executeSpy,
+      runDisclosureAckBySession: {},
     } as never);
 
     render(<CompletionBar />);
@@ -230,6 +232,13 @@ describe("CompletionBar", () => {
     expect(runButton.disabled).toBe(false);
 
     fireEvent.click(runButton);
+
+    // The disclosure gates execute(); confirming fires it.
+    expect(executeSpy).not.toHaveBeenCalled();
+    const dialog = screen.getByRole("alertdialog", { name: /run pipeline\?/i });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /^run pipeline$/i }),
+    );
 
     expect(executeSpy).toHaveBeenCalledTimes(1);
     expect(executeSpy).toHaveBeenCalledWith("sess-RUN");

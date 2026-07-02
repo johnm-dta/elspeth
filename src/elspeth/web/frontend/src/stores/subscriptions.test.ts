@@ -1030,3 +1030,77 @@ describe("requestValidate — cache-aware manual validate entry point", () => {
     expect(validate).not.toHaveBeenCalled();
   });
 });
+
+// Reload-resilience (elspeth-90db33baac): on session activation the
+// subscription must ask executionStore to rehydrate a live run (restore
+// activeRunId + reattach the progress WebSocket).
+describe("subscriptions — run rehydration on session activation", () => {
+  beforeEach(() => {
+    _resetSubscriptionsForTesting();
+    vi.clearAllMocks();
+  });
+
+  it("fires rehydrateActiveRun when the active session changes to a session", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: null } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+
+    expect(rehydrateActiveRun).toHaveBeenCalledTimes(1);
+    expect(rehydrateActiveRun).toHaveBeenCalledWith(SESSION_A);
+  });
+
+  it("does not re-fire on unrelated sessionStore writes with the same active session", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: null, sessions: [] } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+    useSessionStore.setState({
+      sessions: [
+        { id: SESSION_A, title: "A", created_at: "", updated_at: "" } as Session,
+      ],
+    } as never);
+
+    expect(rehydrateActiveRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires once per session activation when switching sessions", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: null } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+    useSessionStore.setState({ activeSessionId: SESSION_B } as never);
+
+    expect(rehydrateActiveRun).toHaveBeenNthCalledWith(1, SESSION_A);
+    expect(rehydrateActiveRun).toHaveBeenNthCalledWith(2, SESSION_B);
+  });
+
+  it("does not fire when the active session becomes null", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    useSessionStore.setState({ activeSessionId: null } as never);
+
+    expect(rehydrateActiveRun).not.toHaveBeenCalled();
+  });
+
+  it("does not fire for the session already active when init runs (seeded tracker)", () => {
+    const rehydrateActiveRun = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ activeSessionId: SESSION_A } as never);
+    useExecutionStore.setState({ rehydrateActiveRun } as never);
+    initStoreSubscriptions();
+
+    // An unrelated write must not fire for the pre-init session.
+    useSessionStore.setState({ sessions: [] } as never);
+
+    expect(rehydrateActiveRun).not.toHaveBeenCalled();
+  });
+});

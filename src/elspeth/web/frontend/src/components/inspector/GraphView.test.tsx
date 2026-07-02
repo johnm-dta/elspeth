@@ -10,6 +10,12 @@ import type { CompositionProposal, CompositionState, NodeSpec, EdgeSpec } from "
 // Mock @xyflow/react — jsdom cannot do DOM measurements required by React Flow.
 // Render nodes and edges as simple divs so we can assert on their presence.
 vi.mock("@xyflow/react", () => ({
+  // Provider shares the flow store so Controls/MiniMap can render OUTSIDE
+  // <ReactFlow> (they are siblings of the role="img" diagram scope —
+  // elspeth-37f6f13132). The mock just passes children through.
+  ReactFlowProvider: ({ children }: any) => (
+    <div data-testid="react-flow-provider">{children}</div>
+  ),
   ReactFlow: ({
     nodes,
     edges,
@@ -709,6 +715,67 @@ describe("GraphView", () => {
       const list = screen.getByRole("list", { name: /pipeline components/i });
       await userEvent.click(within(list).getByRole("button", { name: /classify/i }));
       expect(selectNode).toHaveBeenCalledWith("classify");
+    });
+
+    it("moves focus to the NodeConfigPanel when a node is selected from the keyboard list (elspeth-37f6f13132)", async () => {
+      // Real selection semantics: selectNode drives selectedNodeId so the
+      // panel actually opens (previous tests stub selectNode as a spy).
+      useSessionStore.setState({
+        selectedNodeId: null,
+        selectNode: (nodeId: string | null) =>
+          useSessionStore.setState({ selectedNodeId: nodeId } as never),
+        compositionState: makeState({ nodes: [makeNode({ id: "classify" })] }),
+      } as never);
+      render(<GraphView />);
+      const list = screen.getByRole("list", { name: /pipeline components/i });
+      await userEvent.click(
+        within(list).getByRole("button", { name: /classify/i }),
+      );
+      const panel = screen.getByRole("complementary", {
+        name: /classify configuration/i,
+      });
+      expect(panel).toHaveFocus();
+    });
+  });
+
+  // role="img" is children-presentational: descendants are pruned from the
+  // accessibility tree. It must therefore scope the diagram ONLY; the live
+  // "pending #N" pill and the interactive zoom Controls (and MiniMap) are
+  // siblings (WCAG 4.1.3 / 1.3.1, elspeth-37f6f13132).
+  describe("role=img scoping (elspeth-37f6f13132)", () => {
+    it("scopes role='img' to the diagram element with the pipeline label", () => {
+      useSessionStore.setState({
+        compositionState: makeState({ nodes: [makeNode({ id: "classify" })] }),
+        compositionProposals: [makeProposal()],
+      });
+      render(<GraphView />);
+      const img = screen.getByRole("img", { name: /pipeline graph with/i });
+      expect(img).toHaveClass("graph-view-diagram");
+      // The diagram itself lives inside the img scope.
+      expect(within(img).getByTestId("react-flow")).toBeInTheDocument();
+    });
+
+    it("keeps the live pending pill and Controls OUTSIDE the img scope", () => {
+      useSessionStore.setState({
+        compositionState: makeState({ nodes: [makeNode({ id: "classify" })] }),
+        compositionProposals: [makeProposal()],
+      });
+      render(<GraphView />);
+      const img = screen.getByRole("img", { name: /pipeline graph with/i });
+      const pill = screen.getByRole("status", { name: /pending graph proposal/i });
+      const controls = screen.getByTestId("react-flow-controls");
+      expect(img.contains(pill)).toBe(false);
+      expect(img.contains(controls)).toBe(false);
+    });
+
+    it("keeps the MiniMap outside the img scope on large graphs", () => {
+      const nodes = Array.from({ length: 9 }, (_, i) =>
+        makeNode({ id: `n${i}`, node_type: "transform", plugin: "p" }),
+      );
+      useSessionStore.setState({ compositionState: makeState({ nodes }) });
+      render(<GraphView />);
+      const img = screen.getByRole("img", { name: /pipeline graph with/i });
+      expect(img.contains(screen.getByTestId("minimap"))).toBe(false);
     });
   });
 });

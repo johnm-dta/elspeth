@@ -10,7 +10,9 @@ import { useEffect, useRef, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
+import { isTerminalRunStatus } from "@/types/index";
 import type { Run, RunDiagnostics, RunDiagnosticsWorkingView } from "@/types/index";
 
 interface RunsHistoryDrawerProps {
@@ -70,8 +72,16 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
   const diagnosticsWorkingViewByRunId = useExecutionStore((s) => s.diagnosticsWorkingViewByRunId);
   const loadRunDiagnostics = useExecutionStore((s) => s.loadRunDiagnostics);
   const evaluateRunDiagnostics = useExecutionStore((s) => s.evaluateRunDiagnostics);
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const cancel = useExecutionStore((s) => s.cancel);
+  // Title-first convention (HeaderSessionSwitcher): never surface the raw
+  // session UUID in user-facing chrome (elspeth-ef8c18a6cb).
+  const activeSessionTitle = useSessionStore(
+    (s) =>
+      s.sessions.find((session) => session.id === s.activeSessionId)?.title ??
+      null,
+  );
   const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [cancelTargetRunId, setCancelTargetRunId] = useState<string | null>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
 
   // M08 (WCAG 2.4.3): the shared focus trap moves focus to the Close button on
@@ -112,7 +122,10 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
       </header>
       <div className="runs-history-drawer-body">
         {runs.length === 0 ? (
-          <p>No prior runs for session {activeSessionId ?? "(none)"}.</p>
+          <p>
+            No prior runs for{" "}
+            {activeSessionTitle ? `"${activeSessionTitle}"` : "this session"}.
+          </p>
         ) : (
           <ul className="runs-history-list">
             {runs.map((run) => (
@@ -122,6 +135,21 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                   <span className="runs-history-item-status">
                     {run.status.replace(/_/g, " ")}
                   </span>
+                  {/* REST-backed Cancel for live runs (elspeth-90db33baac):
+                      works without the in-memory activeRunId/WebSocket that
+                      gates ProgressView's Cancel, so a run stays cancellable
+                      after a page reload. */}
+                  {!isTerminalRunStatus(run.status) && (
+                    <button
+                      type="button"
+                      className="btn btn-small btn-danger"
+                      aria-label={`Cancel run ${run.id}`}
+                      disabled={run.cancel_requested === true}
+                      onClick={() => setCancelTargetRunId(run.id)}
+                    >
+                      {run.cancel_requested === true ? "Cancelling..." : "Cancel"}
+                    </button>
+                  )}
                   <button
                     type="button"
                     aria-expanded={expandedRunId === run.id}
@@ -169,6 +197,19 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
           </ul>
         )}
       </div>
+      {cancelTargetRunId !== null && (
+        <ConfirmDialog
+          title="Cancel pipeline"
+          message="Cancel the running pipeline? This cannot be undone."
+          confirmLabel="Cancel pipeline"
+          variant="danger"
+          onConfirm={() => {
+            void cancel(cancelTargetRunId);
+            setCancelTargetRunId(null);
+          }}
+          onCancel={() => setCancelTargetRunId(null)}
+        />
+      )}
     </div>
   );
 }

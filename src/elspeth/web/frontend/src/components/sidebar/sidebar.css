@@ -198,3 +198,28 @@
   padding: var(--space-xs) var(--space-md);
   font-size: var(--font-size-xs);
 }
+
+/* Pre-run egress disclosure (elspeth-c18ad229cc) — rendered inside the
+   shared ConfirmDialog by ExecuteButton. The list names what the run will
+   reach (sources, LLM/model, network fetches, sinks), derived from the
+   live composition. */
+.run-disclosure-summary {
+  margin: 0 0 var(--space-md);
+  padding-left: var(--space-lg);
+  font-size: var(--font-size-sm);
+  color: var(--color-text);
+}
+
+.run-disclosure-summary li {
+  margin-bottom: var(--space-xs);
+}
+
+.run-disclosure-opt-out {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+}

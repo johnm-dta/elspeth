@@ -188,9 +188,20 @@ export function InlineRunResults(): JSX.Element | null {
     : null;
   const mostRecentRun = !activeRunId ? (visibleRuns[0] ?? null) : null;
   const displayRun = activeRun ?? mostRecentRun;
-  const historyRuns = visibleRuns.filter(
-    (run) => isTerminalRunStatus(run.status) && run.id !== displayRun?.id,
-  );
+  // Drawer contents: terminal runs other than the one already displayed,
+  // PLUS any live (pending/running) run this tab is NOT attached to. An
+  // attached live run already exposes Cancel through ProgressView; an
+  // unattached one (reload where rehydration raced, run started from
+  // another tab) must reach the drawer so its REST-backed Cancel is the
+  // guaranteed fallback (elspeth-90db33baac).
+  const historyRuns = visibleRuns.filter((run) => {
+    if (isTerminalRunStatus(run.status)) {
+      return run.id !== displayRun?.id;
+    }
+    const attachedToThisTab =
+      activeRunId !== null && progress !== null && run.id === activeRunId;
+    return !attachedToThisTab;
+  });
   const progressBelongsToActiveRun = activeRunId !== null && progress !== null;
   const displayStatus = progressBelongsToActiveRun ? progress.status : displayRun?.status ?? null;
   const showProgress = progressBelongsToActiveRun;

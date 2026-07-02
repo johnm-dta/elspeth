@@ -260,6 +260,28 @@ describe("InlineRunResults", () => {
     ).not.toBeInTheDocument();
   });
 
+  // elspeth-90db33baac: an unattached live run (no activeRunId/WebSocket in
+  // this tab — reload race, or a run started from another tab) must reach the
+  // drawer, where the REST-backed Cancel works without in-memory state.
+  it("routes an unattached live run into the past-runs drawer so it stays cancellable", async () => {
+    useExecutionStore.setState({
+      activeRunId: null,
+      progress: null,
+      runs: [
+        { id: "run-orphan", session_id: "sess-1", status: "running" } as never,
+      ],
+    } as never);
+    const user = userEvent.setup();
+
+    render(<InlineRunResults />);
+    await user.click(screen.getByRole("button", { name: /past runs \(1\)/i }));
+
+    expect(screen.getByText("run-orphan")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /cancel run run-orphan/i }),
+    ).toBeInTheDocument();
+  });
+
   it("shows only terminal runs in the past-runs drawer while another run is active", async () => {
     useExecutionStore.setState({
       activeRunId: "run-active",

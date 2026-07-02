@@ -480,9 +480,17 @@ async def cleanup_tutorial_orphans(
 ) -> TutorialOrphanCleanupResponse:
     """Soft-delete abandoned tutorial sessions by renaming them.
 
-    The frontend calls this on tutorial entry. The response preserves the
-    historical ``deleted_count`` contract, but the operation is intentionally a
-    rename so the user's audit history remains available.
+    The frontend calls this on FRESH tutorial entry (never on a resume). The
+    response preserves the historical ``deleted_count`` contract, but the
+    operation is intentionally a rename so the user's audit history remains
+    available.
+
+    A session recorded as the user's in-progress tutorial
+    (``preferences.tutorial_session_id`` — elspeth-918f4434b3) is never
+    swept, even when it carries the pending title: it is resumable, not
+    abandoned. This is defence in depth behind the frontend's
+    skip-cleanup-on-resume gate — a stray cleanup call must not rename the
+    session a reload is about to resume.
     """
     preferences_service: PreferencesService = request.app.state.preferences_service
     settings: WebSettings = request.app.state.settings
@@ -490,6 +498,7 @@ async def cleanup_tutorial_orphans(
     prefs = await preferences_service.get_composer_preferences(user.user_id)
     if prefs.tutorial_completed_at is not None:
         return TutorialOrphanCleanupResponse(deleted_count=0)
+    resumable_session_id = prefs.tutorial_session_id
 
     deleted_count = 0
     offset = 0
@@ -505,7 +514,7 @@ async def cleanup_tutorial_orphans(
         if not sessions:
             break
         for session in sessions:
-            if session.title == _TUTORIAL_PENDING_SESSION_TITLE:
+            if session.title == _TUTORIAL_PENDING_SESSION_TITLE and str(session.id) != resumable_session_id:
                 await session_service.update_session_title(
                     session.id,
                     f"{_ABANDONED_SESSION_TITLE_PREFIX}{session.title}-{timestamp}",

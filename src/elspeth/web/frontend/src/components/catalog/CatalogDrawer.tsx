@@ -47,6 +47,7 @@ import {
   confidenceFromScore,
   fuzzyMatch,
 } from "@/utils/fuzzyScore";
+import { pluginDisplayName } from "./pluginDisplayName";
 
 type CatalogTab = "sources" | "transforms" | "sinks";
 const CATALOG_TABS: readonly CatalogTab[] = ["sources", "transforms", "sinks"];
@@ -76,6 +77,9 @@ function catalogPanelId(tab: CatalogTab): string {
 function scorePlugin(query: string, plugin: PluginSummary): number {
   const target = [
     plugin.name,
+    // The card's primary label is the human display name — searching for
+    // "blob storage" must find azure_blob (elspeth-5ee1f76e39).
+    pluginDisplayName(plugin.name),
     plugin.description ?? "",
     plugin.usage_when_to_use ?? "",
     plugin.usage_when_not_to_use ?? "",

@@ -63,11 +63,26 @@ export interface TutorialState {
    * instead of silently swallowing it. Cleared by `reset`.
    */
   cancelled: boolean;
+  /**
+   * True when this state was reconstructed from the server-persisted resume
+   * fields after a reload (elspeth-918f4434b3) rather than walked in-page.
+   * A resumed audit/graduation state has no in-memory run cache, so Back
+   * into the run turn would silently re-fire the tutorial pipeline (real
+   * LLM spend) — the resumed flow suppresses that Back affordance instead.
+   */
+  resumed: boolean;
 }
 
 export type TutorialAction =
   | { type: "start" }
   | { type: "guidedCompleted"; sessionId: string }
+  /**
+   * The run's result arrived (rendered on the run turn, before the user
+   * clicks Continue). Records the run identity WITHOUT changing step so
+   * the persisted resume state can skip straight to audit after a reload
+   * instead of re-executing the pipeline.
+   */
+  | { type: "runResultReady"; result: TutorialRunResult }
   | { type: "runCompleted"; result: TutorialRunResult }
   | { type: "continueToGraduation" }
   | { type: "skipToGraduation" }
@@ -84,6 +99,7 @@ export const initialTutorialState: TutorialState = {
   rows: [],
   skipped: false,
   cancelled: false,
+  resumed: false,
 };
 
 /**
@@ -137,6 +153,16 @@ export function tutorialReducer(
       return { ...state, step: "guided" };
     case "guidedCompleted":
       return { ...state, step: "run", sessionId: action.sessionId };
+    case "runResultReady":
+      // Result rendered on the run turn; record the run identity so the
+      // persisted resume state carries it, but stay on `run` — the user
+      // has not clicked Continue yet.
+      return {
+        ...state,
+        runId: action.result.runId,
+        sourceDataHash: action.result.sourceDataHash,
+        rows: action.result.rows,
+      };
     case "runCompleted":
       return {
         ...state,
@@ -171,4 +197,97 @@ export function tutorialReducer(
       return _exhaustive;
     }
   }
+}
+
+// ── Server-persisted resume state (elspeth-918f4434b3) ─────────────────────
+// The tutorial stage is persisted to composer-preferences on every stage
+// transition so a reload/close-tab resumes at the persisted stage with the
+// SAME session — instead of restarting at Welcome, abandoning the session,
+// and silently re-spending LLM budget.
+
+/** Mirror of the four `tutorial_*` resume fields on composer-preferences. */
+export interface PersistedTutorialProgress {
+  stage: "guided" | "run" | "audit" | "graduation" | null;
+  sessionId: string | null;
+  runId: string | null;
+  sourceDataHash: string | null;
+}
+
+/**
+ * Reconstruct the tutorial state to mount from the server-persisted resume
+ * fields. Fresh start (no persisted stage, or a stage without its session —
+ * an incoherent row we refuse to guess from) returns the initial Welcome
+ * state.
+ *
+ * Stage mapping:
+ *  - `guided` — remount the guided shell on the same session. The backend
+ *    `POST /guided/start` is idempotent (D16): it re-attaches to the
+ *    persisted GuidedSession, so the conversation RESUMES; no LLM restart.
+ *  - `run` with a recorded run identity — the run had already completed
+ *    before the reload (the identity is recorded when the result renders),
+ *    so resume forward at `audit`: zero re-execution.
+ *  - `run` without a run identity — the reload interrupted the run itself;
+ *    resume at `run` (the run turn re-fires; if the pre-reload run is still
+ *    active server-side the one-active-run invariant surfaces the friendly
+ *    still-finishing message).
+ *  - `audit` — requires the recorded run identity; degrades to `run` when
+ *    missing (audit cannot render without it).
+ *  - `graduation` — graduation counts as reached once SHOWN; resume there,
+ *    never restart. (The skipped path never persists a stage — skip
+ *    persists the completion opt-out immediately instead. The cancelled
+ *    flag is in-memory only, so a resumed graduation omits the cancel note.)
+ */
+export function resumeTutorialState(
+  progress: PersistedTutorialProgress,
+): TutorialState {
+  if (progress.stage === null || progress.sessionId === null) {
+    return initialTutorialState;
+  }
+  const base: TutorialState = {
+    ...initialTutorialState,
+    sessionId: progress.sessionId,
+    runId: progress.runId,
+    sourceDataHash: progress.sourceDataHash,
+    resumed: true,
+  };
+  const hasRunIdentity =
+    progress.runId !== null && progress.sourceDataHash !== null;
+  switch (progress.stage) {
+    case "guided":
+      return { ...base, step: "guided", runId: null, sourceDataHash: null };
+    case "run":
+      return hasRunIdentity
+        ? { ...base, step: "audit" }
+        : { ...base, step: "run", runId: null, sourceDataHash: null };
+    case "audit":
+      return hasRunIdentity
+        ? { ...base, step: "audit" }
+        : { ...base, step: "run", runId: null, sourceDataHash: null };
+    case "graduation":
+      return { ...base, step: "graduation" };
+  }
+}
+
+/**
+ * Project the persistable resume fields from a live tutorial state (the
+ * inverse of `resumeTutorialState`). `welcome` maps to all-null — nothing
+ * has started (or the user backed out), so there is nothing to resume.
+ *
+ * The skipped path is handled by the caller: skip persists the completion
+ * opt-out immediately (which clears these fields server-side), so no stage
+ * write happens for it.
+ */
+export function progressForTutorialState(
+  state: TutorialState,
+  sessionId: string | null,
+): PersistedTutorialProgress {
+  if (state.step === "welcome" || sessionId === null) {
+    return { stage: null, sessionId: null, runId: null, sourceDataHash: null };
+  }
+  return {
+    stage: state.step,
+    sessionId,
+    runId: state.runId,
+    sourceDataHash: state.sourceDataHash,
+  };
 }

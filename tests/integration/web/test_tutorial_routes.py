@@ -316,3 +316,37 @@ def test_delete_orphans_never_touches_graduated_tutorial_session(tmp_path: Path)
     pending = asyncio.run(app.state.session_service.get_session(pending_id))
     assert graduated.title == "hello-world (synthetic project briefs)"
     assert pending.title.startswith("abandoned-hello-world (pending)-")
+
+
+def test_delete_orphans_never_touches_the_resumable_tutorial_session(tmp_path: Path) -> None:
+    """A pending-titled session recorded as the user's in-progress tutorial
+    (preferences.tutorial_session_id) is resumable, not abandoned — the sweep
+    must skip it even though it carries the pending title (elspeth-918f4434b3).
+    Defence in depth behind the frontend's skip-cleanup-on-resume gate."""
+    from elspeth.web.preferences.models import UpdateComposerPreferencesRequest
+
+    app = _app(tmp_path)
+    resumable_id = uuid4()
+    orphan_id = uuid4()
+    with app.state.session_engine.begin() as conn:
+        _make_session(conn, session_id=str(resumable_id), user_id="alice", title="hello-world (pending)")
+        _make_session(conn, session_id=str(orphan_id), user_id="alice", title="hello-world (pending)")
+    asyncio.run(
+        app.state.preferences_service.update_composer_preferences(
+            "alice",
+            UpdateComposerPreferencesRequest(
+                tutorial_stage="guided",
+                tutorial_session_id=str(resumable_id),
+            ),
+        )
+    )
+    client = TestClient(app)
+
+    response = client.delete("/api/tutorial/orphans")
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted_count": 1}
+    resumable = asyncio.run(app.state.session_service.get_session(resumable_id))
+    orphan = asyncio.run(app.state.session_service.get_session(orphan_id))
+    assert resumable.title == "hello-world (pending)"
+    assert orphan.title.startswith("abandoned-hello-world (pending)-")

@@ -228,10 +228,13 @@ describe("light theme colour contrast", () => {
 describe("disabled button contrast", () => {
   // The .btn:disabled / .btn[aria-disabled="true"] rule was migrated off
   // opacity:0.4 (which silently fails contrast against any non-white chrome)
-  // to a tokenised background+text pair. We use --color-bg (page background)
-  // rather than --color-surface-elevated because the latter is too close in
-  // luminance to --color-text-muted in the dark theme (3.84:1, fails AA).
-  // The chosen pair passes AA in both themes (dark 4.78:1, light 6.32:1).
+  // to a tokenised background+text pair on --color-bg (page background).
+  // Historical note: --color-surface-elevated was rejected at the time
+  // because the OLD dark muted value (#7a9a9a) was only 3.84:1 there; the
+  // elspeth-dae08efdc9 remediation raised dark muted to #93b3b3, which now
+  // clears every panel surface (see the muted-on-panel-surface composition
+  // suite below). The chosen pair passes AA in both themes
+  // (dark 6.45:1, light 6.32:1).
   // These assertions are the design system's gate: if a future colour rebalance
   // pushes the pair below AA, this test fails before the regression ships.
   it("keeps --color-text-muted on --color-bg at AA in the dark theme", () => {
@@ -287,8 +290,9 @@ describe("disabled button contrast", () => {
 
 describe("form input placeholder contrast", () => {
   // The .input/.textarea ::placeholder colour was migrated off
-  // --color-text-muted (only ~3.84:1 on --color-surface-elevated, the input
-  // background — below AA) to --color-text-secondary as part of the
+  // --color-text-muted (at the time #7a9a9a, only ~3.84:1 on
+  // --color-surface-elevated, the input background — below AA) to
+  // --color-text-secondary as part of the
   // acknowledge-card-stack restyle. These assertions gate both the rule
   // (placeholder uses the secondary token) and the underlying contrast so a
   // future palette rebalance cannot silently regress placeholder legibility.
@@ -641,6 +645,77 @@ describe("design-review contrast remediation (2026-06-29)", () => {
         contrastRatio(resolveHex(theme, "--color-input-border"), resolveHex(theme, "--color-surface-elevated")),
         `input-border on elevated (${theme})`,
       ).toBeGreaterThanOrEqual(3);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Muted-on-panel-surface COMPOSITIONS (elspeth-dae08efdc9, 2026-07-02).
+// The gap that let ~46 dark-theme axe hits ship: this file gated token PAIRS
+// (muted-on-bg, muted-on-inspector) but never the full set of surfaces muted
+// text actually sits on — composing-card labels on elevated (3.83:1 with the
+// old #7a9a9a), graph-mini labels on paper-adjacent surfaces (4.26:1), the
+// message-tools toggle on tinted washes. One token raise (#7a9a9a → #93b3b3
+// dark) cleared them; this suite gates muted against EVERY surface-family
+// token in BOTH themes, plus the hover-wash composites, so no single
+// surface pairing can silently regress again.
+// ---------------------------------------------------------------------------
+
+describe("muted text on every panel surface (elspeth-dae08efdc9)", () => {
+  const themes: Array<"dark" | "light"> = ["dark", "light"];
+  const surfaceTokens = [
+    "--color-bg",
+    "--color-surface",
+    "--color-surface-elevated",
+    "--color-surface-raised",
+    "--color-surface-inspector",
+    "--color-surface-paper",
+    "--color-surface-nav",
+    "--color-surface-nav-raised",
+    "--color-surface-input",
+  ];
+
+  it("keeps muted text at AA on every surface-family token in both themes", () => {
+    for (const theme of themes) {
+      const muted = resolveHex(theme, "--color-text-muted");
+      for (const surface of surfaceTokens) {
+        expect(
+          contrastRatio(muted, resolveHex(theme, surface)),
+          `muted on ${surface} (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps muted text at AA on hover-washed surfaces in both themes", () => {
+    // Live composition: .version-selector-item--focused paints
+    // --color-surface-hover over the elevated dropdown while its meta/tag
+    // spans stay muted. The wash lightens dark surfaces (and darkens light
+    // ones), so it is the tightest composite muted text sits on.
+    for (const theme of themes) {
+      const muted = resolveHex(theme, "--color-text-muted");
+      for (const surface of ["--color-surface", "--color-surface-elevated"]) {
+        const washed = resolveTintOver(theme, "--color-surface-hover", surface);
+        expect(
+          contrastRatio(muted, washed),
+          `muted on surface-hover over ${surface} (${theme})`,
+        ).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+  });
+
+  it("keeps muted text visually quieter than secondary text in both themes", () => {
+    // The token raise must not collapse the muted/secondary hierarchy: muted
+    // stays the quieter register (lower contrast against the page background
+    // than secondary in each theme).
+    for (const theme of themes) {
+      const bg = resolveHex(theme, "--color-bg");
+      expect(
+        contrastRatio(resolveHex(theme, "--color-text-muted"), bg),
+        `muted vs secondary hierarchy (${theme})`,
+      ).toBeLessThan(
+        contrastRatio(resolveHex(theme, "--color-text-secondary"), bg),
+      );
     }
   });
 });

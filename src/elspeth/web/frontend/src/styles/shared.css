@@ -176,7 +176,14 @@
   white-space: nowrap;
 }
 
-.btn:hover:not(:disabled):not([aria-disabled="true"]) {
+/* Base hover. The :disabled / aria-disabled guards live inside :where() so
+   they contribute ZERO specificity: the selector stays at (0,2,0), below the
+   variant hovers (.btn-primary:hover / .btn-danger:hover at (0,3,0)). With
+   bare :not() chains the base rule sat at (0,4,0) and beat every variant
+   hover, so filled primary/danger buttons dropped to the translucent surface
+   wash at the moment of use (elspeth-b293bbd3c0). Gated by
+   styles/buttonCascade.test.ts — keep the guards inside :where(). */
+.btn:hover:where(:not(:disabled)):where(:not([aria-disabled="true"])) {
   background-color: var(--color-surface-hover);
   border-color: var(--color-border-strong);
 }
@@ -185,7 +192,7 @@
    which silently fails WCAG 1.4.3 contrast against any non-white chrome. We
    use --color-bg as the background (rather than --color-surface-elevated) so
    the disabled button reads as "merged into the page" — the muted text on
-   page-background pair passes AA in both themes (dark 4.78:1, light 6.32:1).
+   page-background pair passes AA in both themes (dark 6.45:1, light 6.32:1).
    The border stays at --color-border-strong so the button outline remains
    distinguishable from the page. aria-disabled gets the same treatment
    because we use it on the Save-for-review button while validation pends. */
@@ -221,7 +228,10 @@
   white-space: nowrap;
 }
 
-.btn-compact:hover:not(:disabled):not([aria-disabled="true"]) {
+/* Guards in :where() for the same cascade reason as .btn:hover above —
+   .btn-compact composes with .btn-primary (e.g. the inline-source fallback
+   Accept button), so this base hover must stay below (0,3,0). */
+.btn-compact:hover:where(:not(:disabled)):where(:not([aria-disabled="true"])) {
   background-color: var(--color-surface-hover);
   border-color: var(--color-border-strong);
 }
@@ -244,7 +254,7 @@
    unchanged — --color-bg merges into the page background and is gated by
    colorContrast.test.ts; this only re-targets the surface the rail sits on.
    Text stays --color-text-muted, AA-verified on --color-surface-inspector
-   (dark 4.84:1, light 6.33:1); the --color-border-strong outline is inherited
+   (dark 6.53:1, light 6.33:1); the --color-border-strong outline is inherited
    so the disabled control stays distinguishable. */
 .layout-siderail .btn:disabled,
 .layout-siderail .btn[aria-disabled="true"],
@@ -516,15 +526,44 @@
 .app-layout {
   display: grid;
   grid-template-rows: 100%;
+  /* Rail width is tokenised (--siderail-width) — it was previously a
+     hardcoded inline style in Layout.tsx, which no media query could
+     override (elspeth-49dd290c7a). */
+  grid-template-columns: minmax(0, 1fr) var(--siderail-width);
   grid-template-areas: "chat siderail";
   height: 100%;
   min-width: 640px;
   overflow: hidden;
 }
 
-/* When the side rail is hidden or overlayed, the grid only has chat. */
-.app-layout--overlay {
-  grid-template-areas: "chat";
+/* Responsive collapse (elspeth-49dd290c7a, WCAG 1.4.10 Reflow). Below 960px
+   (640px chat minimum + 320px rail) the two-column shell cannot fit, and with
+   body{overflow:hidden} the rail was clipped with no scroll path. Collapse to
+   ONE column with the conversation + composer first and the rail stacked
+   below as a bounded, independently-scrolling panel — the same discipline as
+   the guided (900px) and tutorial (760px) workspaces. This replaces the
+   never-wired .app-layout--overlay chat-only fallback: hiding the rail
+   outright would strand Run / Save-for-review / Export YAML. */
+@media (max-width: 960px) {
+  .app-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "chat"
+      "siderail";
+    min-width: 0;
+  }
+
+  .layout-siderail {
+    border-left: none;
+    border-top: 1px solid var(--color-border);
+    /* Cap the rail so the chat column keeps the majority of the viewport;
+       the rail scrolls its own content (overflow-y) instead of clipping it
+       (the base rule's overflow:hidden relied on the full-height .side-rail
+       child owning the scroll, which no longer applies when stacked). */
+    max-height: 45vh;
+    overflow-y: auto;
+  }
 }
 
 .layout-chat {

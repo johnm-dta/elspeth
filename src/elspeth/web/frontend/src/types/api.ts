@@ -78,10 +78,23 @@ export type {
 
 export type ComposerMode = "guided" | "freeform";
 
+// First-run tutorial resume stage (elspeth-918f4434b3). Mirrors the
+// backend `TutorialStage` Literal (preferences/models.py) — the frontend
+// TutorialStep union minus "welcome" (never persisted; null is the
+// no-in-progress-tutorial state).
+export type PersistedTutorialStage = "guided" | "run" | "audit" | "graduation";
+
 export interface UserComposerPreferencesPayload {
   default_mode: ComposerMode;
   banner_dismissed_at: string | null;
   tutorial_completed_at: string | null;
+  // In-progress tutorial resume state; all four null when no tutorial is
+  // in progress. run_id/source_data_hash are recorded once the tutorial
+  // run completes so the audit step resumes without re-execution.
+  tutorial_stage: PersistedTutorialStage | null;
+  tutorial_session_id: string | null;
+  tutorial_run_id: string | null;
+  tutorial_source_data_hash: string | null;
   // Nullable to mirror the backend Panel-U1 contract: when no DB row
   // exists for the user, the GET response represents the in-server
   // default and updated_at is null (no write event has occurred to
@@ -94,6 +107,13 @@ export interface UpdateUserComposerPreferencesPayload {
   default_mode?: ComposerMode;
   banner_dismissed_at?: string | null;
   tutorial_completed_at?: string | null;
+  // Absent = unchanged; explicit null = clear. Setting (or clearing)
+  // tutorial_completed_at also clears any resume field not supplied in
+  // the same PATCH (completion-clears-progress, see backend service).
+  tutorial_stage?: PersistedTutorialStage | null;
+  tutorial_session_id?: string | null;
+  tutorial_run_id?: string | null;
+  tutorial_source_data_hash?: string | null;
 }
 
 // ── First-run tutorial (Phase 4) ───────────────────────────────────────────

@@ -28,7 +28,16 @@
   /* ── Text ────────────────────────────────────────────────────────────────── */
   --color-text:              #dff0ee;
   --color-text-secondary:    #a8d0d0;
-  --color-text-muted:        #7a9a9a;
+  /* Muted text must clear WCAG AA (4.5:1) on EVERY panel surface it composes
+     with, not just --color-bg — the old #7a9a9a passed on the page background
+     but failed on elevated cards (3.84:1 on #1a3d47) and paper modals
+     (4.37:1 on #332f2c), ~46 live axe hits (elspeth-dae08efdc9). #93b3b3
+     clears every surface family: bg 6.45, surface 6.28, elevated/raised 5.18,
+     inspector 6.53, paper 5.90, nav 7.61, nav-raised 6.71, and 4.60 on the
+     4%-white hover wash over elevated. Gated by the muted-on-panel-surface
+     composition tests in colorContrast.test.ts. Mirrored in
+     website/tokens/colors.css — change both. */
+  --color-text-muted:        #93b3b3;
   --color-text-inverse:      #ffffff;
 
   /* ── Borders — teal-tinted ───────────────────────────────────────────────── */
@@ -153,6 +162,9 @@
   /* ── Sizing ──────────────────────────────────────────────────────────────── */
   --inspector-default-width: 320px;
   --inspector-min-width:     240px;
+  /* Composer shell right rail. Consumed by .app-layout's grid template in
+     shared.css (previously a hardcoded inline style in Layout.tsx). */
+  --siderail-width:          320px;
 
   /* ── Typography — Inter for body, system fallback ────────────────────────── */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
@@ -160,8 +172,14 @@
   --font-mono: "JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code",
     "Source Code Pro", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 
-  --font-size-3xs:  10px;   /* sub-chrome micro-text (e.g. tab counts, ribbon icons, required-field badge) — a distinct register, smaller than 2xs */
-  --font-size-2xs:  11px;   /* chrome hints, micro-text (e.g. .chat-input-hint, breadcrumbs) */
+  /* Type floor (elspeth-5836435926): 12px is the minimum rendered size — the
+     10/11px micro registers failed the desktop comfort floor and compounded
+     the dark-theme contrast failures. 3xs/2xs keep their distinct NAMES (their
+     consumers signal register intent: micro-chrome vs hints) but both resolve
+     to the 12px floor; hierarchy below body text is carried by weight,
+     case, and letter-spacing instead of sub-12px sizes. Do not lower these. */
+  --font-size-3xs:  12px;   /* sub-chrome micro-text (e.g. tab counts, ribbon icons, required-field badge) — floored at 12px */
+  --font-size-2xs:  12px;   /* chrome hints, micro-text (e.g. .chat-input-hint, breadcrumbs) — floored at 12px */
   --font-size-xs:   12px;
   --font-size-sm:   13px;
   --font-size-md:   15px;   /* preserves the h2/h3 hierarchy step in markdown-body rendering — h3 sits between h2 (base/16) and body (sm/13) */

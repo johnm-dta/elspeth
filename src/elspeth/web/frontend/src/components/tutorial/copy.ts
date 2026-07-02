@@ -52,6 +52,27 @@ export const TUTORIAL_RUN_PREAMBLE =
 export const GRADUATION_CANCELLED_NOTE =
   "Your run was cancelled — the audit story would have shown the source-data hash, the row-by-row decisions, and the output write. You can rerun any time from the chat panel.";
 
+/**
+ * Graduation bullets for the SKIP path. The default bullets assert "The
+ * pipeline you just ran…" and "the same gestures you just practised" —
+ * false for a user who skipped without building or running anything. This
+ * variant carries the same lessons in the future tense, without claiming a
+ * run or practice that never happened. The last two bullets are shared
+ * verbatim with the default set (they make no just-ran claims).
+ */
+export const TURN_7_LEARNING_BULLETS_SKIPPED = [
+  {
+    title: "What the composer builds is AI-generated.",
+    body:
+      "When you describe a pipeline in a sentence, an LLM interprets it and drafts the pipeline for you. The prompt it writes for itself and cleanup choices it makes are kept in the audit trail with your approval against them. You can revisit any pipeline from the Audit page at any time.",
+  },
+  {
+    title: "Read before you run.",
+    body:
+      "When the composer drafts a pipeline for you, glance at the graph and the YAML before clicking Run. If anything looks wrong, amend or reject — nothing executes without your say-so.",
+  },
+] as const;
+
 export const TURN_7_LEARNING_BULLETS = [
   {
     title: "What you built is AI-generated.",

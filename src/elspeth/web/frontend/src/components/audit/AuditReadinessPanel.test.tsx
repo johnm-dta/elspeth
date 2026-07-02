@@ -374,9 +374,11 @@ describe("AuditReadinessPanel", () => {
 
     render(<AuditReadinessPanel />);
 
-    expect(
-      await screen.findByLabelText(/audit readiness checked just now.*v1/i),
-    ).toBeInTheDocument();
+    // Freshness is conveyed by the visible paragraph text — the previous
+    // aria-label duplicate on the <p> was never exposed to AT (naming is
+    // prohibited on a paragraph role; elspeth-37293a3b7c).
+    const freshness = await screen.findByText(/checked just now.*v1/i);
+    expect(freshness).toHaveClass("audit-readiness-freshness");
   });
 
   it("force-refreshes the current composition version when Refresh is clicked", async () => {

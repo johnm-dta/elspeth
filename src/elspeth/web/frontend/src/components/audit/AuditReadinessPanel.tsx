@@ -396,7 +396,6 @@ export function AuditReadinessPanel() {
   }
 
   const checkedText = relativeTime(snapshot.checked_at);
-  const freshnessLabel = `Audit readiness checked ${checkedText} as of v${snapshot.composition_version}`;
 
   // Collapsed view — single summary line when nothing is actionable.
   if (!showExpanded) {
@@ -414,10 +413,11 @@ export function AuditReadinessPanel() {
           aria-label="Audit ready. Show details."
         >
           <span aria-hidden="true">{"✓"}</span> Audit ready
-          <span
-            className="audit-readiness-summary-meta"
-            aria-label={freshnessLabel}
-          >
+          {/* No aria-label here: on a role-less span it is never exposed
+              (elspeth-37293a3b7c), and the parent button's aria-label wins
+              the name computation anyway. The freshness detail is the
+              visible text. */}
+          <span className="audit-readiness-summary-meta">
             Checked {checkedText} · as of v{snapshot.composition_version}
           </span>
         </button>
@@ -435,10 +435,10 @@ export function AuditReadinessPanel() {
         <header className="audit-readiness-header">
           <div>
             <h2 className="audit-readiness-title">Audit readiness</h2>
-            <p
-              className="audit-readiness-freshness"
-              aria-label={freshnessLabel}
-            >
+            {/* No aria-label: naming is not exposed (and is prohibited) on
+                a paragraph role (elspeth-37293a3b7c); the visible text IS
+                the freshness statement. */}
+            <p className="audit-readiness-freshness">
               Checked {checkedText} · as of v{snapshot.composition_version}
             </p>
           </div>

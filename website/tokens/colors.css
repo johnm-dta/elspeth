@@ -29,7 +29,10 @@
   /* ── Text ────────────────────────────────────────────────────────────────── */
   --color-text:              #dff0ee;
   --color-text-secondary:    #a8d0d0;
-  --color-text-muted:        #7a9a9a;
+  /* Mirrors the product token (frontend/src/styles/tokens.css): raised from
+     #7a9a9a so muted text clears WCAG AA on every dark panel surface
+     (elspeth-dae08efdc9). Change both files together. */
+  --color-text-muted:        #93b3b3;
   --color-text-inverse:      #ffffff;
 
   /* ── Borders — teal-tinted ───────────────────────────────────────────────── */

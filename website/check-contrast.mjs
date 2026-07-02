@@ -63,12 +63,21 @@ const checks = [
   ["dark  code .str", dark["--color-badge-source"], dark["--color-surface-nav"]],
   ["dark  body → bg", dark["--color-text"], dark["--color-bg"]],
   ["dark  secondary → surface", dark["--color-text-secondary"], dark["--color-surface"]],
+  // muted text (.eyebrow, .term-bar .t, pre.code .cm, card body copy) sits on
+  // the page bg, cards (surface/elevated) and the terminal (surface-nav).
+  // Mirrors the product-side muted-on-panel-surface gate (elspeth-dae08efdc9).
+  ["dark  muted → bg", dark["--color-text-muted"], dark["--color-bg"]],
+  ["dark  muted → elevated", dark["--color-text-muted"], dark["--color-surface-elevated"]],
+  ["dark  muted → terminal", dark["--color-text-muted"], dark["--color-surface-nav"]],
   // light theme — the re-tinted text on the (worst-case) light code surface
   ["light success/hl override", ovOk, light["--color-surface-nav"]],
   ["light code .key override", ovKey, light["--color-surface-nav"]],
   ["light code .str override", ovStr, light["--color-surface-nav"]],
   ["light body → bg", light["--color-text"], light["--color-bg"]],
   ["light secondary → surface", light["--color-text-secondary"], light["--color-surface"]],
+  ["light muted → bg", light["--color-text-muted"], light["--color-bg"]],
+  ["light muted → elevated", light["--color-text-muted"], light["--color-surface-elevated"]],
+  ["light muted → terminal", light["--color-text-muted"], light["--color-surface-nav"]],
 ];
 
 let failed = 0;

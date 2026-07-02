@@ -18,6 +18,9 @@ import type { FailedTurn } from "./recovery";
  */
 export interface AuthConfig {
   provider: "local" | "oidc" | "entra";
+  /** Effective registration mode — the LoginPage only renders its
+   *  "Create an account" affordance when this is "open" (local auth). */
+  registration_mode: "open" | "email_verified" | "closed";
   oidc_issuer: string | null;
   oidc_client_id: string | null;
   authorization_endpoint: string | null;

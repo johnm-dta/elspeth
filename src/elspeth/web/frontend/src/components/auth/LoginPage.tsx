@@ -1,28 +1,73 @@
-import { useState, useEffect, type FormEvent } from "react";
+import { useState, useEffect, type CSSProperties, type FormEvent } from "react";
 import { useAuth } from "../../hooks/useAuth";
 import * as api from "../../api/client";
-import type { AuthConfig } from "../../types/index";
+import type { ApiError, AuthConfig } from "../../types/index";
 import { Button, Input, AlertBanner, WordMark } from "../ui";
 
 /**
  * Login page that adapts to the configured auth provider.
  *
  * Fetches GET /api/auth/config on mount to determine provider type:
- * - "local": renders a username/password form
+ * - "local": renders a username/password form; when the backend's
+ *   registration_mode is "open", also offers a "Create an account"
+ *   view (username + password + confirm) that auto-logs the new
+ *   account in via the token returned by POST /api/auth/register
  * - "oidc" or "entra": renders a "Sign in with SSO" button that
  *   redirects to config.authorization_endpoint (resolved from OIDC
  *   discovery by the backend)
  *
  * On return from an OIDC redirect, extracts the token from the URL
  * fragment or query parameter and calls loginWithToken().
+ *
+ * Failed sign-in attempts keep the username and clear only the
+ * password (WCAG 3.3.7 Redundant Entry, elspeth-d49f8ad511); the
+ * error banner is programmatically associated with the credential
+ * fields via aria-invalid + aria-describedby.
  */
+
+/** id linking the sign-in error banner to the credential fields. */
+const LOGIN_ERROR_ID = "login-error";
+/** id linking the registration error banner to its targeted fields. */
+const REGISTER_ERROR_ID = "register-error";
+
+/** Which registration fields the current registration error is about. */
+interface RegisterErrorTargets {
+  username: boolean;
+  password: boolean;
+  confirm: boolean;
+}
+
+const NO_REGISTER_TARGETS: RegisterErrorTargets = {
+  username: false,
+  password: false,
+  confirm: false,
+};
+
+/** Inline copy of the app's link-button idiom (.tutorial-link-button) —
+ *  LoginPage is inline-styled and has no dedicated stylesheet. */
+const linkButtonStyle: CSSProperties = {
+  border: 0,
+  background: "transparent",
+  color: "var(--color-link)",
+  cursor: "pointer",
+  font: "inherit",
+  padding: 0,
+  textDecoration: "underline",
+  textUnderlineOffset: 3,
+};
+
 export function LoginPage() {
   const { login, loginWithToken, loginError } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
+  const [view, setView] = useState<"signin" | "register">("signin");
+  const [registerError, setRegisterError] = useState<string | null>(null);
+  const [registerErrorTargets, setRegisterErrorTargets] =
+    useState<RegisterErrorTargets>(NO_REGISTER_TARGETS);
 
   // Fetch auth config on mount to determine which login form to show
   useEffect(() => {
@@ -33,9 +78,12 @@ export function LoginPage() {
         setConfigLoading(false);
       })
       .catch(() => {
-        // If config fetch fails, fall back to local auth
+        // If config fetch fails, fall back to local auth. Registration is
+        // treated as closed — we don't know the effective mode, so we don't
+        // advertise an affordance that may 404.
         setAuthConfig({
           provider: "local",
+          registration_mode: "closed",
           oidc_issuer: null,
           oidc_client_id: null,
           authorization_endpoint: null,
@@ -84,8 +132,55 @@ export function LoginPage() {
     if (!username || !password) return;
 
     setIsSubmitting(true);
-    await login(username, password);
+    const succeeded = await login(username, password);
+    if (!succeeded) {
+      // Keep the username (WCAG 3.3.7 Redundant Entry) — only the
+      // rejected password is cleared, per convention.
+      setPassword("");
+    }
     setIsSubmitting(false);
+  }
+
+  async function handleRegister(e: FormEvent) {
+    e.preventDefault();
+    if (!username || !password || !confirmPassword) return;
+
+    if (password !== confirmPassword) {
+      setRegisterError("Passwords do not match.");
+      setRegisterErrorTargets({ username: false, password: true, confirm: true });
+      return;
+    }
+
+    setIsSubmitting(true);
+    setRegisterError(null);
+    setRegisterErrorTargets(NO_REGISTER_TARGETS);
+    try {
+      const { access_token } = await api.register(username, password);
+      // The backend auto-logs the new account in; adopting the returned
+      // token drops the user straight into the app.
+      await loginWithToken(access_token);
+    } catch (err) {
+      const apiErr = err as ApiError;
+      if (apiErr.status === 409) {
+        setRegisterError("That username is not available.");
+        setRegisterErrorTargets({ username: true, password: false, confirm: false });
+      } else {
+        setRegisterError("Registration failed. Please try again.");
+        setRegisterErrorTargets(NO_REGISTER_TARGETS);
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  function switchView(next: "signin" | "register") {
+    setView(next);
+    // Keep the username across the switch (it's the common field);
+    // passwords and stale errors don't carry over.
+    setPassword("");
+    setConfirmPassword("");
+    setRegisterError(null);
+    setRegisterErrorTargets(NO_REGISTER_TARGETS);
   }
 
   function handleSsoRedirect() {
@@ -125,6 +220,13 @@ export function LoginPage() {
 
   const isOidc =
     authConfig?.provider === "oidc" || authConfig?.provider === "entra";
+  // Registration is a local-auth capability; only advertise it when the
+  // backend's effective mode is "open" ("closed" and "email_verified"
+  // both render nothing — the endpoint would refuse the request).
+  const registrationOpen =
+    authConfig?.provider === "local" &&
+    authConfig?.registration_mode === "open";
+  const showRegister = registrationOpen && view === "register";
 
   return (
     <div
@@ -162,53 +264,181 @@ export function LoginPage() {
           </p>
         </div>
 
-        {loginError && <AlertBanner tone="error">{loginError}</AlertBanner>}
-
         {isOidc ? (
-          /* OIDC / Entra SSO: single "Sign in with SSO" button */
-          <Button
-            variant="primary"
-            type="button"
-            onClick={handleSsoRedirect}
-            aria-label="Sign in with single sign-on"
-          >
-            Sign in with SSO
-          </Button>
-        ) : (
-          /* Local auth: username/password form */
+          <>
+            {loginError && <AlertBanner tone="error">{loginError}</AlertBanner>}
+            {/* OIDC / Entra SSO: single "Sign in with SSO" button */}
+            <Button
+              variant="primary"
+              type="button"
+              onClick={handleSsoRedirect}
+              aria-label="Sign in with single sign-on"
+            >
+              Sign in with SSO
+            </Button>
+          </>
+        ) : showRegister ? (
+          /* Local auth: registration form (registration_mode="open" only) */
           <form
-            onSubmit={handleSubmit}
+            onSubmit={handleRegister}
+            aria-label="Create an account"
             style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}
           >
+            <h2
+              style={{
+                margin: 0,
+                fontSize: "var(--font-size-md)",
+                fontWeight: 600,
+              }}
+            >
+              Create an account
+            </h2>
+
+            {registerError && (
+              <AlertBanner tone="error" id={REGISTER_ERROR_ID}>
+                {registerError}
+              </AlertBanner>
+            )}
+
             <Input
               label="Username"
-              id="login-username"
+              id="register-username"
               type="text"
               autoComplete="username"
               required
               value={username}
               onChange={(e) => setUsername(e.target.value)}
+              aria-invalid={registerErrorTargets.username ? true : undefined}
+              aria-describedby={
+                registerErrorTargets.username ? REGISTER_ERROR_ID : undefined
+              }
             />
 
             <Input
               label="Password"
-              id="login-password"
+              id="register-password"
               type="password"
-              autoComplete="current-password"
+              autoComplete="new-password"
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              aria-invalid={registerErrorTargets.password ? true : undefined}
+              aria-describedby={
+                registerErrorTargets.password ? REGISTER_ERROR_ID : undefined
+              }
+            />
+
+            <Input
+              label="Confirm password"
+              id="register-confirm-password"
+              type="password"
+              autoComplete="new-password"
+              required
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              aria-invalid={registerErrorTargets.confirm ? true : undefined}
+              aria-describedby={
+                registerErrorTargets.confirm ? REGISTER_ERROR_ID : undefined
+              }
             />
 
             <Button
               variant="primary"
               type="submit"
               disabled={isSubmitting}
-              aria-label={isSubmitting ? "Signing in" : "Sign in"}
+              aria-label={isSubmitting ? "Creating account" : "Create account"}
             >
-              {isSubmitting ? "Signing in…" : "Sign in"}
+              {isSubmitting ? "Creating account…" : "Create account"}
             </Button>
+
+            <p
+              style={{
+                margin: 0,
+                fontSize: "var(--font-size-sm)",
+                color: "var(--color-text-secondary)",
+                textAlign: "center",
+              }}
+            >
+              Already have an account?{" "}
+              <button
+                type="button"
+                style={linkButtonStyle}
+                onClick={() => switchView("signin")}
+              >
+                Sign in
+              </button>
+            </p>
           </form>
+        ) : (
+          /* Local auth: username/password form */
+          <>
+            {loginError && (
+              <AlertBanner tone="error" id={LOGIN_ERROR_ID}>
+                {loginError}
+              </AlertBanner>
+            )}
+            <form
+              onSubmit={handleSubmit}
+              style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)" }}
+            >
+              {/* The sign-in error is deliberately generic (it never says which
+                  field was wrong), so on failure BOTH credential fields are
+                  flagged and described by the banner — same idiom as
+                  SecretsPanel's form-error wiring. */}
+              <Input
+                label="Username"
+                id="login-username"
+                type="text"
+                autoComplete="username"
+                required
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                aria-invalid={loginError ? true : undefined}
+                aria-describedby={loginError ? LOGIN_ERROR_ID : undefined}
+              />
+
+              <Input
+                label="Password"
+                id="login-password"
+                type="password"
+                autoComplete="current-password"
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                aria-invalid={loginError ? true : undefined}
+                aria-describedby={loginError ? LOGIN_ERROR_ID : undefined}
+              />
+
+              <Button
+                variant="primary"
+                type="submit"
+                disabled={isSubmitting}
+                aria-label={isSubmitting ? "Signing in" : "Sign in"}
+              >
+                {isSubmitting ? "Signing in…" : "Sign in"}
+              </Button>
+
+              {registrationOpen && (
+                <p
+                  style={{
+                    margin: 0,
+                    fontSize: "var(--font-size-sm)",
+                    color: "var(--color-text-secondary)",
+                    textAlign: "center",
+                  }}
+                >
+                  New to ELSPETH?{" "}
+                  <button
+                    type="button"
+                    style={linkButtonStyle}
+                    onClick={() => switchView("register")}
+                  >
+                    Create an account
+                  </button>
+                </p>
+              )}
+            </form>
+          </>
         )}
       </div>
     </div>

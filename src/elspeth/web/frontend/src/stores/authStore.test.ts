@@ -5,6 +5,7 @@ import { usePreferencesStore } from "./preferencesStore";
 import { useSecretsStore } from "./secretsStore";
 import { useShareableReviewStore } from "./shareableReviewStore";
 import * as shareableReviewsApi from "../api/shareableReviews";
+import * as apiClient from "@/api/client";
 import { resetStore } from "@/test/store-helpers";
 
 vi.mock("@/api/client", () => ({
@@ -13,6 +14,63 @@ vi.mock("@/api/client", () => ({
   fetchUserComposerPreferences: vi.fn(),
   updateUserComposerPreferences: vi.fn(),
 }));
+
+describe("authStore interactive login", () => {
+  beforeEach(() => {
+    resetStore(useAuthStore);
+    // Simulate a completed boot: loadFromStorage has already resolved.
+    useAuthStore.setState({ isLoading: false });
+    localStorage.clear();
+    vi.clearAllMocks();
+  });
+
+  it("failed login sets the generic error, returns false, and never flips isLoading", async () => {
+    // Regression for elspeth-d49f8ad511: login() used to set isLoading=true,
+    // which drove AuthGuard's "Checking authentication" spinner and
+    // UNMOUNTED the LoginPage mid-attempt — a failed login then remounted
+    // a blank form, wiping the username (WCAG 3.3.7 Redundant Entry).
+    vi.mocked(apiClient.login).mockRejectedValue({
+      status: 401,
+      detail: "Invalid credentials",
+    });
+    const isLoadingSamples: boolean[] = [];
+    const unsubscribe = useAuthStore.subscribe((state) => {
+      isLoadingSamples.push(state.isLoading);
+    });
+
+    const succeeded = await useAuthStore.getState().login("alice", "wrong");
+    unsubscribe();
+
+    expect(succeeded).toBe(false);
+    expect(isLoadingSamples).not.toContain(true);
+    expect(useAuthStore.getState()).toMatchObject({
+      token: null,
+      user: null,
+      loginError: "Invalid username or password.",
+      isLoading: false,
+    });
+    expect(localStorage.getItem("auth_token")).toBeNull();
+  });
+
+  it("successful login returns true, stores the token, and loads the user", async () => {
+    vi.mocked(apiClient.login).mockResolvedValue({ access_token: "tok-1" });
+    vi.mocked(apiClient.fetchCurrentUser).mockResolvedValue({
+      user_id: "u-1",
+      username: "alice",
+      display_name: "Alice",
+      email: null,
+      groups: [],
+    });
+
+    const succeeded = await useAuthStore.getState().login("alice", "pw");
+
+    expect(succeeded).toBe(true);
+    expect(useAuthStore.getState().token).toBe("tok-1");
+    expect(useAuthStore.getState().user).toMatchObject({ username: "alice" });
+    expect(useAuthStore.getState().loginError).toBeNull();
+    expect(localStorage.getItem("auth_token")).toBe("tok-1");
+  });
+});
 
 describe("authStore account-scoped store reset", () => {
   beforeEach(() => {

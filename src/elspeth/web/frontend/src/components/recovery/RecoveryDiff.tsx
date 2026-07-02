@@ -264,7 +264,13 @@ export function RecoveryDiff({
   return (
     <section className="recovery-diff" aria-labelledby="recovery-diff-title">
       <h3 id="recovery-diff-title">Pipeline changes</h3>
-      <div className="recovery-diff-summary" aria-label="Recovery diff summary">
+      {/* role="group" so the aria-label is exposed — aria-label on a
+          role-less div is ignored by AT (WCAG 1.3.1, elspeth-37293a3b7c). */}
+      <div
+        className="recovery-diff-summary"
+        role="group"
+        aria-label="Recovery diff summary"
+      >
         {groups.map((group) => (
           <span key={group.kind}>{group.label}</span>
         ))}

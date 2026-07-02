@@ -17,6 +17,10 @@ def test_user_preferences_table_columns() -> None:
         "default_composer_mode",
         "banner_dismissed_at",
         "tutorial_completed_at",
+        "tutorial_stage",
+        "tutorial_session_id",
+        "tutorial_run_id",
+        "tutorial_source_data_hash",
         "updated_at",
     }
 
@@ -60,3 +64,21 @@ def test_tutorial_completed_at_is_nullable_timestamp() -> None:
     table = metadata.tables["user_preferences"]
     column = table.c.tutorial_completed_at
     assert column.nullable
+
+
+def test_tutorial_stage_check_constraint_closes_the_enum() -> None:
+    """The tutorial resume stage is a closed enum at the DB level too
+    (elspeth-918f4434b3). NULL = no in-progress tutorial; 'welcome' is
+    deliberately NOT stored (nothing has started)."""
+    from sqlalchemy import CheckConstraint
+
+    table = metadata.tables["user_preferences"]
+    check_names = {c.name for c in table.constraints if isinstance(c, CheckConstraint)}
+    assert "ck_user_preferences_tutorial_stage" in check_names
+
+
+def test_tutorial_resume_columns_are_nullable() -> None:
+    """All four resume columns are NULL when no tutorial is in progress."""
+    table = metadata.tables["user_preferences"]
+    for name in ("tutorial_stage", "tutorial_session_id", "tutorial_run_id", "tutorial_source_data_hash"):
+        assert table.c[name].nullable, name

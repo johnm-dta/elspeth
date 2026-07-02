@@ -66,6 +66,38 @@
   line-height: 1.25;
 }
 
+/* Display name + raw plugin id + optional internal badge share the left
+   side of the header row (elspeth-5ee1f76e39: display name is primary,
+   id is secondary mono metadata). */
+.plugin-card-title-group {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  min-width: 0;
+}
+
+.plugin-card-id {
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-2xs);
+  line-height: 1.25;
+}
+
+/* Internal-machinery badge (e.g. the resume-only "null" source): the
+   catalog is a reference, so internal plugins stay listed but are marked
+   so first-run users do not reach for them. */
+.plugin-card-internal-badge {
+  padding: 0 var(--space-xs);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: var(--font-size-3xs);
+  font-weight: 700;
+  line-height: 1.6;
+  text-transform: uppercase;
+}
+
 .plugin-card-kind {
   color: var(--color-text-muted);
   font-size: var(--font-size-3xs);

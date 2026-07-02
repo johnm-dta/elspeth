@@ -5,25 +5,88 @@ import {
   renameSession,
   sendTutorialAbandonBeacon,
 } from "@/api/client";
+import { usePreferencesStore } from "@/stores/preferencesStore";
 import { TutorialTurn1Welcome } from "./TutorialTurn1Welcome";
 import { TutorialGuidedShell } from "./TutorialGuidedShell";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
 import { TutorialTurn5AuditStory } from "./TutorialTurn5AuditStory";
 import { TutorialTurn7Graduation } from "./TutorialTurn7Graduation";
-import { initialTutorialState, isAbandonOnPageHide, tutorialReducer } from "./tutorialMachine";
+import {
+  isAbandonOnPageHide,
+  progressForTutorialState,
+  resumeTutorialState,
+  tutorialReducer,
+} from "./tutorialMachine";
 import { HELLO_WORLD_PENDING_SESSION_TITLE } from "./copy";
 
+/**
+ * Reducer lazy-initialiser: reconstruct the mount state from the
+ * server-persisted resume fields (elspeth-918f4434b3). App.tsx only mounts
+ * the tutorial after the preferences bootstrap completes (`showTutorial`
+ * gates on `preferencesLoaded`), so the store fields are authoritative here.
+ */
+function initTutorialStateFromPreferences(): ReturnType<typeof resumeTutorialState> {
+  const prefs = usePreferencesStore.getState();
+  return resumeTutorialState({
+    stage: prefs.tutorialStage,
+    sessionId: prefs.tutorialSessionId,
+    runId: prefs.tutorialRunId,
+    sourceDataHash: prefs.tutorialSourceDataHash,
+  });
+}
+
 export function HelloWorldTutorial(): JSX.Element {
-  const [state, dispatch] = useReducer(tutorialReducer, initialTutorialState);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [state, dispatch] = useReducer(
+    tutorialReducer,
+    null,
+    initTutorialStateFromPreferences,
+  );
+  const [sessionId, setSessionId] = useState<string | null>(state.sessionId);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
+  // Orphan cleanup runs ONLY on a fresh tutorial entry. On a resume the
+  // persisted tutorial session still carries the pending title — sweeping it
+  // here is exactly the "abandoned-hello-world (pending)-<timestamp>" rename
+  // the resume path exists to prevent. (The backend also refuses to sweep
+  // the session recorded in preferences.tutorial_session_id — defence in
+  // depth.)
+  const resumedAtMountRef = useRef(state.resumed);
   useEffect(() => {
+    if (resumedAtMountRef.current) {
+      return;
+    }
     void deleteTutorialOrphans().catch((err) => {
       console.error("[tutorial] orphan cleanup failed:", err);
     });
   }, []);
+
+  // Persist the tutorial stage server-side on every stage transition so a
+  // reload resumes instead of restarting. Best-effort: a failed persist
+  // must not interrupt the in-page tutorial (and deliberately does NOT set
+  // the store's writeError — that would unmount the tutorial via App.tsx's
+  // showTutorial gate); the residual cost of a failure is only that a
+  // reload resumes one stage earlier. The skipped path persists the
+  // completion opt-out instead (see onSkip), which clears these fields
+  // server-side — so no stage write happens for it.
+  useEffect(() => {
+    if (state.skipped) {
+      return;
+    }
+    const target = progressForTutorialState(state, state.sessionId ?? sessionId);
+    const prefs = usePreferencesStore.getState();
+    if (
+      prefs.tutorialStage === target.stage &&
+      prefs.tutorialSessionId === target.sessionId &&
+      prefs.tutorialRunId === target.runId &&
+      prefs.tutorialSourceDataHash === target.sourceDataHash
+    ) {
+      return;
+    }
+    void prefs.saveTutorialProgress(target).catch((err) => {
+      console.error("[tutorial] progress persist failed:", err);
+    });
+  }, [state, sessionId]);
 
   // Fire the best-effort tutorial-abandoned telemetry beacon (composer.
   // tutorial.abandon_total) when the tab/page is torn down while a tutorial
@@ -80,6 +143,23 @@ export function HelloWorldTutorial(): JSX.Element {
   };
 
   const goBack = (): void => dispatch({ type: "back" });
+
+  // "Skip the tutorial" persists the opt-out IMMEDIATELY on this first
+  // click, not on the follow-up "Take me to the composer" click — a closed
+  // tab between the two must not restart the tutorial. publishLocally=false
+  // keeps the graduation card mounted (flipping tutorialCompleted here
+  // would unmount the whole tutorial mid-farewell); the graduation card's
+  // finish click re-persists idempotently and then publishes. Best-effort:
+  // on failure the finish click is still the second chance to persist.
+  const onSkip = (): void => {
+    dispatch({ type: "skipToGraduation" });
+    void usePreferencesStore
+      .getState()
+      .markTutorialGraduated({ publishLocally: false })
+      .catch((err) => {
+        console.error("[tutorial] skip opt-out persist failed:", err);
+      });
+  };
   const stepLabels = TUTORIAL_STEP_LABELS;
   const currentIndex = stepIndex(state.step);
   const totalSteps = stepLabels.length;
@@ -156,10 +236,7 @@ export function HelloWorldTutorial(): JSX.Element {
               {startError}
             </p>
           )}
-          <TutorialTurn1Welcome
-            onStart={() => void onStart()}
-            onSkip={() => dispatch({ type: "skipToGraduation" })}
-          />
+          <TutorialTurn1Welcome onStart={() => void onStart()} onSkip={onSkip} />
         </>
       )}
       {state.step === "guided" && sessionId !== null && (
@@ -180,6 +257,7 @@ export function HelloWorldTutorial(): JSX.Element {
         // return to and renders no Back affordance.
         <TutorialTurn4Run
           sessionId={state.sessionId}
+          onResult={(result) => dispatch({ type: "runResultReady", result })}
           onCompleted={(result) => dispatch({ type: "runCompleted", result })}
           onCancelled={() => dispatch({ type: "cancelRun" })}
         />
@@ -188,11 +266,16 @@ export function HelloWorldTutorial(): JSX.Element {
         state.sessionId !== null &&
         state.runId !== null &&
         state.sourceDataHash !== null && (
+          // A RESUMED audit has no in-memory run cache (it was rebuilt from
+          // the persisted resume fields after a reload), so Back into the
+          // run turn would silently re-fire the tutorial pipeline — real
+          // LLM spend. Suppress the Back affordance on the resumed flow;
+          // the in-page flow keeps it (the run result stays cache-backed).
           <TutorialTurn5AuditStory
             sessionId={state.sessionId}
             runId={state.runId}
             onContinue={() => dispatch({ type: "continueToGraduation" })}
-            onBack={goBack}
+            onBack={state.resumed ? undefined : goBack}
           />
         )}
       {state.step === "graduation" && (

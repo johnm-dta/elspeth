@@ -5,7 +5,7 @@
 // 08-§"Plugin card content design":
 //
 //   ┌──────────────────────────────────────────────────┐
-//   │  csv                                             │
+//   │  CSV  csv                                        │  ← display name + id
 //   │  Read rows from a CSV file. ...                  │
 //   │                                                  │
 //   │  Audit: ✓ reads I/O  ✓ quarantines  ✓ coerces   │
@@ -26,6 +26,7 @@
 import { useState, type MouseEvent } from "react";
 import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
 import { AuditCharacteristicIcon } from "./AuditCharacteristicIcon";
+import { isInternalPlugin, pluginDisplayName } from "./pluginDisplayName";
 
 /** Event name dispatched by InlineChatSourceEntry and consumed by
  *  ChatInput.tsx. Re-exported here for backwards compatibility with
@@ -120,6 +121,7 @@ export function PluginCard({
 }: PluginCardProps) {
   const [expanded, setExpanded] = useState(initialExpanded);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const displayName = pluginDisplayName(plugin.name);
   const cardId = `${pluginCardIdSegment(plugin.plugin_type)}-${pluginCardIdSegment(plugin.name)}`;
   const nameId = `plugin-card-name-${cardId}`;
   const detailsPanelId = `plugin-card-details-panel-${cardId}`;
@@ -149,7 +151,16 @@ export function PluginCard({
     // instead of the name being an undifferentiated bold span.
     <div className="plugin-card" role="article" aria-labelledby={nameId}>
       <div className="plugin-card-header-row">
-        <span id={nameId} className="plugin-card-name">{plugin.name}</span>
+        {/* Display name is the PRIMARY label (human register); the raw
+            plugin id is demoted to secondary mono metadata so operators
+            can still copy the exact wire name (elspeth-5ee1f76e39). */}
+        <span className="plugin-card-title-group">
+          <span id={nameId} className="plugin-card-name">{displayName}</span>
+          <code className="plugin-card-id">{plugin.name}</code>
+          {isInternalPlugin(plugin.name) && (
+            <span className="plugin-card-internal-badge">internal</span>
+          )}
+        </span>
         <span className="plugin-card-kind">{plugin.plugin_type}</span>
       </div>
 
@@ -158,7 +169,14 @@ export function PluginCard({
       </div>
 
       {plugin.audit_characteristics.length > 0 && (
-        <div className="plugin-card-audit-strip" aria-label="Audit characteristics">
+        // role="group" so the aria-label is actually exposed — aria-label on
+        // a role-less div (role=generic) is ignored by AT (WCAG 1.3.1,
+        // elspeth-37293a3b7c).
+        <div
+          className="plugin-card-audit-strip"
+          role="group"
+          aria-label="Audit characteristics"
+        >
           {[...plugin.audit_characteristics].sort().map((flag) => (
             <AuditCharacteristicIcon key={flag} flag={flag} />
           ))}
@@ -172,7 +190,7 @@ export function PluginCard({
           onClick={() => setDetailsOpen((open) => !open)}
           aria-expanded={detailsOpen}
           aria-controls={detailsPanelId}
-          aria-label={`Reference details for ${plugin.name}`}
+          aria-label={`Reference details for ${displayName}`}
         >
           Details
         </button>
@@ -182,7 +200,7 @@ export function PluginCard({
           onClick={handleDisclosureClick}
           aria-expanded={expanded}
           aria-controls={schemaPanelId}
-          aria-label={`Schema for ${plugin.name}`}
+          aria-label={`Schema for ${displayName}`}
         >
           Schema
         </button>

@@ -5,6 +5,7 @@ import {
   GRADUATION_CANCELLED_NOTE,
   HELLO_WORLD_SESSION_TITLE,
   TURN_7_LEARNING_BULLETS,
+  TURN_7_LEARNING_BULLETS_SKIPPED,
   TURN_7_PRIMARY_BUTTON,
 } from "./copy";
 
@@ -111,7 +112,15 @@ export function TutorialTurn7Graduation({
         </p>
       )}
       <ul className="tutorial-graduation-list">
-        {TURN_7_LEARNING_BULLETS.map((bullet) => (
+        {/* Honest skip variant (elspeth-918f4434b3): a user who skipped
+            never built or ran anything, so the "pipeline you just ran" /
+            "gestures you just practised" bullets would be false. The first
+            two bullets swap for future-tense equivalents; the last two are
+            shared (they make no just-ran claims). */}
+        {(skipped
+          ? [...TURN_7_LEARNING_BULLETS_SKIPPED, ...TURN_7_LEARNING_BULLETS.slice(2)]
+          : TURN_7_LEARNING_BULLETS
+        ).map((bullet) => (
           <li key={bullet.title}>
             <strong>{bullet.title}</strong>
             <span>{bullet.body}</span>

@@ -129,7 +129,12 @@ from sqlalchemy.types import JSON
 #        is the eager fail-close that keeps a stale entry_seed-bearing profile blob
 #        from lazy-500-ing deep in WorkflowProfile.from_dict's closed-key-set check.
 #        Pre-release delete-and-recreate policy; see runbook above.
-SESSION_SCHEMA_EPOCH = 25
+#   26 -> ``user_preferences`` gains the first-run tutorial resume columns
+#        (``tutorial_stage`` + ``tutorial_session_id`` + ``tutorial_run_id`` +
+#        ``tutorial_source_data_hash``) so a reload mid-tutorial resumes at the
+#        persisted stage instead of restarting at Welcome (elspeth-918f4434b3).
+#        Pre-release delete-and-recreate policy; see runbook above.
+SESSION_SCHEMA_EPOCH = 26
 
 _SQLITE_ASCII_WHITESPACE = "char(9) || char(10) || char(11) || char(12) || char(13) || char(32)"
 _POSTGRESQL_ASCII_WHITESPACE = "chr(9) || chr(10) || chr(11) || chr(12) || chr(13) || chr(32)"
@@ -1497,10 +1502,29 @@ user_preferences_table = Table(
     Column("banner_dismissed_at", DateTime(timezone=True), nullable=True),
     # NULL = tutorial not completed/reset; non-NULL = completed-at timestamp.
     Column("tutorial_completed_at", DateTime(timezone=True), nullable=True),
+    # First-run tutorial resume state (elspeth-918f4434b3). NULL = no
+    # in-progress tutorial (the Welcome bookend is never persisted — nothing
+    # has started). Non-NULL = the macro stage to resume at after a reload.
+    # The stage vocabulary mirrors the frontend TutorialStep union
+    # (tutorialMachine.ts) minus "welcome"; the CHECK constraint below plus
+    # the Tier-1 read guard in ``PreferencesService._row_to_prefs`` are the
+    # closed-list pair, same lockstep rule as ``default_composer_mode``.
+    Column("tutorial_stage", String, nullable=True),
+    # The tutorial session the persisted stage belongs to, so resume
+    # re-attaches to the SAME session instead of abandoning it. run id +
+    # source-data hash are recorded once the tutorial run completes so the
+    # audit step can resume with zero re-execution (no silent LLM re-spend).
+    Column("tutorial_session_id", String, nullable=True),
+    Column("tutorial_run_id", String, nullable=True),
+    Column("tutorial_source_data_hash", String, nullable=True),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint(
         "default_composer_mode IN ('guided', 'freeform')",
         name="ck_user_preferences_default_composer_mode",
+    ),
+    CheckConstraint(
+        "tutorial_stage IS NULL OR tutorial_stage IN ('guided', 'run', 'audit', 'graduation')",
+        name="ck_user_preferences_tutorial_stage",
     ),
     # Empty-string user_id would silently key a "shared" preferences row
     # that any unauthenticated principal could write to if upstream auth

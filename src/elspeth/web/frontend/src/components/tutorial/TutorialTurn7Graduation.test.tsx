@@ -57,6 +57,10 @@ describe("TutorialTurn7Graduation", () => {
           body.tutorial_completed_at === undefined
             ? null
             : body.tutorial_completed_at,
+        tutorial_stage: null,
+        tutorial_session_id: null,
+        tutorial_run_id: null,
+        tutorial_source_data_hash: null,
         updated_at: "2026-05-19T12:35:00Z",
       }),
     );
@@ -249,5 +253,54 @@ describe("TutorialTurn7Graduation", () => {
     });
     expect(usePreferencesStore.getState().tutorialCompleted).toBe(false);
     expect(useSessionStore.getState().activeSessionId).toBeNull();
+  });
+});
+
+describe("TutorialTurn7Graduation — skip-variant copy (elspeth-918f4434b3)", () => {
+  it("renders honest future-tense bullets for the skipped path", () => {
+    render(
+      <TutorialTurn7Graduation
+        sessionId={null}
+        skipped={true}
+        cancelled={false}
+      />,
+    );
+
+    // The just-ran/just-practised claims are false on the skip path and
+    // must not render.
+    expect(screen.queryByText("What you built is AI-generated.")).toBeNull();
+    expect(
+      screen.queryByText(/the same gestures you just practised/i),
+    ).toBeNull();
+    // The skip variant carries the same lessons without the false claims.
+    expect(
+      screen.getByText("What the composer builds is AI-generated."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Read before you run.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/nothing executes without your say-so/i),
+    ).toBeInTheDocument();
+    // Shared bullets (no just-ran claims) render on both paths.
+    expect(screen.getByText("Ask Elspeth.")).toBeInTheDocument();
+    expect(
+      screen.getByText("LLMs are confident even when they're wrong."),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps the completed-path bullets for a real run", () => {
+    render(
+      <TutorialTurn7Graduation
+        sessionId="sess-new"
+        skipped={false}
+        cancelled={false}
+        onBack={() => undefined}
+      />,
+    );
+    expect(
+      screen.getByText("What you built is AI-generated."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("What the composer builds is AI-generated."),
+    ).toBeNull();
   });
 });

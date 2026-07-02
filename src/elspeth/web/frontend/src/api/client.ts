@@ -1396,3 +1396,22 @@ export {
   fetchAuditReadiness,
   fetchAuditReadinessExplain,
 } from "./auditReadiness";
+
+/**
+ * Register a new local-auth account (only available when the backend's
+ * registration_mode is "open" — see AuthConfig.registration_mode).
+ * The backend auto-logs the new account in and returns a JWT, so no
+ * separate login round-trip is needed. display_name defaults to the
+ * username; the minimal sign-up form does not collect a separate one.
+ */
+export async function register(
+  username: string,
+  password: string,
+): Promise<{ access_token: string }> {
+  const response = await fetch("/api/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, display_name: username }),
+  });
+  return parseResponse<{ access_token: string }>(response);
+}

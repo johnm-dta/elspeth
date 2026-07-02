@@ -88,10 +88,11 @@ export function RecoveryPanel({
             <h2 id="recovery-panel-title">Recover partial composer draft</h2>
             <p>{recoveryError.detail}</p>
           </div>
-          <span
-            className="recovery-panel-reason"
-            aria-label={`Recovery reason: ${reason.toLowerCase()}`}
-          >
+          {/* The "Recovery reason:" context is a visually-hidden prefix —
+              the previous aria-label sat on a role-less span, which AT
+              ignores (WCAG 1.3.1, elspeth-37293a3b7c). */}
+          <span className="recovery-panel-reason">
+            <span className="sr-only">Recovery reason: </span>
             {reason}
           </span>
         </header>

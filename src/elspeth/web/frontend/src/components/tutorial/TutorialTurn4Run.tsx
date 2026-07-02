@@ -7,6 +7,14 @@ import type { RunResultRow, TutorialRunResult } from "./tutorialMachine";
 
 interface TutorialTurn4RunProps {
   sessionId: string;
+  /**
+   * Fired as soon as the run's result arrives (rendered on this turn,
+   * before the user clicks Continue). The parent persists the run identity
+   * so a reload resumes at the audit step instead of re-executing the
+   * pipeline (elspeth-918f4434b3). Optional — standalone mounts (tests)
+   * may omit it.
+   */
+  onResult?: (result: TutorialRunResult) => void;
   onCompleted: (result: TutorialRunResult) => void;
   onCancelled: () => void;
   /**
@@ -95,6 +103,7 @@ const TUTORIAL_RUN_STILL_FINISHING_MESSAGE =
 
 export function TutorialTurn4Run({
   sessionId,
+  onResult,
   onCompleted,
   onCancelled,
   onBack,
@@ -124,12 +133,17 @@ export function TutorialTurn4Run({
     cached.promise
       .then((response) => {
         if (!active) return;
-        setResult({
+        const arrived: TutorialRunResult = {
           runId: response.run_id,
           sourceDataHash: response.output.source_data_hash,
           rows: response.output.rows,
           discardedRowCount: response.output.discarded_row_count,
-        });
+        };
+        setResult(arrived);
+        // Notify the parent the run identity exists, so it can be
+        // persisted for resume BEFORE the user clicks Continue. Uses the
+        // same latest-effect-run closure convention as onCancelled below.
+        onResult?.(arrived);
       })
       .catch((err: unknown) => {
         if (!active) return;

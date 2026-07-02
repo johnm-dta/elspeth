@@ -4,6 +4,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HelloWorldTutorial } from "./HelloWorldTutorial";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
+import { usePreferencesStore } from "@/stores/preferencesStore";
+import { resetStore } from "@/test/store-helpers";
 
 vi.mock("@/api/client", () => ({
   deleteTutorialOrphans: vi.fn().mockResolvedValue({ deleted_count: 0 }),
@@ -31,6 +33,36 @@ vi.mock("@/api/client", () => ({
     },
   }),
   sendTutorialAbandonBeacon: vi.fn(),
+  // The tutorial-persistence slice (elspeth-918f4434b3): the component
+  // persists stage transitions through preferencesStore, which calls this.
+  // Body-aware echo mirroring the backend upsert (supplied fields land in
+  // the response; completion clears progress server-side).
+  updateUserComposerPreferences: vi.fn(async (body: Record<string, unknown>) => ({
+    default_mode: "guided",
+    banner_dismissed_at: null,
+    tutorial_completed_at: body.tutorial_completed_at ?? null,
+    tutorial_stage: body.tutorial_completed_at ? null : (body.tutorial_stage ?? null),
+    tutorial_session_id: body.tutorial_completed_at
+      ? null
+      : (body.tutorial_session_id ?? null),
+    tutorial_run_id: body.tutorial_completed_at ? null : (body.tutorial_run_id ?? null),
+    tutorial_source_data_hash: body.tutorial_completed_at
+      ? null
+      : (body.tutorial_source_data_hash ?? null),
+    updated_at: "2026-07-02T00:00:00Z",
+  })),
+  fetchUserComposerPreferences: vi.fn(),
+  // The resumed-audit test mounts the real TutorialTurn5AuditStory.
+  getRunAuditSummary: vi.fn().mockResolvedValue({
+    run_id: "run-resume",
+    session_id: "sess-resume",
+    llm_call_count: 3,
+    source_data_hash: "hash-resume",
+    started_at: "2026-07-02T00:00:00Z",
+    plugin_versions: {},
+    seeded_from_cache: false,
+    cache_key: null,
+  }),
 }));
 
 // Replace the embedded guided surface with a one-button stub that fires the
@@ -51,6 +83,7 @@ vi.mock("./TutorialGuidedShell", () => ({
 describe("HelloWorldTutorial staged flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetStore(usePreferencesStore);
   });
 
   it("renders the welcome bookend first", () => {
@@ -165,6 +198,7 @@ describe("HelloWorldTutorial staged flow", () => {
 describe("HelloWorldTutorial — abandon beacon (F4)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    resetStore(usePreferencesStore);
   });
 
   it("does not fire the abandon beacon on pagehide while still on the welcome bookend", async () => {
@@ -225,5 +259,147 @@ describe("HelloWorldTutorial — abandon beacon (F4)", () => {
     window.dispatchEvent(new Event("pagehide"));
 
     expect(api.sendTutorialAbandonBeacon).not.toHaveBeenCalled();
+  });
+});
+
+describe("HelloWorldTutorial — server-persisted resume (elspeth-918f4434b3)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    resetStore(usePreferencesStore);
+  });
+
+  it("persists the guided stage + session on Start", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_stage: "guided",
+        tutorial_session_id: "sess-new",
+        tutorial_run_id: null,
+        tutorial_source_data_hash: null,
+      }),
+    );
+  });
+
+  it("persists the run stage when guided completes", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await user.click(
+      await screen.findByRole("button", { name: "finish-guided" }),
+    );
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tutorial_stage: "run",
+          tutorial_session_id: "sess-new",
+        }),
+      ),
+    );
+  });
+
+  it("persists the skip opt-out IMMEDIATELY on the first click", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Skip the tutorial" }));
+    // The opt-out lands on the FIRST click — not on the follow-up
+    // "Take me to the composer" click (which is never made here).
+    await waitFor(() =>
+      expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
+        tutorial_completed_at: expect.any(String),
+      }),
+    );
+    // No stage write for the skip path: the completion persist above
+    // clears the resume state server-side.
+    const bodies = vi.mocked(api.updateUserComposerPreferences).mock.calls.map(
+      ([body]) => body,
+    );
+    expect(bodies.some((body) => "tutorial_stage" in body)).toBe(false);
+    // The graduation card stays mounted (publishLocally=false): the skip
+    // must not yank the farewell out from under the user.
+    expect(
+      screen.getByRole("heading", { name: "You're ready to use the composer." }),
+    ).toBeInTheDocument();
+  });
+
+  it("resumes at guided with the persisted session — no orphan sweep, no restart", async () => {
+    const api = await import("@/api/client");
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-resume",
+    });
+    render(<HelloWorldTutorial />);
+    // The guided shell (stubbed) mounts directly — not the Welcome bookend.
+    expect(
+      screen.getByRole("button", { name: "finish-guided" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /welcome/i })).toBeNull();
+    // The resumable session must NOT be renamed "abandoned-..." on reload:
+    // orphan cleanup is a fresh-entry-only sweep.
+    expect(api.deleteTutorialOrphans).not.toHaveBeenCalled();
+    // And no session re-creation — the persisted session is reused.
+    expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  it("resumes a completed run at the audit step without re-executing", async () => {
+    const api = await import("@/api/client");
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "run",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      await screen.findByRole("heading", { name: "This is the audit story." }),
+    ).toBeInTheDocument();
+    // Zero re-execution: the run identity came from the persisted fields.
+    expect(api.runTutorialPipeline).not.toHaveBeenCalled();
+    // The resumed audit suppresses Back — there is no in-memory run cache,
+    // so Back into the run turn would silently re-fire the pipeline.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Continue" })).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: /back/i })).toBeNull();
+  });
+
+  it("resumes at graduation once the graduation card has been shown", async () => {
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "graduation",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      screen.getByRole("heading", { name: "You're ready to use the composer." }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not fire a progress write when the persisted state already matches", async () => {
+    const api = await import("@/api/client");
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "graduation",
+      tutorialSessionId: "sess-resume",
+      tutorialRunId: "run-resume",
+      tutorialSourceDataHash: "hash-resume",
+    });
+    render(<HelloWorldTutorial />);
+    // The mount-time persist effect dedupes against the store's mirror of
+    // the server row — a resume must not immediately re-PATCH it.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "You're ready to use the composer." }),
+      ).toBeInTheDocument(),
+    );
+    expect(api.updateUserComposerPreferences).not.toHaveBeenCalled();
   });
 });

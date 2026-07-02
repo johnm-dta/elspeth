@@ -257,8 +257,14 @@
   font-size: var(--font-size-base);
 }
 
-.command-palette-input:focus {
-  outline: none;
+/* Standard app focus ring (base.css :focus-visible idiom). This input
+   previously set outline:none and relied on border-color alone, which fails
+   WCAG 2.4.7's visible-focus expectation (elspeth-4a9a0b18ca). Text inputs
+   match :focus-visible whenever focused, so the ring shows for the palette's
+   keyboard-driven flow. */
+.command-palette-input:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
   border-color: var(--color-focus-ring);
 }
 
@@ -470,7 +476,10 @@
   z-index: var(--z-dialog);
   display: flex;
   flex-direction: column;
-  background-color: var(--color-surface-paper);
+  /* Dialog surface, matching .save-for-review-dialog — the warm
+     --color-surface-paper family belongs to document-flavoured inspector
+     panes and clashed with the app's cool whites here (elspeth-bff8043d33). */
+  background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);

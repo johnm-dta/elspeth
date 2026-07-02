@@ -37,18 +37,40 @@ import {
   fetchUserComposerPreferences,
   updateUserComposerPreferences,
 } from "@/api/client";
-import type { ApiError, ComposerMode } from "@/types/api";
+import type {
+  ApiError,
+  ComposerMode,
+  PersistedTutorialStage,
+} from "@/types/api";
 
 // localStorage key for cross-tab banner-dismiss broadcasts. Versioned
 // (`v1`) so a future schema change can add a `v2` key without colliding
 // with stale tabs that pre-date the upgrade.
 const BANNER_DISMISSED_STORAGE_KEY = "elspeth_prefs_banner_dismissed_v1";
 
+/**
+ * In-progress tutorial resume state (elspeth-918f4434b3), server-persisted
+ * on every stage transition so a reload resumes at the persisted stage with
+ * the SAME session instead of restarting at Welcome (and silently
+ * re-spending LLM budget). All four are null when no tutorial is in
+ * progress; runId/sourceDataHash appear once the tutorial run completes.
+ */
+export interface TutorialProgress {
+  stage: PersistedTutorialStage | null;
+  sessionId: string | null;
+  runId: string | null;
+  sourceDataHash: string | null;
+}
+
 interface PreferencesState {
   defaultMode: ComposerMode | null;
   bannerDismissedAt: string | null;
   tutorialCompletedAt: string | null;
   tutorialCompleted: boolean;
+  tutorialStage: PersistedTutorialStage | null;
+  tutorialSessionId: string | null;
+  tutorialRunId: string | null;
+  tutorialSourceDataHash: string | null;
   loaded: boolean;
   writing: boolean;
   // Most-recent error from a setDefaultMode or dismiss call. Components
@@ -60,6 +82,7 @@ interface PreferencesState {
   optedOutAtSessionId: string | null;
 
   bootstrap: () => Promise<void>;
+  saveTutorialProgress: (progress: TutorialProgress) => Promise<void>;
   resolveDefaultMode: () => Promise<ComposerMode>;
   setDefaultMode: (mode: ComposerMode, activeSessionId?: string | null) => Promise<void>;
   saveTutorialMode: (mode: ComposerMode) => Promise<void>;
@@ -82,6 +105,10 @@ const INITIAL_STATE = {
   bannerDismissedAt: null as string | null,
   tutorialCompletedAt: null as string | null,
   tutorialCompleted: false,
+  tutorialStage: null as PersistedTutorialStage | null,
+  tutorialSessionId: null as string | null,
+  tutorialRunId: null as string | null,
+  tutorialSourceDataHash: null as string | null,
   loaded: false,
   writing: false,
   writeError: null as string | null,
@@ -114,6 +141,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         bannerDismissedAt: payload.banner_dismissed_at,
         tutorialCompletedAt: payload.tutorial_completed_at,
         tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
+        tutorialStage: payload.tutorial_stage,
+        tutorialSessionId: payload.tutorial_session_id,
+        tutorialRunId: payload.tutorial_run_id,
+        tutorialSourceDataHash: payload.tutorial_source_data_hash,
         loaded: true,
       });
     } catch (err) {
@@ -145,6 +176,30 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         writeError: message,
       });
     }
+  },
+
+  saveTutorialProgress: async (progress) => {
+    // Deliberately NOT gated on the `writing` serialisation flag: stage
+    // transitions must never be silently dropped because an unrelated
+    // preferences write is in flight, and this PATCH touches only the
+    // disjoint tutorial_* resume fields (the backend upsert writes only
+    // the supplied fields, so there is no clobber hazard with a
+    // concurrent default_mode/banner write). No optimistic set/revert
+    // either — the local tutorial UI state lives in the tutorial
+    // machine; this store only mirrors the server's persisted copy, so
+    // it updates from the response.
+    const payload = await updateUserComposerPreferences({
+      tutorial_stage: progress.stage,
+      tutorial_session_id: progress.sessionId,
+      tutorial_run_id: progress.runId,
+      tutorial_source_data_hash: progress.sourceDataHash,
+    });
+    set({
+      tutorialStage: payload.tutorial_stage,
+      tutorialSessionId: payload.tutorial_session_id,
+      tutorialRunId: payload.tutorial_run_id,
+      tutorialSourceDataHash: payload.tutorial_source_data_hash,
+    });
   },
 
   resolveDefaultMode: async () => {
@@ -281,6 +336,14 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
               ),
             }
           : {}),
+        // Completion-clears-progress (backend rule): the server just
+        // terminated any in-progress resume state; mirror it. Safe to
+        // publish even when publishLocally=false — the resume fields do
+        // not drive the tutorial-vs-composer gate.
+        tutorialStage: payload.tutorial_stage,
+        tutorialSessionId: payload.tutorial_session_id,
+        tutorialRunId: payload.tutorial_run_id,
+        tutorialSourceDataHash: payload.tutorial_source_data_hash,
         writing: false,
       });
       return payload.tutorial_completed_at;
@@ -324,6 +387,13 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         bannerDismissedAt: payload.banner_dismissed_at,
         tutorialCompletedAt: payload.tutorial_completed_at,
         tutorialCompleted: tutorialCompletedFrom(payload.tutorial_completed_at),
+        // A retake restarts cleanly at Welcome: the reset PATCH also
+        // cleared any lingering resume state server-side
+        // (completion-clears-progress rule); mirror it locally.
+        tutorialStage: payload.tutorial_stage,
+        tutorialSessionId: payload.tutorial_session_id,
+        tutorialRunId: payload.tutorial_run_id,
+        tutorialSourceDataHash: payload.tutorial_source_data_hash,
         writing: false,
       });
     } catch (err) {

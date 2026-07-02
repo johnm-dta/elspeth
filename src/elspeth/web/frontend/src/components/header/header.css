@@ -154,7 +154,12 @@
 .header-session-switcher-item:focus,
 .header-session-switcher-action:hover,
 .header-session-switcher-action:focus {
-  background: var(--color-bg-hover, rgba(143, 200, 200, 0.08));
+  /* --color-surface-hover is the theme-paired hover wash every other hover in
+     the system uses. This rule previously referenced --color-bg-hover, which
+     was defined nowhere, so its hardcoded dark-tinted fallback rendered in
+     BOTH themes (elspeth-400f95605c). styles/tokenReferences.test.ts now
+     rejects var() references to undefined custom properties. */
+  background: var(--color-surface-hover);
 }
 
 .header-session-switcher-item[aria-current="page"] {

@@ -4,14 +4,19 @@
  * Displays audit-domain exemplars from templates_data.ts (seeded from
  * README.md §"Example Use Cases"), reducing the "blank page" problem and
  * communicating ELSPETH's audit-domain strengths to new users.
+ *
+ * Each card carries an explicit "Use this example" action
+ * (elspeth-b948756c5a): activating it hands the template's seed prompt and
+ * recommended starting point to the parent, which applies the starting
+ * point (send the prompt, open the blob manager, or open secrets — see
+ * ChatPanel.handleSelectTemplate). The card body itself stays a
+ * non-interactive article so the SDA breakdown remains browsable context
+ * rather than an ambiguous click target.
  */
 
 import { TEMPLATES, type ExampleUseCase } from "./templates_data";
 
 interface TemplateCardsProps {
-  // Reserved for the future user-storable favourites flow. The current
-  // example tiles are intentionally static: they establish visual context
-  // without implying that these exact demo pipelines are one-click starters.
   onSelectTemplate: (
     seedPrompt: string,
     recommendedStartingPoint: ExampleUseCase["recommended_starting_point"],
@@ -19,17 +24,14 @@ interface TemplateCardsProps {
 }
 
 export function TemplateCards({ onSelectTemplate }: TemplateCardsProps) {
-  // TODO(user-storable-favourites): Re-enable tile activation only when this
-  // surface can show operator-saved favourites rather than generic examples.
-  void onSelectTemplate;
-
   return (
     <div className="template-cards-container">
       <div className="template-cards-heading">
         <h2 className="template-cards-title">Welcome to ELSPETH</h2>
         <p className="template-cards-subtitle">
-          ELSPETH builds <strong>auditable</strong> pipelines. Consider one of
-          the domain examples below, or describe your own pipeline in the chat.
+          ELSPETH builds <strong>auditable</strong> pipelines. Start from one
+          of the domain examples below, or describe your own pipeline in the
+          chat.
         </p>
       </div>
 
@@ -69,6 +71,22 @@ export function TemplateCards({ onSelectTemplate }: TemplateCardsProps) {
                 <dd>{template.act}</dd>
               </div>
             </dl>
+            <button
+              type="button"
+              className="btn btn-small template-card-action"
+              // Visible text stays in the accessible name (WCAG 2.5.3); the
+              // domain suffix disambiguates the twelve otherwise-identical
+              // button names for AT users.
+              aria-label={`Use this example: ${template.domain}`}
+              onClick={() =>
+                onSelectTemplate(
+                  template.seed_prompt,
+                  template.recommended_starting_point,
+                )
+              }
+            >
+              Use this example
+            </button>
           </article>
         ))}
       </div>

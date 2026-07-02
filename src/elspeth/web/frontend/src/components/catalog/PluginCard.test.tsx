@@ -9,7 +9,7 @@
 // ============================================================================
 
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { PluginCard } from "./PluginCard";
 import type { PluginSummary, PluginSchemaInfo } from "@/types/index";
@@ -82,7 +82,7 @@ const DISCRIMINATED_SCHEMA: PluginSchemaInfo = {
 };
 
 describe("PluginCard — collapsed header", () => {
-  it("renders plugin name and description without expanding", () => {
+  it("renders display name (primary), raw id (metadata), and description without expanding", () => {
     render(
       <PluginCard
         plugin={makePlugin({ name: "csv", description: "CSV source" })}
@@ -90,10 +90,60 @@ describe("PluginCard — collapsed header", () => {
         onExpand={vi.fn()}
       />,
     );
-    expect(screen.getByText("csv")).toBeInTheDocument();
+    // Display name is the primary label; the raw plugin id is demoted to
+    // secondary mono metadata (elspeth-5ee1f76e39).
+    expect(screen.getByText("CSV")).toHaveClass("plugin-card-name");
+    expect(screen.getByText("csv")).toHaveClass("plugin-card-id");
     expect(screen.getByText("CSV source")).toHaveAttribute("title", "CSV source");
     // Expanded content does NOT render while collapsed.
     expect(screen.queryByText(/Loading/)).not.toBeInTheDocument();
+  });
+
+  it("humanises underscore ids while preserving the raw id as metadata", () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({ name: "azure_document_intelligence" })}
+        schema={null}
+        onExpand={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Azure Document Intelligence")).toHaveClass(
+      "plugin-card-name",
+    );
+    expect(screen.getByText("azure_document_intelligence")).toHaveClass(
+      "plugin-card-id",
+    );
+  });
+
+  it("never uses the developer value 'null' as the primary label and badges it internal", () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({
+          name: "null",
+          plugin_type: "source",
+          description: "A source that yields no rows.",
+        })}
+        schema={null}
+        onExpand={vi.fn()}
+      />,
+    );
+    const article = screen.getByRole("article", { name: "Resume Placeholder" });
+    expect(within(article).getByText("internal")).toHaveClass(
+      "plugin-card-internal-badge",
+    );
+    // The raw id stays visible, but only as demoted mono metadata.
+    expect(within(article).getByText("null")).toHaveClass("plugin-card-id");
+  });
+
+  it("does not render the internal badge for ordinary plugins", () => {
+    render(
+      <PluginCard
+        plugin={makePlugin({ name: "csv" })}
+        schema={null}
+        onExpand={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText("internal")).not.toBeInTheDocument();
   });
 });
 
@@ -376,7 +426,7 @@ describe("PluginCard — Phase 7B reshape", () => {
     expect(screen.getByText(/Read rows from a CSV file/i)).toBeInTheDocument();
   });
 
-  it("exposes the card as an article named by the plugin name (WCAG 1.3.1)", () => {
+  it("exposes the card as an article named by the display name (WCAG 1.3.1)", () => {
     // The visually-heading name span must convey programmatic structure:
     // role="article" + aria-labelledby points the accessible name at the
     // name element rather than leaving it an undifferentiated bold span.
@@ -387,8 +437,8 @@ describe("PluginCard — Phase 7B reshape", () => {
         onExpand={() => {}}
       />,
     );
-    const article = screen.getByRole("article", { name: "csv" });
-    const name = screen.getByText("csv");
+    const article = screen.getByRole("article", { name: "CSV" });
+    const name = screen.getByText("CSV");
     expect(name.id).toBe("plugin-card-name-source-csv");
     expect(article).toHaveAttribute("aria-labelledby", name.id);
   });
@@ -403,6 +453,21 @@ describe("PluginCard — Phase 7B reshape", () => {
     );
     expect(screen.getByText(/reads i\/?o/i)).toBeInTheDocument();
     expect(screen.getByText(/quarantines/i)).toBeInTheDocument();
+  });
+
+  it("exposes the audit strip as a group named 'Audit characteristics' (WCAG 1.3.1)", () => {
+    // aria-label on a role-less div is not exposed to AT; the strip must
+    // carry role="group" for the label to associate (elspeth-37293a3b7c).
+    render(
+      <PluginCard
+        plugin={makePlugin({ audit_characteristics: ["io_read"] })}
+        schema={null}
+        onExpand={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole("group", { name: "Audit characteristics" }),
+    ).toBeInTheDocument();
   });
 
   it("renders the 'Use when' prose in the details disclosure", async () => {

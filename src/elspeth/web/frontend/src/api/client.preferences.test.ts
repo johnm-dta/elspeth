@@ -23,6 +23,10 @@ function makePayload(
     default_mode: "guided",
     banner_dismissed_at: null,
     tutorial_completed_at: null,
+    tutorial_stage: null,
+    tutorial_session_id: null,
+    tutorial_run_id: null,
+    tutorial_source_data_hash: null,
     updated_at: "2026-05-16T00:00:00Z",
     ...overrides,
   };
@@ -105,5 +109,35 @@ describe("api/client user composer preferences", () => {
       // @ts-expect-error -- intentionally invalid mode to exercise the 422 branch
       updateUserComposerPreferences({ default_mode: "kiosk" }),
     ).rejects.toMatchObject({ status: 422 });
+  });
+  it("PATCH sends the tutorial resume fields when supplied (elspeth-918f4434b3)", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify(
+          makePayload({
+            tutorial_stage: "guided",
+            tutorial_session_id: "sess-1",
+          }),
+        ),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const result = await updateUserComposerPreferences({
+      tutorial_stage: "guided",
+      tutorial_session_id: "sess-1",
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+    });
+
+    expect(result.tutorial_stage).toBe("guided");
+    expect(result.tutorial_session_id).toBe("sess-1");
+    const [, init] = fetchSpy.mock.calls[0];
+    expect(JSON.parse(init?.body as string)).toEqual({
+      tutorial_stage: "guided",
+      tutorial_session_id: "sess-1",
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+    });
   });
 });

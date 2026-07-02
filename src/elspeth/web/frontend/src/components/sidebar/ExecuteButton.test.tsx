@@ -102,6 +102,32 @@ describe("ExecuteButton", () => {
     expect(screen.getByRole("button", { name: /run pipeline/i })).toBeDisabled();
   });
 
+  it("stays a co-equal plain .btn (never btn-primary) even when runnable (elspeth-0d37694c8c)", () => {
+    // CompletionBar's contract (its docstring, per plan 19b §"Scope
+    // boundaries"): Save-for-review / Run / Export YAML are co-equal verbs
+    // with no primary emphasis. A conditional btn-primary previously singled
+    // Run out as the lone filled accent button whenever the composition was
+    // valid — the common case.
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: true,
+        checks: [],
+        errors: [],
+        warnings: [],
+      } as never,
+      isExecuting: false,
+      progress: null,
+    } as never);
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+
+    render(<ExecuteButton />);
+
+    const button = screen.getByRole("button", { name: /run pipeline/i });
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveClass("btn");
+    expect(button).not.toHaveClass("btn-primary");
+  });
+
   it("invokes execute with the active session id when clicked", () => {
     const execute = vi.fn();
     useExecutionStore.setState({

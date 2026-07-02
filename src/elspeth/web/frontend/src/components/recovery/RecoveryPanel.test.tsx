@@ -94,8 +94,13 @@ describe("RecoveryPanel", () => {
       screen.getByRole("dialog", { name: "Recover partial composer draft" }),
     ).toHaveAttribute("aria-modal", "true");
     expect(screen.getByText("Composer failed after a tool call")).toBeInTheDocument();
-    expect(screen.getByLabelText("Recovery reason: composer plugin crash")).toHaveTextContent(
-      "Composer plugin crash",
+    // The reason badge carries a visually-hidden "Recovery reason:" prefix
+    // (an aria-label on a role-less span is not exposed to AT — WCAG 1.3.1,
+    // elspeth-37293a3b7c).
+    const reasonBadge = screen.getByText("Composer plugin crash");
+    expect(reasonBadge).toHaveClass("recovery-panel-reason");
+    expect(reasonBadge).toHaveTextContent(
+      "Recovery reason: Composer plugin crash",
     );
     expect(screen.getByText("2 tool calls attempted")).toBeInTheDocument();
     expect(screen.getByText("1 tool response persisted")).toBeInTheDocument();

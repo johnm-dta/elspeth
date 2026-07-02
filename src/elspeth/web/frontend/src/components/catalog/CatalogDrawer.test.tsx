@@ -313,6 +313,25 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
     expect(screen.getByText("Read Azure blobs.")).toBeInTheDocument();
   });
 
+  it("extends search across the human display name (elspeth-5ee1f76e39)", async () => {
+    // The card's primary label is "Azure Blob Storage" — a user searching
+    // the label they can see must find the plugin even though neither the
+    // raw id nor the description contains "storage".
+    render(<CatalogDrawer isOpen onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("Read Azure blobs.")).toBeInTheDocument());
+    const input = screen.getByPlaceholderText(/search plugins/i);
+    await userEvent.type(input, "blob storage");
+    expect(screen.queryByText("Read CSV files.")).not.toBeInTheDocument();
+    expect(screen.getByText("Read Azure blobs.")).toBeInTheDocument();
+  });
+
+  it("renders the display name as the card's primary label", async () => {
+    render(<CatalogDrawer isOpen onClose={() => {}} />);
+    await waitFor(() => expect(screen.getByText("azure_blob")).toBeInTheDocument());
+    expect(screen.getByText("Azure Blob Storage")).toHaveClass("plugin-card-name");
+    expect(screen.getByText("azure_blob")).toHaveClass("plugin-card-id");
+  });
+
   it("filter state is per-tab — switching tabs does not carry filters over", async () => {
     // Regression guard for the cross-tab UX trap. An active capability
     // filter on Sources must NOT silently filter Transforms on tab switch.
@@ -399,9 +418,12 @@ describe("CatalogDrawer — Phase 7B reshape", () => {
 
     expect(screen.getByRole("list")).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
-    // Each card is an article named by its plugin name (M06 second half).
-    expect(screen.getByRole("article", { name: "csv" })).toBeInTheDocument();
-    expect(screen.getByRole("article", { name: "azure_blob" })).toBeInTheDocument();
+    // Each card is an article named by its display name (M06 second half;
+    // display-name-first per elspeth-5ee1f76e39).
+    expect(screen.getByRole("article", { name: "CSV" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("article", { name: "Azure Blob Storage" }),
+    ).toBeInTheDocument();
   });
 
   it("InlineChatSourceEntry and empty-state message are simultaneously visible when filters eliminate all real plugins", async () => {

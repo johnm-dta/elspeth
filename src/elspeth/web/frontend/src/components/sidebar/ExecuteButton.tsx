@@ -70,7 +70,13 @@ export function ExecuteButton(): JSX.Element | null {
     <>
       <button
         type="button"
-        className={`btn side-rail-execute-btn ${canExecute && !isExecuting ? "btn-primary" : ""}`}
+        // Plain .btn, never .btn-primary: CompletionBar's contract (its
+        // docstring, per plan 19b §"Scope boundaries") renders Save-for-review
+        // / Run / Export YAML as CO-EQUAL verbs with no primary emphasis. A
+        // conditional btn-primary here singled Run out as the lone filled
+        // accent button whenever the composition was valid, contradicting the
+        // documented design (elspeth-0d37694c8c).
+        className="btn side-rail-execute-btn"
         onClick={() => execute(activeSessionId)}
         disabled={!canExecute}
         aria-disabled={!canExecute ? true : undefined}

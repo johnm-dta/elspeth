@@ -712,6 +712,20 @@ class TestAuthConfigEndpoint:
         assert body["oidc_issuer"] is None
         assert body["oidc_client_id"] is None
 
+    async def test_registration_mode_closed_is_exposed_to_frontend(self, tmp_path) -> None:
+        """The LoginPage gates its "Create an account" affordance on the
+        effective registration mode — /config must reflect a closed mode."""
+        provider = LocalAuthProvider(
+            db_path=tmp_path / "auth.db",
+            secret_key="test-key",
+        )
+        app = _create_test_app(provider, auth_provider_type="local", registration_mode="closed")
+
+        async with _client_for(app) as client:
+            response = await client.get("/api/auth/config")
+        assert response.status_code == 200
+        assert response.json()["registration_mode"] == "closed"
+
     async def test_oidc_provider_returns_issuer_and_client_id(self) -> None:
         provider = AsyncMock()
         app = _create_test_app(

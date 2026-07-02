@@ -213,6 +213,16 @@
   background-color: var(--color-surface-hover);
 }
 
+/* Standard app 2px focus ring (base.css idiom) on top of the background
+   wash — background-only focus was the one keyboard-focus deviation in the
+   graph area (elspeth-4a9a0b18ca). The wash stays as a secondary cue; the
+   ring provides the ≥3:1 focus indicator (--color-focus-ring is gated ≥3:1
+   against --color-bg in colorContrast.test.ts). */
+.graph-a11y-list button:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 .graph-a11y-list button[aria-pressed="true"] {
   background-color: var(--color-accent-muted);
 }

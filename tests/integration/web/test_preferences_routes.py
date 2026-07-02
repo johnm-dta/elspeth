@@ -361,3 +361,84 @@ def test_db_unavailable_returns_503() -> None:
     response = client.get("/api/composer-preferences")
     assert response.status_code == 503
     assert response.json()["error_type"] == "database_unavailable"
+
+
+# ── Tutorial resume-state persistence (elspeth-918f4434b3) ─────────────────
+
+
+def test_get_default_has_no_tutorial_progress(client_as_alice: TestClient) -> None:
+    body = client_as_alice.get("/api/composer-preferences").json()
+    assert body["tutorial_stage"] is None
+    assert body["tutorial_session_id"] is None
+    assert body["tutorial_run_id"] is None
+    assert body["tutorial_source_data_hash"] is None
+
+
+def test_patch_persists_tutorial_progress_round_trip(client_as_alice: TestClient) -> None:
+    """The frontend PATCHes stage + session on every stage transition; a
+    reload GETs them back and resumes at the persisted stage."""
+    response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_stage": "guided", "tutorial_session_id": "sess-http-1"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tutorial_stage"] == "guided"
+    assert body["tutorial_session_id"] == "sess-http-1"
+
+    follow_up = client_as_alice.get("/api/composer-preferences").json()
+    assert follow_up["tutorial_stage"] == "guided"
+    assert follow_up["tutorial_session_id"] == "sess-http-1"
+
+
+def test_patch_rejects_invalid_tutorial_stage(client_as_alice: TestClient) -> None:
+    """'welcome' is deliberately outside the persisted vocabulary — nothing
+    has started; NULL is the no-in-progress state."""
+    response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_stage": "welcome", "tutorial_session_id": "sess-http-2"},
+    )
+    assert response.status_code == 422
+
+
+def test_e2e_reset_recipe_clears_tutorial_progress(client_as_alice: TestClient) -> None:
+    """The e2e harness reset recipe — PATCH {"tutorial_completed_at": null,
+    "default_mode": "guided"} — must restart the tutorial cleanly at Welcome
+    even when a resume stage lingers from an interrupted tutorial."""
+    client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_stage": "run", "tutorial_session_id": "sess-http-3"},
+    )
+
+    response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": None, "default_mode": "guided"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tutorial_completed_at"] is None
+    assert body["tutorial_stage"] is None
+    assert body["tutorial_session_id"] is None
+
+    follow_up = client_as_alice.get("/api/composer-preferences").json()
+    assert follow_up["tutorial_stage"] is None
+    assert follow_up["tutorial_session_id"] is None
+
+
+def test_completion_clears_tutorial_progress_over_http(client_as_alice: TestClient) -> None:
+    """Skip's immediate opt-out persist (tutorial_completed_at set) also
+    terminates the in-progress resume state."""
+    client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_stage": "graduation", "tutorial_session_id": "sess-http-4"},
+    )
+
+    response = client_as_alice.patch(
+        "/api/composer-preferences",
+        json={"tutorial_completed_at": "2026-05-15T13:00:00Z"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tutorial_completed_at"] is not None
+    assert body["tutorial_stage"] is None
+    assert body["tutorial_session_id"] is None

@@ -43,6 +43,10 @@ vi.mock("@/api/client", () => ({
     default_mode: "freeform",
     banner_dismissed_at: null,
     tutorial_completed_at: null,
+    tutorial_stage: null,
+    tutorial_session_id: null,
+    tutorial_run_id: null,
+    tutorial_source_data_hash: null,
     updated_at: "2026-05-15T00:00:00Z",
   }),
   updateUserComposerPreferences: vi.fn(),
@@ -175,6 +179,10 @@ describe("sessionStore", () => {
       default_mode: "freeform",
       banner_dismissed_at: null,
       tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
       updated_at: "2026-05-15T00:00:00Z",
     });
     // Phase 5b — sessionStore.selectSession fires a fire-and-forget
@@ -1705,6 +1713,10 @@ describe("sessionStore", () => {
         default_mode: "guided",
         banner_dismissed_at: null,
         tutorial_completed_at: null,
+        tutorial_stage: null,
+        tutorial_session_id: null,
+        tutorial_run_id: null,
+        tutorial_source_data_hash: null,
         updated_at: "2026-05-15T00:00:00Z",
       });
       (apiClient.createSession as ReturnType<typeof vi.fn>).mockResolvedValueOnce({

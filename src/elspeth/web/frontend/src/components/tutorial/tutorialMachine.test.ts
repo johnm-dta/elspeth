@@ -3,6 +3,8 @@ import {
   CANONICAL_TUTORIAL_PROMPT,
   initialTutorialState,
   isAbandonOnPageHide,
+  progressForTutorialState,
+  resumeTutorialState,
   tutorialReducer,
   type TutorialState,
 } from "./tutorialMachine";
@@ -123,5 +125,177 @@ describe("isAbandonOnPageHide", () => {
     // composer.tutorial.abandon_total.
     expect(isAbandonOnPageHide("audit", true)).toBe(false);
     expect(isAbandonOnPageHide("run", true)).toBe(false);
+  });
+});
+
+describe("tutorialReducer runResultReady", () => {
+  it("records the run identity without leaving the run step", () => {
+    const run: TutorialState = {
+      ...initialTutorialState,
+      step: "run",
+      sessionId: "sess-123",
+    };
+    const next = tutorialReducer(run, {
+      type: "runResultReady",
+      result: {
+        runId: "run-7",
+        sourceDataHash: "hash-7",
+        rows: [{ url: "dta.gov.au" }],
+        discardedRowCount: 0,
+      },
+    });
+    expect(next.step).toBe("run");
+    expect(next.runId).toBe("run-7");
+    expect(next.sourceDataHash).toBe("hash-7");
+  });
+});
+
+describe("resumeTutorialState (elspeth-918f4434b3)", () => {
+  it("returns the fresh Welcome state when nothing is persisted", () => {
+    expect(
+      resumeTutorialState({
+        stage: null,
+        sessionId: null,
+        runId: null,
+        sourceDataHash: null,
+      }),
+    ).toEqual(initialTutorialState);
+  });
+
+  it("refuses to resume a stage without its session (incoherent row)", () => {
+    expect(
+      resumeTutorialState({
+        stage: "guided",
+        sessionId: null,
+        runId: null,
+        sourceDataHash: null,
+      }),
+    ).toEqual(initialTutorialState);
+  });
+
+  it("resumes guided on the same session (idempotent guided start = conversation resumes)", () => {
+    const state = resumeTutorialState({
+      stage: "guided",
+      sessionId: "sess-1",
+      runId: null,
+      sourceDataHash: null,
+    });
+    expect(state.step).toBe("guided");
+    expect(state.sessionId).toBe("sess-1");
+    expect(state.resumed).toBe(true);
+  });
+
+  it("resumes run-in-flight at the run step", () => {
+    const state = resumeTutorialState({
+      stage: "run",
+      sessionId: "sess-1",
+      runId: null,
+      sourceDataHash: null,
+    });
+    expect(state.step).toBe("run");
+    expect(state.sessionId).toBe("sess-1");
+  });
+
+  it("resumes a completed run forward at audit — zero re-execution", () => {
+    const state = resumeTutorialState({
+      stage: "run",
+      sessionId: "sess-1",
+      runId: "run-1",
+      sourceDataHash: "hash-1",
+    });
+    expect(state.step).toBe("audit");
+    expect(state.runId).toBe("run-1");
+    expect(state.sourceDataHash).toBe("hash-1");
+    expect(state.resumed).toBe(true);
+  });
+
+  it("resumes audit at audit when the run identity is recorded", () => {
+    const state = resumeTutorialState({
+      stage: "audit",
+      sessionId: "sess-1",
+      runId: "run-1",
+      sourceDataHash: "hash-1",
+    });
+    expect(state.step).toBe("audit");
+  });
+
+  it("degrades audit to run when the run identity is missing", () => {
+    const state = resumeTutorialState({
+      stage: "audit",
+      sessionId: "sess-1",
+      runId: null,
+      sourceDataHash: null,
+    });
+    expect(state.step).toBe("run");
+  });
+
+  it("graduation counts as reached once shown: resumes at graduation, never restarts", () => {
+    const state = resumeTutorialState({
+      stage: "graduation",
+      sessionId: "sess-1",
+      runId: "run-1",
+      sourceDataHash: "hash-1",
+    });
+    expect(state.step).toBe("graduation");
+    expect(state.resumed).toBe(true);
+  });
+});
+
+describe("progressForTutorialState (elspeth-918f4434b3)", () => {
+  it("welcome projects to all-null (nothing to resume)", () => {
+    expect(progressForTutorialState(initialTutorialState, null)).toEqual({
+      stage: null,
+      sessionId: null,
+      runId: null,
+      sourceDataHash: null,
+    });
+  });
+
+  it("backing out to welcome clears even when a session exists", () => {
+    expect(
+      progressForTutorialState(initialTutorialState, "sess-1"),
+    ).toEqual({ stage: null, sessionId: null, runId: null, sourceDataHash: null });
+  });
+
+  it("guided projects stage + session", () => {
+    const state: TutorialState = { ...initialTutorialState, step: "guided" };
+    expect(progressForTutorialState(state, "sess-1")).toEqual({
+      stage: "guided",
+      sessionId: "sess-1",
+      runId: null,
+      sourceDataHash: null,
+    });
+  });
+
+  it("run with an arrived result carries the run identity", () => {
+    const state: TutorialState = {
+      ...initialTutorialState,
+      step: "run",
+      sessionId: "sess-1",
+      runId: "run-1",
+      sourceDataHash: "hash-1",
+    };
+    expect(progressForTutorialState(state, state.sessionId)).toEqual({
+      stage: "run",
+      sessionId: "sess-1",
+      runId: "run-1",
+      sourceDataHash: "hash-1",
+    });
+  });
+
+  it("round-trips through resumeTutorialState onto a resumable state", () => {
+    const audit: TutorialState = {
+      ...initialTutorialState,
+      step: "audit",
+      sessionId: "sess-1",
+      runId: "run-1",
+      sourceDataHash: "hash-1",
+    };
+    const resumed = resumeTutorialState(
+      progressForTutorialState(audit, audit.sessionId),
+    );
+    expect(resumed.step).toBe("audit");
+    expect(resumed.sessionId).toBe("sess-1");
+    expect(resumed.runId).toBe("run-1");
   });
 });

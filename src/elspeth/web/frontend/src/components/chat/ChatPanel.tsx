@@ -1220,6 +1220,7 @@ export function ChatPanel({
       <div
         id="chat-main"
         className="chat-panel chat-panel--empty"
+        role="region"
         aria-label="Chat panel"
       >
         Use the session switcher to select a session or create a new one.
@@ -1258,6 +1259,7 @@ export function ChatPanel({
       <div
         id="chat-main"
         className="chat-panel chat-panel--completed"
+        role="region"
         aria-label="Pipeline summary"
       >
         <GuidedWorkflowStepper activeStep="ready" />
@@ -1446,6 +1448,7 @@ export function ChatPanel({
       <div
         id="chat-main"
         className="chat-panel chat-panel--guided"
+        role="region"
         aria-label="Guided composer"
       >
         {/* Header — mirrors the freeform body header so the mode-switch control
@@ -1589,6 +1592,7 @@ export function ChatPanel({
       <div
         id="chat-main"
         className="chat-panel chat-panel--guided"
+        role="region"
         aria-label="Guided composer"
         data-testid="tutorial-guided-loading"
       >
@@ -1601,9 +1605,13 @@ export function ChatPanel({
   }
 
   return (
+    // role="region" so the aria-label is exposed as a named landmark —
+    // aria-label on a role-less div is ignored by AT (WCAG 1.3.1,
+    // elspeth-37293a3b7c). Applies to every id="chat-main" branch above too.
     <div
       id="chat-main"
       className="chat-panel"
+      role="region"
       aria-label="Chat panel"
       // data-composing surfaces the "agent is thinking" state to CSS so the
       // textarea and send-button cursors flip to `progress` while the compose

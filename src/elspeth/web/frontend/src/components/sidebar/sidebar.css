@@ -146,7 +146,7 @@
    (.btn), ExecuteButton (.btn .side-rail-execute-btn), and ExportYamlButton
    (.btn .side-rail-export-yaml-btn).
    The earlier horizontal layout clipped Export-YAML: the side rail is 320px
-   wide (Layout.tsx SIDERAIL_WIDTH), the three labels need ~436px of min-content
+   wide (--siderail-width, tokens.css), the three labels need ~436px of min-content
    width at --font-size-base with white-space:nowrap, and the row overflowed
    into .layout-siderail's overflow:hidden region — making the third button
    invisible. The three-co-equal-verbs intent is preserved by stacking them

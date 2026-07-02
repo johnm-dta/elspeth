@@ -1,0 +1,25 @@
+/*
+ * Self-hosted web fonts (elspeth-a0db35bd62).
+ *
+ * Inter and JetBrains Mono are served from this origin via the
+ * @fontsource packages instead of fonts.googleapis.com. This removes
+ * the third-party dependency (privacy + air-gapped determinism for a
+ * government tool) and lets the CSP drop the Google origins entirely
+ * (`font-src 'self'`), which previously logged a blocked-prefetch CSP
+ * violation on every page load.
+ *
+ * Weights mirror the old Google Fonts request exactly:
+ *   Inter          400 / 500 / 600 / 700  (--font-sans)
+ *   JetBrains Mono 400 / 600 / 700        (--font-mono)
+ * Latin subset only; each file declares `font-display: swap`. The
+ * family names ("Inter", "JetBrains Mono") match tokens.css verbatim.
+ * Vite resolves these bare-package @imports from node_modules and
+ * fingerprints the woff2 assets into dist/.
+ */
+@import "@fontsource/inter/latin-400.css";
+@import "@fontsource/inter/latin-500.css";
+@import "@fontsource/inter/latin-600.css";
+@import "@fontsource/inter/latin-700.css";
+@import "@fontsource/jetbrains-mono/latin-400.css";
+@import "@fontsource/jetbrains-mono/latin-600.css";
+@import "@fontsource/jetbrains-mono/latin-700.css";

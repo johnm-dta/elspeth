@@ -9,6 +9,22 @@ const ALL_OFF: CatalogFilters = {
 };
 
 describe("FilterChipStrip", () => {
+  it("exposes the strip as a group named 'Catalog filters' (WCAG 1.3.1)", () => {
+    // aria-label on a role-less div is not exposed to AT; the strip must
+    // carry role="group" for the label to associate (elspeth-37293a3b7c).
+    render(
+      <FilterChipStrip
+        availableCapabilityTags={["csv"]}
+        availableAuditCharacteristics={[]}
+        filters={ALL_OFF}
+        onChange={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole("group", { name: "Catalog filters" }),
+    ).toBeInTheDocument();
+  });
+
   it("renders one chip per capability tag", () => {
     render(
       <FilterChipStrip

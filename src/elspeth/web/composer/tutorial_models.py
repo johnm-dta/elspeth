@@ -14,7 +14,6 @@ class TutorialRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: UUID
-    prompt: str = Field(default="", max_length=65536)
 
 
 class TutorialRunOutput(BaseModel):
@@ -33,7 +32,7 @@ class TutorialRunOutput(BaseModel):
     # ``rows``. Surfaced so the UX can show "N rows dropped at source" rather than
     # silently presenting only the survivors (the "5 requested, 2 arrived" gap).
     # Quarantined-to-a-sink rows are NOT counted here — those have a visible
-    # destination. Defaults to 0 (e.g. cache-replayed clean runs).
+    # destination. Defaults to 0 (a clean run with nothing discarded).
     discarded_row_count: int = Field(default=0, ge=0)
 
 
@@ -44,8 +43,27 @@ class TutorialRunResponse(BaseModel):
 
     run_id: str
     output: TutorialRunOutput
-    seeded_from_cache: bool
-    cache_key: str | None
+
+
+class TutorialCancelRequest(BaseModel):
+    """Request body for ``POST /api/tutorial/cancel``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: UUID
+
+
+class TutorialCancelResponse(BaseModel):
+    """Response for ``POST /api/tutorial/cancel``.
+
+    ``cancelled=True`` when the session's active run was cancelled;
+    ``cancelled=False`` when no active run exists. The endpoint is
+    idempotent — the no-active-run case is never an error.
+    """
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    cancelled: bool
 
 
 class TutorialOrphanCleanupResponse(BaseModel):

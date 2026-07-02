@@ -100,7 +100,12 @@ export interface UpdateUserComposerPreferencesPayload {
 
 export interface TutorialRunRequest {
   session_id: string;
-  prompt: string;
+}
+
+/** Response of POST /api/tutorial/cancel. Idempotent best-effort cancel:
+ * `cancelled: false` means there was no active run left to stop. */
+export interface TutorialCancelResponse {
+  cancelled: boolean;
 }
 
 export interface TutorialRunOutput {
@@ -114,8 +119,6 @@ export interface TutorialRunOutput {
 export interface TutorialRunResponse {
   run_id: string;
   output: TutorialRunOutput;
-  seeded_from_cache: boolean;
-  cache_key: string | null;
 }
 
 export interface RunAuditStoryResponse {

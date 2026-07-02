@@ -240,6 +240,20 @@ interface SessionState {
   loadSessions: () => Promise<void>;
   createSession: () => Promise<void>;
   selectSession: (id: string) => Promise<void>;
+  /**
+   * Bind `activeSessionId` to `sessionId` and clear every field a stale
+   * previous session (including a completed guided/tutorial one) could
+   * leave behind — the same "start clean" fields `selectSession` clears,
+   * but WITHOUT its subsequent fetch-and-populate tail. Used by
+   * TutorialGuidedShell's mount effect, which must bind the session BEFORE
+   * calling startGuided/getTutorialSample and has no composition state of
+   * its own to fetch. Previously that mount effect hand-mirrored this
+   * field list in a raw `useSessionStore.setState()` call — a silent-drift
+   * seam where a new SessionState field added elsewhere would never be
+   * reflected there without someone remembering to touch the shell too.
+   * Routing it through this one action means the field list lives here.
+   */
+  resetForTutorialSession: (sessionId: string) => void;
   renameSession: (id: string, title: string) => Promise<void>;
   archiveSession: (id: string) => Promise<void>;
   sendMessage: (content: string, signal?: AbortSignal) => Promise<void>;
@@ -542,6 +556,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         set({ error: "Failed to load session. Please refresh the page." });
       }
     }
+  },
+
+  resetForTutorialSession(sessionId: string) {
+    set({
+      activeSessionId: sessionId,
+      messages: [],
+      compositionState: null,
+      compositionProposals: [],
+      composerPreferences: null,
+      staleProposalIds: [],
+      proposalActionPendingIds: [],
+      composerProgress: null,
+      stateVersions: [],
+      isComposing: false,
+      error: null,
+      selectedNodeId: null,
+      ...clearedGuidedState(),
+      ...clearedRecoveryState(),
+    });
   },
 
   async sendMessage(content: string, signal?: AbortSignal) {

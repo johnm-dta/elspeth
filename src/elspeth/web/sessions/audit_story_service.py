@@ -14,6 +14,18 @@ class AuditStoryIntegrityError(RuntimeError):
     """Raised when Landscape cannot provide a complete audit-story projection."""
 
 
+class AuditStoryNotRecordedError(RuntimeError):
+    """Raised when no audit story was ever recorded for an existing run.
+
+    Deliberately NOT a subclass of :class:`AuditStoryIntegrityError`: this is
+    the absent state, not corruption. Only the tutorial projection writes the
+    audit-story columns (``llm_call_count`` et al.) onto the Landscape runs
+    row today, so every non-tutorial run legitimately lacks them. The HTTP
+    boundary maps this to a structured 404 (``audit_story_not_recorded``)
+    while genuine integrity violations stay a structured 500.
+    """
+
+
 class AuditStoryService:
     """Aggregates audit-story fields from real Landscape rows."""
 
@@ -31,6 +43,13 @@ class AuditStoryService:
             run = conn.execute(select(runs_table).where(runs_table.c.run_id == landscape_run_id)).first()
             if run is None:
                 raise AuditStoryIntegrityError(f"Landscape run {landscape_run_id!r} not found")
+            if run.llm_call_count is None:
+                # Absent state, checked BEFORE any projection query: the run
+                # exists but its audit-story columns were never written (the
+                # normal state for non-tutorial runs). Raising early keeps a
+                # never-recorded run from tripping the downstream projection
+                # integrity checks (e.g. an empty run with zero rows).
+                raise AuditStoryNotRecordedError(f"Landscape run {landscape_run_id!r} has no recorded audit story")
 
             hashes = tuple(
                 row.source_data_hash
@@ -56,8 +75,6 @@ class AuditStoryService:
         seeded_from_cache = run.seeded_from_cache
         if type(seeded_from_cache) is not bool:
             raise AuditStoryIntegrityError(f"Landscape run {landscape_run_id!r} has non-bool seeded_from_cache={seeded_from_cache!r}")
-        if run.llm_call_count is None:
-            raise AuditStoryIntegrityError(f"Landscape run {landscape_run_id!r} has NULL llm_call_count")
         if seeded_from_cache and run.cache_key is None:
             raise AuditStoryIntegrityError(f"Landscape cache replay {landscape_run_id!r} has NULL cache_key")
 

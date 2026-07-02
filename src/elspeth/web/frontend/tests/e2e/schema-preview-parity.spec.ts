@@ -6,8 +6,9 @@
 //   requirements, and fork-to-sink checks"
 //
 // EXPECTED FAILURE: this spec is designed to fail until elspeth-87f6d5dea5
-// is fixed. Once the underlying bug is fixed, remove the test.fixme() and
-// the spec becomes a regression guard.
+// is fixed. Once the underlying bug is fixed AND the direct-state-seed
+// blocker (elspeth-3a7df642c5) is resolved, remove the test.skip() and the
+// spec becomes a regression guard.
 //
 // What this spec WILL assert (once unblocked):
 //   Seed source with aliased schema_config; call composer tool
@@ -17,9 +18,9 @@
 import { test } from "@playwright/test";
 
 test.describe("schema-preview-parity — alias handling, nested agg, fork-to-sink", () => {
-  test.fixme(
+  test.skip(
     true,
-    "Blocked on direct-state-seed REST endpoint or LLM stub server. " +
+    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5. " +
       "Also expected to fail on bug elspeth-87f6d5dea5 — that is intentional.",
   );
 

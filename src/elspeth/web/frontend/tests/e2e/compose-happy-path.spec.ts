@@ -13,16 +13,19 @@
 //   2. Composer-progress events stream; tool call preview_pipeline observed.
 //   3. Composition state mutates and pipeline becomes Stage-1 valid.
 //
-// Why fixme:
+// Why skipped:
 //   Driving the compose loop requires either a real LLM (cost +
 //   nondeterminism — out of scope for E2E) or an LLM stub. The pytest
 //   suite uses ChaosLLM for this purpose; porting that to a JS-side stub
-//   the webServer can dial is its own work item. Tracked separately.
+//   the webServer can dial is its own work item. Tracked as elspeth-3a7df642c5.
 
 import { test } from "@playwright/test";
 
 test.describe("compose-happy-path — through-UI compose loop with stubbed LLM", () => {
-  test.fixme(true, "Blocked on LLM stub server. Real LLM is out of scope for E2E.");
+  test.skip(
+    true,
+    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5",
+  );
 
   test("user prompt → composer tools → valid pipeline state", async () => {
     // 1. Open composer for a fresh session.

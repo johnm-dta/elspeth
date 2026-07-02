@@ -442,10 +442,10 @@ def apply_anthropic_cache_markers(
     - The first message with ``role == "system"`` receives a top-level
       ``cache_control: {"type": "ephemeral"}`` field. ``build_messages()``
       keeps this first system message to the stable skill/deployment prompt;
-      the dynamic current-state JSON is emitted as a later system message.
-      LiteLLM's Anthropic transform recognizes this marker and propagates it
-      onto the corresponding ``AnthropicSystemMessageContent`` block on the
-      wire.
+      the dynamic current-state JSON is emitted as a later ``role: "user"``
+      message, not a second system message. LiteLLM's Anthropic transform
+      recognizes this marker and propagates it onto the corresponding
+      ``AnthropicSystemMessageContent`` block on the wire.
     - The LAST tool in ``tools`` receives the same marker at the tool
       level. Anthropic caches all tools up to and including the marker,
       so marking the trailing tool covers the full tools array.

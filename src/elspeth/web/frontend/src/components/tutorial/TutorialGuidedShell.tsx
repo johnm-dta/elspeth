@@ -50,6 +50,9 @@ export function TutorialGuidedShell({
 }: TutorialGuidedShellProps): JSX.Element {
   const guidedSession = useSessionStore((s) => s.guidedSession);
   const startGuided = useSessionStore((s) => s.startGuided);
+  const resetForTutorialSession = useSessionStore(
+    (s) => s.resetForTutorialSession,
+  );
   const startedRef = useRef(false);
   const completedRef = useRef(false);
   // True once this mount has OBSERVED a live (non-null, not-yet-completed)
@@ -82,32 +85,12 @@ export function TutorialGuidedShell({
       // startGuided. startGuided (sessionStore.ts) DISCARDS its fetched guided
       // payload unless get().activeSessionId === the requested id, and ChatPanel
       // renders the empty-session surface (chat-panel--empty) whenever
-      // activeSessionId is null. Clear the same session/guided payload that
-      // selectSession clears before loading (mirrors selectSession +
-      // cleared{Guided,Recovery}State), otherwise a completed guided session
-      // from the previous active session can make ChatPanel render the completed
-      // surface and fire onCompleted before the new tutorial session has loaded.
-      useSessionStore.setState({
-        activeSessionId: sessionId,
-        messages: [],
-        compositionState: null,
-        compositionProposals: [],
-        composerPreferences: null,
-        staleProposalIds: [],
-        proposalActionPendingIds: [],
-        composerProgress: null,
-        stateVersions: [],
-        isComposing: false,
-        error: null,
-        selectedNodeId: null,
-        guidedSession: null,
-        guidedNextTurn: null,
-        guidedTerminal: null,
-        guidedChatPending: false,
-        guidedResponsePending: false,
-        recoveryError: null,
-        recoveryStartedCompositionVersion: null,
-      });
+      // activeSessionId is null. resetForTutorialSession clears the same
+      // session/guided payload that selectSession clears before loading,
+      // otherwise a completed guided session from the previous active session
+      // can make ChatPanel render the completed surface and fire onCompleted
+      // before the new tutorial session has loaded.
+      resetForTutorialSession(sessionId);
       try {
         await startGuidedSession(sessionId, "tutorial");
         // Fetch the runtime-resolved synthetic URLs BEFORE entering the wizard.
@@ -128,7 +111,7 @@ export function TutorialGuidedShell({
         setStarting(false);
       }
     })();
-  }, [sessionId, startGuided]);
+  }, [sessionId, startGuided, resetForTutorialSession]);
 
   // Hand off to the run/audit/graduation tail when guided reaches completion —
   // but ONLY on a completion this mount OBSERVED transition to. The back-nav

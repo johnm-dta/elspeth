@@ -104,7 +104,7 @@ export function TutorialTurn5AuditStory({
               type="button"
               className="tutorial-link-button"
               onClick={onBack}
-              aria-label="Back: edit prompt and start over"
+              aria-label="Back to your pipeline run"
             >
               Back
             </button>

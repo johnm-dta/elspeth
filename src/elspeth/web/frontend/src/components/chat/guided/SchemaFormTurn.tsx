@@ -227,6 +227,7 @@ function summaryValueNode(field: KnobField, value: unknown): ReactNode {
     return text === "" ? "(none)" : text;
   }
   const raw = value === null || value === undefined ? "" : String(value);
+  if (field.name === "path" && raw.startsWith(BLOB_REF_PATH_PREFIX)) return BLOB_REF_FRIENDLY_LABEL;
   if (field.name === "path" && raw.startsWith("/")) return friendlyBlobRef(raw);
   return raw === "" ? "(none)" : raw;
 }
@@ -372,7 +373,19 @@ function KnobFieldRenderer({
       // can never overwrite the real value.
       const maskPathLeak =
         isTutorial && field.name === "path" && rawString.startsWith("/");
-      const displayString = maskPathLeak ? friendlyBlobRef(rawString) : rawString;
+      // blob:<ref> sentinel mask (all modes, not just tutorial): the guided
+      // emitter already masks a blob-backed source's absolute storage_path as
+      // `blob:<blob_ref>` on the wire, but a raw UUID means nothing to the
+      // user. Render the friendly label; the sentinel stays in form state and
+      // flows to submit unchanged (handleContinue reads `values`, never this
+      // DOM string). readOnly so the label can never overwrite the sentinel.
+      const maskBlobRef =
+        field.name === "path" && rawString.startsWith(BLOB_REF_PATH_PREFIX);
+      const displayString = maskBlobRef
+        ? BLOB_REF_FRIENDLY_LABEL
+        : maskPathLeak
+          ? friendlyBlobRef(rawString)
+          : rawString;
       return (
         <div className="guided-schema-field-row">
           <FieldLabel field={field} htmlFor={id} />
@@ -387,7 +400,7 @@ function KnobFieldRenderer({
             aria-describedby={descriptionId}
             onChange={(event) => onChange(event.target.value)}
             disabled={disabled}
-            readOnly={maskPathLeak}
+            readOnly={maskPathLeak || maskBlobRef}
           />
           {field.description && (
             <p id={descriptionId} className="guided-schema-hint">
@@ -578,6 +591,17 @@ function KnobFieldRenderer({
   const _exhaustive: never = field.kind;
   return _exhaustive;
 }
+
+// Wire sentinel for a blob-backed source's `path` knob (mirrors
+// BLOB_REF_PATH_PREFIX in web/composer/guided/protocol.py): the emitter sends
+// `blob:<blob_ref>` instead of the absolute storage_path, and the step-1
+// commit handler re-resolves it server-side. A filesystem path never starts
+// with this prefix, so the mask is unambiguous.
+const BLOB_REF_PATH_PREFIX = "blob:";
+// Friendly display label for the sentinel. Unlike an absolute path (whose
+// basename carries the original filename), the sentinel is just a UUID — there
+// is nothing human-meaningful to recover, so a fixed label stands in for it.
+const BLOB_REF_FRIENDLY_LABEL = "Uploaded sample data";
 
 // A blob storage_path basename is "<blob_uuid>_<original_filename>"
 // (web/blobs/service.py _storage_path). Strip the uuid_ prefix to recover the

@@ -75,7 +75,7 @@ from elspeth.web.secrets.routes import create_secrets_router
 from elspeth.web.secrets.server_store import ServerSecretStore
 from elspeth.web.secrets.service import ScopedSecretResolver, WebSecretService
 from elspeth.web.secrets.user_store import UserSecretStore
-from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError
+from elspeth.web.sessions.audit_story_service import AuditStoryIntegrityError, AuditStoryNotRecordedError
 from elspeth.web.sessions.engine import create_session_engine
 from elspeth.web.sessions.protocol import AuditAccessLogWriteError, RunAlreadyActiveError, RunRecord, StaleComposeStateError
 from elspeth.web.sessions.routes import create_session_router
@@ -739,6 +739,23 @@ def create_app(settings: WebSettings | None = None) -> FastAPI:
             content={
                 "error_type": "audit_story_integrity_error",
                 "detail": str(exc),
+            },
+        )
+
+    @app.exception_handler(AuditStoryNotRecordedError)
+    async def _audit_story_not_recorded_error_handler(_request: Request, _exc: AuditStoryNotRecordedError) -> JSONResponse:
+        # Absent-state sibling of ``_audit_story_integrity_error_handler``
+        # above: the run exists but no audit story was ever recorded for it
+        # (today only the tutorial projection writes the audit-story columns,
+        # so this is the normal state for every non-tutorial run). Structured
+        # 404 with a stable machine code; the detail is fixed plain language —
+        # the internal exception text (which names Landscape run ids) is
+        # deliberately not echoed.
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error_type": "audit_story_not_recorded",
+                "detail": "No audit story was recorded for this run.",
             },
         )
 

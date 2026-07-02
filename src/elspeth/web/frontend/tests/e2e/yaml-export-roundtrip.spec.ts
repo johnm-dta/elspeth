@@ -11,7 +11,10 @@
 import { test } from "@playwright/test";
 
 test.describe("yaml-export-roundtrip — generate_yaml output re-validates", () => {
-  test.fixme(true, "Blocked on direct-state-seed REST endpoint or LLM stub server.");
+  test.skip(
+    true,
+    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5",
+  );
 
   test("valid state → exported YAML → re-imported state is also valid", async () => {
     // 1. createSession via API helper.

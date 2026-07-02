@@ -1,10 +1,11 @@
-// RUN-CACHE KEY ONLY — no longer the per-stage build prompt. Kept
-// BYTE-IDENTICAL to the backend cache-key constant ``CANONICAL_SEED_PROMPT`` in
-// ``src/elspeth/web/preferences/tutorial_cache.py``. Turn 4 posts this string to
-// ``/api/tutorial/run``; the backend only engages the tutorial cache when
-// ``effective_prompt == CANONICAL_SEED_PROMPT``. If the two drift apart the cache
-// silently never hits and every tutorial run goes live. The Python test
-// ``test_canonical_seed_matches_frontend_constant`` fails CI if they diverge.
+// Display-only framing copy — NOT sent to the backend and NOT a cache key.
+// ``TutorialRunRequest`` (types/api.ts) carries only ``session_id``; every
+// tutorial run executes the canonical scrape/summarize/write scenario live,
+// every time. The run-cache mechanism this constant used to key into
+// (``src/elspeth/web/preferences/tutorial_cache.py``) and its parity-guard
+// test (``test_canonical_seed_matches_frontend_constant``) have both been
+// deleted — see the "Tutorial run now LIVE" project note. This constant is
+// kept only as the descriptive seed for ``TutorialState.prompt``.
 // The guided BUILD is now driven PER STAGE by the prompts below — the composer
 // is a STAGED orchestrator (source -> sink -> transforms -> wire), one focused
 // prompt per phase, NOT one whole-problem prompt at every phase.
@@ -44,8 +45,6 @@ export interface TutorialRunResult {
   runId: string;
   sourceDataHash: string;
   rows: RunResultRow[];
-  seededFromCache: boolean;
-  cacheKey: string | null;
   discardedRowCount: number;
 }
 
@@ -112,6 +111,21 @@ export function previousStep(state: TutorialState): TutorialStep | null {
     case "graduation":
       return "audit";
   }
+}
+
+/**
+ * Whether a page teardown (pagehide) at `step` counts as abandoning the
+ * tutorial. `welcome` means nothing started; `graduation` means the learner
+ * finished (every finishing path — completed, skipped, cancelled — lands
+ * there). `hasGraduated` is a LATCH: once graduation has been reached, a
+ * Back re-view of the audit story or run results followed by tab close is
+ * still a completed tutorial, not an abandon.
+ */
+export function isAbandonOnPageHide(
+  step: TutorialStep,
+  hasGraduated: boolean,
+): boolean {
+  return step !== "welcome" && step !== "graduation" && !hasGraduated;
 }
 
 export function tutorialReducer(

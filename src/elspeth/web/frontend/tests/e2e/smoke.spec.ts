@@ -16,9 +16,9 @@
 //   - Assert on visual layout or styling.
 //
 // The richer composer-correctness specs that target epic elspeth-e1ab67e55a
-// live alongside this file as test.fixme() stubs (see ./topology.spec.ts
-// etc.) and will be unblocked by either an LLM stub server or a direct
-// state-mutation REST endpoint.
+// live alongside this file as tracked test.skip() stubs (see ./topology.spec.ts
+// etc., tracked as elspeth-3a7df642c5) and will be unblocked by either an LLM
+// stub server or a direct state-mutation REST endpoint.
 
 import { expect, test } from "@playwright/test";
 

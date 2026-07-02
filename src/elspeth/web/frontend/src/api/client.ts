@@ -56,6 +56,7 @@ import type {
 import type { RecoveryTranscriptRow } from "@/types/recovery";
 import type {
   RunAuditStoryResponse,
+  TutorialCancelResponse,
   TutorialOrphanCleanupResponse,
   TutorialRunRequest,
   TutorialRunResponse,
@@ -374,6 +375,41 @@ export async function runTutorialPipeline(
     signal,
   });
   return parseResponse<TutorialRunResponse>(response);
+}
+
+/** Best-effort server-side cancel of an active tutorial run.
+ *
+ * Idempotent: `cancelled: false` means there was no active run left to stop.
+ * `keepalive` lets the request survive the user closing the tab immediately
+ * after clicking Cancel (the auth is a bearer header, so this cannot be a
+ * `navigator.sendBeacon` — beacons carry no custom headers). */
+export async function cancelTutorialRun(
+  sessionId: string,
+): Promise<TutorialCancelResponse> {
+  const response = await fetch("/api/tutorial/cancel", {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify({ session_id: sessionId }),
+    keepalive: true,
+  });
+  return parseResponse<TutorialCancelResponse>(response);
+}
+
+/** Fire the tutorial-abandoned telemetry beacon (POST /api/tutorial/abandon).
+ *
+ * Best-effort and fire-and-forget: called from a `pagehide` handler while the
+ * page is being torn down, so failures are swallowed — there is nowhere left
+ * to surface them. The endpoint requires the bearer header, which
+ * `navigator.sendBeacon` cannot carry, so this is a keepalive fetch (the
+ * browser lets it outlive the page). */
+export function sendTutorialAbandonBeacon(): void {
+  void fetch("/api/tutorial/abandon", {
+    method: "POST",
+    headers: authHeaders(),
+    keepalive: true,
+  }).catch(() => {
+    // Best-effort telemetry: the page is going away; nothing to surface.
+  });
 }
 
 /** Read the audit-story projection for a completed tutorial run. */

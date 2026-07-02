@@ -199,9 +199,11 @@ def _build_get_guided_turn(
 
     - STEP_3_TRANSFORMS: if ``step_3_proposal`` is set, emit
       ``propose_chain`` from the staged proposal, unless
-      ``step_3_edit_index`` is set, in which case emit the transform
-      ``schema_form`` for the proposed step being revised.  Returns ``None``
-      if the proposal is absent (LLM call has not completed; should
+      ``step_3_edit_index`` is set AND in range for the current proposal, in
+      which case emit the transform ``schema_form`` for the proposed step
+      being revised.  A stale/out-of-range ``step_3_edit_index`` degrades to
+      the no-edit ``propose_chain`` rebuild rather than raising.  Returns
+      ``None`` if the proposal is absent (LLM call has not completed; should
       not occur in practice — guarded defensively to avoid a crash).
 
     - STEP_4_WIRE: rebuild the skeleton ``confirm_wiring`` turn from current
@@ -256,11 +258,23 @@ def _build_get_guided_turn(
         return None
     if step is GuidedStep.STEP_3_TRANSFORMS:
         if guided.step_3_proposal is not None:
-            if guided.step_3_edit_index is not None:
-                step_record = dict(guided.step_3_proposal.steps[guided.step_3_edit_index])
+            edit_index = guided.step_3_edit_index
+            # A stale edit_index can outlive the proposal it was staged
+            # against (e.g. a chat-revise replaces step_3_proposal with a
+            # shorter chain) if some future call site installs a new
+            # proposal without clearing the index. Degrade to no-edit-in-
+            # progress rather than raising IndexError — GET /guided must
+            # stay reconstructible from whatever was last persisted.
+            if edit_index is not None and 0 <= edit_index < len(guided.step_3_proposal.steps):
+                step_record = dict(guided.step_3_proposal.steps[edit_index])
                 plugin = step_record["plugin"]
                 options = step_record["options"]
-                if type(plugin) is not str or type(options) is not dict:
+                # ChainProposal.__post_init__ deep-freezes ``steps``, so a
+                # live in-memory or from_dict-reconstructed proposal's
+                # ``options`` is a MappingProxyType, never a plain dict —
+                # isinstance(Mapping) accepts both; build_step_3_schema_form_turn
+                # deep_thaws before use.
+                if type(plugin) is not str or not isinstance(options, Mapping):
                     raise InvariantError("STEP_3 edit rebuild requires proposal step plugin str and options mapping")
                 return build_step_3_schema_form_turn(
                     plugin=plugin,
@@ -274,6 +288,49 @@ def _build_get_guided_turn(
     if step is GuidedStep.STEP_4_WIRE:
         return build_step_4_wire_turn(state)
     return None
+
+
+def _step_1_plugin_hint(guided: GuidedSession) -> str | None:
+    """Derive the Step-1 chat resolver's plugin hint from structured state.
+
+    Priority mirrors ``_build_get_guided_turn``'s STEP_1_SOURCE rebuild order:
+    ``step_1_source_intent`` (awaiting INSPECT_AND_CONFIRM) -> ``step_1_chosen_plugin``
+    (awaiting SCHEMA_FORM) -> ``step_1_result`` (already committed, chat-apply
+    re-render). Never parses ``TurnRecord.summary`` — that is denormalised
+    display copy for the client, not structured state, and a copy change to
+    its "Selected: " prefix must not silently break chat resolution.
+    """
+    if guided.step_1_source_intent is not None:
+        return guided.step_1_source_intent.plugin
+    if guided.step_1_chosen_plugin is not None:
+        return guided.step_1_chosen_plugin
+    if guided.step_1_result is not None:
+        return guided.step_1_result.plugin
+    return None
+
+
+def _guided_persisted_validity(state: CompositionState) -> tuple[bool, list[str] | None]:
+    """Derive is_valid/validation_errors for a guided persist site.
+
+    Mirrors the freeform persist convention's authoring-only fallback
+    (``_composer_persisted_validation``'s last branch in ``_helpers.py``):
+    ``CompositionState.validate()`` is a pure function of the graph alone, so
+    it is the correct, uniform check at every guided persist site regardless
+    of how far through the wizard the session has progressed — a genuinely
+    incomplete mid-flow graph (no source yet, no sinks yet) validates with
+    real errors, never the previous permanent ``is_valid=False,
+    validation_errors=None`` stamp that combination-never-produced-by-freeform.
+
+    No runtime preflight here (unlike ``_state_data_from_composer_state``):
+    guided intermediate persists happen at points that do not uniformly carry
+    a ``secret_service``/``settings`` runtime-preflight context, and runtime
+    preflight is the freeform *commit* path's concern — the run-time gate in
+    ``execution/service.py`` stays the hard backstop regardless of what this
+    Stage-1-only check reports.
+    """
+    summary = state.validate()
+    messages = [error.message for error in summary.errors]
+    return summary.is_valid, messages or None
 
 
 def _append_server_turn_record(
@@ -391,7 +448,29 @@ async def get_guided(
             # state + catalog).  Returns None for steps with no rebuildable
             # initial turn (STEP_3 / no-recipe STEP_2_5 path) or when the
             # session is already terminal.
-            turn = _build_get_guided_turn(state, guided, catalog=catalog) if guided.terminal is None else None
+            if guided.terminal is None:
+                try:
+                    turn = _build_get_guided_turn(state, guided, catalog=catalog)
+                except InvariantError as exc:
+                    # Same B1-sanitization rationale as the POST /respond
+                    # dispatcher's InvariantError catch: ``str(exc)`` can embed
+                    # ``{d!r}`` of a corrupted Tier-1 record including Tier-3
+                    # sample_rows. Static detail; slog carries exc_class +
+                    # frames only.
+                    slog.error(
+                        "guided.invariant_violated",
+                        session_id=str(session_id),
+                        user_id=user.user_id,
+                        exc_class=type(exc).__name__,
+                        site="get_guided._build_get_guided_turn",
+                        frames=_safe_frame_strings(exc),
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Server invariant violated. See application audit log for diagnostic detail.",
+                    ) from exc
+            else:
+                turn = None
             turn_type: TurnType | None = TurnType(turn["type"]) if turn is not None else None
             payload_hash: str | None = stable_hash(turn["payload"]) if turn is not None else None
 
@@ -428,14 +507,15 @@ async def get_guided(
                 new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
 
                 state_d = new_state.to_dict()
+                persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
                 state_data = CompositionStateData(
                     sources=state_d["sources"],
                     nodes=state_d["nodes"],
                     edges=state_d["edges"],
                     outputs=state_d["outputs"],
                     metadata_=state_d["metadata"],
-                    is_valid=False,
-                    validation_errors=None,
+                    is_valid=persisted_is_valid,
+                    validation_errors=persisted_errors,
                     composer_meta=new_composer_meta,
                 )
                 state_record_out = await service.save_composition_state(
@@ -734,14 +814,15 @@ async def post_guided_reenter(
             existing_meta = dict(deep_thaw(state_record.composer_meta))
         new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
         state_d = new_state.to_dict()
+        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
         state_data = CompositionStateData(
             sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],
             metadata_=state_d["metadata"],
-            is_valid=False,
-            validation_errors=None,
+            is_valid=persisted_is_valid,
+            validation_errors=persisted_errors,
             composer_meta=new_composer_meta,
         )
         state_record_out = await service.save_composition_state(
@@ -922,14 +1003,15 @@ async def post_guided_start(
 
         new_composer_meta = {"guided_session": seeded_guided.to_dict()}
         state_d = new_state.to_dict()
+        persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
         state_data = CompositionStateData(
             sources=state_d["sources"],
             nodes=state_d["nodes"],
             edges=state_d["edges"],
             outputs=state_d["outputs"],
             metadata_=state_d["metadata"],
-            is_valid=False,
-            validation_errors=None,
+            is_valid=persisted_is_valid,
+            validation_errors=persisted_errors,
             composer_meta=new_composer_meta,
         )
         state_record_out = await service.save_composition_state(
@@ -1127,14 +1209,15 @@ async def post_guided_respond(
                 new_composer_meta = {**existing_meta_exit, "guided_session": new_guided.to_dict()}
 
                 state_d = new_state.to_dict()
+                persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
                 state_data = CompositionStateData(
                     sources=state_d["sources"],
                     nodes=state_d["nodes"],
                     edges=state_d["edges"],
                     outputs=state_d["outputs"],
                     metadata_=state_d["metadata"],
-                    is_valid=False,
-                    validation_errors=None,
+                    is_valid=persisted_is_valid,
+                    validation_errors=persisted_errors,
                     composer_meta=new_composer_meta,
                 )
                 state_record_out = await service.save_composition_state(
@@ -1471,14 +1554,15 @@ async def post_guided_respond(
                         existing_meta_error = dict(deep_thaw(state_record.composer_meta))
                     error_meta = {**existing_meta_error, "guided_session": guided.to_dict()}
                     state_d_error = new_state.to_dict()
+                    persisted_is_valid_error, persisted_errors_error = _guided_persisted_validity(new_state)
                     state_data_error = CompositionStateData(
                         sources=state_d_error["sources"],
                         nodes=state_d_error["nodes"],
                         edges=state_d_error["edges"],
                         outputs=state_d_error["outputs"],
                         metadata_=state_d_error["metadata"],
-                        is_valid=False,
-                        validation_errors=None,
+                        is_valid=persisted_is_valid_error,
+                        validation_errors=persisted_errors_error,
                         composer_meta=error_meta,
                     )
                     state_record_out = await service.save_composition_state(
@@ -1528,14 +1612,15 @@ async def post_guided_respond(
             new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
 
             state_d = new_state.to_dict()
+            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
             state_data = CompositionStateData(
                 sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],
                 metadata_=state_d["metadata"],
-                is_valid=False,
-                validation_errors=None,
+                is_valid=persisted_is_valid,
+                validation_errors=persisted_errors,
                 composer_meta=new_composer_meta,
             )
             state_record_out = await service.save_composition_state(
@@ -1744,14 +1829,15 @@ async def _build_guided_chat_apply_response(
         existing_meta = dict(deep_thaw(state_record.composer_meta))
     new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
     state_d = new_state.to_dict()
+    persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
     state_data = CompositionStateData(
         sources=state_d["sources"],
         nodes=state_d["nodes"],
         edges=state_d["edges"],
         outputs=state_d["outputs"],
         metadata_=state_d["metadata"],
-        is_valid=False,
-        validation_errors=None,
+        is_valid=persisted_is_valid,
+        validation_errors=persisted_errors,
         composer_meta=new_composer_meta,
     )
     state_record_out = await service.save_composition_state(session_id, state_data, provenance="convergence_persist")
@@ -1915,20 +2001,7 @@ async def post_guided_chat(
                 and guided.step is GuidedStep.STEP_1_SOURCE
                 and current_turn_type in (TurnType.SINGLE_SELECT, TurnType.SCHEMA_FORM, TurnType.INSPECT_AND_CONFIRM)
             ):
-                plugin_hint: str | None = None
-                selected_record = next(
-                    (
-                        r
-                        for r in reversed(guided.history)
-                        if r.step is GuidedStep.STEP_1_SOURCE
-                        and r.turn_type is TurnType.SINGLE_SELECT
-                        and r.summary is not None
-                        and r.summary.startswith("Selected: ")
-                    ),
-                    None,
-                )
-                if selected_record is not None and selected_record.summary is not None:
-                    plugin_hint = selected_record.summary.removeprefix("Selected: ").split(", ", 1)[0]
+                plugin_hint = _step_1_plugin_hint(guided)
 
                 source_chat_result = await resolve_step_1_source_chat_with_auto_drop(
                     site="post_guided_chat",
@@ -2462,7 +2535,13 @@ async def post_guided_chat(
                         # Record the transient proposal for in-place re-render.
                         # NOT committed: handle_step_3_chain_accept (commit +
                         # advance to WIRE) stays on /guided/respond.
-                        guided = _replace(guided, step_3_proposal=proposal)
+                        # Clear step_3_edit_index in the SAME atomic replace that
+                        # installs the replacement proposal: an edit staged
+                        # against the prior (possibly longer) proposal can point
+                        # past the end of a shorter revised chain, and a stale
+                        # index left dangling makes GET /guided's rebuild index
+                        # out of range for the new proposal's steps.
+                        guided = _replace(guided, step_3_proposal=proposal, step_3_edit_index=None)
                         state = _replace(state, guided_session=guided)
                         next_turn = build_step_3_propose_chain_turn(proposal)
                         next_turn_type = TurnType(next_turn["type"])
@@ -2660,14 +2739,15 @@ async def post_guided_chat(
             new_composer_meta = {**existing_meta, "guided_session": new_guided.to_dict()}
 
             state_d = new_state.to_dict()
+            persisted_is_valid, persisted_errors = _guided_persisted_validity(new_state)
             state_data = CompositionStateData(
                 sources=state_d["sources"],
                 nodes=state_d["nodes"],
                 edges=state_d["edges"],
                 outputs=state_d["outputs"],
                 metadata_=state_d["metadata"],
-                is_valid=False,
-                validation_errors=None,
+                is_valid=persisted_is_valid,
+                validation_errors=persisted_errors,
                 composer_meta=new_composer_meta,
             )
             state_record_out = await service.save_composition_state(

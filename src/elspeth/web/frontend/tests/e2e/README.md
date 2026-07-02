@@ -55,21 +55,28 @@ tests/e2e/
 This is the proof-of-life that the harness itself works. If `smoke.spec.ts`
 fails, fix the harness before debugging any other spec.
 
-## What's stubbed (test.fixme)
+## What's stubbed (tracked test.skip)
 
 The remaining specs target the composer-correctness epic
-[`elspeth-e1ab67e55a`](../../../../../../) and its sub-issues. They are
-sketched with `test.fixme()` and detailed step-by-step bodies so a
-contributor can pick them up without re-deriving intent:
+[`elspeth-e1ab67e55a`](../../../../../../) and its sub-issues. Five of them
+are gated with a describe-level `test.skip(true, "…tracked as
+elspeth-3a7df642c5")` — NOT `test.fixme`, which silently reports as passing;
+a tracked skip is CI-visible in the run summary — and detailed step-by-step
+bodies so a contributor can pick them up without re-deriving intent:
 
-| Spec                              | Targets                                | Blocker                  |
-|-----------------------------------|----------------------------------------|--------------------------|
-| `topology.spec.ts`                | `elspeth-3724f02de9` (closed)          | direct state-seed gap    |
-| `mandatory-fields.spec.ts`        | `elspeth-39089c98ee` (closed)          | direct state-seed gap    |
-| `schema-preview-parity.spec.ts`   | `elspeth-87f6d5dea5` (open, P2)        | state-seed; expected-fail|
-| `llm-provider-schema.spec.ts`     | `elspeth-dcf12c061b` (open, P2)        | state-seed; expected-fail|
-| `yaml-export-roundtrip.spec.ts`   | parent epic acceptance criterion       | direct state-seed gap    |
-| `compose-happy-path.spec.ts`      | through-UI proof; `elspeth-528bde62bb` | LLM stub server          |
+| Spec                              | Targets                                | Blocker (tracked)                                            |
+|-----------------------------------|-----------------------------------------|---------------------------------------------------------------|
+| `topology.spec.ts`                | `elspeth-3724f02de9` (closed)          | `elspeth-3a7df642c5` state-seed                               |
+| `mandatory-fields.spec.ts`        | `elspeth-39089c98ee` (closed)          | `elspeth-3a7df642c5` state-seed                               |
+| `schema-preview-parity.spec.ts`   | `elspeth-87f6d5dea5` (open, P2)        | `elspeth-3a7df642c5` + expected-fail on `elspeth-87f6d5dea5`  |
+| `yaml-export-roundtrip.spec.ts`   | parent epic acceptance criterion       | `elspeth-3a7df642c5` state-seed                               |
+| `compose-happy-path.spec.ts`      | through-UI proof; `elspeth-528bde62bb` | `elspeth-3a7df642c5` LLM stub server                          |
+
+`llm-provider-schema.spec.ts` is different: its describe-level `test.fixme()`
+gate was already removed (per plan 16c Task 6 Step 3a) — most of its tests run
+on every CI pass, with a single per-test `test.skip(!hasStateSeed, "state-seed
+gap — see elspeth-dcf12c061b")` for the one path still needing the
+add-node-without-LLM affordance.
 
 ### The two unblockers
 

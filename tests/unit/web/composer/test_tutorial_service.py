@@ -22,7 +22,7 @@ from elspeth.web.composer.tutorial_service import (
     _coalesce_run_source_hashes,
     _count_calls_for_run,
     _count_discarded_rows,
-    _parse_rows_file,
+    _parse_rows_content,
     _rows_from_artifacts,
 )
 from elspeth.web.config import WebSettings
@@ -96,6 +96,61 @@ async def test_failed_live_tutorial_run_response_omits_raw_run_error(tmp_path: P
     assert detail["status"] == "failed"
     assert detail["detail"] == "The tutorial run did not complete successfully."
     assert sentinel_error not in repr(detail)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_live_tutorial_run_returns_409_with_machine_code(tmp_path: Path) -> None:
+    """A run that terminates ``cancelled`` is a deliberate user action, not a
+    failure: the route must answer 409 with the stable machine code
+    ``tutorial_run_cancelled`` (the frontend switches on it), never the
+    generic ``tutorial_live_run_failed`` 500."""
+    run_id = uuid4()
+    session_id = uuid4()
+    state_id = uuid4()
+
+    class FakeExecutionService:
+        async def execute(self, session_id: Any, *, user_id: str, auth_provider_type: str) -> Any:
+            del session_id, user_id, auth_provider_type
+            return run_id
+
+    class FakeSessionService:
+        async def get_run(self, requested_run_id: Any) -> RunRecord:
+            assert requested_run_id == run_id
+            now = datetime.now(UTC)
+            return RunRecord(
+                id=run_id,
+                session_id=session_id,
+                state_id=state_id,
+                status="cancelled",
+                started_at=now,
+                finished_at=now,
+                rows_processed=0,
+                rows_succeeded=0,
+                rows_failed=0,
+                rows_routed_success=0,
+                rows_routed_failure=0,
+                rows_quarantined=0,
+                error=None,
+                landscape_run_id=None,
+                pipeline_yaml=None,
+            )
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(execution_service=FakeExecutionService())))
+    settings = _make_tutorial_settings(tmp_path)
+    user = SimpleNamespace(user_id="tutorial-user")
+
+    with pytest.raises(HTTPException) as exc_info:
+        await tutorial_service_module._run_live_tutorial(
+            request=request,
+            user=user,
+            session_id=session_id,
+            settings=settings,
+            session_service=FakeSessionService(),
+        )
+
+    assert exc_info.value.status_code == 409
+    detail = exc_info.value.detail
+    assert detail["error_type"] == "tutorial_run_cancelled"
 
 
 def test_count_calls_for_run_counts_only_llm_calls() -> None:
@@ -222,7 +277,7 @@ def test_coalesce_run_source_hashes_aggregates_row_hashes() -> None:
     assert _coalesce_run_source_hashes(hashes, run_id="run-1") == stable_hash({"source_data_hashes": list(hashes)})
 
 
-# --- _parse_rows_file / _rows_from_artifacts --------------------------------
+# --- _parse_rows_content / _rows_from_artifacts ------------------------------
 # Tier-1 audit invariant: row-parsing distinguishes three failure modes, none
 # of which may be silently coalesced into ``[]``:
 #   1. file format is not a recognised row format → ``None`` (caller skips)
@@ -230,7 +285,11 @@ def test_coalesce_run_source_hashes_aggregates_row_hashes() -> None:
 #   3. file IS a row format and parses cleanly → return rows (possibly empty)
 
 
-def test_parse_rows_file_returns_none_for_unrecognised_suffix(tmp_path: Path) -> None:
+def _read(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def test_parse_rows_content_returns_none_for_unrecognised_suffix(tmp_path: Path) -> None:
     """An auxiliary artifact (.txt, .parquet, .log) is not a row format.
 
     Returning ``None`` lets ``_rows_from_artifacts`` cleanly skip it and try
@@ -244,10 +303,10 @@ def test_parse_rows_file_returns_none_for_unrecognised_suffix(tmp_path: Path) ->
             path.write_bytes(content)
         else:
             path.write_text(content, encoding="utf-8")
-        assert _parse_rows_file(path) is None, f"{name}: non-row format must return None, not []"
+        assert _parse_rows_content(path, _read(path)) is None, f"{name}: non-row format must return None, not []"
 
 
-def test_parse_rows_file_raises_for_json_scalar_or_null(tmp_path: Path) -> None:
+def test_parse_rows_content_raises_for_json_scalar_or_null(tmp_path: Path) -> None:
     """A .json artifact whose top-level is a scalar/null is structurally corrupt.
 
     The prior implementation fell through and returned [] — Tier-1 corruption
@@ -262,28 +321,28 @@ def test_parse_rows_file_raises_for_json_scalar_or_null(tmp_path: Path) -> None:
         path = tmp_path / f"output_{label}.json"
         path.write_text(content, encoding="utf-8")
         with pytest.raises(TutorialRunIntegrityError, match="JSON top-level"):
-            _parse_rows_file(path)
+            _parse_rows_content(path, _read(path))
 
 
-def test_parse_rows_file_parses_csv_and_returns_rows(tmp_path: Path) -> None:
+def test_parse_rows_content_parses_csv_and_returns_rows(tmp_path: Path) -> None:
     path = tmp_path / "rows.csv"
     path.write_text("url,rating\nato.gov.au,5\ndata.gov.au,4\n", encoding="utf-8")
-    rows = _parse_rows_file(path)
+    rows = _parse_rows_content(path, _read(path))
     assert rows == [{"url": "ato.gov.au", "rating": "5"}, {"url": "data.gov.au", "rating": "4"}]
 
 
-def test_parse_rows_file_parses_json_list_of_objects(tmp_path: Path) -> None:
+def test_parse_rows_content_parses_json_list_of_objects(tmp_path: Path) -> None:
     path = tmp_path / "rows.json"
     path.write_text('[{"url": "ato.gov.au", "rating": 5}, {"url": "data.gov.au", "rating": 4}]', encoding="utf-8")
-    rows = _parse_rows_file(path)
+    rows = _parse_rows_content(path, _read(path))
     assert rows == [{"url": "ato.gov.au", "rating": 5}, {"url": "data.gov.au", "rating": 4}]
 
 
-def test_parse_rows_file_parses_empty_csv_as_empty_rows(tmp_path: Path) -> None:
+def test_parse_rows_content_parses_empty_csv_as_empty_rows(tmp_path: Path) -> None:
     """A header-only CSV legitimately yields zero rows — that is not corruption."""
     path = tmp_path / "empty.csv"
     path.write_text("url,rating\n", encoding="utf-8")
-    rows = _parse_rows_file(path)
+    rows = _parse_rows_content(path, _read(path))
     assert rows == []  # legitimate empty result, distinct from "couldn't parse"
 
 

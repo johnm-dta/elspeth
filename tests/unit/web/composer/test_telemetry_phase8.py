@@ -48,7 +48,6 @@ from elspeth.web.composer.telemetry_phase8 import (
     record_share_link_expiry_hit,
     record_share_token_verify_failure,
     record_source_dynamic_created,
-    record_tutorial_completed,
     record_tutorial_started,
 )
 from elspeth.web.sessions.telemetry import _FakeCounter, build_sessions_telemetry, observed_value
@@ -215,7 +214,9 @@ def test_factory_registers_canonical_counter_names() -> None:
             "composer.mode.opted_in_total",
             "composer.session.switched_total",
             "composer.tutorial.started_total",
-            "composer.tutorial.completed_total",
+            # composer.tutorial.completed_total — counted ONLY by
+            # composer/tutorial_telemetry.py (attribute-carrying); the
+            # sessions-meter registration was a double-count and was removed.
             # composer.tutorial.replayed_total — deferred to Phase 9
             # per Decision 2 resolution (Option C). Do NOT add it back
             # to expected_names without re-opening that decision.
@@ -345,18 +346,6 @@ def test_record_tutorial_started_increments_counter(sessions_telemetry: Sessions
     record_tutorial_started(sessions_telemetry)
     assert observed_value(sessions_telemetry.tutorial_started_total) == 1
     calls = _fake_calls(sessions_telemetry.tutorial_started_total)
-    assert calls == [(1, {}, None)]
-
-
-def test_record_tutorial_completed_increments_counter(sessions_telemetry: SessionsTelemetry) -> None:
-    """Tutorial-completed helper.
-
-    Note absence of a tutorial_replayed companion — that counter is
-    Phase 9 deferred per Decision 2 / Option C.
-    """
-    record_tutorial_completed(sessions_telemetry)
-    assert observed_value(sessions_telemetry.tutorial_completed_total) == 1
-    calls = _fake_calls(sessions_telemetry.tutorial_completed_total)
     assert calls == [(1, {}, None)]
 
 
@@ -497,7 +486,6 @@ def _swap_counter(tel: SessionsTelemetry, field: str, replacement: _RaisingCount
             lambda tel: record_session_switched(tel, from_mode="explicit_approve", to_mode="auto_commit"),
         ),
         ("tutorial_started_total", lambda tel: record_tutorial_started(tel)),
-        ("tutorial_completed_total", lambda tel: record_tutorial_completed(tel)),
         (
             "session_completed_total",
             lambda tel: record_session_completed(tel, completion_verb="mark_ready_for_review"),

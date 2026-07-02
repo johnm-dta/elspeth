@@ -400,12 +400,18 @@ def build_step_3_schema_form_turn(
     catalog: CatalogServiceProtocol,
 ) -> Turn:
     """Build a ``schema_form`` Turn for editing a proposed transform step."""
+    from elspeth.contracts.freeze import deep_thaw
+
     schema_info = catalog.get_schema("transform", plugin)
+    # ``options`` may be a proposal step's frozen mapping (nested values are
+    # MappingProxyType) — deep_thaw before dict() so nested dicts survive
+    # pydantic JSON serialisation of TurnPayloadResponse. Mirrors the same
+    # thaw in build_step_3_propose_chain_turn above.
     payload: SchemaFormPayload = {
         "mode": "plugin_options",
         "plugin": plugin,
         "knobs": cast(KnobSchema, schema_info.knob_schema),
-        "prefilled": dict(options),
+        "prefilled": dict(deep_thaw(options)),
     }
     return Turn(
         type=TurnType.SCHEMA_FORM.value,

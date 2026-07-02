@@ -125,7 +125,13 @@ from elspeth.web.composer.redaction import (
     redact_tool_call_response,
 )
 from elspeth.web.composer.redaction_telemetry import OtelRedactionTelemetry
-from elspeth.web.composer.service import _advisor_signoff_blocked_validation, _BadRequestLLMError
+from elspeth.web.composer.service import (
+    _ADVISOR_MALFORMED_USER_DETAIL,
+    _ADVISOR_UNAVAILABLE_USER_DETAIL,
+    _advisor_signoff_blocked_validation,
+    _BadRequestLLMError,
+    _fence_advisor_findings,
+)
 from elspeth.web.composer.source_inspection import SourceInspectionFacts, inspect_blob_content
 from elspeth.web.composer.state import CompositionState, PipelineMetadata, ValidationEntry, ValidationSummary
 from elspeth.web.composer.telemetry_phase8 import (
@@ -2642,6 +2648,32 @@ def _store_guided_audit_payload(payload_store: Any, payload: Mapping[str, Any]) 
     return payload_ref
 
 
+def _maybe_fence_advisor_findings(findings_text: str) -> str:
+    """Fence free-text advisor findings before they reach the wire.
+
+    Mirrors the C2 discipline in ``composer/service.py``
+    (``_fence_advisor_findings`` / ``_ADVISOR_FINDINGS_MAX_CHARS``): a
+    prompt-injection payload smuggled into an operator-authored pipeline
+    option value can survive into the advisor's own free-text response
+    (a CLEAN commentary, or a non-exhausted FLAGGED finding) and get
+    parroted back to the wire, where a later turn (or a future assistant-
+    turn replay) could re-read it as an instruction rather than untrusted
+    commentary.
+
+    The two fixed Tier-3 constants the advisor checkpoint emits when it
+    could not render a verdict at all (``_ADVISOR_UNAVAILABLE_USER_DETAIL``
+    / ``_ADVISOR_MALFORMED_USER_DETAIL``) are backend-authored, not model
+    output, and are passed through literally — fencing them would just be
+    noise, and callers elsewhere (``_advisor_signoff_blocked_validation``'s
+    ``"unavailable"`` branch) already rely on their wording staying literal.
+    Every other value reaching here is the advisor MODEL's own text and is
+    fenced/capped.
+    """
+    if findings_text in (_ADVISOR_UNAVAILABLE_USER_DETAIL, _ADVISOR_MALFORMED_USER_DETAIL):
+        return findings_text
+    return _fence_advisor_findings(findings_text)
+
+
 def _emit_wire_turn(
     *,
     state: CompositionState,
@@ -3698,7 +3730,7 @@ async def _dispatch_guided_respond(
             next_turn = build_step_4_wire_turn(
                 state,
                 catalog=catalog,
-                advisor_findings=on_demand_blocked_findings or decision.findings_text,
+                advisor_findings=on_demand_blocked_findings or _maybe_fence_advisor_findings(decision.findings_text),
                 signoff_outcome=decision.outcome.value,
                 # Budget left after this pass (``guided`` is post-run_wire_signoff,
                 # so the counter is already incremented). Disclosed so the revise
@@ -3857,7 +3889,7 @@ async def _dispatch_guided_respond(
         next_turn = build_step_4_wire_turn(
             state,
             catalog=catalog,
-            advisor_findings=blocked_findings or decision.findings_text,
+            advisor_findings=blocked_findings or _maybe_fence_advisor_findings(decision.findings_text),
             signoff_outcome=decision.outcome.value,
             # Budget left after this pass (``guided`` is post-run_wire_signoff,
             # so the counter is already incremented). Disclosed so a REVISE turn

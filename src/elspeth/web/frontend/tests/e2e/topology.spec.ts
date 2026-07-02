@@ -12,7 +12,7 @@
 //   2. Re-seed UI-edge-only chain (no runtime connections); banner
 //      reads "invalid".
 //
-// Why fixme:
+// Why skipped:
 //   The composer tools (upsert_node, upsert_edge, etc.) are LLM-facing
 //   and not exposed as REST endpoints we can call directly. To seed
 //   composition state without driving a real LLM, we need either:
@@ -23,14 +23,17 @@
 //         ported to a TypeScript stub the webServer can dial via
 //         ELSPETH_WEB__composer_model env override).
 //
-// Either path is tracked separately. Until then this spec is fixme'd —
+// Tracked as elspeth-3a7df642c5. Until then this spec is a tracked skip —
 // but the test body is sketched so the next contributor does not need
 // to re-derive intent from the issue tracker.
 
 import { test } from "@playwright/test";
 
 test.describe("topology — runtime-connection vs UI-edge validation parity", () => {
-  test.fixme(true, "Blocked on direct-state-seed REST endpoint or LLM stub server.");
+  test.skip(
+    true,
+    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5",
+  );
 
   test("connection-wired chain (no UI edges) validates as valid", async () => {
     // 1. createSession via API helper.

@@ -601,6 +601,78 @@ describe("SchemaFormTurn", () => {
     });
   });
 
+  describe("blob:<ref> sentinel masking", () => {
+    // The guided emitter masks a blob-backed source's absolute storage_path as
+    // a stable `blob:<blob_ref>` wire sentinel (BLOB_REF_PATH_PREFIX,
+    // web/composer/guided/protocol.py). A raw UUID means nothing to a learner,
+    // so both views render a friendly label instead — the sentinel stays in
+    // form state and flows to submit unchanged, mirroring the /-path mask.
+    const blobSentinel = "blob:cb7f1f46-b724-4472-9acb-1680cefef45e";
+
+    it("masks a blob:<ref> path to the friendly label in the summary view", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", kind: "text", required: true })], {
+            path: blobSentinel,
+          })}
+          onSubmit={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("Uploaded sample data")).toBeInTheDocument();
+      expect(screen.queryByText(blobSentinel)).not.toBeInTheDocument();
+    });
+
+    it("masks a blob:<ref> path in the edit view (read-only), outside tutorial mode too", async () => {
+      const user = userEvent.setup();
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", kind: "text", required: true })], {
+            path: blobSentinel,
+          })}
+          onSubmit={vi.fn()}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "Edit" }));
+      const input = screen.getByLabelText(/path/) as HTMLInputElement;
+      expect(input.value).toBe("Uploaded sample data");
+      expect(input).toHaveAttribute("readonly");
+    });
+
+    it("submits the REAL blob:<ref> sentinel (not the label) on Continue", async () => {
+      // Load-bearing: the mask is display-only. The commit handler re-resolves
+      // the sentinel server-side, so the submitted value must stay `blob:<ref>`.
+      const onSubmit = vi.fn();
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", kind: "text", required: true })], {
+            path: blobSentinel,
+          })}
+          onSubmit={onSubmit}
+        />,
+      );
+      await userEvent.click(screen.getByRole("button", { name: /continue/i }));
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      const body = onSubmit.mock.calls[0][0] as {
+        edited_values: { options: Record<string, unknown> };
+      };
+      expect(body.edited_values.options.path).toBe(blobSentinel);
+    });
+
+    it("masks a blob:<ref> path in tutorial summary mode", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([field({ name: "path", kind: "text", required: true })], {
+            path: blobSentinel,
+          })}
+          onSubmit={vi.fn()}
+          isTutorial
+        />,
+      );
+      expect(screen.getByText("Uploaded sample data")).toBeInTheDocument();
+      expect(screen.queryByText(blobSentinel)).not.toBeInTheDocument();
+    });
+  });
+
   describe("read-only summary view", () => {
     it("renders prefilled scalar knobs as read-only text, not editable controls", () => {
       render(

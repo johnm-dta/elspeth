@@ -1,19 +1,16 @@
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import {
   createSession,
   deleteTutorialOrphans,
   renameSession,
+  sendTutorialAbandonBeacon,
 } from "@/api/client";
 import { TutorialTurn1Welcome } from "./TutorialTurn1Welcome";
 import { TutorialGuidedShell } from "./TutorialGuidedShell";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
 import { TutorialTurn5AuditStory } from "./TutorialTurn5AuditStory";
 import { TutorialTurn7Graduation } from "./TutorialTurn7Graduation";
-import {
-  CANONICAL_TUTORIAL_PROMPT,
-  initialTutorialState,
-  tutorialReducer,
-} from "./tutorialMachine";
+import { initialTutorialState, isAbandonOnPageHide, tutorialReducer } from "./tutorialMachine";
 import { HELLO_WORLD_PENDING_SESSION_TITLE } from "./copy";
 
 export function HelloWorldTutorial(): JSX.Element {
@@ -26,6 +23,41 @@ export function HelloWorldTutorial(): JSX.Element {
     void deleteTutorialOrphans().catch((err) => {
       console.error("[tutorial] orphan cleanup failed:", err);
     });
+  }, []);
+
+  // Fire the best-effort tutorial-abandoned telemetry beacon (composer.
+  // tutorial.abandon_total) when the tab/page is torn down while a tutorial
+  // is genuinely in progress — started (past the welcome bookend) but not
+  // yet at its terminal step. `graduation` is reached by EVERY finishing
+  // path (completed, skipped, and cancelled all dispatch into it — see
+  // tutorialReducer), so landing there before teardown means the learner
+  // saw the tutorial through, not abandoned it. A ref (not a `step` dep on
+  // the listener effect) keeps the same `pagehide` listener attached for the
+  // component's whole lifetime; `pagehide` only fires on real page teardown
+  // (tab close, external navigation, refresh) — never on this component's
+  // own in-app step transitions or its eventual unmount when the tutorial
+  // completes and `showTutorial` flips false in App.tsx, so a normal
+  // graduation can never be misread as an abandon. Graduation LATCHES
+  // (`hasGraduatedRef`): stepping Back from graduation to re-view the audit
+  // story or run results and then closing the tab is still a completed
+  // tutorial, not an abandon — the gate itself is the pure
+  // `isAbandonOnPageHide` in tutorialMachine.ts.
+  const stepRef = useRef(state.step);
+  const hasGraduatedRef = useRef(false);
+  useEffect(() => {
+    stepRef.current = state.step;
+    if (state.step === "graduation") {
+      hasGraduatedRef.current = true;
+    }
+  }, [state.step]);
+  useEffect(() => {
+    function handlePageHide(): void {
+      if (isAbandonOnPageHide(stepRef.current, hasGraduatedRef.current)) {
+        sendTutorialAbandonBeacon();
+      }
+    }
+    window.addEventListener("pagehide", handlePageHide);
+    return () => window.removeEventListener("pagehide", handlePageHide);
   }, []);
 
   // Create the tutorial session on Start so TutorialGuidedShell has a
@@ -148,7 +180,6 @@ export function HelloWorldTutorial(): JSX.Element {
         // return to and renders no Back affordance.
         <TutorialTurn4Run
           sessionId={state.sessionId}
-          prompt={CANONICAL_TUTORIAL_PROMPT}
           onCompleted={(result) => dispatch({ type: "runCompleted", result })}
           onCancelled={() => dispatch({ type: "cancelRun" })}
         />

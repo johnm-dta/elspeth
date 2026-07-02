@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CANONICAL_TUTORIAL_PROMPT,
   initialTutorialState,
+  isAbandonOnPageHide,
   tutorialReducer,
   type TutorialState,
 } from "./tutorialMachine";
@@ -44,8 +45,6 @@ describe("tutorialReducer staged flow", () => {
         runId: "run-1",
         sourceDataHash: "hash",
         rows: [],
-        seededFromCache: true,
-        cacheKey: null,
         discardedRowCount: 0,
       },
     });
@@ -99,5 +98,30 @@ describe("tutorialReducer staged flow", () => {
     };
     const next = tutorialReducer(graduation, { type: "back" });
     expect(next.step).toBe("audit");
+  });
+});
+
+describe("isAbandonOnPageHide", () => {
+  it("never counts the welcome bookend as an abandon", () => {
+    expect(isAbandonOnPageHide("welcome", false)).toBe(false);
+  });
+
+  it("counts teardown mid-tutorial as an abandon", () => {
+    expect(isAbandonOnPageHide("guided", false)).toBe(true);
+    expect(isAbandonOnPageHide("run", false)).toBe(true);
+    expect(isAbandonOnPageHide("audit", false)).toBe(true);
+  });
+
+  it("never counts teardown at graduation as an abandon", () => {
+    expect(isAbandonOnPageHide("graduation", false)).toBe(false);
+    expect(isAbandonOnPageHide("graduation", true)).toBe(false);
+  });
+
+  it("graduation latches: Back re-views after graduating are not abandons", () => {
+    // graduation -> Back -> audit (or audit -> Back -> run), then tab close:
+    // the learner finished the tutorial; the re-view must not overcount
+    // composer.tutorial.abandon_total.
+    expect(isAbandonOnPageHide("audit", true)).toBe(false);
+    expect(isAbandonOnPageHide("run", true)).toBe(false);
   });
 });

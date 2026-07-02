@@ -1512,6 +1512,88 @@ describe("sessionStore", () => {
     });
   });
 
+  describe("resetForTutorialSession", () => {
+    it("binds activeSessionId and hydrates every field a stale session could leave behind", () => {
+      // Dirty every field resetForTutorialSession is responsible for
+      // clearing, mirroring a completed guided session left over from a
+      // previously active (non-tutorial) session — the exact scenario
+      // TutorialGuidedShell's mount effect must recover from.
+      useSessionStore.setState({
+        activeSessionId: "old-session",
+        messages: [{ id: "old-message" } as unknown as ChatMessage],
+        compositionState: makeCompositionState(1),
+        compositionProposals: [makeCompositionProposal()],
+        composerPreferences: {
+          session_id: "old-session",
+          trust_mode: "explicit_approve",
+          density_default: "medium",
+          interpretation_review_disabled: false,
+          updated_at: "2026-05-15T00:00:00Z",
+        },
+        staleProposalIds: ["proposal-1"],
+        proposalActionPendingIds: ["proposal-1"],
+        composerProgress: {} as ComposerProgressSnapshot,
+        stateVersions: [{ id: "state-1", version: 1 } as never],
+        isComposing: true,
+        error: "some stale error",
+        selectedNodeId: "old-node",
+        guidedSession: {
+          step: "step_4_wire",
+          history: [],
+          terminal: { kind: "completed", reason: null },
+          chat_history: [],
+          chat_turn_seq: 0,
+          profile: null,
+        } as never,
+        guidedNextTurn: {} as never,
+        guidedTerminal: { kind: "completed", reason: null } as never,
+        guidedChatPending: true,
+        guidedResponsePending: true,
+        recoveryError: makeRecoveryError(),
+        recoveryStartedCompositionVersion: 3,
+      });
+
+      useSessionStore.getState().resetForTutorialSession("tutorial-session-1");
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("tutorial-session-1");
+      expect(state.messages).toEqual([]);
+      expect(state.compositionState).toBeNull();
+      expect(state.compositionProposals).toEqual([]);
+      expect(state.composerPreferences).toBeNull();
+      expect(state.staleProposalIds).toEqual([]);
+      expect(state.proposalActionPendingIds).toEqual([]);
+      expect(state.composerProgress).toBeNull();
+      expect(state.stateVersions).toEqual([]);
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toBeNull();
+      expect(state.selectedNodeId).toBeNull();
+      expect(state.guidedSession).toBeNull();
+      expect(state.guidedNextTurn).toBeNull();
+      expect(state.guidedTerminal).toBeNull();
+      expect(state.guidedChatPending).toBe(false);
+      expect(state.guidedResponsePending).toBe(false);
+      expect(state.recoveryError).toBeNull();
+      expect(state.recoveryStartedCompositionVersion).toBeNull();
+    });
+
+    it("does not touch fields it is not responsible for (sessions list)", () => {
+      const sessions = [
+        {
+          id: "session-1",
+          title: "Existing",
+          created_at: "2026-05-14T00:00:00Z",
+          updated_at: "2026-05-14T00:00:00Z",
+        },
+      ];
+      useSessionStore.setState({ sessions });
+
+      useSessionStore.getState().resetForTutorialSession("tutorial-session-2");
+
+      expect(useSessionStore.getState().sessions).toBe(sessions);
+    });
+  });
+
   // ── Phase 1B: createSession honours composer default-mode preference ──
   describe("createSession honours default mode", () => {
     it("leaves guidedSession null when default mode is freeform", async () => {

@@ -55,6 +55,16 @@ def _settings(tmp_path: Path) -> WebSettings:
     )
 
 
+class _FakeExecutionService:
+    """Records cancel calls; the live execution backbone is out of scope here."""
+
+    def __init__(self) -> None:
+        self.cancelled: list[UUID] = []
+
+    async def cancel(self, run_id: UUID) -> None:
+        self.cancelled.append(run_id)
+
+
 def _app(tmp_path: Path) -> FastAPI:
     engine = create_session_engine(
         "sqlite:///:memory:",
@@ -76,6 +86,7 @@ def _app(tmp_path: Path) -> FastAPI:
     app.state.session_service = session_service
     app.state.preferences_service = PreferencesService(engine)
     app.state.rate_limiter = ComposerRateLimiter(limit=settings.composer_rate_limit_per_minute)
+    app.state.execution_service = _FakeExecutionService()
 
     identity = UserIdentity(user_id="alice", username="alice")
 
@@ -112,8 +123,7 @@ def _install_fake_live_run(
     """Replace ``_run_live_tutorial`` with a stub that records its call count.
 
     The live execution backbone is out of scope for these route tests; the stub
-    returns a fixed response with ``seeded_from_cache=False`` (the only shape the
-    cache-free tutorial run produces) so the route's wiring can be asserted.
+    returns a fixed response so the route's wiring can be asserted.
     """
     calls = {"count": 0}
     response = TutorialRunResponse(
@@ -122,8 +132,6 @@ def _install_fake_live_run(
             rows=({"url": "https://example.gov.au", "summary": "A page."},),
             source_data_hash="a" * 64,
         ),
-        seeded_from_cache=False,
-        cache_key=None,
     )
 
     class _FakeLiveRun:
@@ -138,7 +146,7 @@ def _install_fake_live_run(
     return calls
 
 
-def test_post_run_executes_live_and_returns_not_seeded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_post_run_executes_live_and_returns_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app = _app(tmp_path)
     session_id = _seed_session_with_state(app)
     calls = _install_fake_live_run(monkeypatch)
@@ -148,9 +156,6 @@ def test_post_run_executes_live_and_returns_not_seeded(tmp_path: Path, monkeypat
 
     assert response.status_code == 200
     body = response.json()
-    # The cache-free tutorial run is always a real execution: never seeded.
-    assert body["seeded_from_cache"] is False
-    assert body["cache_key"] is None
     assert body["output"]["rows"] == [{"url": "https://example.gov.au", "summary": "A page."}]
     assert calls["count"] == 1
 
@@ -200,12 +205,80 @@ def test_post_run_rejects_extra_fields(tmp_path: Path) -> None:
     assert response.status_code == 422
 
 
-def test_delete_orphans_soft_renames_incomplete_tutorial_sessions(tmp_path: Path) -> None:
+def test_post_cancel_with_active_run_cancels_via_run_cancel_machinery(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    session_id = _seed_session_with_state(app)
+    state = asyncio.run(
+        app.state.session_service.save_composition_state(
+            session_id,
+            CompositionStateData(),
+            provenance="session_seed",
+        )
+    )
+    run = asyncio.run(app.state.session_service.create_run(session_id, state.id))
+    client = TestClient(app)
+
+    response = client.post("/api/tutorial/cancel", json={"session_id": str(session_id)})
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": True}
+    # The session's active run was cancelled through the EXISTING run-cancel
+    # machinery (ExecutionService.cancel keyed by run_id), not a tutorial fork.
+    assert app.state.execution_service.cancelled == [run.id]
+
+
+def test_post_cancel_without_active_run_is_idempotent(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    session_id = _seed_session_with_state(app)
+    client = TestClient(app)
+
+    response = client.post("/api/tutorial/cancel", json={"session_id": str(session_id)})
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": False}
+    assert app.state.execution_service.cancelled == []
+
+
+def test_post_cancel_unknown_session_returns_404(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    client = TestClient(app)
+
+    response = client.post("/api/tutorial/cancel", json={"session_id": str(uuid4())})
+
+    assert response.status_code == 404
+    assert app.state.execution_service.cancelled == []
+
+
+def test_post_cancel_other_users_session_returns_404(tmp_path: Path) -> None:
+    """IDOR contract: ownership failure is indistinguishable from absence."""
+    app = _app(tmp_path)
+    session_id = uuid4()
+    with app.state.session_engine.begin() as conn:
+        _make_session(conn, session_id=str(session_id), user_id="mallory")
+    client = TestClient(app)
+
+    response = client.post("/api/tutorial/cancel", json={"session_id": str(session_id)})
+
+    assert response.status_code == 404
+    assert app.state.execution_service.cancelled == []
+
+
+def test_post_cancel_rejects_extra_fields(tmp_path: Path) -> None:
+    app = _app(tmp_path)
+    session_id = _seed_session_with_state(app)
+    client = TestClient(app)
+
+    response = client.post("/api/tutorial/cancel", json={"session_id": str(session_id), "rogue": True})
+
+    assert response.status_code == 422
+
+
+def test_delete_orphans_soft_renames_only_pending_tutorial_sessions(tmp_path: Path) -> None:
     app = _app(tmp_path)
     orphan_id = uuid4()
     keep_id = uuid4()
     with app.state.session_engine.begin() as conn:
-        _make_session(conn, session_id=str(orphan_id), user_id="alice", title="hello-world (cool government pages)")
+        _make_session(conn, session_id=str(orphan_id), user_id="alice", title="hello-world (pending)")
         _make_session(conn, session_id=str(keep_id), user_id="alice", title="ordinary session")
     client = TestClient(app)
 
@@ -215,5 +288,31 @@ def test_delete_orphans_soft_renames_incomplete_tutorial_sessions(tmp_path: Path
     assert response.json() == {"deleted_count": 1}
     renamed = asyncio.run(app.state.session_service.get_session(orphan_id))
     kept = asyncio.run(app.state.session_service.get_session(keep_id))
-    assert renamed.title.startswith("abandoned-hello-world (cool government pages)-")
+    assert renamed.title.startswith("abandoned-hello-world (pending)-")
     assert kept.title == "ordinary session"
+
+
+def test_delete_orphans_never_touches_graduated_tutorial_session(tmp_path: Path) -> None:
+    """A RETAKE resets tutorial_completed_at to None; the user's graduated
+    (renamed, keep-forever) tutorial pipeline must survive the orphan sweep
+    that runs on tutorial re-entry. Protection comes from the title alone —
+    cleanup only ever matches the pending title, never the graduated one."""
+    app = _app(tmp_path)
+    graduated_id = uuid4()
+    pending_id = uuid4()
+    with app.state.session_engine.begin() as conn:
+        # Graduated title mirrors HELLO_WORLD_SESSION_TITLE in frontend copy.ts.
+        _make_session(conn, session_id=str(graduated_id), user_id="alice", title="hello-world (synthetic project briefs)")
+        _make_session(conn, session_id=str(pending_id), user_id="alice", title="hello-world (pending)")
+    # tutorial_completed_at is None for alice (no preferences row) — the
+    # graduated session must be protected by its title, not by the flag.
+    client = TestClient(app)
+
+    response = client.delete("/api/tutorial/orphans")
+
+    assert response.status_code == 200
+    assert response.json() == {"deleted_count": 1}
+    graduated = asyncio.run(app.state.session_service.get_session(graduated_id))
+    pending = asyncio.run(app.state.session_service.get_session(pending_id))
+    assert graduated.title == "hello-world (synthetic project briefs)"
+    assert pending.title.startswith("abandoned-hello-world (pending)-")

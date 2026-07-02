@@ -65,19 +65,24 @@ describe("tutorial teaching moments — render at the right turn", () => {
     );
     expect(screen.queryByText(/received its score/i)).not.toBeInTheDocument();
     expect(screen.getByText(/what it chose to include or leave out/i)).toBeInTheDocument();
+    // The Back button here really does return to the run-results view
+    // (previousStep(audit) === "run", cache-backed re-view) — not a
+    // free-text prompt editor, which the staged guided walk retired (F6).
+    const backButton = screen.getByRole("button", {
+      name: "Back to your pipeline run",
+    });
+    expect(backButton).toBeInTheDocument();
+    expect(backButton).not.toHaveAccessibleName(/edit prompt/i);
   });
 
   it("Turn 4 (run) renders the shield-override caveat", () => {
     vi.mocked(api.runTutorialPipeline).mockResolvedValue({
       run_id: "run-1",
       output: { rows: [], source_data_hash: "h", discarded_row_count: 0 },
-      seeded_from_cache: false,
-      cache_key: null,
     } as unknown as Awaited<ReturnType<typeof api.runTutorialPipeline>>);
     render(
       <TutorialTurn4Run
         sessionId="sess-1"
-        prompt="any"
         onCompleted={noop}
         onCancelled={noop}
       />,

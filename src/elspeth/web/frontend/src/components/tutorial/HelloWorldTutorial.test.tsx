@@ -29,9 +29,8 @@ vi.mock("@/api/client", () => ({
       rows: [{ url: "dta.gov.au", score: 9, rationale: "bold" }],
       discarded_row_count: 0,
     },
-    seeded_from_cache: false,
-    cache_key: null,
   }),
+  sendTutorialAbandonBeacon: vi.fn(),
 }));
 
 // Replace the embedded guided surface with a one-button stub that fires the
@@ -146,7 +145,6 @@ describe("HelloWorldTutorial staged flow", () => {
       <StrictMode>
         <TutorialTurn4Run
           sessionId="strict-session"
-          prompt="strict prompt"
           onCompleted={() => undefined}
           onCancelled={() => undefined}
           onBack={() => undefined}
@@ -159,8 +157,73 @@ describe("HelloWorldTutorial staged flow", () => {
     const [body, signal] = vi.mocked(api.runTutorialPipeline).mock.calls[0];
     expect(body).toEqual({
       session_id: "strict-session",
-      prompt: "strict prompt",
     });
     expect(signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe("HelloWorldTutorial — abandon beacon (F4)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("does not fire the abandon beacon on pagehide while still on the welcome bookend", async () => {
+    const api = await import("@/api/client");
+    render(<HelloWorldTutorial />);
+    // Nothing has started yet — there is no in-progress tutorial to abandon.
+    window.dispatchEvent(new Event("pagehide"));
+    expect(api.sendTutorialAbandonBeacon).not.toHaveBeenCalled();
+  });
+
+  it("fires the abandon beacon on pagehide once the tutorial is in progress", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "finish-guided" }),
+      ).toBeInTheDocument(),
+    );
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(api.sendTutorialAbandonBeacon).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fire the abandon beacon on pagehide once graduation is reached (skip path)", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Skip the tutorial" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "You're ready to use the composer." }),
+      ).toBeInTheDocument(),
+    );
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    // Skip lands on the same terminal `graduation` step every completing path
+    // reaches — the learner saw the tutorial through, so this is not an
+    // abandon, regardless of which door they left through.
+    expect(api.sendTutorialAbandonBeacon).not.toHaveBeenCalled();
+  });
+
+  it("removes its pagehide listener on unmount so a later pagehide cannot fire the beacon", async () => {
+    const api = await import("@/api/client");
+    const user = userEvent.setup();
+    const { unmount } = render(<HelloWorldTutorial />);
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "finish-guided" }),
+      ).toBeInTheDocument(),
+    );
+
+    unmount();
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(api.sendTutorialAbandonBeacon).not.toHaveBeenCalled();
   });
 });

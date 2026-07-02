@@ -252,10 +252,9 @@ def build_step_3_context_block(
 def guided_staged_skill_hash() -> str:
     """Hex SHA-256 over base.md + every step playbook in _STEP_PLAYBOOK_ORDER.
 
-    Consumed by the tutorial run-cache key (tutorial_model_id, cache input
-    #3). Enumerating the playbook order means appending a GuidedStep member
-    (and its skill file) automatically extends the keyed input set — the
-    step_4_wire.md add (P1) shifts this hash with no edit to the cache path.
+    Enumerating the playbook order means appending a GuidedStep member (and
+    its skill file) automatically extends the hashed input set — the
+    step_4_wire.md add (P1) shifts this hash with no edit needed here.
 
     Cached per process; restart elspeth-web.service after editing skill
     markdown (same lifecycle caveat as the other loaders in this module).

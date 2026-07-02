@@ -9,14 +9,17 @@
 //      validation entry contains "plugin required".
 //   2. Patch via API to add plugin; banner clears.
 //
-// Why fixme:
+// Why skipped:
 //   See topology.spec.ts — same blocker (no direct state-mutation REST
-//   endpoint; would otherwise need an LLM stub).
+//   endpoint; would otherwise need an LLM stub). Tracked as elspeth-3a7df642c5.
 
 import { test } from "@playwright/test";
 
 test.describe("mandatory-fields — transform nodes must declare plugin", () => {
-  test.fixme(true, "Blocked on direct-state-seed REST endpoint or LLM stub server.");
+  test.skip(
+    true,
+    "blocked: needs direct-state-seed endpoint / LLM stub server — tracked as elspeth-3a7df642c5",
+  );
 
   test("transform without plugin is reported invalid", async () => {
     // 1. createSession via API helper.

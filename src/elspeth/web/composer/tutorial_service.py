@@ -31,7 +31,12 @@ from elspeth.core.landscape.schema import (
 )
 from elspeth.web.async_workers import run_sync_in_worker
 from elspeth.web.auth.models import UserIdentity
-from elspeth.web.composer.tutorial_models import TutorialOrphanCleanupResponse, TutorialRunOutput, TutorialRunResponse
+from elspeth.web.composer.tutorial_models import (
+    TutorialCancelResponse,
+    TutorialOrphanCleanupResponse,
+    TutorialRunOutput,
+    TutorialRunResponse,
+)
 from elspeth.web.config import WebSettings
 from elspeth.web.execution.outputs import filesystem_path_candidates
 from elspeth.web.execution.protocol import ExecutionService
@@ -47,7 +52,14 @@ from elspeth.web.sessions.protocol import (
 
 _TUTORIAL_RUN_TIMEOUT_SECONDS = 120.0
 _TUTORIAL_RUN_POLL_SECONDS = 0.25
-_TUTORIAL_SESSION_TITLE_PREFIX = "hello-world ("
+# Mirrors HELLO_WORLD_PENDING_SESSION_TITLE in the frontend tutorial copy
+# (src/elspeth/web/frontend/src/components/tutorial/copy.ts). Sessions carry
+# this title from creation until graduation, when the frontend renames them
+# to HELLO_WORLD_SESSION_TITLE ("hello-world (synthetic project briefs)").
+# Orphan cleanup matches ONLY the pending title: a graduated session is the
+# user's keep-forever pipeline and must never be swept, even when a tutorial
+# RETAKE has reset ``tutorial_completed_at`` back to None.
+_TUTORIAL_PENDING_SESSION_TITLE = "hello-world (pending)"
 _ABANDONED_SESSION_TITLE_PREFIX = "abandoned-"
 _TUTORIAL_RUN_FAILED_PUBLIC_DETAIL = "The tutorial run did not complete successfully."
 
@@ -129,6 +141,17 @@ async def _run_live_tutorial(
         auth_provider_type=settings.auth_provider,
     )
     run_record = await _wait_for_terminal_run(session_service, run_id)
+    if run_record.status == "cancelled":
+        # Cancellation is a deliberate user action (POST /api/tutorial/cancel),
+        # not a failure: 409 with a stable machine code the frontend switches
+        # on, distinct from the generic live-run-failed 500 below.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_type": "tutorial_run_cancelled",
+                "detail": "The tutorial run was cancelled before it completed.",
+            },
+        )
     if run_record.status not in OPERATOR_COMPLETION_RUN_STATUS_VALUES:
         raise HTTPException(
             status_code=500,
@@ -150,8 +173,6 @@ async def _run_live_tutorial(
     response = TutorialRunResponse(
         run_id=str(run_id),
         output=projection.output,
-        seeded_from_cache=False,
-        cache_key=None,
     )
     return _LiveTutorialRun(response=response, run_record=run_record, projection=projection)
 
@@ -330,7 +351,7 @@ def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id
     Three distinct Tier-1 failure modes are surfaced separately rather than
     collapsed into one "empty result" message:
 
-    1. **Corrupt row-format artifact** — ``_parse_rows_file`` raises
+    1. **Corrupt row-format artifact** — ``_parse_rows_content`` raises
        ``TutorialRunIntegrityError`` directly. Caller never sees the
        ambiguous empty list.
     2. **No row-bearing artifact** — every file artifact has a suffix outside
@@ -364,10 +385,6 @@ def _rows_from_artifacts(artifact_rows: Sequence[Any], *, data_dir: Path, run_id
     raise TutorialRunIntegrityError(
         f"Tutorial run {run_id}: no row-bearing artifact found (recognised formats: {sorted(_ROW_FORMAT_SUFFIXES)})"
     )
-
-
-def _parse_rows_file(path: Path) -> list[dict[str, Any]] | None:
-    return _parse_rows_content(path, path.read_bytes())
 
 
 def _parse_rows_content(path: Path, content: bytes) -> list[dict[str, Any]] | None:
@@ -424,6 +441,38 @@ def _parse_rows_content(path: Path, content: bytes) -> list[dict[str, Any]] | No
     )
 
 
+async def cancel_tutorial_run(
+    *,
+    request: Request,
+    user: UserIdentity,
+    session_id: str,
+) -> TutorialCancelResponse:
+    """Cancel the session's active tutorial run, if one exists.
+
+    Reuses the existing run-cancel machinery (``ExecutionService.cancel``,
+    keyed by run_id) rather than growing a tutorial-special execution path:
+    the session's pending/running run is looked up via the same one-active-
+    run-per-session invariant the execute path enforces, then cancelled
+    exactly as ``POST /api/runs/{run_id}/cancel`` would.
+
+    Idempotent: when no active run exists (never started, already terminal)
+    the response is ``cancelled=False``, never an error.
+    """
+    from uuid import UUID
+
+    session_uuid = UUID(session_id)
+    await verify_session_ownership(session_uuid, user, request)
+
+    session_service: SessionServiceProtocol = request.app.state.session_service
+    active_run = await session_service.get_active_run(session_uuid)
+    if active_run is None:
+        return TutorialCancelResponse(cancelled=False)
+
+    execution_service: ExecutionService = request.app.state.execution_service
+    await execution_service.cancel(active_run.id)
+    return TutorialCancelResponse(cancelled=True)
+
+
 async def cleanup_tutorial_orphans(
     *,
     request: Request,
@@ -456,7 +505,7 @@ async def cleanup_tutorial_orphans(
         if not sessions:
             break
         for session in sessions:
-            if session.title.startswith(_TUTORIAL_SESSION_TITLE_PREFIX) and not session.title.startswith(_ABANDONED_SESSION_TITLE_PREFIX):
+            if session.title == _TUTORIAL_PENDING_SESSION_TITLE:
                 await session_service.update_session_title(
                     session.id,
                     f"{_ABANDONED_SESSION_TITLE_PREFIX}{session.title}-{timestamp}",

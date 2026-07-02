@@ -7,6 +7,8 @@
  * to the parent exactly once.
  */
 
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -89,5 +91,35 @@ describe("TemplateCards", () => {
       expect(labels).toContain("Decide");
       expect(labels).toContain("Act");
     }
+  });
+});
+
+describe("template card text contrast (dark-contrast carry-over, ux-review-2026-07-02)", () => {
+  // --color-text-muted passes WCAG AA on its own (pinned in
+  // colorContrast.test.ts), but opacity dimming on the card text composited
+  // it below 4.5:1 against the card's color-mix background in both themes
+  // (measured ~3-4:1 vs the #173942 dark card mix). Pin: the faded-chrome
+  // look belongs to the card background/border, never to text opacity.
+  const chatCss = readFileSync("src/components/chat/chat.css", "utf8");
+
+  function ruleBody(selector: string): string {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = new RegExp(`${escaped}\\s*\\{(?<body>[\\s\\S]*?)\\n\\}`).exec(chatCss);
+    if (!match?.groups?.body) {
+      throw new Error(`Could not find CSS rule for ${selector} in chat.css`);
+    }
+    return match.groups.body;
+  }
+
+  it("does not dim .template-card-description text with opacity", () => {
+    const body = ruleBody(".template-card-description");
+    expect(body).not.toMatch(/opacity:\s*0?\.[0-9]+/);
+    expect(body).toContain("var(--color-text-muted)");
+  });
+
+  it("does not dim .template-card-sda text with opacity", () => {
+    const body = ruleBody(".template-card-sda");
+    expect(body).not.toMatch(/opacity:\s*0?\.[0-9]+/);
+    expect(body).toContain("var(--color-text-muted)");
   });
 });

@@ -146,4 +146,142 @@ describe("PipelineValidationSummary", () => {
       screen.getByTestId("pipeline-validation-summary"),
     ).toBeInTheDocument();
   });
+
+  // ── elspeth-3b35abf148 variant 4: the backend suggestion is rendered ────────
+  it("renders the backend's actionable suggestion with the error", () => {
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: null,
+          component_type: null,
+          message: "Cannot resolve secret references: OPENROUTER_API_KEY",
+          suggestion:
+            "Add the missing secrets via the Secrets panel before executing.",
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    expect(
+      screen.getByText(/add the missing secrets via the secrets panel/i),
+    ).toBeInTheDocument();
+  });
+
+  it("adds an honest availability note for Secrets-panel suggestions in the tutorial", () => {
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: null,
+          component_type: null,
+          message: "Cannot resolve secret references: OPENROUTER_API_KEY",
+          suggestion:
+            "Add the missing secrets via the Secrets panel before executing.",
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary isTutorial />);
+    expect(
+      screen.getByText(/part of the full composer, outside this tutorial/i),
+    ).toBeInTheDocument();
+  });
+
+  // ── elspeth-3b35abf148 error-rendering: contract dumps are humanised ────────
+  it("humanises a schema-contract-violation dump and keeps the raw text behind a details expander", () => {
+    const rawDump =
+      "Schema contract violation: 'rater' -> 'out'. " +
+      "Consumer (csv) requires fields: [score]. " +
+      "Producer (llm) guarantees: [body]. Missing fields: [score].";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "node:rater",
+          component_type: "transform",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    // The role=status headline is the plain-language line, mapped through the
+    // gloss ("rate each row" / "write a CSV"), never the raw dump.
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/aren't connected correctly/i);
+    expect(status.textContent).toMatch(/rate each row/);
+    expect(status.textContent).toMatch(/write a CSV/);
+    expect(status.textContent).not.toMatch(/Schema contract violation/);
+    // The verbatim dump survives behind the expander for the engineer read.
+    expect(screen.getByText("Technical details")).toBeInTheDocument();
+    expect(screen.getByText(rawDump)).toBeInTheDocument();
+  });
+
+  it("humanises the DAG preflight dump format (edge 'X' → 'Y', unicode arrow) — the live-verified variant", () => {
+    // core/dag/graph.py format — the exact shape live-verified in the review
+    // ("Schema contract violation: edge 'transform_guided_xform_0_…' → …").
+    const rawDump =
+      "Schema contract violation: edge 'rater' → 'out'\n" +
+      "  Consumer (csv) requires fields: ['score']\n" +
+      "  Producer (llm) guarantees: ['body']\n" +
+      "  Missing fields: ['score']\n" +
+      "\n" +
+      "Fix: Either:\n" +
+      "  1. Add missing fields to producer's schema or guaranteed_fields, or\n" +
+      "  2. Remove from consumer's required_input_fields if truly optional";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "out",
+          component_type: "output",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/aren't connected correctly/i);
+    expect(status.textContent).toMatch(/rate each row/);
+    expect(status.textContent).toMatch(/write a CSV/);
+    expect(status.textContent).not.toMatch(/Schema contract violation/);
+    expect(screen.getByText("Technical details")).toBeInTheDocument();
+  });
+
+  it("humanises the edge-contract preflight dump (Edge contract violation between producer node …)", () => {
+    // web/execution/validation.py _format_edge_contract_failure format.
+    const rawDump =
+      "Edge contract violation between producer node 'rater' (schema 'LLMOutput') " +
+      "and consumer node 'out' (schema 'CsvInput'):\n" +
+      "Missing required fields (consumer requires, producer does not guarantee):\n" +
+      "  - 'score'";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "out",
+          component_type: "output",
+          message: rawDump,
+          suggestion: null,
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/aren't connected correctly/i);
+    expect(status.textContent).toMatch(/rate each row/);
+    expect(status.textContent).toMatch(/write a CSV/);
+    expect(status.textContent).not.toMatch(/Edge contract violation/);
+    expect(screen.getByText("Technical details")).toBeInTheDocument();
+  });
 });

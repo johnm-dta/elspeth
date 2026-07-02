@@ -16,6 +16,7 @@ import {
 import { MessageBubble } from "./MessageBubble";
 import { groupIntoTurns, turnRepresentativeMessage, type ChatTurn } from "./turns";
 import { ComposingIndicator } from "./ComposingIndicator";
+import { ModelChip } from "./ModelChip";
 import { ChatInput } from "./ChatInput";
 import { TemplateCards } from "./TemplateCards";
 import { BlobManager } from "@/components/blobs/BlobManager";
@@ -28,13 +29,26 @@ import { GuidedHistory } from "./guided/GuidedHistory";
 import { GuidedTurn } from "./guided/GuidedTurn";
 import { latestAssistantRationale } from "./guided/guidedRationale";
 import { PipelineGloss } from "./guided/PipelineGloss";
-import { PipelineValidationSummary } from "./guided/PipelineValidationSummary";
+import {
+  humaniseValidationMessage,
+  makePhraseFor,
+  PipelineValidationSummary,
+} from "./guided/PipelineValidationSummary";
 import { GraphMiniView } from "@/components/sidebar/GraphMiniView";
 import {
   AcknowledgementLiveRegion,
   AcknowledgementStack,
   useHasPendingGuidedInterpretations,
+  usePendingAcknowledgements,
 } from "./AcknowledgementStack";
+import { acknowledgementCardTitle } from "./AcknowledgementCard";
+import { humaniseStepLabel } from "./interpretationStepLabel";
+import {
+  COMPOSE_TIMEOUT_ABORT_REASON,
+  COMPOSE_TIMEOUT_MS,
+  COMPOSE_USER_CANCEL_ABORT_REASON,
+} from "@/config/composer";
+import type { WireBlockerLink } from "./guided/WireStageTurn";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
 import { InlineSourceDisambiguationTurn } from "./InlineSourceDisambiguationTurn";
 import { InlineSourceFallbackPrompt } from "./InlineSourceFallbackPrompt";
@@ -471,7 +485,12 @@ const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
     "Describe how this recipe should change, or accept it as proposed…",
   step_3_transforms:
     "Describe what each row should become, or how to fix the proposed transforms…",
-  step_4_wire: "Confirm how the steps connect, then continue.",
+  // Names the real next action instead of circularly pointing at a possibly
+  // disabled button (elspeth-3b35abf148 variant 1): at the wire stage the
+  // unblock path is the acknowledgement cards + the Confirm wiring button in
+  // the decision panel.
+  step_4_wire:
+    "Resolve any pending acknowledgements, then press Confirm wiring in the decision panel.",
 };
 
 interface ChatPanelProps {
@@ -569,6 +588,68 @@ export function ChatPanel({
   const hasPendingGuidedInterpretations = useHasPendingGuidedInterpretations(
     activeSessionId ?? "",
   );
+  // Named blockers for the wire-stage confirm (elspeth-3b35abf148 variant 1):
+  // the SAME pending cards the AcknowledgementStack renders (same order, same
+  // titles), projected to jump links WireStageTurn renders under the disabled
+  // Confirm-wiring button. Unconditional hooks — see the note above.
+  const pendingAcknowledgementEvents = usePendingAcknowledgements(
+    activeSessionId ?? "",
+  );
+  const wirePendingAcknowledgements = useMemo<WireBlockerLink[]>(
+    () =>
+      pendingAcknowledgementEvents.map((event) => ({
+        id: event.id,
+        label: acknowledgementCardTitle(
+          event,
+          humaniseStepLabel(compositionState, event.affected_node_id),
+        ),
+      })),
+    [pendingAcknowledgementEvents, compositionState],
+  );
+  // Client-known validation blockers (elspeth-3b35abf148 variant 3, client
+  // side): the persisted composition carries its Stage-1 errors; a non-empty
+  // list means a confirm would be rejected server-side, so WireStageTurn
+  // disables the button and names the issues instead of offering a dead click.
+  // Messages route through the same humaniser the validation summary uses —
+  // an engineer-grade contract dump must not land verbatim in the blockers
+  // panel either (same error-rendering discipline).
+  const wireInvalidChainIssues = useMemo<string[]>(() => {
+    const raw = compositionState?.validation_errors ?? [];
+    if (raw.length === 0) return raw;
+    const phraseFor = makePhraseFor(compositionState);
+    return raw.map(
+      (message) => humaniseValidationMessage(message, phraseFor).headline,
+    );
+  }, [compositionState]);
+  // Guided chat abort plumbing (elspeth-fb4464cdf0): the same
+  // AbortController + client-timeout treatment freeform gets from
+  // useComposer.runWithTimeout, scoped to the guided step composer. Stored on
+  // a ref so Stop can abort the in-flight fetch; the store's chatGuided catch
+  // maps the abort reason to the cancelled/timeout copy and resets
+  // guidedChatPending so the turn can be retried.
+  const guidedChatControllerRef = useRef<AbortController | null>(null);
+  const sendGuidedChat = useCallback(
+    async (content: string) => {
+      const controller = new AbortController();
+      guidedChatControllerRef.current = controller;
+      const timer = setTimeout(
+        () => controller.abort(COMPOSE_TIMEOUT_ABORT_REASON),
+        COMPOSE_TIMEOUT_MS,
+      );
+      try {
+        await chatGuided(content, controller.signal);
+      } finally {
+        clearTimeout(timer);
+        if (guidedChatControllerRef.current === controller) {
+          guidedChatControllerRef.current = null;
+        }
+      }
+    },
+    [chatGuided],
+  );
+  const cancelGuidedChat = useCallback(() => {
+    guidedChatControllerRef.current?.abort(COMPOSE_USER_CANCEL_ABORT_REASON);
+  }, []);
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
   const {
@@ -1331,12 +1412,18 @@ export function ChatPanel({
           // just-sent prompt with a live Send and read as "did it send?" —
           // with a static confirmation line.
           <p className="guided-step-chat-sent" role="status">
+            {/* Honest framing (elspeth-3b45c51564): the tutorial's continue is
+                a review-then-proceed, not a choice — don't dress it as one. */}
             Sent — your request is in the transcript above and the assistant
-            has built this step. Confirm the decision above to continue.
+            has built this step. Review the decision, then continue.
           </p>
         ) : (
           <ChatInput
-            onSend={(content) => void chatGuided(content)}
+            onSend={(content) => void sendGuidedChat(content)}
+            // Stop affordance (elspeth-fb4464cdf0): only while THIS composer's
+            // chat is in flight — a respond-pending disable has no fetch this
+            // controller could abort, so no Stop is offered for it.
+            onCancel={guidedChatPending ? cancelGuidedChat : undefined}
             // Gate on BOTH pending flags: `guidedChatPending` blocks
             // double-submits of a chat in flight; `guidedResponsePending` blocks
             // a chat WHILE a turn-respond is advancing the step — otherwise the
@@ -1412,7 +1499,7 @@ export function ChatPanel({
               <p className="guided-current-decision-tutorial-note">
                 You don't need to fill this in by hand — press{" "}
                 <strong>Send</strong> below and the assistant builds this step.
-                Then confirm the decision to continue.
+                Then review the decision and continue.
               </p>
             )}
           </div>
@@ -1432,6 +1519,12 @@ export function ChatPanel({
                 onSubmit={(body) => void respondGuided(body)}
                 disabled={guidedResponsePending || hasPendingGuidedInterpretations}
                 isTutorial={isTutorial}
+                wirePendingAcknowledgements={
+                  hasPendingGuidedInterpretations
+                    ? wirePendingAcknowledgements
+                    : undefined
+                }
+                wireInvalidChainIssues={wireInvalidChainIssues}
               />
             )}
           </div>
@@ -1439,6 +1532,28 @@ export function ChatPanel({
             <p className="guided-current-decision-pending" role="status">
               Saving decision...
             </p>
+          )}
+          {/* Backend rejection surfaced NEXT TO the turn widget it rejected —
+              never only the status strip, never silent (elspeth-3b35abf148
+              variant 3). `errorDetails` is only populated by guided respond
+              rejections; the generic top banner is suppressed while this
+              renders so the alert announces once. */}
+          {error && errorDetails != null && errorDetails.length > 0 && (
+            <div role="alert" className="guided-respond-rejection">
+              <p className="guided-respond-rejection-message">{error}</p>
+              <ul className="guided-respond-rejection-details">
+                {errorDetails.map((detail, index) => (
+                  <li key={index}>{detail}</li>
+                ))}
+              </ul>
+              <button
+                onClick={clearError}
+                className="chat-panel-error-dismiss"
+                aria-label="Dismiss error"
+              >
+                {"\u00D7"}
+              </button>
+            </div>
           )}
         </section>
       );
@@ -1471,7 +1586,9 @@ export function ChatPanel({
           </div>
         )}
         <GuidedWorkflowStepper activeStep={guidedSession.step} />
-        {error && (
+        {/* Suppressed while the inline respond-rejection alert renders next to
+            the turn widget (errorDetails non-empty) — one alert, one announce. */}
+        {error && (errorDetails == null || errorDetails.length === 0) && (
           <GuidedErrorBanner error={error} onDismiss={clearError} />
         )}
         {/* "What just happened / what to do" surfaces.
@@ -1519,7 +1636,7 @@ export function ChatPanel({
           const summaryCard = (
             <section className="guided-graph-panel" aria-label="Pipeline so far">
               <PipelineGloss compositionState={compositionState} />
-              <PipelineValidationSummary />
+              <PipelineValidationSummary isTutorial={isTutorial} />
               {isTutorial && <GraphMiniView />}
             </section>
           );
@@ -1638,6 +1755,10 @@ export function ChatPanel({
           className="chat-panel-header-actions"
           style={{ display: "inline-flex", gap: 8, alignItems: "center" }}
         >
+          {/* Persistent composer-model identity (elspeth-e9f7678de8): an
+              auditability product should name the model doing the composing
+              in the authoring chrome, not only in run records. */}
+          <ModelChip />
           <ModeSwitchButton target="guided" hasWork={currentChatHasWork} />
         </div>
       </div>
@@ -1697,15 +1818,22 @@ export function ChatPanel({
         </>
       )}
 
-      {/* Message list */}
+      {/* Message list.
+          tabIndex=0 (elspeth-5e43a0c8b2, WCAG 2.1.1): the scroll container
+          must be keyboard-focusable so keyboard-only users can arrow-scroll
+          a long conversation instead of tabbing through every interactive
+          child. The focus ring is the app's :focus-visible idiom, drawn
+          inset in chat.css because .chat-panel clips overflow. role="log"
+          aria-live semantics are unchanged. */}
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
         className="chat-panel-messages"
         role="log"
-        aria-label="Chat messages"
+        aria-label="Conversation"
         aria-live="polite"
         aria-relevant="additions"
+        tabIndex={0}
       >
         {messages.length === 0 ? (
           <TemplateCards onSelectTemplate={handleSelectTemplate} />
@@ -1750,6 +1878,7 @@ export function ChatPanel({
                   onRetry={turn.kind === "user" ? retryMessage : undefined}
                   onFork={turn.kind === "user" ? handleFork : undefined}
                   proposalsByToolCallId={proposalsByToolCallId}
+                  compositionState={compositionState}
                   staleProposalIds={staleProposalIds}
                   proposalActionPendingIds={proposalActionPendingIds}
                   onAcceptProposal={acceptProposal}
@@ -1823,15 +1952,22 @@ export function ChatPanel({
             onNotSourceData={handleDisambiguationNotSourceData}
           />
         ))}
-        {shouldShowComposerProgress && (
-          <ComposingIndicator
-            latestRequest={activeComposerMessage?.content ?? null}
-            compositionState={compositionState}
-            composerProgress={composerProgress}
-          />
-        )}
         <div ref={messagesEndRef} />
       </div>
+
+      {/* Composing indicator — deliberately a SIBLING of the role="log"
+          messages container, not a child (elspeth-76a0cc485e, WCAG 4.1.3):
+          its role="status" is itself a polite live region, and nesting it
+          inside the aria-live log risks double announcements on AT that
+          honours both regions. Docked here it also stays visible while the
+          user scrolls back through history mid-compose. */}
+      {shouldShowComposerProgress && (
+        <ComposingIndicator
+          latestRequest={activeComposerMessage?.content ?? null}
+          compositionState={compositionState}
+          composerProgress={composerProgress}
+        />
+      )}
 
       {/* Scroll-to-bottom button */}
       {showScrollButton && (

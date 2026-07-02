@@ -15,7 +15,6 @@ Exported:
     build_step_3_propose_chain_turn — propose_chain from a ChainProposal.
     build_step_3_schema_form_turn — schema_form for editing one proposed transform.
     build_step_4_wire_turn — confirm_wiring turn with topology + validation two-read merge.
-    rebuild_wire_turn_after_reconciliation — resurface and rebuild the wire turn after reconciliation.
 
 Trust tier: L3 web layer.  No upward imports.  Payloads are Tier 2 pipeline
 data constructed from system-owned state; the Turn dict itself is not persisted
@@ -24,11 +23,12 @@ data constructed from system-owned state; the Turn dict itself is not persisted
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from elspeth.web.catalog.knob_schema import KnobSchema
 from elspeth.web.composer._producer_resolver import source_producer_id
+from elspeth.web.composer.guided._display import plugin_display_label
 from elspeth.web.composer.guided.errors import InvariantError
 from elspeth.web.composer.guided.protocol import (
     BLOB_REF_PATH_PREFIX,
@@ -190,7 +190,9 @@ def build_step_2_single_select_turn(
     options: list[_Option] = [
         _Option(
             id=plugin.name,
-            label=plugin.name,
+            # Human display label; the option id (the submitted VALUE) stays
+            # the raw plugin id (elspeth-5ee1f76e39 backend half).
+            label=plugin_display_label(plugin.name),
             hint=plugin.description if plugin.description else None,
         )
         for plugin in sinks
@@ -456,17 +458,6 @@ def build_step_4_wire_turn(
     )
 
 
-def rebuild_wire_turn_after_reconciliation(
-    state: CompositionState,
-    *,
-    resurface: Callable[[CompositionState], None],
-) -> tuple[Turn, bool]:
-    """Re-evaluate the wire turn after a wire-stage reconciliation (B6)."""
-    resurface(state)
-    turn = build_step_4_wire_turn(state)
-    return turn, state.validate().is_valid
-
-
 def _build_wire_topology(state: CompositionState) -> WireTopology:
     """Build the label topology used by the wire-stage renderer."""
     full_state = _serialize_full_pipeline_state(state, requested_component="pipeline")
@@ -547,7 +538,9 @@ def _build_step_1_single_select_turn(
     options: list[_Option] = [
         _Option(
             id=plugin.name,
-            label=plugin.name,
+            # Human display label; the option id (the submitted VALUE) stays
+            # the raw plugin id (elspeth-5ee1f76e39 backend half).
+            label=plugin_display_label(plugin.name),
             hint=plugin.description if plugin.description else None,
         )
         for plugin in sources

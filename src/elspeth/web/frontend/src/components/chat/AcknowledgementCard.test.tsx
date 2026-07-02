@@ -505,7 +505,7 @@ describe("AcknowledgementCard — error mapping", () => {
         { showAmend: false },
       );
       // Open the View expander so the scroll gate clears (no overflow → ready).
-      await user.click(screen.getByRole("button", { name: /^view$/i }));
+      await user.click(screen.getByRole("button", { name: /^view prompt/i }));
       const accept = screen.getByRole("button", {
         name: /acknowledge the llm prompt template/i,
       }) as HTMLButtonElement;
@@ -542,7 +542,7 @@ describe("AcknowledgementCard — prompt-template scroll gate", () => {
       // Collapsed: gate closed.
       expect(accept.disabled).toBe(true);
 
-      await user.click(screen.getByRole("button", { name: /^view$/i }));
+      await user.click(screen.getByRole("button", { name: /^view prompt/i }));
       // Open but not scrolled: still gated (content overflows).
       expect(accept.disabled).toBe(true);
 
@@ -577,11 +577,63 @@ describe("AcknowledgementCard — prompt-template scroll gate", () => {
         name: /acknowledge the llm prompt template/i,
       }) as HTMLButtonElement;
       expect(accept.disabled).toBe(true);
-      await user.click(screen.getByRole("button", { name: /^view$/i }));
+      await user.click(screen.getByRole("button", { name: /^view prompt/i }));
       await waitFor(() => expect(accept.disabled).toBe(false));
     } finally {
       restore();
     }
+  });
+
+  // elspeth-3b35abf148 variant 2: the disabled Acknowledge says WHY as visible
+  // text (not title-only), and the View button carries its required intent.
+  it("explains the closed gate in visible text wired to the disabled button", async () => {
+    const restore = mockScrollMetrics({ scrollHeight: 300, clientHeight: 100 });
+    try {
+      const user = userEvent.setup();
+      renderCard(
+        makeEvent({
+          kind: "llm_prompt_template",
+          llm_draft: "Summarise {{ row.body }}.",
+        }),
+        { showAmend: false },
+      );
+
+      // Visible explanation (must NOT be visually-hidden) + intent-carrying label.
+      const note = screen.getByText(/read it to the end to enable/i);
+      expect(note.classList.contains("visually-hidden")).toBe(false);
+      const view = screen.getByRole("button", { name: "View prompt (required)" });
+      expect(view).toBeTruthy();
+      // aria-describedby on the disabled button points at the SAME element.
+      const accept = screen.getByRole("button", {
+        name: /acknowledge the llm prompt template/i,
+      });
+      expect(accept.getAttribute("aria-describedby")).toBe(note.id);
+
+      // Once the gate clears (open + no overflow scenario is covered above),
+      // scrolling to the end removes the note.
+      await user.click(view);
+      const surface = screen.getByRole("region", {
+        name: /prompt template review/i,
+      });
+      Object.defineProperty(surface, "scrollTop", {
+        configurable: true,
+        value: 200,
+      });
+      fireEvent.scroll(surface);
+      await waitFor(() =>
+        expect(screen.queryByText(/read it to the end to enable/i)).toBeNull(),
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it("has a stable DOM id the wire-stage blocker links can target", () => {
+    const event = makeEvent({ kind: "llm_prompt_template" });
+    renderCard(event, { showAmend: false });
+    const section = document.getElementById(`ack-card-${event.id}`);
+    expect(section).not.toBeNull();
+    expect(section?.getAttribute("data-testid")).toBe("acknowledgement-card");
   });
 });
 

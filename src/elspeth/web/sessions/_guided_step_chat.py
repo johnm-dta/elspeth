@@ -128,6 +128,7 @@ async def resolve_step_1_source_chat_with_auto_drop(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
+    timeout_seconds: float | None = None,
 ) -> Step1SourceChatResult:
     """Wrap Step-1 ``resolve_source`` chat with the guided-chat fallback contract."""
     from litellm.exceptions import APIError as LiteLLMAPIError
@@ -150,6 +151,7 @@ async def resolve_step_1_source_chat_with_auto_drop(
             temperature=temperature,
             seed=seed,
             recorder=recorder,
+            timeout_seconds=timeout_seconds,
         )
         return Step1SourceChatResult(
             source_resolution=source_resolution,
@@ -223,6 +225,7 @@ async def resolve_step_2_sink_chat_with_auto_drop(
     catalog: CatalogService | None = None,
     secret_service: WebSecretResolver | None = None,
     max_discovery_iters: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> Step2SinkChatResult:
     """Wrap Step-2 ``resolve_sink`` chat with the guided-chat fallback contract.
 
@@ -257,6 +260,7 @@ async def resolve_step_2_sink_chat_with_auto_drop(
             secret_service=secret_service,
             user_id=user_id,
             max_discovery_iters=max_discovery_iters,
+            timeout_seconds=timeout_seconds,
         )
         if resolved is None:
             return Step2SinkChatResult(sink_resolution=None, assistant_message=None, fallback_chat=None)
@@ -315,6 +319,7 @@ async def solve_step_chat_with_auto_drop(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
+    timeout_seconds: float | None = None,
 ) -> StepChatResult:
     """Wrap ``solve_step_chat`` with the synthetic-message-on-transient contract.
 
@@ -390,6 +395,7 @@ async def solve_step_chat_with_auto_drop(
             temperature=temperature,
             seed=seed,
             recorder=recorder,
+            timeout_seconds=timeout_seconds,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
         return StepChatResult(

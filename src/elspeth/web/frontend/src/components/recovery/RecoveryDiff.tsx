@@ -7,10 +7,23 @@ import type {
 import type { OutputSpec, SourceSpec } from "@/types/index";
 import { sortedSourceEntries } from "@/utils/compositionState";
 
-type DiffKind = "added" | "removed" | "changed";
-type DiffSection = "source" | "node" | "edge" | "output";
+// DiffKind / DiffSection / DiffEntry are exported for reuse by the chat
+// panel's proposal cards (elspeth-10f76f9250): mutating tool-call proposals
+// render fragment-level before/after rows through the same DiffEntryRow this
+// recovery view uses, so "what is about to change" reads identically on both
+// surfaces. The "metadata" and "option" sections are only emitted by the
+// proposal projection (set_metadata / patch_*_options tools) — buildDiff here
+// never produces them.
+export type DiffKind = "added" | "removed" | "changed";
+export type DiffSection =
+  | "source"
+  | "node"
+  | "edge"
+  | "output"
+  | "metadata"
+  | "option";
 
-interface DiffEntry {
+export interface DiffEntry {
   kind: DiffKind;
   section: DiffSection;
   identity: string;
@@ -33,7 +46,7 @@ interface RecoveryDiffProps {
 
 const LARGE_DIFF_ROW_THRESHOLD = 50;
 
-function stableStringify(value: unknown): string {
+export function stableStringify(value: unknown): string {
   return JSON.stringify(sortJson(value));
 }
 
@@ -51,20 +64,20 @@ function sortJson(value: unknown): unknown {
   );
 }
 
-function sourceEntrySummary(entry: [string, SourceSpec]): string {
+export function sourceEntrySummary(entry: [string, SourceSpec]): string {
   const [sourceName, source] = entry;
   return sourceName === "source" ? source.plugin : `${sourceName} (${source.plugin})`;
 }
 
-function nodeSummary(node: NodeSpec): string {
+export function nodeSummary(node: NodeSpec): string {
   return [node.node_type, node.plugin ?? "no plugin"].join(" ");
 }
 
-function edgeIdentity(edge: EdgeSpec): string {
+export function edgeIdentity(edge: EdgeSpec): string {
   return edge.id || `${edge.from_node}->${edge.to_node}:${edge.edge_type}`;
 }
 
-function edgeSummary(edge: EdgeSpec): string {
+export function edgeSummary(edge: EdgeSpec): string {
   return `${edge.from_node} -> ${edge.to_node} (${edge.edge_type})`;
 }
 
@@ -72,7 +85,7 @@ function outputIdentity(output: OutputSpec): string {
   return output.name;
 }
 
-function outputSummary(output: OutputSpec): string {
+export function outputSummary(output: OutputSpec): string {
   return `${output.name} (${output.plugin})`;
 }
 
@@ -218,7 +231,7 @@ function buildDiff(
   return groups.filter((group) => group.entries.length > 0);
 }
 
-function DiffEntryRow({ entry }: { entry: DiffEntry }) {
+export function DiffEntryRow({ entry }: { entry: DiffEntry }) {
   return (
     <li className={`recovery-diff-row recovery-diff-row--${entry.kind}`}>
       <div className="recovery-diff-row-title">

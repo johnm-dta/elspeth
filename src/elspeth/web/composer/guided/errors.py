@@ -74,6 +74,37 @@ class InvariantError(Exception):
     """
 
 
+class WireConfirmRejectedError(Exception):
+    """A STEP_4_WIRE confirm was attempted against a pipeline that cannot
+    complete (``state.validate().is_valid`` is False).
+
+    Raised by the wire-stage dispatch branch so the route handler can return
+    a **structured HTTP 409 rejection** naming what is invalid — instead of
+    the pre-fix behaviour, where the failed confirm returned HTTP 200,
+    re-emitted the wire turn, and *persisted a new composition-state version
+    per click* (15 clicks = 15 minted versions with zero user feedback;
+    ux-review elspeth-3b35abf148 variant 3).
+
+    Not a ``ValueError`` (the request body is well-formed — the *state* is
+    what blocks completion) and not an :class:`InvariantError` (nothing is
+    corrupted server-side). The route handler must NOT run the generic
+    dispatcher-HTTPException persistence path for this class: a rejected
+    confirm mints no new composition version. The ``guided_turn_answered``
+    audit event still drains via the route's finally block, so the rejected
+    attempt remains on the audit record.
+
+    ``issues`` carries ``ValidationEntry.to_dict()`` payloads
+    (``component`` / ``message`` / ``severity``) — the same strings already
+    egressed to the browser via the wire-turn payload and the persisted
+    ``validation_errors`` column, so no new egress surface is opened.
+    """
+
+    def __init__(self, *, step: str, issues: tuple[dict[str, str], ...]) -> None:
+        self.step = step
+        self.issues = issues
+        super().__init__(f"wire confirm rejected at {step}: {len(issues)} validation issue(s)")
+
+
 class ChainSolverResponseShapeError(Exception):
     """The LLM produced a tool-call/response that violated the chain solver's
     contract — either an ``emit_turn`` of the wrong tool name / turn_type /

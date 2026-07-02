@@ -1,20 +1,22 @@
-// Client-side abort budget for the POST /api/sessions/{id}/messages call.
+// Client-side abort budget for composer requests — the freeform
+// POST /api/sessions/{id}/messages call and the guided step-chat call.
 //
-// MUST sit between the backend's ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS and the
-// practical browser/proxy idle ceiling so the server reaches its own deadline
-// first and emits a discriminated 422 (e.g. convergence_wall_clock_timeout).
-// If the client or transport aborts first, the structured response is lost and
-// the user only sees a generic AbortError fallback.
+// Sized for SUBPHASE-era compose (elspeth-b189b5b3b8): the compose flow is
+// broken into bounded subphases and live turns settle in seconds to ~30s.
+// 90s is ~3x that observed worst case — past it the request reads as
+// stalled, not slow, and holding the abort any longer only delays failure
+// surfacing by minutes.
 //
-// Staging backend budget: 270.0 s (see deploy/elspeth-web.env). That leaves
-// 30 s below the ~5 minute idle ceiling. The client waits 25 s beyond the
-// backend deadline so the 422 has room to arrive while the client abort still
-// fires before the transport cliff.
-export const COMPOSE_BACKEND_TIMEOUT_MS = 270_000;
-export const COMPOSE_TRANSPORT_IDLE_CEILING_MS = 300_000;
-export const COMPOSE_SERVER_TRANSPORT_HEADROOM_MS = 30_000;
-export const COMPOSE_CLIENT_GRACE_MS = 25_000;
-export const COMPOSE_TIMEOUT_MS = COMPOSE_BACKEND_TIMEOUT_MS + COMPOSE_CLIENT_GRACE_MS;
+// History: this was 295s (backend budget 270s + 25s client grace), sized for
+// the old big-bang "compose the whole pipeline in one call" flow so the
+// backend's discriminated 422 (e.g. convergence_wall_clock_timeout) always
+// arrived before the client aborted. With subphase compose this ceiling
+// deliberately sits BELOW the backend's 270s wall
+// (ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS, deploy/elspeth-web.env): a call
+// living in the 90–270s band now surfaces the client timeout copy instead of
+// a structured 422 — accepted, because subphase turns never legitimately run
+// that long.
+export const COMPOSE_TIMEOUT_MS = 90_000;
 
 // Abort reasons are internal frontend control-plane values. They let
 // sessionStore distinguish a user-requested stop from the timeout guard while

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -29,7 +29,6 @@ from elspeth.web.composer.guided.steps import (
 )
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.dependencies import create_catalog_service
-from elspeth.web.sessions.routes import _helpers as guided_route_helpers
 from elspeth.web.sessions.routes._helpers import _dispatch_guided_respond, _summarize_guided_response
 from tests.fixtures.stores import MockPayloadStore
 
@@ -279,56 +278,39 @@ def test_confirm_wiring_invalid_pipeline_returns_failed_tool_result_without_term
 
 
 @pytest.mark.asyncio
-async def test_confirm_wiring_invalid_pipeline_reemits_wire_turn_without_terminal() -> None:
+async def test_confirm_wiring_invalid_pipeline_raises_structured_rejection() -> None:
+    """A confirm against an invalid pipeline is an ERROR, not a silent success.
+
+    Pre-fix, this path 200'd, re-emitted the wire turn, and minted a new
+    composition-state version per click (elspeth-3b35abf148 variant 3). The
+    dispatch now raises the structured rejection; the route maps it to HTTP 409
+    without persisting a version.
+    """
+    from elspeth.web.composer.guided.errors import WireConfirmRejectedError
+
     state, wire_session, catalog, payload_store = _wire_ready_session(valid=False)
+    recorder = BufferingRecorder()
 
-    _state2, guided2, next_turn, recorder = await _dispatch(
-        state,
-        wire_session,
-        catalog,
-        payload_store=payload_store,
-        current_step=GuidedStep.STEP_4_WIRE,
-        current_turn_type=TurnType.CONFIRM_WIRING,
-        turn_response=_valid_confirm_body(),
-    )
+    with pytest.raises(WireConfirmRejectedError) as excinfo:
+        await _dispatch(
+            state,
+            wire_session,
+            catalog,
+            payload_store=payload_store,
+            current_step=GuidedStep.STEP_4_WIRE,
+            current_turn_type=TurnType.CONFIRM_WIRING,
+            turn_response=_valid_confirm_body(),
+            recorder=recorder,
+        )
 
-    assert guided2.terminal is None
-    assert next_turn is not None
-    assert next_turn["type"] == TurnType.CONFIRM_WIRING.value
+    # Structured rejection names the step and carries the validation issues.
+    assert excinfo.value.step == GuidedStep.STEP_4_WIRE.value
+    assert len(excinfo.value.issues) > 0
+    for issue in excinfo.value.issues:
+        assert set(issue) == {"component", "message", "severity"}
+    # The rejected confirm never advances the wizard and never re-emits a turn.
     assert _audit_args(recorder, "guided_step_advanced") == []
-    confirm_records = [r for r in guided2.history if r.turn_type is TurnType.CONFIRM_WIRING]
-    assert len(confirm_records) == 1
-    emitted = _audit_args(recorder, "guided_turn_emitted")
-    assert len(emitted) == 1
-    _assert_final_wire_payload_stored(next_turn=next_turn, emitted_args=emitted[0], payload_store=payload_store)
-
-
-@pytest.mark.asyncio
-async def test_confirm_wiring_invalid_pipeline_rebuild_path_is_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    from elspeth.web.composer.guided.emitters import rebuild_wire_turn_after_reconciliation as real_rebuild
-
-    state, wire_session, catalog, payload_store = _wire_ready_session(valid=False)
-    seen_versions: list[int] = []
-
-    def recording_rebuild(state: CompositionState, *, resurface: Any) -> tuple[Any, bool]:
-        seen_versions.append(state.version)
-        return real_rebuild(state, resurface=resurface)
-
-    monkeypatch.setattr(guided_route_helpers, "rebuild_wire_turn_after_reconciliation", recording_rebuild)
-
-    _state2, _guided2, next_turn, _recorder = await _dispatch(
-        state,
-        wire_session,
-        catalog,
-        payload_store=payload_store,
-        current_step=GuidedStep.STEP_4_WIRE,
-        current_turn_type=TurnType.CONFIRM_WIRING,
-        turn_response=_valid_confirm_body(),
-    )
-
-    assert seen_versions == [state.version]
-    assert next_turn is not None
-    assert next_turn["type"] == TurnType.CONFIRM_WIRING.value
+    assert _audit_args(recorder, "guided_turn_emitted") == []
 
 
 @pytest.mark.parametrize(
@@ -382,3 +364,91 @@ async def test_confirm_wiring_rejects_malformed_response_body(body: TurnResponse
         )
 
     assert exc.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Route-level regression: a failed confirm mints NO new composition version and
+# returns a structured 409 (elspeth-3b35abf148 variant 3 — the silent no-op
+# confirm that minted v11→v19 across 15 clicks).
+# ---------------------------------------------------------------------------
+
+
+def _seed_invalid_wire_session(client: Any, session_id: str) -> int:
+    """Persist an INVALID composition parked at STEP_4_WIRE; return its version."""
+    import asyncio as _asyncio
+
+    from elspeth.web.composer.guided.state_machine import TurnRecord
+    from elspeth.web.sessions.protocol import CompositionStateData
+
+    service = client.app.state.session_service
+
+    state = _empty_state()
+    assert state.validate().is_valid is False, "fixture must be invalid to exercise the gate"
+
+    wire_record = TurnRecord(
+        step=GuidedStep.STEP_4_WIRE,
+        turn_type=TurnType.CONFIRM_WIRING,
+        payload_hash="wire-payload-hash",
+        response_hash=None,
+        emitter="server",
+    )
+    guided = replace(
+        GuidedSession.initial(profile=TUTORIAL_PROFILE),
+        step=GuidedStep.STEP_4_WIRE,
+        history=(wire_record,),
+    )
+    state_d = state.to_dict()
+    state_data = CompositionStateData(
+        sources=state_d["sources"],
+        nodes=state_d["nodes"],
+        edges=state_d["edges"],
+        outputs=state_d["outputs"],
+        metadata_=state_d["metadata"],
+        is_valid=False,
+        validation_errors=None,
+        composer_meta={"guided_session": guided.to_dict()},
+    )
+    record = _asyncio.run(service.save_composition_state(UUID(session_id), state_data, provenance="session_seed"))
+    return record.version
+
+
+def _current_version(client: Any, session_id: str) -> int:
+    import asyncio as _asyncio
+
+    record = _asyncio.run(client.app.state.session_service.get_current_state(UUID(session_id)))
+    assert record is not None
+    return record.version
+
+
+def test_route_failed_confirm_returns_409_and_mints_no_version(composer_test_client: Any) -> None:
+    client = composer_test_client
+    resp = client.post("/api/sessions", json={"title": "wire-reject"})
+    assert resp.status_code == 201, resp.json()
+    session_id = resp.json()["id"]
+
+    seeded_version = _seed_invalid_wire_session(client, session_id)
+
+    confirm_body = {
+        "chosen": ["confirm"],
+        "edited_values": None,
+        "custom_inputs": None,
+        "accepted_step_index": None,
+        "edit_step_index": None,
+        "control_signal": None,
+    }
+
+    # Click confirm three times — every attempt is a structured 409, and the
+    # composition-version count never moves (pre-fix: +1 per click).
+    for _click in range(3):
+        resp = client.post(f"/api/sessions/{session_id}/guided/respond", json=confirm_body)
+        assert resp.status_code == 409, resp.json()
+        detail = resp.json()["detail"]
+        assert detail["code"] == "wire_confirm_rejected"
+        assert detail["step"] == GuidedStep.STEP_4_WIRE.value
+        assert "confirmed yet" in detail["detail"]
+        assert isinstance(detail["validation_errors"], list)
+        assert len(detail["validation_errors"]) > 0
+        for issue in detail["validation_errors"]:
+            assert set(issue) == {"component", "message", "severity"}
+
+    assert _current_version(client, session_id) == seeded_version

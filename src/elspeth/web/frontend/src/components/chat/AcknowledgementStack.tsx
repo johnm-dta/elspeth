@@ -112,18 +112,22 @@ export interface AcknowledgementStackProps {
   ) => void;
 }
 
-export function AcknowledgementStack({
-  sessionId,
-  isTutorial = false,
-  onResolved,
-}: AcknowledgementStackProps): JSX.Element | null {
+/**
+ * The session's pending acknowledgements, sorted by pipeline step then
+ * created_at (stable). Extracted from the stack's render path so other
+ * surfaces (the wire-stage named-blocker panel in ChatPanel) list the SAME
+ * cards in the SAME order the stack renders them — a blocker list that
+ * disagreed with the stack would be a fresh defect.
+ */
+export function usePendingAcknowledgements(
+  sessionId: string,
+): InterpretationEvent[] {
   const pendingBySession = useInterpretationEventsStore(
     (s) => s.pendingBySession,
   );
   const compositionState = useSessionStore((s) => s.compositionState);
-  const optOut = useInterpretationEventsStore((s) => s.optOut);
 
-  const pending = useMemo(() => {
+  return useMemo(() => {
     const events = Object.values(pendingBySession[sessionId] ?? {}).filter(
       isPendingAcknowledgement,
     );
@@ -144,6 +148,17 @@ export function AcknowledgementStack({
       return createdDelta !== 0 ? createdDelta : a.id.localeCompare(b.id);
     });
   }, [pendingBySession, sessionId, compositionState]);
+}
+
+export function AcknowledgementStack({
+  sessionId,
+  isTutorial = false,
+  onResolved,
+}: AcknowledgementStackProps): JSX.Element | null {
+  const compositionState = useSessionStore((s) => s.compositionState);
+  const optOut = useInterpretationEventsStore((s) => s.optOut);
+
+  const pending = usePendingAcknowledgements(sessionId);
 
   const [showOptOutConfirm, setShowOptOutConfirm] = useState(false);
   const [optOutInFlight, setOptOutInFlight] = useState(false);

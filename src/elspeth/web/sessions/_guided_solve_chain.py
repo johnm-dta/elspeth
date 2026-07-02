@@ -87,6 +87,7 @@ async def solve_chain_with_auto_drop(
     catalog: CatalogService | None = None,
     secret_service: WebSecretResolver | None = None,
     max_discovery_iters: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[ChainProposal | None, GuidedSession]:
     """Wrap ``solve_chain`` with the auto-drop-on-transient contract (I2).
 
@@ -177,6 +178,7 @@ async def solve_chain_with_auto_drop(
             secret_service=secret_service,
             user_id=user_id,
             max_discovery_iters=max_discovery_iters,
+            timeout_seconds=timeout_seconds,
         )
         return proposal, session
     except (

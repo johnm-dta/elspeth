@@ -1,5 +1,7 @@
 // src/components/chat/ComposingIndicator.tsx
 
+import { useEffect, useRef, useState } from "react";
+
 import type { ComposerProgressSnapshot, CompositionState } from "@/types/api";
 import { hasSources } from "@/utils/compositionState";
 
@@ -19,6 +21,14 @@ interface WorkingView {
   headline: string;
   evidence: string[];
   likelyNext: string;
+  /**
+   * Provenance of the view (elspeth-b189b5b3b8 part c): "backend" views carry
+   * evidence the server actually reported for this compose request;
+   * "estimated" views are keyword-guessed from the user's message text and
+   * must not read as if ELSPETH reported them. Rendering italicises estimated
+   * views and appends a visible "(estimated)" marker to the headline.
+   */
+  source: "backend" | "estimated";
 }
 
 function isTerminalPhase(
@@ -119,6 +129,7 @@ function backendWorkingView(
     likelyNext:
       composerProgress.likely_next ??
       "ELSPETH will continue through the visible composer workflow.",
+    source: "backend",
   };
 }
 
@@ -134,14 +145,56 @@ function heuristicWorkingView(
       describeCurrentSetup(compositionState),
     ],
     likelyNext: requestFocus.nextMove,
+    source: "estimated",
   };
+}
+
+/** Format elapsed whole seconds as a mm:ss readout (65 → "01:05"). */
+export function formatElapsed(totalSeconds: number): string {
+  const clamped = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(clamped / 60);
+  const seconds = clamped % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+/**
+ * Elapsed-time readout for the in-flight compose card (elspeth-b189b5b3b8
+ * part a): a slow turn must not read identically to a stalled request.
+ * Counts from the moment the indicator becomes active (non-terminal) and
+ * stops when a terminal phase lands.
+ *
+ * The ticking readout is aria-hidden: the indicator sits in a role="status"
+ * live region and a once-per-second text mutation would spam screen readers
+ * with announcements. Sighted users get the timer; AT users get the phase
+ * headline changes, which already convey progress.
+ */
+function ElapsedReadout() {
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const startRef = useRef<number>(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startRef.current) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  return (
+    <span className="composing-elapsed" aria-hidden="true">
+      {formatElapsed(elapsedSeconds)}
+    </span>
+  );
 }
 
 /**
  * Animated three-dot composing indicator shown while the backend
  * is processing the LLM tool-use loop. Uses the .composing-dot CSS
  * class from styles/animations.css for staggered bounce animation.
- * Screen-reader announcements are handled by the parent ChatPanel live region.
+ *
+ * This component carries its own role="status" live region and is mounted
+ * OUTSIDE ChatPanel's role="log" messages container (elspeth-76a0cc485e):
+ * nesting a status region inside an aria-live log risks double announcements
+ * on AT that honours both regions.
  */
 export function ComposingIndicator({
   latestRequest = null,
@@ -152,6 +205,7 @@ export function ComposingIndicator({
     backendWorkingView(composerProgress) ??
     heuristicWorkingView(latestRequest, compositionState);
   const isTerminal = isTerminalPhase(composerProgress?.phase);
+  const isEstimated = workingView.source === "estimated";
 
   return (
     <div
@@ -170,13 +224,32 @@ export function ComposingIndicator({
             <span className="composing-dot" />
           </div>
         )}
-        <div className="composing-working-view">
+        <div
+          className={`composing-working-view${isEstimated ? " composing-working-view--estimated" : ""}`}
+        >
           <div className="composing-label">
-            {isTerminal ? "Last composer update" : "Working on..."}
+            {isTerminal ? (
+              "Last composer update"
+            ) : (
+              <>
+                Working on...
+                {/* Mount lifecycle doubles as the reset: the readout only
+                    renders while non-terminal, so a terminal phase unmounts
+                    it and the next compose remounts it from 00:00. */}
+                <ElapsedReadout />
+              </>
+            )}
           </div>
-          <div className="composing-title">{workingView.headline}</div>
+          <div className="composing-title">
+            {workingView.headline}
+            {isEstimated && (
+              <span className="composing-estimated-tag"> (estimated)</span>
+            )}
+          </div>
           <div className="composing-section">
-            <div className="composing-label">What ELSPETH can see</div>
+            <div className="composing-label">
+              {isEstimated ? "Best guess from your request" : "What ELSPETH can see"}
+            </div>
             <ul className="composing-evidence">
               {workingView.evidence.map((item) => (
                 <li key={item}>{item}</li>

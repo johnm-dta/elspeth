@@ -627,3 +627,118 @@ describe("WireStageTurn — outcome → affordance", () => {
     expect(onCompleteWithoutSignoff).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("named blockers under the confirm button (elspeth-3b35abf148 variant 1)", () => {
+  it("renders each pending acknowledgement as a jump link that focuses the card", async () => {
+    const user = userEvent.setup();
+    // Fake blocking card in the other column: same DOM contract the real
+    // AcknowledgementCard renders (id=ack-card-<eventId>, tabIndex=-1).
+    const card = document.createElement("section");
+    card.id = "ack-card-evt-1";
+    card.tabIndex = -1;
+    card.scrollIntoView = vi.fn();
+    document.body.appendChild(card);
+    try {
+      render(
+        <WireStageTurn
+          data={canonicalData()}
+          onConfirm={vi.fn()}
+          confirmDisabled={true}
+          pendingAcknowledgements={[
+            { id: "evt-1", label: "Summarise step · prompt" },
+          ]}
+        />,
+      );
+
+      expect(
+        screen.getByText(/1 acknowledgement pending — resolve it/i),
+      ).toBeTruthy();
+      const link = screen.getByRole("button", {
+        name: "Summarise step · prompt",
+      });
+      // The blocker list is wired to the disabled confirm via aria-describedby.
+      const confirm = screen.getByRole("button", {
+        name: "Confirm wiring",
+      }) as HTMLButtonElement;
+      expect(confirm.disabled).toBe(true);
+      const describedBy = confirm.getAttribute("aria-describedby");
+      expect(describedBy).toBeTruthy();
+      expect(document.getElementById(describedBy as string)).toBeTruthy();
+
+      await user.click(link);
+      expect(card.scrollIntoView).toHaveBeenCalled();
+      expect(document.activeElement).toBe(card);
+    } finally {
+      card.remove();
+    }
+  });
+
+  it("pluralises the heading for multiple pending acknowledgements", () => {
+    render(
+      <WireStageTurn
+        data={canonicalData()}
+        onConfirm={vi.fn()}
+        confirmDisabled={true}
+        pendingAcknowledgements={[
+          { id: "evt-1", label: "Summarise step · prompt" },
+          { id: "evt-2", label: "Summarise step · model" },
+        ]}
+      />,
+    );
+    expect(
+      screen.getByText(/2 acknowledgements pending — resolve each/i),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Summarise step · model" }),
+    ).toBeTruthy();
+  });
+
+  it("renders no blocker panel when nothing is pending", () => {
+    render(
+      <WireStageTurn
+        data={canonicalData()}
+        onConfirm={vi.fn()}
+        confirmDisabled={false}
+      />,
+    );
+    expect(screen.queryByText(/acknowledgements? pending/i)).toBeNull();
+    const confirm = screen.getByRole("button", {
+      name: "Confirm wiring",
+    }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(false);
+    expect(confirm.getAttribute("aria-describedby")).toBeNull();
+  });
+});
+
+describe("client-known invalid chain (elspeth-3b35abf148 variant 3)", () => {
+  it("disables confirm and names the validation issues", async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    render(
+      <WireStageTurn
+        data={canonicalData()}
+        onConfirm={onConfirm}
+        confirmDisabled={false}
+        invalidChainIssues={[
+          "Pipeline has no outputs configured.",
+          "Node 'mapper' input label is not produced by any step.",
+        ]}
+      />,
+    );
+
+    const confirm = screen.getByRole("button", {
+      name: "Confirm wiring",
+    }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    expect(
+      screen.getByText(/isn't ready to confirm/i),
+    ).toBeTruthy();
+    expect(
+      screen.getByText("Pipeline has no outputs configured."),
+    ).toBeTruthy();
+
+    // A disabled confirm never fires — no silent no-op click path.
+    await user.click(confirm);
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+});

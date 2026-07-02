@@ -846,6 +846,44 @@ class TestStepChatTransientFailure:
         assert chat_history[0]["content"] == "anything"
         assert chat_history[1]["content"] == "I'm unavailable right now; you can still use the wizard controls."
 
+    def test_route_enforces_server_side_timeout_bound(self, composer_test_client: TestClient) -> None:
+        """A HUNG LLM call is bounded by ``settings.composer_timeout_seconds``.
+
+        elspeth-fb4464cdf0: the guided chat route now threads the composer
+        budget into the solver (``asyncio.wait_for``), the same bound freeform
+        compose applies. A provider call that never returns must NOT hang the
+        request past the budget — the wait_for fires TimeoutError, which the
+        auto-drop wrapper maps to the 200 synthetic-unavailable contract.
+        """
+
+        async def hung_acompletion(**_kwargs: object) -> object:
+            await asyncio.sleep(60)
+            raise AssertionError("unreachable — the wait_for bound must fire first")
+
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        # Shrink the budget so the test proves the bound without waiting 85 s.
+        settings = composer_test_client.app.state.settings
+        composer_test_client.app.state.settings = settings.model_copy(update={"composer_timeout_seconds": 0.05})
+        try:
+            with patch(
+                "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+                new=hung_acompletion,
+            ):
+                status, body = _post_chat(
+                    composer_test_client,
+                    session_id,
+                    message="anything",
+                    step_index="step_1_source",
+                )
+        finally:
+            composer_test_client.app.state.settings = settings
+
+        assert status == 200, body
+        assert body["assistant_message"] == "I'm unavailable right now; you can still use the wizard controls."
+        assert body["guided_session"]["terminal"] is None
+
     def test_litellm_budget_exceeded_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
         """BudgetExceededError from the LLM seam → 200 with the synthetic unavailable message.
 

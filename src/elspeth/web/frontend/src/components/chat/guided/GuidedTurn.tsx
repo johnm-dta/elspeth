@@ -52,7 +52,7 @@ import { InspectAndConfirmTurn } from "./InspectAndConfirmTurn";
 import { MultiSelectWithCustomTurn } from "./MultiSelectWithCustomTurn";
 import { SchemaFormTurn } from "./SchemaFormTurn";
 import { ProposeChainTurn } from "./ProposeChainTurn";
-import { WireStageTurn } from "./WireStageTurn";
+import { WireStageTurn, type WireBlockerLink } from "./WireStageTurn";
 
 interface GuidedTurnProps {
   turn: TurnPayload;
@@ -61,13 +61,27 @@ interface GuidedTurnProps {
   /** Tutorial mode — forwarded to leaf widgets that surface worked-example
    * teaching copy (e.g. SchemaFormTurn's on_validation_failure caveat). */
   isTutorial?: boolean;
+  /** Pending acknowledgements blocking the confirm_wiring turn — forwarded to
+   * WireStageTurn's named-blocker panel (other turn types ignore it; their
+   * disabled state is transient in-flight, not an acknowledgement gate). */
+  wirePendingAcknowledgements?: WireBlockerLink[];
+  /** Client-known validation blockers for confirm_wiring (persisted
+   * composition invalid) — forwarded to WireStageTurn. */
+  wireInvalidChainIssues?: string[];
 }
 
 function guidedTurnInstanceKey(turn: TurnPayload): string {
   return JSON.stringify([turn.step_index, turn.type, turn.payload]);
 }
 
-export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = false }: GuidedTurnProps) {
+export function GuidedTurn({
+  turn,
+  onSubmit,
+  disabled = false,
+  isTutorial = false,
+  wirePendingAcknowledgements,
+  wireInvalidChainIssues,
+}: GuidedTurnProps) {
   const guardedSubmit = (body: GuidedRespondRequest) => {
     if (disabled) return;
     onSubmit(body);
@@ -153,6 +167,8 @@ export function GuidedTurn({ turn, onSubmit, disabled = false, isTutorial = fals
           key={turnInstanceKey}
           data={turn.payload as WireStageData}
           confirmDisabled={disabled}
+          pendingAcknowledgements={wirePendingAcknowledgements}
+          invalidChainIssues={wireInvalidChainIssues}
           onConfirm={() =>
             guardedSubmit({
               chosen: ["confirm"],

@@ -146,6 +146,56 @@ class TestStep1SourcePicker:
         assert option_ids == ["csv", "json"]
 
 
+class _SinkCatalog:
+    """Catalog stub exposing list_sinks for the step-2 single_select path."""
+
+    def list_sinks(self) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(name="csv", description="Write rows to a CSV file."),
+            SimpleNamespace(name="azure_blob", description="Write to Azure Blob Storage."),
+            SimpleNamespace(name="json_explode", description=None),
+        ]
+
+
+class TestPluginDisplayLabels:
+    """Option labels are human display names; option ids stay the raw plugin id
+    (ux review elspeth-5ee1f76e39, backend half — mirrors the frontend
+    ``pluginDisplayName`` module)."""
+
+    def test_source_picker_labels_are_humanised_and_values_unchanged(self) -> None:
+        turn = build_initial_step_1_turn(_empty_state(), blob_inspection=None, catalog=_SourceCatalog())
+
+        options = {opt["id"]: opt for opt in turn["payload"]["options"]}
+        # VALUE (id) unchanged: the raw plugin id is what the client submits.
+        assert set(options) == {"csv", "json"}
+        # LABEL humanised: acronyms upper-cased.
+        assert options["csv"]["label"] == "CSV"
+        assert options["json"]["label"] == "JSON"
+        # Hints still ride through untouched.
+        assert options["csv"]["hint"] == "Load rows from a CSV file."
+
+    def test_sink_picker_labels_use_overrides_and_humaniser(self) -> None:
+        from elspeth.web.composer.guided.emitters import build_step_2_single_select_turn
+
+        turn = build_step_2_single_select_turn(_SinkCatalog())
+
+        options = {opt["id"]: opt for opt in turn["payload"]["options"]}
+        assert set(options) == {"csv", "azure_blob", "json_explode"}
+        # Curated override beats the humaniser.
+        assert options["azure_blob"]["label"] == "Azure Blob Storage"
+        # Humanised fallback: underscores to spaces, acronyms upper-cased.
+        assert options["json_explode"]["label"] == "JSON Explode"
+        assert options["csv"]["label"] == "CSV"
+
+    def test_plugin_display_label_helper_directly(self) -> None:
+        from elspeth.web.composer.guided._display import plugin_display_label
+
+        assert plugin_display_label("batch_top_k") == "Batch Top-K"
+        assert plugin_display_label("dataverse") == "Microsoft Dataverse"
+        assert plugin_display_label("web_scrape") == "Web Scrape"
+        assert plugin_display_label("llm_transform") == "LLM Transform"
+
+
 class TestSchemaFormPathMask:
     """Fix B: a blob-backed source's absolute storage_path must never reach the
     wire — it is rendered as a stable blob:<ref> sentinel that the step_1 commit

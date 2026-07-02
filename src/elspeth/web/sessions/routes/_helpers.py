@@ -80,9 +80,8 @@ from elspeth.web.composer.guided.emitters import (
     build_step_3_propose_chain_turn,
     build_step_3_schema_form_turn,
     build_step_4_wire_turn,
-    rebuild_wire_turn_after_reconciliation,
 )
-from elspeth.web.composer.guided.errors import InvariantError
+from elspeth.web.composer.guided.errors import InvariantError, WireConfirmRejectedError
 from elspeth.web.composer.guided.profile import EMPTY_PROFILE, WorkflowProfile
 from elspeth.web.composer.guided.protocol import ChatRole, ChatTurn, ControlSignal, GuidedStep, Turn, TurnResponse, TurnType
 from elspeth.web.composer.guided.state_machine import (
@@ -2800,7 +2799,9 @@ async def _dispatch_guided_respond(
     |                   |                           | CONFIRM_WIRING            |
     | STEP_4_WIRE       | STEP_4_WIRE               | CONFIRM_WIRING confirm →  |
     |                   |                           | validate; terminal or     |
-    |                   |                           | re-emit CONFIRM_WIRING    |
+    |                   |                           | raise WireConfirmRejected |
+    |                   |                           | (route maps to HTTP 409,  |
+    |                   |                           | no version persisted)     |
     +-------------------+---------------------------+---------------------------+
 
     ``step_advance`` has already run; ``guided.step`` may already point to the
@@ -3321,6 +3322,7 @@ async def _dispatch_guided_respond(
                     catalog=catalog,
                     secret_service=None,
                     max_discovery_iters=(settings.composer_max_discovery_turns if settings is not None else None),
+                    timeout_seconds=(settings.composer_timeout_seconds if settings is not None else None),
                 )
                 if proposal is None:
                     return state, guided, None
@@ -3472,6 +3474,7 @@ async def _dispatch_guided_respond(
                         catalog=catalog,
                         secret_service=None,
                         max_discovery_iters=(settings.composer_max_discovery_turns if settings is not None else None),
+                        timeout_seconds=(settings.composer_timeout_seconds if settings is not None else None),
                     )
                     if repair_proposal is None:
                         return state, guided, None
@@ -3773,24 +3776,23 @@ async def _dispatch_guided_respond(
                 ),
             )
 
-        # Validate-gate first (same semantics as P1.6/P2): an invalid pipeline never
-        # completes — re-emit the wire turn so the user can reconcile (B6). The
-        # re-emit routes through rebuild_wire_turn_after_reconciliation so the B6
-        # resurface hook stays bound on the invalid-pipeline path.
-        if not state.validate().is_valid:
-            rebuilt_turn, _is_valid = rebuild_wire_turn_after_reconciliation(
-                state,
-                resurface=lambda _state: None,
+        # Validate-gate first (same semantics as P1.6/P2): an invalid pipeline
+        # never completes. A confirm that cannot proceed is an ERROR, not a
+        # silent success (Tier-1 doctrine) — raise the structured rejection so
+        # the route returns HTTP 409 naming each blocking issue and, crucially,
+        # does NOT persist a new composition-state version for the failed
+        # attempt (pre-fix: every failed confirm 200'd, re-emitted the wire
+        # turn, and minted a version — 15 clicks = v11→v19 with zero feedback;
+        # ux-review elspeth-3b35abf148 variant 3). The B6 resurface hook is
+        # not run here: the composition is unchanged by a rejected confirm, so
+        # there is nothing to reconcile — the client keeps its current wire
+        # turn (whose payload already carries the contracts + warnings).
+        validation = state.validate()
+        if not validation.is_valid:
+            raise WireConfirmRejectedError(
+                step=GuidedStep.STEP_4_WIRE.value,
+                issues=tuple(entry.to_dict() for entry in validation.errors),
             )
-            guided, next_turn = _emit_wire_turn(
-                state=state,
-                guided=guided,
-                next_turn=rebuilt_turn,
-                recorder=recorder,
-                user_id=user_id,
-                payload_store=payload_store,
-            )
-            return state, guided, next_turn
 
         # D13 — profile-gated terminal advisor sign-off. The live profile runs
         # the whole-pipeline END sign-off as a PRE-terminal gate so a FLAG can

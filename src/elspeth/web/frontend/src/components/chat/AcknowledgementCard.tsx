@@ -44,6 +44,27 @@ export function supportsAmendment(kind: InterpretationEvent["kind"]): boolean {
   return kind === null || kind === "vague_term";
 }
 
+/**
+ * Stable DOM id for a card's labelled <section>. The wire-stage named-blocker
+ * links (WireStageTurn) target this id to scroll to + focus the blocking card
+ * from the other column (elspeth-3b35abf148 variant 1).
+ */
+export function acknowledgementCardDomId(eventId: string): string {
+  return `ack-card-${eventId}`;
+}
+
+/**
+ * Scroll the card into view and move focus to its section (tabIndex=-1).
+ * Deliberate focus-steal: unlike mount-time announce-don't-steal, this runs
+ * only on an explicit user click of a "go to blocker" link.
+ */
+export function focusAcknowledgementCard(eventId: string): void {
+  const element = document.getElementById(acknowledgementCardDomId(eventId));
+  if (element === null) return;
+  element.scrollIntoView({ behavior: "smooth", block: "center" });
+  element.focus({ preventScroll: true });
+}
+
 function assertNever(value: never): never {
   throw new Error(`Unhandled interpretation kind: ${String(value)}`);
 }
@@ -125,6 +146,19 @@ function getCardPresentation(
     default:
       return assertNever(event.kind);
   }
+}
+
+/**
+ * The card's plain-string title ("Summarise step · prompt"). Exported so the
+ * wire-stage blocker list can name the pending card it links to using the
+ * exact same wording the card renders — a blocker label that disagreed with
+ * the card title would be a fresh way to get lost.
+ */
+export function acknowledgementCardTitle(
+  event: InterpretationEvent,
+  stepLabel: string,
+): string {
+  return getCardPresentation(event, stepLabel).title;
 }
 
 export interface AcknowledgementCardProps {
@@ -263,6 +297,7 @@ export function AcknowledgementCard({
   return (
     <section
       ref={sectionRef}
+      id={acknowledgementCardDomId(event.id)}
       tabIndex={-1}
       className="ack-card"
       aria-labelledby={titleId}
@@ -274,6 +309,16 @@ export function AcknowledgementCard({
 
       <div className="ack-card-main">
         <p className="ack-card-line">{presentation.line}</p>
+        {/* The scroll gate's WHY, as visible text (not title-only): a disabled
+            Acknowledge beside an unexplained View was an unexplained dead-end
+            (elspeth-3b35abf148 variant 2). Same element the disabled button's
+            aria-describedby points at, so sighted and SR users read one truth. */}
+        {chooseMode && requiresPromptScroll && !promptReadyForAccept && (
+          <p id={promptGateId} className="ack-card-gate-note">
+            Open <strong>View prompt</strong> and read it to the end to enable
+            Acknowledge.
+          </p>
+        )}
         {chooseMode && (
           <div className="ack-card-actions">
             <button
@@ -324,7 +369,16 @@ export function AcknowledgementCard({
             aria-controls={valueRegionId}
             onClick={() => setExpanded((prev) => !prev)}
           >
-            {expanded ? "Hide" : "View"}
+            {/* The prompt-template View is REQUIRED reading (it gates
+                Acknowledge) — carry that intent in the label instead of an
+                unexplained "View" (elspeth-3b35abf148 variant 2). */}
+            {requiresPromptScroll
+              ? expanded
+                ? "Hide prompt"
+                : "View prompt (required)"
+              : expanded
+                ? "Hide"
+                : "View"}
           </button>
           {expanded &&
             (requiresPromptScroll ? (
@@ -341,9 +395,6 @@ export function AcknowledgementCard({
                 >
                   <pre className="ack-card-prompt-pre">{llmDraft}</pre>
                 </div>
-                <span id={promptGateId} className="visually-hidden">
-                  Review the full prompt template before acknowledging.
-                </span>
               </>
             ) : (
               <div id={valueRegionId}>

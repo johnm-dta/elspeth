@@ -256,3 +256,50 @@ def test_step_2_revision_prompt_uses_llm_safe_sink_context() -> None:
     assert '"schema_mode": "fixed"' in prompt
     assert '"required_fields": ["email_hash", "profile_url"]' in prompt
     assert '"option_count": 3' in prompt
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_timeout_seconds_bounds_the_llm_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guided chat LLM call is server-side bounded (elspeth-fb4464cdf0).
+
+    A hung provider call must raise TimeoutError once ``timeout_seconds``
+    elapses — the same freeform-compose bound (asyncio.wait_for on
+    ``composer_timeout_seconds``). The routes thread the settings value;
+    ``None`` (legacy/test callers) stays unbounded.
+    """
+    import asyncio
+
+    async def hung_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        await asyncio.sleep(60)
+        raise AssertionError("unreachable — the wait_for bound must fire first")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", hung_acompletion)
+
+    with pytest.raises(TimeoutError):
+        await solve_step_chat(
+            model="test/model",
+            step=GuidedStep.STEP_1_SOURCE,
+            user_message="hello",
+            temperature=None,
+            seed=None,
+            timeout_seconds=0.01,
+        )
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_without_timeout_stays_unbounded_contract(monkeypatch: pytest.MonkeyPatch) -> None:
+    """timeout_seconds=None (default) does not wrap the call — direct callers keep the legacy contract."""
+
+    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        return _ok_response("advice")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    reply = await solve_step_chat(
+        model="test/model",
+        step=GuidedStep.STEP_1_SOURCE,
+        user_message="hello",
+        temperature=None,
+        seed=None,
+    )
+    assert reply == "advice"

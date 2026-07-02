@@ -311,6 +311,76 @@
   line-height: 1.45;
 }
 
+/* ── Wire-stage named blockers (elspeth-3b35abf148 variant 1) ─────────────────
+   Rendered directly under the (disabled) Confirm-wiring button: each pending
+   acknowledgement is a jump link that scrolls to + focuses its card; validation
+   issues list the concrete "what's invalid". */
+.wire-stage__blockers {
+  margin-top: var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-surface-elevated);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+  color: var(--color-text-secondary);
+}
+
+.wire-stage__blockers-heading {
+  margin: 0 0 var(--space-2xs);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.wire-stage__blockers-list {
+  margin: 0 0 var(--space-2xs);
+  padding-left: var(--space-lg);
+}
+
+.wire-stage__blockers-list:last-child {
+  margin-bottom: 0;
+}
+
+.wire-stage__blocker-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--color-link);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* ── Guided respond rejection (elspeth-3b35abf148 variant 3) ──────────────────
+   The backend's structured 409 rendered NEXT TO the turn widget it rejected. */
+.guided-respond-rejection {
+  position: relative;
+  margin-top: var(--space-sm);
+  padding: var(--space-sm) var(--space-xl) var(--space-sm) var(--space-sm);
+  border: 1px solid var(--color-error-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-error-bg);
+  color: var(--color-text);
+  font-size: var(--font-size-sm);
+  line-height: 1.45;
+}
+
+.guided-respond-rejection-message {
+  margin: 0;
+  font-weight: 600;
+}
+
+.guided-respond-rejection-details {
+  margin: var(--space-2xs) 0 0;
+  padding-left: var(--space-lg);
+}
+
+.guided-respond-rejection .chat-panel-error-dismiss {
+  position: absolute;
+  top: var(--space-2xs);
+  right: var(--space-2xs);
+}
+
 /* ── Guided verification panel (Slice C) ──────────────────────────────────────
    The canonical "what I built" surface above the current decision: gloss +
    validation status (+ a graph thumbnail in the tutorial). A direct child of
@@ -369,6 +439,40 @@
 
 .pipeline-validation-summary--error .pipeline-validation-summary-glyph {
   color: var(--color-error);
+}
+
+.pipeline-validation-summary-status {
+  margin: 0;
+}
+
+/* Backend-authored actionable suggestion ("Add the missing secrets via the
+   Secrets panel…") rendered with the finding instead of dropped
+   (elspeth-3b35abf148 variant 4). */
+.pipeline-validation-summary-suggestion {
+  margin: var(--space-2xs) 0 0;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+/* Engineer-grade raw dump behind an expander — never the role=status
+   headline (elspeth-3b35abf148 error-rendering fix). */
+.pipeline-validation-summary-raw {
+  margin-top: var(--space-2xs);
+  font-size: var(--font-size-sm);
+}
+
+.pipeline-validation-summary-raw > summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+}
+
+.pipeline-validation-summary-raw-text {
+  margin: var(--space-2xs) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
 }
 
 .guided-step-chat {

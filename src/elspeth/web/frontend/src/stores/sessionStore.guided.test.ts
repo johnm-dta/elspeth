@@ -786,10 +786,14 @@ describe("sessionStore — guided-mode fields and actions", () => {
       const chatPromise = useSessionStore.getState().chatGuided("What columns are available?");
 
       expect(useSessionStore.getState().guidedChatPending).toBe(true);
-      expect(chatGuided).toHaveBeenCalledWith("sess-1", {
-        message: "What columns are available?",
-        step_index: "step_1_source",
-      });
+      expect(chatGuided).toHaveBeenCalledWith(
+        "sess-1",
+        {
+          message: "What columns are available?",
+          step_index: "step_1_source",
+        },
+        undefined,
+      );
 
       resolveChat(sampleChatResponse);
       await chatPromise;
@@ -898,6 +902,136 @@ describe("sessionStore — guided-mode fields and actions", () => {
       expect(state.error).toBe(detail);
       expect(state.guidedChatPending).toBe(false);
       expect(state.guidedSession).toEqual(sampleGuidedSession);
+    });
+
+    it("user cancel: abort resets pending and surfaces the cancelled copy (elspeth-fb4464cdf0)", async () => {
+      const { chatGuided } = await import("@/api/client");
+      // Mirror the fetch abort contract: the request rejects with an
+      // AbortError once the ChatPanel Stop button aborts the controller.
+      (chatGuided as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_sessionId: string, _body: unknown, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () => {
+              const err = new Error("aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          }),
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const controller = new AbortController();
+      const chatPromise = useSessionStore
+        .getState()
+        .chatGuided("What columns are available?", controller.signal);
+      expect(useSessionStore.getState().guidedChatPending).toBe(true);
+
+      controller.abort("compose_user_cancel");
+      await chatPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.guidedChatPending).toBe(false);
+      expect(state.error).toBe(
+        "Composition stopped. You can revise your request and send it again.",
+      );
+      // The turn is retryable: guided state is untouched.
+      expect(state.guidedSession).toEqual(sampleGuidedSession);
+    });
+
+    it("client timeout: abort surfaces the timeout copy", async () => {
+      const { chatGuided } = await import("@/api/client");
+      (chatGuided as ReturnType<typeof vi.fn>).mockImplementationOnce(
+        (_sessionId: string, _body: unknown, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener("abort", () => {
+              const err = new Error("aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          }),
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const controller = new AbortController();
+      const chatPromise = useSessionStore
+        .getState()
+        .chatGuided("What columns are available?", controller.signal);
+
+      controller.abort("compose_timeout");
+      await chatPromise;
+
+      const state = useSessionStore.getState();
+      expect(state.guidedChatPending).toBe(false);
+      expect(state.error).toMatch(/took too long/i);
+    });
+  });
+
+  describe("respondGuided rejection surfacing (elspeth-3b35abf148 variant 3)", () => {
+    it("surfaces a structured wire_confirm_rejected 409 as error + errorDetails", async () => {
+      const { respondGuided } = await import("@/api/client");
+      (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+        status: 409,
+        detail:
+          "The pipeline can't be confirmed yet - validation found 2 blocking issue(s) at the wiring step. Fix the issues below, then confirm again.",
+        error_type: "wire_confirm_rejected",
+        validation_errors: [
+          { component: "pipeline", message: "No sinks configured.", severity: "high" },
+          { component: "node:rater", message: "Missing input.", severity: "high" },
+        ],
+      });
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      await useSessionStore.getState().respondGuided({
+        chosen: ["confirm"],
+        edited_values: null,
+        custom_inputs: null,
+        accepted_step_index: null,
+        edit_step_index: null,
+        control_signal: null,
+      });
+
+      const state = useSessionStore.getState();
+      expect(state.error).toMatch(/can't be confirmed yet/);
+      expect(state.errorDetails).toEqual([
+        "pipeline: No sinks configured.",
+        "node:rater: Missing input.",
+      ]);
+      expect(state.guidedResponsePending).toBe(false);
+    });
+
+    it("falls back to the generic message when the failure carries no detail", async () => {
+      const { respondGuided } = await import("@/api/client");
+      (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("network down"),
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      await useSessionStore.getState().respondGuided({
+        chosen: ["confirm"],
+        edited_values: null,
+        custom_inputs: null,
+        accepted_step_index: null,
+        edit_step_index: null,
+        control_signal: null,
+      });
+
+      const state = useSessionStore.getState();
+      expect(state.error).toBe(
+        "Failed to submit guided response. Please try again.",
+      );
+      expect(state.errorDetails).toBeNull();
     });
   });
 });

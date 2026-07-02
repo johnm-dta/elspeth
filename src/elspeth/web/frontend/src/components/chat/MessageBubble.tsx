@@ -1,6 +1,11 @@
 // src/components/chat/MessageBubble.tsx
 import { useState, useCallback, useRef, useEffect } from "react";
-import type { ChatMessage, CompositionProposal, InlineSourceSummary } from "@/types/api";
+import type {
+  ChatMessage,
+  CompositionProposal,
+  CompositionState,
+  InlineSourceSummary,
+} from "@/types/api";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ToolCallCard } from "./ToolCallCard";
 import { InlineSourceCreatedTurn } from "./InlineSourceCreatedTurn";
@@ -11,6 +16,11 @@ interface MessageBubbleProps {
   onRetry?: (messageId: string) => void;
   onFork?: (messageId: string, newContent: string) => void;
   proposalsByToolCallId?: Map<string, CompositionProposal>;
+  /**
+   * Current composition state, threaded through to ToolCallCard as the
+   * "before" side of pending-proposal diffs (elspeth-10f76f9250).
+   */
+  compositionState?: CompositionState | null;
   staleProposalIds?: string[];
   proposalActionPendingIds?: string[];
   onAcceptProposal?: (proposalId: string) => void;
@@ -34,6 +44,7 @@ export function MessageBubble({
   onRetry,
   onFork,
   proposalsByToolCallId,
+  compositionState = null,
   staleProposalIds = [],
   proposalActionPendingIds = [],
   onAcceptProposal = () => undefined,
@@ -230,6 +241,7 @@ export function MessageBubble({
                   <ToolCallCard
                     key={tc.id ?? i}
                     toolCall={tc}
+                    currentState={compositionState}
                     proposal={
                       tc.id
                         ? proposalsByToolCallId?.get(tc.id) ?? null

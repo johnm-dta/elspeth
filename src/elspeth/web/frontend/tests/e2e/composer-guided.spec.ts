@@ -30,9 +30,10 @@
 //
 // B6 (field_mapper / schema-relax reconciliation re-render): NOT asserted here.
 // The in-flow reconciliation the brief describes does not exist in the guided
-// flow — the sole call site of rebuild_wire_turn_after_reconciliation passes a
-// no-op resurface, guided has no graph-editing respond at the wire stage, and
-// the only graph-mutating composer tools (upsert_node/set_pipeline) are MCP-only
+// flow — an invalid wire confirm is now a structured HTTP 409 rejection
+// (WireConfirmRejectedError; no re-emitted wire turn, no new composition
+// version), guided has no graph-editing respond at the wire stage, and the
+// only graph-mutating composer tools (upsert_node/set_pipeline) are MCP-only
 // (no REST surface reachable from a Playwright auth context). Surfaced to the
 // operator as a spec-vs-reality gap (task report) rather than faked.
 //

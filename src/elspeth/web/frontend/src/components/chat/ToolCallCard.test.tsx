@@ -3,7 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ToolCallCard } from "./ToolCallCard";
-import type { CompositionProposal, ToolCall } from "@/types/api";
+import type { CompositionProposal, CompositionState, ToolCall } from "@/types/api";
 
 const toolCall: ToolCall = {
   id: "call-1",
@@ -137,5 +137,140 @@ describe("ToolCallCard", () => {
     expect(
       screen.queryByRole("button", { name: /Accept proposal/ }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("ToolCallCard proposal change surface (elspeth-10f76f9250)", () => {
+  const currentState: CompositionState = {
+    id: "state-1",
+    version: 2,
+    sources: {},
+    nodes: [
+      {
+        id: "extract",
+        node_type: "transform",
+        plugin: "field_mapper",
+        input: "rows",
+        on_success: "mapped",
+        on_error: null,
+        options: {},
+      },
+    ],
+    edges: [],
+    outputs: [],
+    metadata: { name: null, description: null },
+  };
+
+  const upsertToolCall: ToolCall = {
+    id: "call-2",
+    type: "function",
+    function: {
+      name: "upsert_node",
+      arguments: "{}",
+    },
+  };
+
+  function upsertProposal(
+    overrides: Partial<CompositionProposal> = {},
+  ): CompositionProposal {
+    return {
+      ...proposal,
+      id: "proposal-2",
+      tool_call_id: "call-2",
+      tool_name: "upsert_node",
+      summary: "Swap the extract step to html_extract.",
+      arguments_redacted_json: {
+        id: "extract",
+        node_type: "transform",
+        plugin: "html_extract",
+        input: "rows",
+      },
+      ...overrides,
+    };
+  }
+
+  it("renders a before/after diff for a pending proposal against the current state", () => {
+    render(
+      <ToolCallCard
+        toolCall={upsertToolCall}
+        proposal={upsertProposal()}
+        currentState={currentState}
+        onAccept={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId("proposal-diff")).toBeInTheDocument();
+    expect(screen.getByText("Changed node")).toBeInTheDocument();
+    expect(screen.getByText("transform field_mapper")).toBeInTheDocument();
+    expect(screen.getByText("transform html_extract")).toBeInTheDocument();
+    // The structured-fields fallback does not double-render alongside the diff.
+    expect(screen.queryByTestId("proposal-arg-fields")).not.toBeInTheDocument();
+  });
+
+  it("keeps the raw JSON available behind the details expander alongside the diff", () => {
+    render(
+      <ToolCallCard
+        toolCall={upsertToolCall}
+        proposal={upsertProposal()}
+        currentState={currentState}
+        onAccept={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("View arguments (JSON)")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Tool call arguments (scrollable)"),
+    ).toHaveTextContent('"plugin": "html_extract"');
+  });
+
+  it("falls back to structured argument fields for stale proposals", () => {
+    // The current state is no longer the state a stale proposal targets, so a
+    // before/after diff against it would be dishonest.
+    render(
+      <ToolCallCard
+        toolCall={upsertToolCall}
+        proposal={upsertProposal()}
+        currentState={currentState}
+        isStale={true}
+        onAccept={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("proposal-diff")).not.toBeInTheDocument();
+    expect(screen.getByTestId("proposal-arg-fields")).toBeInTheDocument();
+  });
+
+  it("falls back to structured argument fields for resolved proposals", () => {
+    render(
+      <ToolCallCard
+        toolCall={upsertToolCall}
+        proposal={upsertProposal({ status: "committed" })}
+        currentState={currentState}
+        onAccept={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("proposal-diff")).not.toBeInTheDocument();
+    expect(screen.getByTestId("proposal-arg-fields")).toBeInTheDocument();
+  });
+
+  it("falls back to structured argument fields when no current state is loaded", () => {
+    render(
+      <ToolCallCard
+        toolCall={upsertToolCall}
+        proposal={upsertProposal()}
+        onAccept={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByTestId("proposal-diff")).not.toBeInTheDocument();
+    expect(screen.getByTestId("proposal-arg-fields")).toBeInTheDocument();
+    expect(screen.getByText("node_type")).toBeInTheDocument();
+    expect(screen.getByText('"html_extract"')).toBeInTheDocument();
   });
 });

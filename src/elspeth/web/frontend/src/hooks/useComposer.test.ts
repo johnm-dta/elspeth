@@ -1,33 +1,25 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  COMPOSE_BACKEND_TIMEOUT_MS,
-  COMPOSE_CLIENT_GRACE_MS,
-  COMPOSE_SERVER_TRANSPORT_HEADROOM_MS,
   COMPOSE_TIMEOUT_MS,
   COMPOSE_TIMEOUT_ABORT_REASON,
-  COMPOSE_TRANSPORT_IDLE_CEILING_MS,
   COMPOSE_USER_CANCEL_ABORT_REASON,
 } from "@/config/composer";
 
 describe("COMPOSE_TIMEOUT_MS", () => {
-  it("outlasts the backend deadline while staying below the transport idle ceiling", () => {
-    // Backend ELSPETH_WEB__COMPOSER_TIMEOUT_SECONDS = 270.0 in the staging
-    // deployment. The client must outlast it with grace, but still abort before
-    // the roughly 300s browser/proxy idle ceiling turns the request into an
-    // opaque transport abort.
-    const minimumClientGraceMs = 20_000;
+  it("is an honest stall ceiling for subphase-era compose turns", () => {
+    // Live subphase turns settle in seconds to ~30s; the client abort fires
+    // at ~3x that observed worst case so slow-but-alive turns still land
+    // while a stalled request does not sit unreported for minutes
+    // (elspeth-b189b5b3b8). The old 295s value dated from big-bang compose —
+    // see config/composer.ts for the ordering trade against the backend's
+    // 270s wall.
+    const observedLiveTurnCeilingMs = 30_000;
 
-    expect(COMPOSE_BACKEND_TIMEOUT_MS).toBeLessThanOrEqual(
-      COMPOSE_TRANSPORT_IDLE_CEILING_MS - COMPOSE_SERVER_TRANSPORT_HEADROOM_MS,
-    );
-    expect(COMPOSE_CLIENT_GRACE_MS).toBeGreaterThanOrEqual(minimumClientGraceMs);
-    expect(COMPOSE_CLIENT_GRACE_MS).toBeLessThan(COMPOSE_SERVER_TRANSPORT_HEADROOM_MS);
-    expect(COMPOSE_TIMEOUT_MS).toBe(COMPOSE_BACKEND_TIMEOUT_MS + COMPOSE_CLIENT_GRACE_MS);
-    expect(COMPOSE_TIMEOUT_MS).toBeGreaterThanOrEqual(
-      COMPOSE_BACKEND_TIMEOUT_MS + minimumClientGraceMs,
-    );
-    expect(COMPOSE_TIMEOUT_MS).toBeLessThan(COMPOSE_TRANSPORT_IDLE_CEILING_MS);
+    expect(COMPOSE_TIMEOUT_MS).toBe(90_000);
+    expect(COMPOSE_TIMEOUT_MS).toBeGreaterThanOrEqual(3 * observedLiveTurnCeilingMs);
+    // Regression guard: never drift back toward the pre-subphase 295s value.
+    expect(COMPOSE_TIMEOUT_MS).toBeLessThan(270_000);
   });
 
   it("uses distinct abort reasons for timeout and user cancel paths", () => {

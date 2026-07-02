@@ -52,6 +52,9 @@ vi.mock("@/api/client", async (importOriginal) => {
     ...actual,
     getBlobMetadata: vi.fn(),
     previewBlobContent: vi.fn(),
+    // ModelChip's data source. Reset (undefined resolution) in most tests →
+    // the chip renders nothing; the model-chip tests set a resolved value.
+    fetchSystemStatus: vi.fn(),
   };
 });
 
@@ -91,11 +94,13 @@ vi.mock("./ChatInput", () => ({
   ChatInput: ({
     placeholder,
     onSend,
+    onCancel,
     disabled,
     maxLength,
   }: {
     placeholder?: string;
     onSend?: (content: string) => void;
+    onCancel?: () => void;
     disabled?: boolean;
     maxLength?: number;
   }) => (
@@ -104,6 +109,7 @@ vi.mock("./ChatInput", () => ({
       data-testid="chat-input"
       data-placeholder={placeholder ?? ""}
       data-disabled={disabled ? "true" : "false"}
+      data-has-cancel={onCancel ? "true" : "false"}
       data-max-length={maxLength ?? ""}
       onClick={() => onSend?.("test-chat-message")}
     >
@@ -1073,7 +1079,7 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
-      "Confirm how the steps connect, then continue.",
+      "Resolve any pending acknowledgements, then press Confirm wiring in the decision panel.",
     );
   });
 
@@ -1236,8 +1242,44 @@ describe("ChatPanel mode discriminator", () => {
     });
 
     await waitFor(() => {
-      expect(chatGuidedSpy).toHaveBeenCalledWith("test-chat-message");
+      // The guided send path now threads an AbortSignal (Stop button +
+      // client-timeout bound — elspeth-fb4464cdf0).
+      expect(chatGuidedSpy).toHaveBeenCalledWith(
+        "test-chat-message",
+        expect.any(AbortSignal),
+      );
     });
+  });
+
+  it("offers Stop (onCancel) to the guided ChatInput while a guided chat is in flight", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.hasCancel).toBe("true");
+  });
+
+  it("does NOT offer Stop while only a turn-respond is pending (nothing to abort)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: false,
+      guidedResponsePending: true,
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId("chat-input").dataset.hasCancel).toBe("false");
   });
 
   it("tutorial: keeps the retry chat box (not the 'Sent' line) when a Send-driven step was sent but produced no forward affordance", () => {
@@ -3822,5 +3864,94 @@ describe("ChatPanel interpretation-review inline-message dispatch", () => {
       event.id,
       { choice: "accepted_as_drafted" },
     );
+  });
+});
+
+describe("ChatPanel chat presentation (ux-review-2026-07-02)", () => {
+  const session: Session = {
+    id: "session-pres",
+    title: "Presentation session",
+    created_at: "2026-07-02T10:00:00Z",
+    updated_at: "2026-07-02T10:00:00Z",
+  };
+  const userMessage: ChatMessage = {
+    id: "message-pres-1",
+    session_id: session.id,
+    role: "user",
+    content: "Build me a pipeline",
+    tool_calls: null,
+    created_at: "2026-07-02T10:00:01Z",
+  };
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    Element.prototype.scrollIntoView = vi.fn();
+    resetStore(useSessionStore);
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      cancelComposition: vi.fn(),
+      isComposing: true,
+      compositionState: null,
+      error: null,
+    });
+    useSessionStore.setState({
+      activeSessionId: session.id,
+      sessions: [session],
+      messages: [userMessage],
+    });
+  });
+
+  it("makes the conversation scroll region keyboard-focusable with an accessible name (elspeth-5e43a0c8b2)", () => {
+    const { container } = render(<ChatPanel />);
+
+    const log = container.querySelector<HTMLElement>(".chat-panel-messages");
+    expect(log).not.toBeNull();
+    // Keyboard users must be able to focus the container to arrow-scroll it.
+    expect(log?.getAttribute("tabindex")).toBe("0");
+    expect(log?.getAttribute("aria-label")).toBe("Conversation");
+    // The live-region semantics stay intact alongside focusability.
+    expect(log?.getAttribute("role")).toBe("log");
+    expect(log?.getAttribute("aria-live")).toBe("polite");
+    expect(log?.getAttribute("aria-relevant")).toBe("additions");
+  });
+
+  it("mounts the composing indicator OUTSIDE the role=log live region (elspeth-76a0cc485e)", () => {
+    // Default beforeEach useComposer mock has isComposing: true, so the
+    // indicator is painted.
+    const { container } = render(<ChatPanel />);
+
+    const log = container.querySelector<HTMLElement>(".chat-panel-messages");
+    const indicator = container.querySelector<HTMLElement>(".composing-indicator");
+    expect(log).not.toBeNull();
+    expect(indicator).not.toBeNull();
+    // Structural fix for the nested-live-region finding: the indicator's
+    // role="status" must be a SIBLING of the log container, never nested
+    // inside it where both live regions could announce the same change.
+    expect(log?.contains(indicator)).toBe(false);
+    expect(indicator?.getAttribute("role")).toBe("status");
+  });
+
+  it("shows the composer model chip in the chat header (elspeth-e9f7678de8)", async () => {
+    vi.mocked(apiClient.fetchSystemStatus).mockResolvedValue({
+      composer_available: true,
+      composer_model: "anthropic/claude-sonnet-4.6",
+      composer_provider: "openrouter",
+      composer_reason: null,
+      composer_missing_keys: [],
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText("Composer model: anthropic/claude-sonnet-4.6"),
+      ).toBeInTheDocument();
+    });
+    // The chip lives in the header chrome, not in the message stream.
+    const header = container.querySelector(".chat-panel-header");
+    expect(
+      header?.querySelector(".chat-model-chip"),
+    ).not.toBeNull();
   });
 });

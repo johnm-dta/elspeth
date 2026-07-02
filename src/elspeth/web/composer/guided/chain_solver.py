@@ -196,6 +196,7 @@ async def solve_chain(
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     max_discovery_iters: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> ChainProposal:
     """Invoke the LLM with the guided skill, expect a propose_chain turn back.
 
@@ -319,7 +320,14 @@ async def solve_chain(
         error_class: str | None = None
         error_message: str | None = None
         try:
-            response = await _litellm_acompletion(**kwargs)
+            # Bounded like freeform compose (composer/service.py wait_for on
+            # composer_timeout_seconds); None preserves the unbounded legacy
+            # behaviour for direct callers/tests. The TimeoutError lands in the
+            # existing except-TimeoutError audit branch below.
+            if timeout_seconds is None:
+                response = await _litellm_acompletion(**kwargs)
+            else:
+                response = await asyncio.wait_for(_litellm_acompletion(**kwargs), timeout=timeout_seconds)
             message = response.choices[0].message
             tool_calls = message.tool_calls or ()
 

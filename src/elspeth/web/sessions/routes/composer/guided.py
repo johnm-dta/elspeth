@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from elspeth.web.composer.guided.errors import WireConfirmRejectedError
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.guided.protocol import Turn
 from elspeth.web.composer.protocol import ComposerService
@@ -1078,6 +1079,10 @@ async def post_guided_respond(
     ``terminal`` payload (or ``None`` while still active).
 
     Raises 400 if the session has no ``guided_session`` attached.
+    Raises 409 with a structured ``wire_confirm_rejected`` detail when a
+        STEP_4_WIRE confirm targets an invalid pipeline — the rejection names
+        each blocking validation issue and, deliberately, persists NO new
+        composition-state version (elspeth-3b35abf148 variant 3).
     Raises 409 if the guided session is already in a terminal state,
         EXCEPT for the wizard-teardown signal
         ``control_signal=exit_to_freeform`` against a ``kind=completed``
@@ -1542,6 +1547,34 @@ async def post_guided_respond(
                         advisor_checkpoint_max_passes=settings.composer_advisor_checkpoint_max_passes,
                         settings=settings,
                     )
+                except WireConfirmRejectedError as exc:
+                    # Wire-stage confirm against an invalid pipeline: a
+                    # structured, actionable 409 — NOT a silent 200 and NOT a
+                    # new composition-state version (pre-fix, every failed
+                    # confirm minted one; elspeth-3b35abf148 variant 3). No
+                    # persistence here on purpose: the composition is
+                    # unchanged by a rejected confirm, and the
+                    # ``guided_turn_answered`` audit event still drains via
+                    # the finally block, so the rejected attempt remains on
+                    # the audit record without a version bump. The nested
+                    # detail shape (``detail``/``code``/``validation_errors``)
+                    # is the envelope the frontend parseResponse already
+                    # understands. ``validation_errors`` carries the same
+                    # ValidationEntry payloads already egressed via the wire
+                    # turn — no new egress surface.
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "wire_confirm_rejected",
+                            "detail": (
+                                "The pipeline can't be confirmed yet - validation found "
+                                f"{len(exc.issues)} blocking issue(s) at the wiring step. "
+                                "Fix the issues below, then confirm again."
+                            ),
+                            "step": exc.step,
+                            "validation_errors": list(exc.issues),
+                        },
+                    ) from exc
                 except HTTPException:
                     # Dispatcher-level 400s happen after the turn has been
                     # answered and audited. Persist the response_hash on that
@@ -2014,6 +2047,10 @@ async def post_guided_chat(
                     temperature=settings.composer_temperature,
                     seed=settings.composer_seed,
                     recorder=recorder,
+                    # Server-side bound, consistent with freeform compose
+                    # (elspeth-fb4464cdf0): the guided LLM call may not run
+                    # past the composer budget.
+                    timeout_seconds=settings.composer_timeout_seconds,
                 )
                 chat_result = source_chat_result.fallback_chat
                 source_resolution = source_chat_result.source_resolution
@@ -2262,6 +2299,7 @@ async def post_guided_chat(
                     catalog=catalog,
                     secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
                     max_discovery_iters=settings.composer_max_discovery_turns,
+                    timeout_seconds=settings.composer_timeout_seconds,
                 )
                 chat_result = sink_chat_result.fallback_chat
                 sink_resolution = sink_chat_result.sink_resolution
@@ -2503,6 +2541,7 @@ async def post_guided_chat(
                             secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
                             user_id=user.user_id,
                             max_discovery_iters=settings.composer_max_discovery_turns,
+                            timeout_seconds=settings.composer_timeout_seconds,
                         )
                     except (
                         _LLMAPIError,
@@ -2637,6 +2676,7 @@ async def post_guided_chat(
                         temperature=settings.composer_temperature,
                         seed=settings.composer_seed,
                         recorder=recorder,
+                        timeout_seconds=settings.composer_timeout_seconds,
                     )
                 except InvariantError as exc:
                     finished_at = datetime.now(UTC)

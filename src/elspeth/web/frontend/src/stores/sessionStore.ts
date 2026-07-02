@@ -303,7 +303,9 @@ interface SessionState {
   //   * terminal.kind === "exited_to_freeform" => reenterGuided
   // The button stays a single affordance with one label regardless of branch.
   enterGuided: () => Promise<void>;
-  chatGuided: (message: string) => Promise<void>;
+  // `signal` aborts the underlying fetch (Stop button / client timeout) — the
+  // guided mirror of sendMessage's AbortController plumbing (useComposer).
+  chatGuided: (message: string, signal?: AbortSignal) => Promise<void>;
   exitToFreeform: () => Promise<void>;
   clearError: () => void;
   injectSystemMessage: (content: string, stableId?: string) => void;
@@ -1300,13 +1302,39 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
-      set({ guidedResponsePending: false });
-    } catch {
+      // A successful respond clears any earlier rejection surfaced near the
+      // turn widget (e.g. a wire_confirm_rejected 409) — the mirror of
+      // reenterGuided's error:null on success.
+      set({ guidedResponsePending: false, error: null, errorDetails: null });
+    } catch (err) {
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
+      // Surface the backend's structured rejection when present — a wire-stage
+      // confirm against an invalid pipeline returns 409 with a nested detail
+      // ({code: "wire_confirm_rejected", detail, validation_errors}); showing
+      // only a blanket "failed" would recreate the silent no-op confirm this
+      // fix removes (elspeth-3b35abf148 variant 3). `validation_errors`
+      // entries are backend ValidationEntry payloads ({component, message,
+      // severity}) — read defensively so any shape still yields a line.
+      const apiErr = err as ApiError;
+      const rejectionDetails = (apiErr.validation_errors ?? [])
+        .map((entry) => {
+          const raw = entry as unknown as Record<string, unknown>;
+          const component =
+            typeof raw.component === "string" && raw.component !== ""
+              ? raw.component
+              : null;
+          const message = typeof raw.message === "string" ? raw.message : "";
+          return component !== null && message !== ""
+            ? `${component}: ${message}`
+            : message;
+        })
+        .filter((line) => line !== "");
       set({
-        error: "Failed to submit guided response. Please try again.",
+        error:
+          apiErr.detail ?? "Failed to submit guided response. Please try again.",
+        errorDetails: rejectionDetails.length > 0 ? rejectionDetails : null,
         guidedResponsePending: false,
       });
     }
@@ -1363,7 +1391,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     await get().startGuided(activeSessionId);
   },
 
-  async chatGuided(message: string) {
+  async chatGuided(message: string, signal?: AbortSignal) {
     const { activeSessionId, guidedSession } = get();
     // Offensive guards: caller must not invoke without an active session
     // or before guidedSession is loaded.  Per CLAUDE.md "proactively detect
@@ -1391,10 +1419,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     set({ guidedChatPending: true });
 
     try {
-      const response = await api.chatGuided(activeSessionId, {
-        message,
-        step_index: requestedStep,
-      });
+      const response = await api.chatGuided(
+        activeSessionId,
+        {
+          message,
+          step_index: requestedStep,
+        },
+        signal,
+      );
       // Stale-fetch guard: drop the response if session changed mid-flight.
       if (get().activeSessionId !== requestedSessionId) {
         return;
@@ -1408,6 +1440,18 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       });
     } catch (err) {
       if (get().activeSessionId !== requestedSessionId) {
+        return;
+      }
+      // Cancellation / client-timeout path (elspeth-fb4464cdf0): the guided
+      // ChatInput's Stop button (or the COMPOSE_TIMEOUT_MS guard) aborted the
+      // fetch. Reset the pending flag so the turn can be revised and re-sent,
+      // and surface the same cancelled/timeout copy freeform uses — the
+      // abort reason on the signal discriminates user-cancel from timeout.
+      if (isAbortError(err)) {
+        set({
+          error: composeAbortMessage(signal),
+          guidedChatPending: false,
+        });
         return;
       }
       // HTTP-layer failure (network, 4xx/5xx).  Distinct from the

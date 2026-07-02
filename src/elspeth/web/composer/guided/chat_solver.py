@@ -386,6 +386,23 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
     )
 
 
+async def _bounded_acompletion(kwargs: dict[str, Any], timeout_seconds: float | None) -> Any:
+    """Run ``_litellm_acompletion`` under an ``asyncio.wait_for`` bound.
+
+    ``timeout_seconds=None`` preserves the unbounded legacy behaviour for
+    direct callers/tests; the guided routes thread
+    ``settings.composer_timeout_seconds`` so a guided LLM call is bounded the
+    same way freeform compose bounds its calls (``composer/service.py``
+    ``asyncio.wait_for(..., timeout=self._timeout_seconds)``). The raised
+    ``TimeoutError`` lands in each solver's existing ``except TimeoutError``
+    audit branch (status=TIMEOUT) and the auto-drop wrappers turn it into the
+    synthetic-unavailable / advisory-fallback contract.
+    """
+    if timeout_seconds is None:
+        return await _litellm_acompletion(**kwargs)
+    return await asyncio.wait_for(_litellm_acompletion(**kwargs), timeout=timeout_seconds)
+
+
 async def maybe_resolve_step_1_source_chat(
     *,
     model: str,
@@ -395,6 +412,7 @@ async def maybe_resolve_step_1_source_chat(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
+    timeout_seconds: float | None = None,
 ) -> Step1SourceChatResolution | None:
     """Try to resolve a Step-1 schema-form chat message into source data.
 
@@ -452,7 +470,7 @@ async def maybe_resolve_step_1_source_chat(
     error_class: str | None = None
     error_message: str | None = None
     try:
-        response = await _litellm_acompletion(**kwargs)
+        response = await _bounded_acompletion(kwargs, timeout_seconds)
 
         message = response.choices[0].message
         tool_calls = message.tool_calls or ()
@@ -678,6 +696,7 @@ async def maybe_resolve_step_2_sink_chat(
     secret_service: WebSecretResolver | None = None,
     user_id: str | None = None,
     max_discovery_iters: int | None = None,
+    timeout_seconds: float | None = None,
 ) -> tuple[SinkResolved, str] | None:
     """Resolve a Step-2 chat message into a sink config via a discovery loop.
 
@@ -744,7 +763,7 @@ async def maybe_resolve_step_2_sink_chat(
         error_class: str | None = None
         error_message: str | None = None
         try:
-            response = await _litellm_acompletion(**kwargs)
+            response = await _bounded_acompletion(kwargs, timeout_seconds)
             message = response.choices[0].message
             tool_calls = message.tool_calls or ()
 
@@ -857,6 +876,7 @@ async def solve_step_chat(
     temperature: float | None,
     seed: int | None,
     recorder: BufferingRecorder | None = None,
+    timeout_seconds: float | None = None,
 ) -> str:
     """Send a user chat message to the LLM scoped to *step*; return the assistant reply.
 
@@ -916,7 +936,7 @@ async def solve_step_chat(
     error_class: str | None = None
     error_message: str | None = None
     try:
-        response = await _litellm_acompletion(**kwargs)
+        response = await _bounded_acompletion(kwargs, timeout_seconds)
 
         message = response.choices[0].message
         # LiteLLM's typed contract: message.content is str | None (None when the

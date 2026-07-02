@@ -1,4 +1,19 @@
+import { useId } from "react";
 import type { WireStageData } from "@/types/guided";
+import { focusAcknowledgementCard } from "../AcknowledgementCard";
+
+/**
+ * One named blocker behind a disabled "Confirm wiring" — a pending
+ * acknowledgement the user must resolve first. `id` is the interpretation
+ * event id; clicking the entry scrolls to + focuses the blocking card
+ * (`focusAcknowledgementCard`). Part of the shared dead-end fix: a disabled
+ * primary action must name each pending item and give a direct path to it
+ * (elspeth-3b35abf148 variant 1).
+ */
+export interface WireBlockerLink {
+  id: string;
+  label: string;
+}
 
 export interface WireEdge {
   from: string;
@@ -92,6 +107,13 @@ export interface WireStageTurnProps {
    *  escape_unavailable (advisor unreachable + budget exhausted), so it is
    *  rendered nowhere else — a FLAG can never be acknowledged into a bypass. */
   onCompleteWithoutSignoff?: () => void;
+  /** Pending acknowledgements blocking this confirm. Each renders as a named
+   *  jump link under the disabled button (scrolls to + focuses the card). */
+  pendingAcknowledgements?: WireBlockerLink[];
+  /** Client-known validation blockers (the persisted composition is invalid).
+   *  Non-empty DISABLES confirm — a confirm the server must reject is never
+   *  offered as a live button (elspeth-3b35abf148 variant 3, client side). */
+  invalidChainIssues?: string[];
 }
 
 function edgeStatus(edge: WireEdge): string {
@@ -123,21 +145,72 @@ export function WireStageTurn({
   onAskAdvisor,
   onExitToFreeform,
   onCompleteWithoutSignoff,
+  pendingAcknowledgements,
+  invalidChainIssues,
 }: WireStageTurnProps) {
   const edges = reconstructWireEdges(data);
   const outcome = data.signoff_outcome;
   const passesRemaining = data.passes_remaining;
+  const blockersId = useId();
+
+  const acknowledgements = pendingAcknowledgements ?? [];
+  const chainIssues = invalidChainIssues ?? [];
+  const hasBlockers = acknowledgements.length > 0 || chainIssues.length > 0;
 
   const confirmButton = (
     <button
       type="button"
       className="guided-turn-primary"
       onClick={onConfirm}
-      disabled={confirmDisabled}
+      disabled={confirmDisabled || chainIssues.length > 0}
+      aria-describedby={hasBlockers ? blockersId : undefined}
     >
       Confirm wiring
     </button>
   );
+
+  // Named-blocker panel: renders directly under the (possibly disabled)
+  // confirm button so the unblock path is never buried in another column
+  // (elspeth-3b35abf148 variant 1). Acknowledgement entries are jump links to
+  // the blocking card; validation issues are the concrete "what's invalid".
+  const blockersPanel = hasBlockers ? (
+    <div id={blockersId} className="wire-stage__blockers">
+      {acknowledgements.length > 0 && (
+        <>
+          <p className="wire-stage__blockers-heading">
+            {acknowledgements.length === 1
+              ? "1 acknowledgement pending — resolve it to enable Confirm wiring:"
+              : `${acknowledgements.length} acknowledgements pending — resolve each to enable Confirm wiring:`}
+          </p>
+          <ul className="wire-stage__blockers-list">
+            {acknowledgements.map((blocker) => (
+              <li key={blocker.id}>
+                <button
+                  type="button"
+                  className="wire-stage__blocker-link"
+                  onClick={() => focusAcknowledgementCard(blocker.id)}
+                >
+                  {blocker.label}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {chainIssues.length > 0 && (
+        <>
+          <p className="wire-stage__blockers-heading">
+            The pipeline isn't ready to confirm:
+          </p>
+          <ul className="wire-stage__blockers-list wire-stage__blockers-list--issues">
+            {chainIssues.map((issue, index) => (
+              <li key={index}>{issue}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  ) : null;
 
   const exitButton = (
     <button
@@ -159,7 +232,12 @@ export function WireStageTurn({
       // actionable finalize step — not a dead-end.
       case undefined:
       case "complete":
-        return <div className="wire-stage__actions">{confirmButton}</div>;
+        return (
+          <>
+            <div className="wire-stage__actions">{confirmButton}</div>
+            {blockersPanel}
+          </>
+        );
 
       // FLAGGED, budget remains: re-ask (with disclosed cost) or exit. No bare
       // confirm — that is the silent repeat-burn this slice removes.

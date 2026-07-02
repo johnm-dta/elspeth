@@ -31,6 +31,12 @@ import {
 import { useHashRouter } from "./hooks/useHashRouter";
 import { useSharedToken } from "./hooks/useSharedToken";
 import { useAuth } from "./hooks/useAuth";
+import { useAutoResumeSession } from "./hooks/useAutoResumeSession";
+import {
+  formatDocumentTitle,
+  useDocumentTitle,
+} from "./hooks/useDocumentTitle";
+import { hasCompositionContent } from "./utils/compositionState";
 import { SharedInspectView } from "./components/shared/SharedInspectView";
 import { CompletionBar } from "./components/composer/CompletionBar";
 import { SaveForReviewDialog } from "./components/composer/SaveForReviewDialog";
@@ -92,6 +98,14 @@ function App() {
   const createSession = useSessionStore((s) => s.createSession);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const compositionState = useSessionStore((s) => s.compositionState);
+  const sessionsLoaded = useSessionStore((s) => s.sessionsLoaded);
+  const hasLiveSessions = useSessionStore((s) =>
+    s.sessions.some((session) => !session.archived),
+  );
+  const activeSessionTitle = useSessionStore((s) => {
+    const active = s.sessions.find((session) => session.id === s.activeSessionId);
+    return active?.title ?? null;
+  });
   const recoveryError = useSessionStore((s) => s.recoveryError);
   const applyRecoveredState = useSessionStore((s) => s.applyRecoveredState);
   const discardRecovery = useSessionStore((s) => s.discardRecovery);
@@ -109,6 +123,34 @@ function App() {
   // no-fabrication contract in the store.
   const showTutorial =
     preferencesLoaded && !tutorialCompleted && preferencesWriteError === null;
+
+  // Returning-user auto-resume (elspeth-e69642fede): once sessions have
+  // loaded, select the most recently active one instead of landing on an
+  // empty shell. Gated so it never fights the flows that own their own
+  // session choice: the first-run tutorial (tutorial resume wins — wait for
+  // preferences to settle before deciding), the shared-inspect route, and
+  // hash deep links (checked inside the hook).
+  const preferencesSettled =
+    preferencesLoaded || preferencesWriteError !== null;
+  useAutoResumeSession(
+    isAuthenticated &&
+      sharedToken === null &&
+      preferencesSettled &&
+      !showTutorial,
+  );
+
+  // Browser-tab title tracks the active session (elspeth-42f63fa312).
+  // Session rename and the first-message auto-title both update the
+  // sessions list, so the tab follows without extra plumbing.
+  useDocumentTitle(
+    formatDocumentTitle(sharedToken === null ? activeSessionTitle : null),
+  );
+
+  // Real empty state (elspeth-e69642fede): the account has no live sessions,
+  // so there is nothing to auto-resume — the main area carries the primary
+  // actions directly rather than pointing at a header menu.
+  const showEmptyLanding =
+    sessionsLoaded && !hasLiveSessions && activeSessionId === null;
 
   useEffect(() => {
     function handleOpenCatalog() {
@@ -190,14 +232,20 @@ function App() {
         return;
       }
 
-      // Ctrl+Shift+Y / Cmd+Shift+Y: Open YAML export modal
+      // Ctrl+Shift+Y / Cmd+Shift+Y: Open YAML export modal.
+      // Gated on composition content — the same hasCompositionContent
+      // predicate ExportYamlButton uses — so the shortcut can't open the
+      // near-empty modal on a pipeline with nothing to export
+      // (elspeth-bff8043d33 residual).
       if (
         e.key.toLowerCase() === "y" &&
         e.shiftKey &&
         (e.ctrlKey || e.metaKey)
       ) {
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
+        if (hasCompositionContent(compositionState)) {
+          window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
+        }
         return;
       }
 
@@ -378,6 +426,35 @@ function App() {
         />
         {showTutorial ? (
           <HelloWorldTutorial />
+        ) : showEmptyLanding ? (
+          <div className="app-main" role="main">
+            <section
+              className="empty-landing"
+              aria-labelledby="empty-landing-title"
+            >
+              <h2 id="empty-landing-title">No sessions yet</h2>
+              <p>
+                Create a session to start composing a pipeline, or browse the
+                plugin catalog to see what ELSPETH can work with.
+              </p>
+              <div className="empty-landing-actions">
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => void createSession()}
+                >
+                  + New session
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setCatalogOpen(true)}
+                >
+                  Browse the catalog
+                </button>
+              </div>
+            </section>
+          </div>
         ) : (
           <div className="app-main" role="main">
             <Layout

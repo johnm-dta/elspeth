@@ -288,7 +288,7 @@ export function TutorialTurn4Run({
               {result.discardedRowCount}{" "}
               {result.discardedRowCount === 1 ? "row was" : "rows were"} discarded at the source
               because the data could not be parsed. They were recorded in the audit trail but are
-              not shown above.
+              not shown in the results table.
             </p>
           )}
           <TutorialResultTable rows={result.rows} />

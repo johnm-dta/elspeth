@@ -174,12 +174,11 @@
 
   /* Type floor (elspeth-5836435926): 12px is the minimum rendered size — the
      10/11px micro registers failed the desktop comfort floor and compounded
-     the dark-theme contrast failures. 3xs/2xs keep their distinct NAMES (their
-     consumers signal register intent: micro-chrome vs hints) but both resolve
-     to the 12px floor; hierarchy below body text is carried by weight,
-     case, and letter-spacing instead of sub-12px sizes. Do not lower these. */
-  --font-size-3xs:  12px;   /* sub-chrome micro-text (e.g. tab counts, ribbon icons, required-field badge) — floored at 12px */
-  --font-size-2xs:  12px;   /* chrome hints, micro-text (e.g. .chat-input-hint, breadcrumbs) — floored at 12px */
+     the dark-theme contrast failures. Do not lower --font-size-xs below 12px;
+     hierarchy below body text is carried by weight, case, and letter-spacing
+     instead of sub-12px sizes. (--font-size-3xs and --font-size-2xs were
+     consolidated into this one token — elspeth-892528c899 — once the floor
+     raise left all three byte-identical at 12px.) */
   --font-size-xs:   12px;
   --font-size-sm:   13px;
   --font-size-md:   15px;   /* preserves the h2/h3 hierarchy step in markdown-body rendering — h3 sits between h2 (base/16) and body (sm/13) */
@@ -205,7 +204,9 @@
   /* ── Spacing ─────────────────────────────────────────────────────────────── */
   --space-2xs: 2px;          /* chip insets, badge padding (covers the 2px axis) */
   --space-xs:  4px;
+  --space-1-5: 6px;          /* between xs/sm — compact chip/pill padding, tight gaps (elspeth-892528c899: recurred as a raw literal ×20+, promoted rather than snapped) */
   --space-sm:  8px;
+  --space-2-5: 10px;         /* between sm/md — same rationale as --space-1-5, for the ~10px sibling literal */
   --space-md:  12px;
   --space-lg:  16px;
   --space-xl:  24px;
@@ -218,6 +219,15 @@
   --radius-xl:   12px;
   --radius-pill: 9999px;   /* fully-rounded pills, circular FABs, progress-bar tracks */
 
+  /* ── Elevation (elspeth-892528c899) ──────────────────────────────────────── */
+  /* Three tiers matching what the app actually raises off the page. Smaller
+     one-off recipes (command palette, oversized config panels) stay literal —
+     they sit at a different weight than any of these three and forcing them
+     onto the nearest tier would be a visible regression, not a hygiene fix. */
+  --shadow-popover:  0 4px 12px rgba(0, 0, 0, 0.15);   /* tooltips, mini floating panels, the scroll-to-bottom pill */
+  --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.18);   /* menus, the graph-canvas controls panel */
+  --shadow-modal:    0 8px 32px rgba(0, 0, 0, 0.25);   /* blocking dialogs (was copy-pasted identically ×7) */
+
   /* ── Control heights ─────────────────────────────────────────────────────── */
   /* --size-control is the WCAG 2.5.5 (AAA) 44×44 touch-target floor used by
      .btn for canvas-area primary actions. --size-control-compact is the smaller
@@ -226,6 +236,9 @@
      .btn or .btn-compact — do not redeclare min-height literally. */
   --size-control:         44px;
   --size-control-compact: 36px;
+  /* Fixed app-header row height (desktop); the <=960px wrap rule reuses it as
+     a min-height so a wrapped header never renders shorter than the fixed row. */
+  --size-header-height:   40px;
 
   /* ── Transitions ─────────────────────────────────────────────────────────── */
   --transition-fast:   100ms ease;
@@ -377,4 +390,9 @@
 
   /* ── React Flow canvas grid (light) ──────────────────────────────────── */
   --color-canvas-grid:           rgba(15, 45, 53, 0.20);
+
+  /* ── Elevation (light) ──────────────────────────────────────────────── */
+  /* Dropdown shadow swaps to a tinted-navy base on light backgrounds —
+     plain black at the same alpha reads too heavy on white/cream surfaces. */
+  --shadow-dropdown: 0 8px 24px rgba(15, 45, 53, 0.10);
 }

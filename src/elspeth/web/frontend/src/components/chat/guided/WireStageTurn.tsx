@@ -1,6 +1,7 @@
 import { useId } from "react";
 import type { WireStageData } from "@/types/guided";
 import { focusAcknowledgementCard } from "../AcknowledgementCard";
+import { stepLabelForPlugin } from "../interpretationStepLabel";
 
 /**
  * One named blocker behind a disabled "Confirm wiring" — a pending
@@ -116,10 +117,56 @@ export interface WireStageTurnProps {
   invalidChainIssues?: string[];
 }
 
+/**
+ * Human names for every topology entity, keyed by its internal id
+ * (elspeth-016f463ff0: `guided_xform_0` / `output:main` must not reach
+ * first-run copy). Transforms reuse the acknowledgement cards' step-label
+ * mapping (stepLabelForPlugin, e.g. llm → "Summarise") so the wiring list and
+ * the cards name a step identically; a plugin-less structural node falls back
+ * to its node_type through the same humaniser. Sources read as "Source" (or
+ * "<name> source" for a named source); outputs read as "<sink_name> output" —
+ * both names are user-meaningful, not internal ids.
+ */
+export function buildEntityNames(data: WireStageData): Map<string, string> {
+  const names = new Map<string, string>();
+  const sourceEntries = Object.entries(data.topology.sources);
+  for (const [name, source] of sourceEntries) {
+    names.set(
+      source.id,
+      sourceEntries.length === 1 ? "Source" : `${name} source`,
+    );
+  }
+  for (const node of data.topology.nodes) {
+    names.set(node.id, `${stepLabelForPlugin(node.plugin ?? node.node_type)} step`);
+  }
+  for (const output of data.topology.outputs) {
+    names.set(output.id, `${output.sink_name} output`);
+  }
+  return names;
+}
+
+/** Plain-language connection state: "(contract unchecked)" is engineer
+ *  register; a first-run user reads "not yet checked". */
 function edgeStatus(edge: WireEdge): string {
-  if (edge.satisfied === true) return "(connected)";
-  if (edge.satisfied === false) return "(not satisfied)";
-  return "(contract unchecked)";
+  if (edge.satisfied === true) return "connected";
+  if (edge.satisfied === false) return "not connected correctly";
+  return "not yet checked";
+}
+
+/** The verbatim engineer-grade row, preserved behind the Technical details
+ *  expander for operators (same idiom as the validation summary's raw dump). */
+function rawEdgeRow(edge: WireEdge): string {
+  const status =
+    edge.satisfied === true
+      ? "(connected)"
+      : edge.satisfied === false
+        ? "(not satisfied)"
+        : "(contract unchecked)";
+  const missing =
+    edge.missing_fields.length > 0
+      ? ` Missing fields: ${edge.missing_fields.join(", ")}`
+      : "";
+  return `${edge.from} -> ${edge.to} via ${edge.label} ${status}${missing}`;
 }
 
 function warningText(warning: Record<string, unknown>): string {
@@ -149,6 +196,8 @@ export function WireStageTurn({
   invalidChainIssues,
 }: WireStageTurnProps) {
   const edges = reconstructWireEdges(data);
+  const entityNames = buildEntityNames(data);
+  const nameFor = (id: string): string => entityNames.get(id) ?? id;
   const outcome = data.signoff_outcome;
   const passesRemaining = data.passes_remaining;
   const blockersId = useId();
@@ -316,16 +365,19 @@ export function WireStageTurn({
         </ul>
       ) : null}
 
+      {/* Human step names + plain-language connection state
+          (elspeth-016f463ff0). The raw ids / connection labels stay available
+          verbatim behind the Technical details expander below. */}
       <ul className="wire-stage__edges">
         {edges.map((edge) => (
           <li
             key={`${edge.from}\u0000${edge.label}\u0000${edge.to}`}
-            aria-label={`${edge.from} to ${edge.to}`}
+            aria-label={`${nameFor(edge.from)} to ${nameFor(edge.to)}`}
           >
-            <span>{edge.from}</span>
-            <span>{" -> "}</span>
-            <span>{edge.to}</span>
-            <span> via {edge.label} </span>
+            <span>{nameFor(edge.from)}</span>
+            <span aria-hidden="true">{" → "}</span>
+            <span>{nameFor(edge.to)}</span>
+            <span aria-hidden="true">{" — "}</span>
             <span>{edgeStatus(edge)}</span>
             {edge.missing_fields.length > 0 ? (
               <span> Missing fields: {edge.missing_fields.join(", ")}</span>
@@ -333,6 +385,14 @@ export function WireStageTurn({
           </li>
         ))}
       </ul>
+      {edges.length > 0 ? (
+        <details className="wire-stage__raw">
+          <summary>Technical details</summary>
+          <pre className="wire-stage__raw-text">
+            {edges.map(rawEdgeRow).join("\n")}
+          </pre>
+        </details>
+      ) : null}
 
       {data.advisor_findings !== undefined ? (
         <div className="wire-stage__findings">

@@ -81,8 +81,42 @@ describe("ProgressView", () => {
 
     render(<ProgressView />);
 
-    expect(screen.getByText("cancelling")).toBeInTheDocument();
+    // The header is a ui/StatusBadge (elspeth-e1c5ad0b53); cancelling maps to
+    // the cancelled colour family.
+    const badge = screen.getByText("cancelling");
+    expect(badge).toHaveClass("status-badge", "status-badge-cancelled");
     expect(screen.queryByRole("button", { name: "Cancel pipeline execution" })).not.toBeInTheDocument();
+  });
+
+  // elspeth-e1c5ad0b53: the status header adopts ui/StatusBadge so the
+  // completed_with_failures / empty distinction carries the ⚠ / ∅ a11y glyphs
+  // instead of being colour-only (the hand-rolled label dropped them).
+  it("renders the completed_with_failures header as a StatusBadge with the ⚠ glyph", () => {
+    (useWebSocket as ReturnType<typeof vi.fn>).mockReturnValue({
+      activeRunId: "run-1",
+      wsDisconnected: false,
+      progress: progressFixture({ status: "completed_with_failures" }),
+    });
+
+    render(<ProgressView />);
+
+    const badge = screen.getByText("completed with failures");
+    expect(badge).toHaveClass("status-badge", "status-badge-completed");
+    expect(badge).toHaveTextContent("⚠");
+  });
+
+  it("renders the empty header as a StatusBadge with the ∅ glyph", () => {
+    (useWebSocket as ReturnType<typeof vi.fn>).mockReturnValue({
+      activeRunId: "run-1",
+      wsDisconnected: false,
+      progress: progressFixture({ status: "empty" }),
+    });
+
+    render(<ProgressView />);
+
+    const badge = screen.getByText("empty");
+    expect(badge).toHaveClass("status-badge", "status-badge-empty");
+    expect(badge).toHaveTextContent("∅");
   });
 
   it("shows closed accounting totals for structural-token DAG completions", () => {

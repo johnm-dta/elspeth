@@ -17,7 +17,7 @@ vi.mock("@/api/client", () => ({
   }),
   renameSession: vi.fn().mockResolvedValue({
     id: "sess-new",
-    title: "hello-world (pending)",
+    title: "First-run tutorial (in progress)",
     created_at: "2026-05-19T12:00:00Z",
     updated_at: "2026-05-19T12:00:00Z",
   }),
@@ -93,6 +93,22 @@ describe("HelloWorldTutorial staged flow", () => {
     ).toBeInTheDocument();
   });
 
+  it("labels the tutorial progress row visibly so it reads as a different hierarchy from the build stepper", async () => {
+    // elspeth-d75756fa2c: the 5 unlabeled dots sat directly above the guided
+    // 5-chip build stepper and read as a broken duplicate of it. The visible
+    // "Tutorial · <stage>" label is aria-hidden — the existing sr-only "Step N
+    // of M" line stays the AT signal (the ARIA was already right).
+    const user = userEvent.setup();
+    render(<HelloWorldTutorial />);
+    const label = screen.getByText("Tutorial · Welcome — step 1 of 5");
+    expect(label).toHaveAttribute("aria-hidden", "true");
+
+    await user.click(screen.getByRole("button", { name: "Let's go" }));
+    expect(
+      await screen.findByText("Tutorial · Build — step 2 of 5"),
+    ).toBeInTheDocument();
+  });
+
   it("runs orphan cleanup on mount", async () => {
     const api = await import("@/api/client");
     render(<HelloWorldTutorial />);
@@ -141,7 +157,7 @@ describe("HelloWorldTutorial staged flow", () => {
     await waitFor(() =>
       expect(api.renameSession).toHaveBeenCalledWith(
         "sess-new",
-        "hello-world (pending)",
+        "First-run tutorial (in progress)",
       ),
     );
     const createOrder = vi.mocked(api.createSession).mock

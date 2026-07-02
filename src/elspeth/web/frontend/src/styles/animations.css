@@ -1,7 +1,7 @@
-/* animations.css — @keyframes (composing-bounce, progress-stripe, pulse-dot,
-   spin) plus the rules that consume them (.composing-dot, .progress-bar*,
-   .spinner) plus the global @media (prefers-reduced-motion: reduce) that
-   silences them. */
+/* animations.css — @keyframes (composing-bounce, progress-stripe, spin) plus
+   the rules that consume them (.composing-dot, .progress-bar*, .spinner)
+   plus the global @media (prefers-reduced-motion: reduce) that silences
+   them. */
 
 /* ---------------------------------------------------------------------------
    Keyframe Animations
@@ -28,7 +28,7 @@
   height: 7px;
   border-radius: 50%;
   background-color: var(--color-text-muted);
-  margin: 0 2px;
+  margin: 0 var(--space-2xs);
   animation: composing-bounce 1.2s ease-in-out infinite;
 }
 
@@ -86,16 +86,6 @@
   height: 100%;
   background-color: var(--color-success);
   transition: background-color var(--transition-normal);
-}
-
-@keyframes pulse-dot {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.3;
-  }
 }
 
 /* Spinner for button loading states (Validate, etc.) */

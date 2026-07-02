@@ -122,21 +122,20 @@ describe("RecoveryPanel", () => {
     expect(onApply).not.toHaveBeenCalled();
   });
 
-  it("does not consume Escape without a close action", () => {
+  // elspeth-83eb51334f: this panel was the only role=dialog surface without
+  // Escape dismissal. Escape routes through Discard — the panel's safe exit
+  // (it drops the recovery OFFER, not composed state).
+  it("dismisses via Discard when Escape is pressed", async () => {
+    const user = userEvent.setup();
     const onDiscard = vi.fn();
-    renderPanel({ onDiscard });
+    const onApply = vi.fn(() => ({ applied: false, needsConfirmation: false }));
+    renderPanel({ onDiscard, onApply });
 
-    const escapeEvent = new KeyboardEvent("keydown", {
-      key: "Escape",
-      bubbles: true,
-      cancelable: true,
-    });
+    screen.getByRole("dialog").focus();
+    await user.keyboard("{Escape}");
 
-    const eventWasNotCancelled = screen.getByRole("dialog").dispatchEvent(escapeEvent);
-
-    expect(eventWasNotCancelled).toBe(true);
-    expect(escapeEvent.defaultPrevented).toBe(false);
-    expect(onDiscard).not.toHaveBeenCalled();
+    expect(onDiscard).toHaveBeenCalledTimes(1);
+    expect(onApply).not.toHaveBeenCalled();
   });
 
   it("opens inline confirmation when apply reports a concurrent edit", async () => {

@@ -482,6 +482,36 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("inline-run-results")).toBeInTheDocument();
   });
 
+  it("shows the composer model chip in the GUIDED chat header too (elspeth-e9f7678de8)", async () => {
+    // Freeform's header already carries the chip; guided authoring must name
+    // its model the same way (same chip, same /api/system/status source).
+    vi.mocked(apiClient.fetchSystemStatus).mockResolvedValue({
+      composer_available: true,
+      composer_model: "anthropic/claude-sonnet-4.6",
+      composer_provider: "openrouter",
+      composer_reason: null,
+      composer_missing_keys: [],
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    await waitFor(() => {
+      expect(
+        screen.getByLabelText("Composer model: anthropic/claude-sonnet-4.6"),
+      ).toBeInTheDocument();
+    });
+    // The chip lives in the guided header's actions chrome.
+    const header = container.querySelector(".chat-panel-header");
+    expect(header?.querySelector(".chat-model-chip")).not.toBeNull();
+  });
+
   it("non-tutorial guided: no 'always start in freeform mode' opt-out checkbox", () => {
     // Load preferences so the (now-removed) InlineOptOutCheckbox would render if
     // it were still wired — it returns null until prefs load, so without this

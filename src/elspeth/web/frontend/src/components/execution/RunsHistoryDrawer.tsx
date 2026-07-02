@@ -12,6 +12,7 @@ import { useSessionStore } from "@/stores/sessionStore";
 import { useFocusTrap } from "@/hooks/useFocusTrap";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { RunOutputsPanel } from "@/components/inspector/RunOutputsPanel";
+import { Button, StatusBadge } from "@/components/ui";
 import { isTerminalRunStatus } from "@/types/index";
 import type { Run, RunDiagnostics, RunDiagnosticsWorkingView } from "@/types/index";
 
@@ -111,14 +112,9 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
     >
       <header className="runs-history-drawer-header">
         <h2>Past runs</h2>
-        <button
-          type="button"
-          aria-label="Close past runs"
-          onClick={onClose}
-          className="btn"
-        >
+        <Button aria-label="Close past runs" onClick={onClose}>
           Close
-        </button>
+        </Button>
       </header>
       <div className="runs-history-drawer-body">
         {runs.length === 0 ? (
@@ -132,26 +128,28 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
               <li key={run.id} className="runs-history-item">
                 <div className="runs-history-item-summary">
                   <span className="runs-history-item-id">{run.id}</span>
-                  <span className="runs-history-item-status">
+                  {/* ui/StatusBadge carries the a11y glyph map (⚠ / ∅) so
+                      completed_with_failures and empty are not colour-only
+                      distinctions (elspeth-e1c5ad0b53). */}
+                  <StatusBadge status={run.status}>
                     {run.status.replace(/_/g, " ")}
-                  </span>
+                  </StatusBadge>
                   {/* REST-backed Cancel for live runs (elspeth-90db33baac):
                       works without the in-memory activeRunId/WebSocket that
                       gates ProgressView's Cancel, so a run stays cancellable
                       after a page reload. */}
                   {!isTerminalRunStatus(run.status) && (
-                    <button
-                      type="button"
-                      className="btn btn-small btn-danger"
+                    <Button
+                      variant="danger"
+                      className="btn-small"
                       aria-label={`Cancel run ${run.id}`}
                       disabled={run.cancel_requested === true}
                       onClick={() => setCancelTargetRunId(run.id)}
                     >
                       {run.cancel_requested === true ? "Cancelling..." : "Cancel"}
-                    </button>
+                    </Button>
                   )}
-                  <button
-                    type="button"
+                  <Button
                     aria-expanded={expandedRunId === run.id}
                     aria-controls={`run-history-diagnostics-${run.id}`}
                     aria-label={
@@ -159,7 +157,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                         ? `Hide detail for ${run.id}`
                         : `Show detail for ${run.id}`
                     }
-                    className="btn btn-small"
+                    className="btn-small"
                     onClick={() => {
                       const nextRunId = expandedRunId === run.id ? null : run.id;
                       setExpandedRunId(nextRunId);
@@ -169,7 +167,7 @@ export function RunsHistoryDrawer({ onClose, runsOverride }: RunsHistoryDrawerPr
                     }}
                   >
                     {expandedRunId === run.id ? "Hide detail" : "Show detail"}
-                  </button>
+                  </Button>
                 </div>
                 <div
                   id={`run-history-diagnostics-${run.id}`}
@@ -250,17 +248,16 @@ function RunDiagnosticsPanel({
           {diagnostics?.summary.preview_truncated ? `, first ${diagnostics.summary.preview_limit}` : ""}
         </span>
         <span className="run-diagnostics-actions">
-          <button type="button" className="btn btn-small" onClick={onRefresh} disabled={isLoading}>
+          <Button className="btn-small" onClick={onRefresh} disabled={isLoading}>
             Refresh
-          </button>
-          <button
-            type="button"
-            className="btn btn-small"
+          </Button>
+          <Button
+            className="btn-small"
             onClick={onExplain}
             disabled={isEvaluating || isLoading || !diagnostics}
           >
             {isEvaluating ? "Explaining..." : "Explain"}
-          </button>
+          </Button>
         </span>
       </div>
 

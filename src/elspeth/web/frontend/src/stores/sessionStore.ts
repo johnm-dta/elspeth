@@ -211,9 +211,28 @@ interface ApplyRecoveredStateResult {
 
 interface SessionState {
   sessions: Session[];
+  /**
+   * True once loadSessions has resolved successfully at least once.
+   * Consumers (returning-user auto-resume, the no-sessions empty landing)
+   * must not act on an EMPTY sessions array before the list has actually
+   * loaded — an unfetched list and a genuinely empty account look identical
+   * without this flag.
+   */
+  sessionsLoaded: boolean;
   activeSessionId: string | null;
   messages: ChatMessage[];
   compositionState: CompositionState | null;
+  /**
+   * True once the active session's composition state is KNOWN — i.e. the
+   * selectSession fetch settled (success, 404, or failure), or the session
+   * was just created/forked (fresh state is known by construction).
+   * `compositionState === null` alone is ambiguous: it means both "still
+   * fetching" and "loaded, and this session has no pipeline yet". The
+   * #/{id}/yaml hash route gates the Export-YAML modal on content
+   * (elspeth-bff8043d33) and needs the disambiguation to avoid either
+   * breaking the deep link or opening the modal on an empty pipeline.
+   */
+  compositionStateLoaded: boolean;
   compositionProposals: CompositionProposal[];
   composerPreferences: ComposerPreferences | null;
   staleProposalIds: string[];
@@ -314,9 +333,11 @@ interface SessionState {
 
 const initialState = {
   sessions: [] as Session[],
+  sessionsLoaded: false,
   activeSessionId: null as string | null,
   messages: [] as ChatMessage[],
   compositionState: null as CompositionState | null,
+  compositionStateLoaded: false,
   compositionProposals: [] as CompositionProposal[],
   composerPreferences: null as ComposerPreferences | null,
   staleProposalIds: [] as string[],
@@ -338,7 +359,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   async loadSessions() {
     try {
       const sessions = await api.fetchSessions();
-      set({ sessions });
+      set({ sessions, sessionsLoaded: true });
     } catch {
       set({ error: "Failed to load sessions. Please refresh the page." });
     }
@@ -365,7 +386,9 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       sessions: [session, ...state.sessions],
       activeSessionId: session.id,
       messages: [],
+      // A freshly created session is KNOWN to have no composition state.
       compositionState: null,
+      compositionStateLoaded: true,
       compositionProposals: [],
       composerPreferences: null,
       staleProposalIds: [],
@@ -420,6 +443,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
                 activeSessionId: null,
                 messages: [],
                 compositionState: null,
+                compositionStateLoaded: false,
                 compositionProposals: [],
                 composerPreferences: null,
                 staleProposalIds: [],
@@ -477,6 +501,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       activeSessionId: id,
       messages: [],
       compositionState: null,
+      compositionStateLoaded: false,
       compositionProposals: [],
       composerPreferences: null,
       staleProposalIds: [],
@@ -511,6 +536,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       set({
         messages,
         compositionState,
+        compositionStateLoaded: true,
         compositionProposals: compositionProposals ?? [],
         composerPreferences: composerPreferences ?? null,
       });
@@ -540,6 +566,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           activeSessionId: null,
           messages: [],
           compositionState: null,
+          compositionStateLoaded: false,
           compositionProposals: [],
           composerPreferences: null,
           staleProposalIds: [],
@@ -555,7 +582,14 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         return;
       }
       if (get().activeSessionId === id) {
-        set({ error: "Failed to load session. Please refresh the page." });
+        // The fetch settled (failed) — the composition state is as known as
+        // it will get without a retry. Marking loaded lets deferred
+        // consumers (the #/{id}/yaml gate) resolve to "no content" instead
+        // of waiting forever.
+        set({
+          error: "Failed to load session. Please refresh the page.",
+          compositionStateLoaded: true,
+        });
       }
     }
   },
@@ -565,6 +599,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       activeSessionId: sessionId,
       messages: [],
       compositionState: null,
+      compositionStateLoaded: false,
       compositionProposals: [],
       composerPreferences: null,
       staleProposalIds: [],
@@ -1146,6 +1181,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         activeSessionId: result.session.id,
         messages: result.messages,
         compositionState: result.composition_state,
+        compositionStateLoaded: true,
         compositionProposals: [],
         composerPreferences: null,
         staleProposalIds: [],

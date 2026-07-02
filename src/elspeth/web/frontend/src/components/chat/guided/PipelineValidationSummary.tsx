@@ -28,6 +28,10 @@
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { CompositionState } from "@/types";
+import {
+  resolveNodePlugin,
+  stepLabelForPlugin,
+} from "../interpretationStepLabel";
 import { buildPlainPhraseMap, UNKNOWN_COMPONENT_PHRASE } from "./pipelineGloss";
 
 /**
@@ -48,6 +52,17 @@ const CONTRACT_VIOLATION_RES: readonly RegExp[] = [
   /^Edge contract violation between producer node '([^']+)' \(schema '[^']*'\) and consumer node '([^']+)'/,
 ];
 
+/**
+ * Match the interpretation-review-pending dumps that reach this surface
+ * verbatim from `_format_interpretation_site` (web/execution/validation.py):
+ *   "pipeline_decision review pending for transform 'guided_xform_1': drop_raw_html_fields"
+ * Capture group: [1] = component id. The kind / component_type / user_term are
+ * engineer detail — they stay in the raw dump behind the expander
+ * (elspeth-016f463ff0).
+ */
+const INTERPRETATION_REVIEW_PENDING_RE =
+  /^[a-z_]+ review pending for [a-z_]+ '([^']+)': /;
+
 export interface HumanisedFinding {
   /** Plain-language headline safe for a role="status" announcement. */
   headline: string;
@@ -59,13 +74,30 @@ export interface HumanisedFinding {
 /**
  * Humanise one validation message. Contract-violation dumps become a
  * plain-language headline ("Two steps aren't connected correctly: …") with the
- * raw dump preserved for the expander; anything else passes through untouched.
+ * raw dump preserved for the expander; interpretation-review-pending dumps
+ * become "The <step> step is waiting for your review." (elspeth-016f463ff0)
+ * using the SAME step-label mapping the acknowledgement cards render, when the
+ * caller supplies `stepLabelFor`; anything else passes through untouched.
  * Exported for tests.
  */
 export function humaniseValidationMessage(
   message: string,
   phraseFor: (componentId: string | null) => string,
+  stepLabelFor?: (componentId: string) => string | null,
 ): HumanisedFinding {
+  const pendingMatch = INTERPRETATION_REVIEW_PENDING_RE.exec(message);
+  if (pendingMatch !== null && stepLabelFor !== undefined) {
+    const stepLabel = stepLabelFor(pendingMatch[1]);
+    return {
+      // A null step label (component absent from the composition) falls back
+      // to a generic phrase — never the raw internal id.
+      headline:
+        stepLabel !== null
+          ? `The ${stepLabel} step is waiting for your review.`
+          : "A step is waiting for your review.",
+      raw: message,
+    };
+  }
   let match: RegExpExecArray | null = null;
   for (const pattern of CONTRACT_VIOLATION_RES) {
     match = pattern.exec(message);
@@ -130,6 +162,15 @@ export function PipelineValidationSummary({
   }
 
   const phraseFor = makePhraseFor(compositionState);
+  // Step labels for the pending-review headline reuse the acknowledgement
+  // cards' mapping (stepLabelForPlugin → "Summarise" / "Output" …) so the
+  // problems strip names the step exactly as the card it points at. Null when
+  // the component id cannot be resolved — the humaniser then uses a generic
+  // phrase instead of echoing the internal id.
+  const stepLabelFor = (componentId: string): string | null => {
+    const plugin = resolveNodePlugin(compositionState, componentId);
+    return plugin === null ? null : stepLabelForPlugin(plugin);
+  };
 
   const errors = validationResult.errors ?? [];
   const warnings = validationResult.warnings ?? [];
@@ -145,7 +186,7 @@ export function PipelineValidationSummary({
     tone = "error";
     glyph = "✕";
     const label = errors.length === 1 ? "problem to fix" : "problems to fix";
-    const finding = humaniseValidationMessage(first.message, phraseFor);
+    const finding = humaniseValidationMessage(first.message, phraseFor, stepLabelFor);
     rawDetail = finding.raw;
     body =
       finding.raw !== null
@@ -157,7 +198,7 @@ export function PipelineValidationSummary({
     tone = "warning";
     glyph = "⚠";
     const label = warnings.length === 1 ? "warning" : "warnings";
-    const finding = humaniseValidationMessage(first.message, phraseFor);
+    const finding = humaniseValidationMessage(first.message, phraseFor, stepLabelFor);
     rawDetail = finding.raw;
     body =
       finding.raw !== null

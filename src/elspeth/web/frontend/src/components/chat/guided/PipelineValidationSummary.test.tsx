@@ -284,4 +284,60 @@ describe("PipelineValidationSummary", () => {
     expect(status.textContent).not.toMatch(/Edge contract violation/);
     expect(screen.getByText("Technical details")).toBeInTheDocument();
   });
+
+  // ── elspeth-016f463ff0: interpretation-review-pending dumps are humanised ──
+  it("humanises a pending-review dump with the acknowledge-card step label, raw text behind the expander", () => {
+    // web/execution/validation.py _format_interpretation_site format — the
+    // exact shape live-captured in the review.
+    const rawDump =
+      "pipeline_decision review pending for transform 'rater': drop_raw_html_fields";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "rater",
+          component_type: "transform",
+          message: rawDump,
+          suggestion: "Resolve the pending interpretation review before running.",
+          error_code: "interpretation_review_pending",
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    const status = screen.getByRole("status");
+    // "Summarise" is the SAME label the acknowledgement card renders for the
+    // llm plugin (stepLabelForPlugin) — the strip and the card must agree.
+    expect(status.textContent).toMatch(/The Summarise step is waiting for your review\./);
+    expect(status.textContent).not.toMatch(/pipeline_decision/);
+    expect(status.textContent).not.toMatch(/rater/);
+    // The verbatim dump survives behind the expander for the operator read.
+    expect(screen.getByText("Technical details")).toBeInTheDocument();
+    expect(screen.getByText(rawDump)).toBeInTheDocument();
+  });
+
+  it("pending-review dump with an unmappable component id gets a generic headline, never the raw id", () => {
+    const rawDump =
+      "pipeline_decision review pending for transform 'guided_xform_9': drop_raw_html_fields";
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: "guided_xform_9",
+          component_type: "transform",
+          message: rawDump,
+          suggestion: null,
+          error_code: "interpretation_review_pending",
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/A step is waiting for your review\./);
+    expect(status.textContent).not.toMatch(/guided_xform_9/);
+    expect(screen.getByText("Technical details")).toBeInTheDocument();
+  });
 });

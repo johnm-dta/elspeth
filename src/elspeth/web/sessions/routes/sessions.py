@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 
 from elspeth.web.blobs.protocol import BlobRecord
+from elspeth.web.sessions.titles import mint_default_session_title
 
 from ._helpers import (
     UUID,
@@ -180,9 +182,27 @@ def register_session_routes(router: APIRouter) -> None:
         """Create a new session for the authenticated user."""
         service = request.app.state.session_service
         settings = request.app.state.settings
+        title = body.title
+        if title is None:
+            # Mint the app-wide default title server-side (one convention,
+            # elspeth-ef8c18a6cb). Archived sessions are included in the
+            # collision set so an unarchive never resurfaces a duplicate
+            # default row in the switcher. Local server time so the date in
+            # the title matches the operator's wall clock, not UTC.
+            existing = await service.list_sessions(
+                user.user_id,
+                settings.auth_provider,
+                limit=200,
+                offset=0,
+                include_archived=True,
+            )
+            title = mint_default_session_title(
+                datetime.now(UTC).astimezone(),
+                (existing_session.title for existing_session in existing),
+            )
         session = await service.create_session(
             user.user_id,
-            body.title,
+            title,
             settings.auth_provider,
         )
         return _session_response(session)

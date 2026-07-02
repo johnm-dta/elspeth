@@ -1181,12 +1181,35 @@ class TestSessionCRUDRoutes:
         assert "id" in body
 
     def test_create_session_default_title(self, tmp_path) -> None:
+        from elspeth.web.sessions.titles import is_default_session_title
+
         app, _ = _make_app(tmp_path)
         client = TestClient(app)
 
         response = client.post("/api/sessions", json={})
         assert response.status_code == 201
-        assert response.json()["title"] == "New session"
+        title = response.json()["title"]
+        # Server-side minted default: "Session — <date>" (elspeth-ef8c18a6cb).
+        assert title.startswith("Session — ")
+        assert is_default_session_title(title)
+
+    def test_create_session_default_titles_auto_disambiguate(self, tmp_path) -> None:
+        app, _ = _make_app(tmp_path)
+        client = TestClient(app)
+
+        first = client.post("/api/sessions", json={}).json()["title"]
+        second = client.post("/api/sessions", json={}).json()["title"]
+        third = client.post("/api/sessions", json={}).json()["title"]
+        assert second == f"{first} (2)"
+        assert third == f"{first} (3)"
+
+    def test_create_session_null_title_mints_default(self, tmp_path) -> None:
+        app, _ = _make_app(tmp_path)
+        client = TestClient(app)
+
+        response = client.post("/api/sessions", json={"title": None})
+        assert response.status_code == 201
+        assert response.json()["title"].startswith("Session — ")
 
     def test_list_sessions(self, tmp_path) -> None:
         app, _ = _make_app(tmp_path)

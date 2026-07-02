@@ -138,7 +138,7 @@ describe("TutorialTurn7Graduation", () => {
     await waitFor(() =>
       expect(useSessionStore.getState().renameSession).toHaveBeenCalledWith(
         "sess-new",
-        "hello-world (synthetic project briefs)",
+        "First-run tutorial",
       ),
     );
     expect(api.updateUserComposerPreferences).toHaveBeenCalledWith({
@@ -302,5 +302,32 @@ describe("TutorialTurn7Graduation — skip-variant copy (elspeth-918f4434b3)", (
     expect(
       screen.queryByText("What the composer builds is AI-generated."),
     ).toBeNull();
+  });
+
+  it("both variants point at the real 'Audit panel' — never a nonexistent 'Audit page' (elspeth-4f69b267dd)", () => {
+    const { unmount } = render(
+      <TutorialTurn7Graduation
+        sessionId="sess-new"
+        skipped={false}
+        cancelled={false}
+      />,
+    );
+    expect(
+      screen.getByText(/Audit panel beside your pipeline/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Audit page/)).toBeNull();
+    unmount();
+
+    render(
+      <TutorialTurn7Graduation
+        sessionId={null}
+        skipped={true}
+        cancelled={false}
+      />,
+    );
+    expect(
+      screen.getByText(/Audit panel beside each pipeline/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Audit page/)).toBeNull();
   });
 });

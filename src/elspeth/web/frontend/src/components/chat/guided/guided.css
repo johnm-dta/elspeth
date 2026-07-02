@@ -351,6 +351,27 @@
   cursor: pointer;
 }
 
+/* Raw wiring rows (internal ids + connection labels) behind an expander for
+   operators — mirrors .pipeline-validation-summary-raw (elspeth-016f463ff0). */
+.wire-stage__raw {
+  margin-top: var(--space-2xs);
+  font-size: var(--font-size-sm);
+}
+
+.wire-stage__raw > summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+}
+
+.wire-stage__raw-text {
+  margin: var(--space-2xs) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, monospace);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
 /* ── Guided respond rejection (elspeth-3b35abf148 variant 3) ──────────────────
    The backend's structured 409 rendered NEXT TO the turn widget it rejected. */
 .guided-respond-rejection {
@@ -1098,8 +1119,8 @@
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 10px 12px;
-  margin: 4px 0 0;
+  padding: var(--space-2-5) var(--space-md);
+  margin: var(--space-xs) 0 0;
   overflow-x: auto;
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
@@ -1122,6 +1143,20 @@
 /* Non-tutorial nudge shown when a prefilled value blocks Continue — points the
    user at the Edit toggle to fix it. */
 .guided-schema-summary-needs-edit {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+/* Required-but-empty summary value — a muted "Not set", never a literal
+   `null` / "(none)" (elspeth-eba8820005). */
+.guided-schema-summary-not-set {
+  color: var(--color-text-secondary);
+  font-style: italic;
+}
+
+/* Whole-card fallback when every row is optional-and-empty (all rows elided). */
+.guided-schema-summary-defaults {
+  margin: var(--space-sm) 0;
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }

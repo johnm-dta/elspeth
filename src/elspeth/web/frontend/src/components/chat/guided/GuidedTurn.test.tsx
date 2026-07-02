@@ -317,7 +317,8 @@ describe("GuidedTurn dispatcher — routing", () => {
     );
 
     expect(screen.getByRole("heading", { name: "Review wiring" })).toBeTruthy();
-    expect(screen.getByRole("listitem", { name: /source to scrape/ })).toBeTruthy();
+    // Wiring rows carry human step names, not internal ids (elspeth-016f463ff0).
+    expect(screen.getByRole("listitem", { name: /Source to Fetch step/ })).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Confirm wiring" }),
     ).toBeTruthy();

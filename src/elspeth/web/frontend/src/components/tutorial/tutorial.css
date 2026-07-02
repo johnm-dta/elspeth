@@ -311,7 +311,7 @@
 
 .tutorial-draft-progress-evidence {
   margin: 0;
-  padding-left: 18px;
+  padding-left: var(--space-lg);
 }
 
 .tutorial-draft-progress-next {
@@ -454,7 +454,7 @@
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   overflow-wrap: anywhere;
 }
 
@@ -514,7 +514,7 @@
 }
 
 .tutorial-mode-fieldset input {
-  margin-top: 5px;
+  margin-top: var(--space-xs);
 }
 
 .tutorial-mode-fieldset strong {
@@ -546,7 +546,17 @@
 
 .tutorial-progress {
   display: flex;
+  align-items: center;
   gap: var(--space-sm);
+}
+
+/* Visible name for the tutorial-level tracker (elspeth-d75756fa2c): "Tutorial ·
+   Build — step 2 of 5" distinguishes this row from the build stepper's five
+   chips directly beneath it. */
+.tutorial-progress-label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
 }
 
 .tutorial-progress-dot {

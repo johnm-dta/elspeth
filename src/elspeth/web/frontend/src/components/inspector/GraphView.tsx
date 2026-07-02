@@ -35,6 +35,7 @@ import {
   sourceComponentId,
 } from "@/utils/compositionState";
 import { BADGE_COLORS, BADGE_BACKGROUNDS, EDGE_COLORS, EDGE_LABEL_COLOR, VALIDATION_COLORS } from "@/styles/tokens";
+import { TypeBadge } from "@/components/ui";
 import type { CompositionState } from "@/types/index";
 
 const NODE_WIDTH = 260;
@@ -283,15 +284,11 @@ function NodeConfigPanel({
     >
       <header className="graph-config-panel-header">
         <div>
-          <span
-            className="graph-node-badge"
-            style={{
-              backgroundColor: BADGE_BACKGROUNDS[config.typeLabel],
-              color: BADGE_COLORS[config.typeLabel],
-            }}
-          >
-            {config.typeLabel}
-          </span>
+          {/* ui/TypeBadge composes the same --color-badge-* tokens the inline
+              style used; the primitive replaces the hand-rolled span
+              (elspeth-e1c5ad0b53). Canvas-drawn badges keep the raw token
+              values because React Flow / MiniMap need resolved colours. */}
+          <TypeBadge type={config.typeLabel} />
           <h3>{config.id} config</h3>
           {config.plugin && (
             <p className="graph-config-plugin">{config.plugin}</p>

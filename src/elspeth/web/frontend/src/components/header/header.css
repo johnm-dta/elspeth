@@ -16,7 +16,7 @@
 }
 
 .alert-banner {
-  padding: 10px 14px;
+  padding: var(--space-2-5) var(--space-md);
   background-color: var(--color-error-bg);
   color: var(--color-error);
   border-bottom: 1px solid var(--color-error-border);
@@ -81,12 +81,48 @@
   position: relative;
 }
 
+/* ---------------------------------------------------------------------------
+   Empty landing — shown in place of the composer shell when the account has
+   no live sessions (elspeth-e69642fede). The primary actions live HERE, in
+   the main area where the user is looking, not inside a header menu.
+   --------------------------------------------------------------------------- */
+.empty-landing {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+  padding: var(--space-xl);
+  text-align: center;
+  background: var(--color-surface);
+}
+
+.empty-landing h2 {
+  margin: 0;
+  font-size: var(--font-size-xl);
+}
+
+.empty-landing p {
+  margin: 0;
+  max-width: 44ch;
+  color: var(--color-text-muted);
+}
+
+.empty-landing-actions {
+  display: flex;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  justify-content: center;
+  margin-top: var(--space-sm);
+}
+
 .app-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  height: 40px;
-  padding: 0 12px;
+  height: var(--size-header-height);
+  padding: 0 var(--space-md);
   border-bottom: 1px solid var(--color-border);
   background: var(--color-surface-nav);
   flex-shrink: 0;
@@ -96,7 +132,26 @@
 .app-header-right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-md);
+}
+
+/* Narrow-viewport wrap (elspeth-49dd290c7a residual): the fixed-height
+   no-wrap flex row clipped the Account button off-screen at 375px. Below
+   960px (the same breakpoint the shell under the header collapses at) the
+   header may wrap onto multiple rows so every control stays reachable. */
+@media (max-width: 960px) {
+  .app-header {
+    height: auto;
+    min-height: var(--size-header-height);
+    flex-wrap: wrap;
+    row-gap: var(--space-xs);
+    padding: var(--space-xs) var(--space-md);
+  }
+
+  .app-header-left {
+    flex-wrap: wrap;
+    row-gap: var(--space-xs);
+  }
 }
 
 /* The header brand mark is rendered by the canonical <WordMark> primitive
@@ -126,7 +181,7 @@
   top: 100%;
   left: 0;
   margin: 0;
-  padding: 4px 0;
+  padding: var(--space-xs) 0;
   list-style: none;
   background: var(--color-surface-nav-raised);
   border: 1px solid var(--color-border);
@@ -140,7 +195,7 @@
 .header-session-switcher-item {
   display: block;
   width: 100%;
-  padding: 6px 12px;
+  padding: var(--space-1-5) var(--space-md);
   min-height: var(--size-control-compact);
   border: 0;
   background: transparent;
@@ -166,8 +221,32 @@
   font-weight: 600;
 }
 
+/* "+ New session" is an ACTION, not a session entry. Accent + weight keep it
+   visually distinct from session rows so a session named like the action can
+   never be conflated with it; the role="separator" li below it draws the
+   dividing rule (elspeth-ef8c18a6cb). */
 .header-session-switcher-item-new {
-  border-bottom: 1px solid var(--color-border);
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.header-session-switcher-separator {
+  margin: var(--space-xs) 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.header-session-switcher-item-title {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+/* Last-modified secondary line inside each session entry — the
+   disambiguating metadata the switcher previously lacked. */
+.header-session-switcher-item-time {
+  display: block;
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  color: var(--color-text-muted);
 }
 
 .header-session-switcher-row {
@@ -224,12 +303,12 @@
   z-index: 50;
   min-width: 200px;
   margin: 0;
-  padding: 4px 0;
+  padding: var(--space-xs) 0;
   list-style: none;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  box-shadow: var(--shadow-dropdown);
 }
 
 .user-menu-item {
@@ -259,6 +338,14 @@
   outline-offset: -2px;
 }
 
+/* Anchor variant of the menu action (Help & documentation). Same block
+   layout as the buttons; suppress the default link underline/colour so the
+   row reads as one menu, not a hyperlink embedded in it. */
+.user-menu-action--link {
+  text-decoration: none;
+  color: var(--color-text);
+}
+
 /* Destructive variant — applied to actions like Sign out that end a session
    or otherwise have a meaningful "you'll lose state" consequence. The error
    colour keeps the action visually subordinate to neutral items above it
@@ -277,20 +364,20 @@
 .header-session-switcher-rename-form {
   display: grid;
   grid-template-columns: minmax(140px, 1fr) auto auto;
-  gap: 4px;
-  padding: 6px 8px;
+  gap: var(--space-xs);
+  padding: var(--space-1-5) var(--space-sm);
 }
 
 .runs-history-item-summary {
   display: grid;
   grid-template-columns: minmax(90px, 1fr) auto auto;
-  gap: 8px;
+  gap: var(--space-sm);
   align-items: center;
 }
 
 .run-diagnostics-panel {
-  margin-top: 10px;
-  padding-top: 10px;
+  margin-top: var(--space-2-5);
+  padding-top: var(--space-2-5);
   border-top: 1px solid var(--color-border);
   font-size: var(--font-size-xs);
 }
@@ -298,22 +385,22 @@
 .run-diagnostics-panel-header {
   display: flex;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-sm);
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: var(--space-sm);
   color: var(--color-text-muted);
 }
 
 .run-diagnostics-actions,
 .run-diagnostics-operations {
   display: flex;
-  gap: 6px;
+  gap: var(--space-1-5);
   flex-wrap: wrap;
 }
 
 .run-failure-detail {
-  margin-bottom: 10px;
-  padding: 8px 10px;
+  margin-bottom: var(--space-2-5);
+  padding: var(--space-sm) var(--space-2-5);
   border: 1px solid var(--color-error-border);
   border-left: 3px solid var(--color-error);
   border-radius: var(--radius-sm);
@@ -322,22 +409,22 @@
 }
 
 .run-failure-detail pre {
-  margin: 4px 0 0;
+  margin: var(--space-xs) 0 0;
   font-family: var(--font-mono, monospace);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 .run-diagnostics-tokens {
   display: grid;
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: var(--space-1-5);
+  margin-bottom: var(--space-sm);
 }
 
 .run-diagnostics-working-view,
 .run-diagnostics-explanation {
-  padding: 7px 9px;
+  padding: var(--space-sm);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   overflow-wrap: anywhere;

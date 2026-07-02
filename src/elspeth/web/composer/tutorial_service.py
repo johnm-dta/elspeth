@@ -49,18 +49,18 @@ from elspeth.web.sessions.protocol import (
     RunRecord,
     SessionServiceProtocol,
 )
+from elspeth.web.sessions.titles import abandoned_tutorial_session_title
 
 _TUTORIAL_RUN_TIMEOUT_SECONDS = 120.0
 _TUTORIAL_RUN_POLL_SECONDS = 0.25
 # Mirrors HELLO_WORLD_PENDING_SESSION_TITLE in the frontend tutorial copy
 # (src/elspeth/web/frontend/src/components/tutorial/copy.ts). Sessions carry
 # this title from creation until graduation, when the frontend renames them
-# to HELLO_WORLD_SESSION_TITLE ("hello-world (synthetic project briefs)").
+# to HELLO_WORLD_SESSION_TITLE ("First-run tutorial").
 # Orphan cleanup matches ONLY the pending title: a graduated session is the
 # user's keep-forever pipeline and must never be swept, even when a tutorial
 # RETAKE has reset ``tutorial_completed_at`` back to None.
-_TUTORIAL_PENDING_SESSION_TITLE = "hello-world (pending)"
-_ABANDONED_SESSION_TITLE_PREFIX = "abandoned-"
+_TUTORIAL_PENDING_SESSION_TITLE = "First-run tutorial (in progress)"
 _TUTORIAL_RUN_FAILED_PUBLIC_DETAIL = "The tutorial run did not complete successfully."
 
 
@@ -503,7 +503,11 @@ async def cleanup_tutorial_orphans(
     deleted_count = 0
     offset = 0
     limit = 200
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    # Human-register rename (elspeth-ef8c18a6cb): the old
+    # "abandoned-<title>-<ISO timestamp>" title leaked machine
+    # register into the session switcher. Same-day duplicates are fine — the
+    # switcher shows last-modified metadata to disambiguate.
+    abandoned_title = abandoned_tutorial_session_title(datetime.now(UTC).astimezone())
     while True:
         sessions = await session_service.list_sessions(
             user.user_id,
@@ -517,7 +521,7 @@ async def cleanup_tutorial_orphans(
             if session.title == _TUTORIAL_PENDING_SESSION_TITLE and str(session.id) != resumable_session_id:
                 await session_service.update_session_title(
                     session.id,
-                    f"{_ABANDONED_SESSION_TITLE_PREFIX}{session.title}-{timestamp}",
+                    abandoned_title,
                 )
                 deleted_count += 1
         if len(sessions) < limit:

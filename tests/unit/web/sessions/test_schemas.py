@@ -55,9 +55,12 @@ def _accounting() -> RunAccounting:
 
 
 class TestCreateSessionRequest:
-    def test_default_title(self) -> None:
+    def test_default_title_is_none_for_server_side_minting(self) -> None:
+        # No client-side default: the route mints the app-wide
+        # "Session — <date>" default when title is omitted
+        # (elspeth-ef8c18a6cb — one naming convention, server-side).
         req = CreateSessionRequest()
-        assert req.title == "New session"
+        assert req.title is None
 
     def test_custom_title(self) -> None:
         req = CreateSessionRequest(title="My pipeline")

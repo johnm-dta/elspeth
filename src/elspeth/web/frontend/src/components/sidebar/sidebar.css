@@ -68,7 +68,7 @@
   cursor: pointer;
   color: var(--color-info);
   font-size: var(--font-size-xs);
-  padding: 2px 8px;
+  padding: var(--space-2xs) var(--space-sm);
   flex-shrink: 0;
   white-space: nowrap;
 }
@@ -130,13 +130,13 @@
 }
 
 .catalog-reference-meta {
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   /* secondary not muted: muted is ~3.84:1 on elevated at 10px (fails AA). */
   color: var(--color-text-secondary);
   background-color: var(--color-surface-elevated);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: 1.2;
   text-transform: uppercase;

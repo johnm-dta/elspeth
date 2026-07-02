@@ -58,7 +58,7 @@ export function GraphModal(): JSX.Element | null {
             onClick={() => setIsOpen(false)}
             aria-label="Close graph"
           >
-            x
+            ×
           </button>
         </header>
         <div className="graph-modal-body">

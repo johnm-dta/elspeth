@@ -1497,8 +1497,11 @@ export function ChatPanel({
             </h2>
             {stepIsSendDriven && !tutorialStepBuilt && (
               <p className="guided-current-decision-tutorial-note">
-                You don't need to fill this in by hand — press{" "}
-                <strong>Send</strong> below and the assistant builds this step.
+                {/* Directionally neutral (elspeth-eba8820005): the Send button
+                    sits RIGHT of the textarea and the columns reflow across
+                    breakpoints, so "below" is wrong somewhere for everyone. */}
+                You don't need to fill this in by hand — press the{" "}
+                <strong>Send</strong> button and the assistant builds this step.
                 Then review the decision and continue.
               </p>
             )}
@@ -1581,6 +1584,10 @@ export function ChatPanel({
               className="chat-panel-header-actions"
               style={{ display: "inline-flex", gap: 8, alignItems: "center" }}
             >
+              {/* Persistent composer-model identity (elspeth-e9f7678de8):
+                  guided authoring names its model in the chrome exactly as
+                  freeform does — same chip, same source. */}
+              <ModelChip />
               <ModeSwitchButton target="freeform" hasWork={currentChatHasWork} />
             </div>
           </div>

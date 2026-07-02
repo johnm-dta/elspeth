@@ -336,6 +336,12 @@ export function AuditReadinessPanel() {
     throw new Error("compositionState missing after audit-readiness content guard");
   }
 
+  // Visible panel name, rendered in EVERY state (elspeth-4f69b267dd): the
+  // graduation card sends users to "the Audit panel", so the destination must
+  // exist by that name even while loading, collapsed, or errored — not only in
+  // the expanded view.
+  const panelHeading = <h2 className="audit-readiness-title audit-readiness-title--standalone">Audit</h2>;
+
   if (isLoading && !snapshot) {
     return (
       <section
@@ -343,6 +349,7 @@ export function AuditReadinessPanel() {
         className="audit-readiness audit-readiness--loading"
         aria-busy="true"
       >
+        {panelHeading}
         <div
           className="audit-readiness-live-region"
           aria-live="polite"
@@ -363,6 +370,7 @@ export function AuditReadinessPanel() {
         className="audit-readiness audit-readiness--error"
         aria-busy={isLoading ? "true" : undefined}
       >
+        {panelHeading}
         <div role="alert" className="audit-readiness-error">
           {error}
         </div>
@@ -405,6 +413,7 @@ export function AuditReadinessPanel() {
         className="audit-readiness audit-readiness--collapsed"
         aria-busy={isLoading ? "true" : undefined}
       >
+        {panelHeading}
         <button
           type="button"
           className="audit-readiness-summary"
@@ -434,7 +443,10 @@ export function AuditReadinessPanel() {
       >
         <header className="audit-readiness-header">
           <div>
-            <h2 className="audit-readiness-title">Audit readiness</h2>
+            {/* "Audit" (not "Audit readiness"): the destination name the
+                graduation copy points at (elspeth-4f69b267dd). The freshness
+                line and the row content carry the readiness meaning. */}
+            <h2 className="audit-readiness-title">Audit</h2>
             {/* No aria-label: naming is not exposed (and is prohibited) on
                 a paragraph role (elspeth-37293a3b7c); the visible text IS
                 the freshness statement. */}

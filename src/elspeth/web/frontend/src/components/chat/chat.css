@@ -134,11 +134,11 @@
   transform: translateX(-50%);
   z-index: var(--z-panel-controls);
   border-radius: var(--radius-pill);
-  padding: 6px var(--space-lg);
+  padding: var(--space-1-5) var(--space-lg);
   min-height: var(--size-control-compact);
   font-size: var(--font-size-sm);
   cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--shadow-popover);
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border-strong);
   color: var(--color-text);
@@ -298,11 +298,11 @@
 }
 
 .run-output-artifact-kind {
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-hover);
   color: var(--color-text-secondary);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: var(--line-height-tight);
   text-transform: uppercase;
@@ -332,7 +332,7 @@
 .run-output-artifact-hash {
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   white-space: nowrap;
 }
 
@@ -387,7 +387,7 @@
 }
 
 .chat-input-upload-alert {
-  padding: 6px 10px;
+  padding: var(--space-1-5) var(--space-2-5);
   margin-bottom: var(--space-sm);
   background-color: var(--color-error-bg);
   color: var(--color-error);
@@ -416,7 +416,7 @@
 }
 
 .chat-input-icon-btn {
-  padding: var(--space-sm) 10px;
+  padding: var(--space-sm) var(--space-2-5);
   background-color: transparent;
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
@@ -491,9 +491,9 @@
 }
 
 .chat-input-hint {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  padding: 2px 0 var(--space-xs);
+  padding: var(--space-2xs) 0 var(--space-xs);
   text-align: right;
 }
 
@@ -759,7 +759,7 @@
   cursor: pointer;
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border-radius: var(--radius-sm);
   min-width: 44px;
   min-height: var(--size-control);
@@ -861,7 +861,7 @@
 .message-tools {
   margin-top: var(--space-sm);
   border-top: 1px solid var(--color-border-strong);
-  padding-top: 6px;
+  padding-top: var(--space-1-5);
 }
 
 .message-tools-toggle {
@@ -888,21 +888,21 @@
 }
 
 .message-tools-details {
-  margin-top: 2px;
+  margin-top: var(--space-2xs);
 }
 
 .message-tools-summary {
   cursor: pointer;
   color: var(--color-text-muted);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
 }
 
 .message-tools-pre {
-  margin: 2px 0 0;
-  padding: 4px;
+  margin: var(--space-2xs) 0 0;
+  padding: var(--space-xs);
   background-color: var(--color-surface-elevated);
   border-radius: var(--radius-sm);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -913,8 +913,8 @@
    bubble. The horizontal ruler (.message-group-separator) is only painted
    when both groups are present; see MessageBubble.tsx for the guard. */
 .message-sources-created {
-  margin-top: 6px;
-  padding-top: 6px;
+  margin-top: var(--space-1-5);
+  padding-top: var(--space-1-5);
 }
 
 /* Static section heading — shares the visual weight of .message-tools-toggle
@@ -927,7 +927,7 @@
 }
 
 .message-sources-created-list {
-  margin: 4px 0 0;
+  margin: var(--space-xs) 0 0;
   padding-left: 0;
   font-size: var(--font-size-xs);
 }
@@ -1004,7 +1004,7 @@
 }
 
 .message-group-separator {
-  margin: 6px 0 0;
+  margin: var(--space-1-5) 0 0;
   border: 0;
   border-top: 1px solid var(--color-border);
   opacity: 0.6;
@@ -1015,7 +1015,7 @@
   gap: var(--space-sm);
   align-items: center;
   margin-top: var(--space-sm);
-  padding: 6px var(--space-sm);
+  padding: var(--space-1-5) var(--space-sm);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-surface);
@@ -1046,7 +1046,7 @@
   background: transparent;
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   cursor: help;
   /* The trigger is a button so it gets the global :focus-visible ring. */
@@ -1071,7 +1071,7 @@
   color: var(--color-text);
   font-size: var(--font-size-xs);
   line-height: var(--line-height-snug);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-popover);
   /* Hidden until the trigger is hovered or focused. visibility +
      opacity transition together so the bubble can fade in but still be
      pointer-event-inert until visible. */
@@ -1100,10 +1100,10 @@
 
 .tool-call-info-bubble-name {
   display: block;
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2xs);
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
 }
 
 .tool-call-info-bubble-body {
@@ -1151,7 +1151,7 @@
 
 .tool-call-audit-id {
   color: var(--color-text-muted);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
 }
 
 .tool-call-summary,
@@ -1174,7 +1174,7 @@
 }
 
 .proposal-diff-heading {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   font-weight: 600;
   text-transform: uppercase;
   color: var(--color-text-muted);
@@ -1226,7 +1226,7 @@
   background-color: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   max-height: 200px;
   overflow: auto;
 }
@@ -1428,7 +1428,7 @@
   gap: var(--space-sm);
   align-items: center;
   margin-bottom: var(--space-sm);
-  padding: var(--space-sm) 10px;
+  padding: var(--space-sm) var(--space-2-5);
   border-left: 4px dashed var(--color-warning);
   background: color-mix(
     in srgb,
@@ -1482,7 +1482,7 @@
 }
 
 .composing-bubble {
-  padding: 10px 14px;
+  padding: var(--space-2-5) var(--space-md);
   border-radius: var(--radius-md);
   background-color: var(--color-bubble-assistant);
   border: 1px solid var(--color-bubble-assistant-border);
@@ -1495,9 +1495,9 @@
 .composing-pulse {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-xs);
   min-width: 34px;
-  padding-top: 5px;
+  padding-top: var(--space-xs);
 }
 
 .composing-indicator--terminal .composing-bubble {
@@ -1511,26 +1511,26 @@
   justify-content: center;
   min-width: 0;
   min-height: 24px;
-  margin-top: 1px;
+  margin-top: var(--space-2xs);
   color: var(--color-text-muted);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   text-transform: uppercase;
 }
 
 .composing-working-view {
   display: grid;
-  gap: 6px;
+  gap: var(--space-1-5);
   min-width: 0;
 }
 
 .composing-section {
   display: grid;
-  gap: 3px;
+  gap: var(--space-2xs);
 }
 
 .composing-label {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   font-weight: 600;
   line-height: 1.25;
@@ -1546,7 +1546,7 @@
 
 .composing-evidence {
   margin: 0;
-  padding-left: 18px;
+  padding-left: var(--space-lg);
   color: var(--color-text-secondary);
   font-size: var(--font-size-xs);
   line-height: 1.45;
@@ -1599,10 +1599,10 @@
   flex-direction: column;
   align-items: flex-start;
   justify-content: flex-start;
-  gap: 6px;
+  gap: var(--space-1-5);
   aspect-ratio: 1 / 1;
   min-width: 0;
-  padding: 12px;
+  padding: var(--space-md);
   overflow: hidden;
   /* Exemplar tiles keep faded chrome so the grid reads as reference
      context; the explicit "Use this example" button inside each card is
@@ -1628,7 +1628,7 @@
 .template-card-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 
 .template-card-icon {
@@ -1664,8 +1664,8 @@
   margin-top: auto;
   display: grid;
   grid-template-columns: 1fr;
-  gap: 5px;
-  font-size: var(--font-size-2xs);
+  gap: var(--space-xs);
+  font-size: var(--font-size-xs);
   /* Same contrast discipline as .template-card-description above: the old
      0.76 dim dropped this micro-text to ~3.9:1 on the dark card mix.
      Muted/secondary tokens at full strength pass AA on the card surface. */
@@ -1974,7 +1974,7 @@
 
 .ack-card .code-block {
   margin: 0;
-  padding: 10px 12px;
+  padding: var(--space-2-5) var(--space-md);
   overflow-x: auto;
   background-color: var(--color-surface-elevated);
   border: 1px solid var(--color-border);

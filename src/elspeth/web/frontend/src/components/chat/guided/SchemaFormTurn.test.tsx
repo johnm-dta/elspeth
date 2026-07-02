@@ -698,14 +698,88 @@ describe("SchemaFormTurn", () => {
       expect(screen.getByText("Yes")).toBeInTheDocument(); // checkbox -> Yes/No
     });
 
-    it("renders empty/undefined scalar values as (none)", () => {
+    // Empty-row treatment (elspeth-eba8820005): never a literal "null" or
+    // "(none)" — optional-empty rows are elided, required-empty rows render a
+    // muted "Not set".
+    it("elides an optional field with an empty value from the summary", () => {
       render(
         <SchemaFormTurn
-          payload={pluginPayload([field({ name: "columns", label: "Columns", kind: "string-list" })], { columns: [] })}
+          payload={pluginPayload(
+            [
+              field({ name: "columns", label: "Columns", kind: "string-list" }),
+              field({ name: "encoding", label: "Encoding", kind: "text" }),
+            ],
+            { columns: [], encoding: "utf-8" },
+          )}
           onSubmit={vi.fn()}
         />,
       );
-      expect(screen.getByText("(none)")).toBeInTheDocument();
+      expect(screen.queryByText("Columns")).not.toBeInTheDocument();
+      expect(screen.queryByText("(none)")).not.toBeInTheDocument();
+      expect(screen.getByText("Encoding")).toBeInTheDocument();
+    });
+
+    it("renders a required-but-empty field as a muted 'Not set', and names it in the banner", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload([
+            field({ name: "format", label: "Format", kind: "text", required: true }),
+          ])}
+          onSubmit={vi.fn()}
+        />,
+      );
+      const notSet = screen.getByText("Not set");
+      expect(notSet).toHaveClass("guided-schema-summary-not-set");
+      expect(
+        screen.getByText("1 value needs attention: Format — open Edit to review."),
+      ).toBeInTheDocument();
+    });
+
+    it("never renders a literal null for a JSON field holding null (elided when optional, Not set when required)", () => {
+      const { rerender } = render(
+        <SchemaFormTurn
+          payload={pluginPayload(
+            [field({ name: "mapping", label: "Field Mapping", kind: "json-value" })],
+            { mapping: null },
+          )}
+          onSubmit={vi.fn()}
+        />,
+      );
+      // Optional + null → the row is elided entirely.
+      expect(screen.queryByText("Field Mapping")).not.toBeInTheDocument();
+      expect(screen.queryByText("null")).not.toBeInTheDocument();
+
+      rerender(
+        <SchemaFormTurn
+          payload={pluginPayload(
+            [field({ name: "mapping", label: "Field Mapping", kind: "json-value", required: true })],
+            { mapping: null },
+          )}
+          onSubmit={vi.fn()}
+        />,
+      );
+      // Required + null → the row stays, with a muted "Not set", never "null".
+      expect(screen.getByText("Field Mapping")).toBeInTheDocument();
+      expect(screen.getByText("Not set")).toBeInTheDocument();
+      expect(screen.queryByText("null")).not.toBeInTheDocument();
+    });
+
+    it("shows a plain 'no settings need review' line when every row is optional-and-empty", () => {
+      render(
+        <SchemaFormTurn
+          payload={pluginPayload(
+            [
+              field({ name: "columns", label: "Columns", kind: "string-list" }),
+              field({ name: "data_key", label: "Data key", kind: "text" }),
+            ],
+            { columns: [] },
+          )}
+          onSubmit={vi.fn()}
+        />,
+      );
+      expect(
+        screen.getByText("No settings need review for this step."),
+      ).toBeInTheDocument();
     });
 
     it("renders a JSON-shaped knob value through CodeBlock (pretty/highlighted)", () => {
@@ -828,14 +902,23 @@ describe("SchemaFormTurn", () => {
       expect(screen.getByRole("button", { name: "Done editing" })).toBeEnabled();
     });
 
-    it("shows a needs-edit banner in the non-tutorial summary when an unfilled required field blocks Continue", () => {
+    it("shows a needs-edit banner NAMING the blocking fields when unfilled required fields block Continue", () => {
       render(
         <SchemaFormTurn
-          payload={pluginPayload([field({ name: "token", label: "Token", kind: "text", required: true })])}
+          payload={pluginPayload([
+            field({ name: "token", label: "Token", kind: "text", required: true }),
+            field({ name: "data_key", label: "Data key", kind: "text", required: true }),
+          ])}
           onSubmit={vi.fn()}
         />,
       );
-      expect(screen.getByText(/click Edit to review/i)).toBeInTheDocument();
+      // Names the fields (elspeth-eba8820005) instead of "Some values need
+      // attention" — the user should not have to open Edit and hunt.
+      expect(
+        screen.getByText(
+          "2 values need attention: Token, Data key — open Edit to review.",
+        ),
+      ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
     });
   });

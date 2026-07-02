@@ -107,6 +107,28 @@ describe("RunsHistoryDrawer", () => {
     expect(screen.getByText(/r2/)).toBeInTheDocument();
   });
 
+  // elspeth-e1c5ad0b53: run status renders through ui/StatusBadge so the
+  // completed_with_failures / empty distinction carries the ⚠ / ∅ glyphs
+  // rather than colour alone, and underscores read as spaces.
+  it("renders run status as a StatusBadge with the a11y glyph map", () => {
+    useExecutionStore.setState({
+      runs: [
+        { id: "r1", status: "completed_with_failures" } as never,
+        { id: "r2", status: "empty" } as never,
+      ],
+    } as never);
+
+    render(<RunsHistoryDrawer onClose={vi.fn()} />);
+
+    const withFailures = screen.getByText("completed with failures");
+    expect(withFailures).toHaveClass("status-badge", "status-badge-completed");
+    expect(withFailures).toHaveTextContent("⚠");
+
+    const empty = screen.getByText("empty");
+    expect(empty).toHaveClass("status-badge", "status-badge-empty");
+    expect(empty).toHaveTextContent("∅");
+  });
+
   it("calls onClose when the Close button is clicked", async () => {
     const onClose = vi.fn();
     render(<RunsHistoryDrawer onClose={onClose} />);

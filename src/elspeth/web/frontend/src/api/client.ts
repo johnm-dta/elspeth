@@ -328,12 +328,17 @@ export async function fetchSessions(includeArchived = true): Promise<Session[]> 
   return parseResponse<Session[]>(response);
 }
 
-/** Create a new session. */
+/** Create a new session.
+ *
+ * No title is sent: the backend mints the app-wide default
+ * ("Session — 2 Jul 2026", auto-disambiguated per user) so every client
+ * shares one naming convention (elspeth-ef8c18a6cb).
+ */
 export async function createSession(): Promise<Session> {
   const response = await fetch("/api/sessions", {
     method: "POST",
     headers: authHeaders("application/json"),
-    body: JSON.stringify({ title: "New session" }),
+    body: JSON.stringify({}),
   });
   return parseResponse<Session>(response);
 }

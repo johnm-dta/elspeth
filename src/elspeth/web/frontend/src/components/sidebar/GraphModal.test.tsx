@@ -2,6 +2,9 @@ import { describe, it, expect, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GraphModal } from "./GraphModal";
+// (Close control uses the standard × glyph — pinned below alongside the
+// aria-label so the lowercase-'x' regression cannot recur; elspeth-83eb51334f
+// wave-3 carry-over, same defect class as elspeth-bff8043d33's modal close.)
 import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
 
 // The stub must include a focusable element so the focus trap has two nodes
@@ -58,6 +61,14 @@ describe("GraphModal", () => {
     fireEvent.click(screen.getByRole("button", { name: /close graph/i }));
 
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("uses the standard × close glyph (not a lowercase 'x')", () => {
+    render(<GraphModal />);
+    fireEvent(window, new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
+
+    const closeBtn = screen.getByRole("button", { name: /close graph/i });
+    expect(closeBtn.textContent?.trim()).toBe("×");
   });
 
   // ── Focus trap ──────────────────────────────────────────────────────────────

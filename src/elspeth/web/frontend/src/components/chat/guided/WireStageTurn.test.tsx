@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 
 import type { WireStageData } from "@/types/guided";
 import {
+  buildEntityNames,
   reconstructWireEdges,
   WireStageTurn,
 } from "./WireStageTurn";
@@ -308,7 +309,7 @@ describe("WireStageTurn", () => {
     ).toBeDisabled();
   });
 
-  it("conveys edge status as text not colour alone", () => {
+  it("conveys edge status as plain-language text not colour alone", () => {
     render(
       <WireStageTurn
         data={canonicalData()}
@@ -317,10 +318,11 @@ describe("WireStageTurn", () => {
       />,
     );
 
-    expect(screen.getAllByText("(connected)").length).toBeGreaterThan(0);
-    expect(
-      screen.getAllByText("(contract unchecked)").length,
-    ).toBeGreaterThan(0);
+    // Plain language (elspeth-016f463ff0): "connected" / "not yet checked",
+    // never the engineer-register "(contract unchecked)".
+    expect(screen.getAllByText("connected").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("not yet checked").length).toBeGreaterThan(0);
+    expect(screen.queryByText("(contract unchecked)")).toBeNull();
   });
 
   it("renders missing field text for not satisfied contracts", () => {
@@ -345,9 +347,74 @@ describe("WireStageTurn", () => {
       />,
     );
 
-    const edge = screen.getByRole("listitem", { name: /source to scrape/ });
-    expect(within(edge).getByText("(not satisfied)")).toBeTruthy();
+    const edge = screen.getByRole("listitem", { name: /Source to Fetch step/ });
+    expect(within(edge).getByText("not connected correctly")).toBeTruthy();
     expect(within(edge).getByText("Missing fields: body")).toBeTruthy();
+  });
+
+  // ── elspeth-016f463ff0: internal ids never reach the wiring rows ────────────
+  it("renders human step names in the wiring rows, raw ids only behind Technical details", () => {
+    render(
+      <WireStageTurn
+        data={canonicalData()}
+        onConfirm={vi.fn()}
+        confirmDisabled={false}
+      />,
+    );
+
+    // Human names: acknowledge-card step labels for transforms, "Source" for
+    // the single source, "<sink_name> output" for outputs.
+    expect(
+      screen.getByRole("listitem", { name: "Source to Fetch step" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("listitem", { name: "Fetch step to Output step" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("listitem", { name: "Output step to jsonl_out output" }),
+    ).toBeTruthy();
+
+    // The raw rows (ids + connection labels) survive verbatim behind the
+    // expander for operators.
+    expect(screen.getByText("Technical details")).toBeTruthy();
+    const raw = document.querySelector(".wire-stage__raw-text");
+    expect(raw?.textContent).toContain("source -> scrape via chain_in (contract unchecked)");
+    expect(raw?.textContent).toContain("scrape -> mapper via scraped (connected)");
+
+    // Internal ids appear ONLY inside the raw expander — never in the list.
+    const list = document.querySelector(".wire-stage__edges");
+    expect(list?.textContent).not.toContain("scrape");
+    expect(list?.textContent).not.toContain("mapper");
+    expect(list?.textContent).not.toContain("output:jsonl_out");
+    expect(list?.textContent).not.toContain("chain_in");
+  });
+
+  it("buildEntityNames: single source is 'Source', named sources keep their name, plugin-less nodes fall back to node_type", () => {
+    const names = buildEntityNames(canonicalData());
+    expect(names.get("source")).toBe("Source");
+    expect(names.get("scrape")).toBe("Fetch step"); // web_scrape → ack-card label
+    expect(names.get("mapper")).toBe("Output step"); // field_mapper → ack-card label
+    expect(names.get("merge_paths")).toBe("Coalesce step"); // plugin null → node_type
+    expect(names.get("output:jsonl_out")).toBe("jsonl_out output");
+
+    const multi = canonicalData();
+    multi.topology.sources = {
+      refunds: {
+        id: "source:refunds",
+        plugin: "inline_blob",
+        on_success: "chain_in",
+        on_validation_failure: "discard",
+      },
+      orders: {
+        id: "source:orders",
+        plugin: "inline_blob",
+        on_success: "chain_in",
+        on_validation_failure: "discard",
+      },
+    };
+    const multiNames = buildEntityNames(multi);
+    expect(multiNames.get("source:refunds")).toBe("refunds source");
+    expect(multiNames.get("source:orders")).toBe("orders source");
   });
 
   it("lets keyboard focus reach confirm and activate it", async () => {

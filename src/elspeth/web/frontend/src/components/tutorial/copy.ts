@@ -11,15 +11,16 @@ export const TURN_4_PRIMARY_BUTTON = "Continue";
 export const TURN_5_PRIMARY_BUTTON = "Continue";
 export const TURN_7_PRIMARY_BUTTON = "Take me to the composer";
 
-export const HELLO_WORLD_SESSION_TITLE = "hello-world (synthetic project briefs)";
+export const HELLO_WORLD_SESSION_TITLE = "First-run tutorial";
 
 // Set immediately after createSession in HelloWorldTutorial.onStart (before the
 // guided shell's external POST /guided/start) so the backend orphan-cleanup
-// scan (which filters by the "hello-world (" prefix) catches sessions abandoned
-// mid-tutorial. Without this tag, a user leaving any time before graduation's
-// final rename leaves a "New session" titled session that the cleanup never
-// matches.
-export const HELLO_WORLD_PENDING_SESSION_TITLE = "hello-world (pending)";
+// scan (which matches this exact pending title — mirrored as
+// _TUTORIAL_PENDING_SESSION_TITLE in composer/tutorial_service.py; change BOTH
+// together) catches sessions abandoned mid-tutorial. Without this tag, a user
+// leaving any time before graduation's final rename leaves a default-titled
+// session that the cleanup never matches.
+export const HELLO_WORLD_PENDING_SESSION_TITLE = "First-run tutorial (in progress)";
 
 export const WELCOME_LAYERS = [
   {
@@ -64,7 +65,7 @@ export const TURN_7_LEARNING_BULLETS_SKIPPED = [
   {
     title: "What the composer builds is AI-generated.",
     body:
-      "When you describe a pipeline in a sentence, an LLM interprets it and drafts the pipeline for you. The prompt it writes for itself and cleanup choices it makes are kept in the audit trail with your approval against them. You can revisit any pipeline from the Audit page at any time.",
+      "When you describe a pipeline in a sentence, an LLM interprets it and drafts the pipeline for you. The prompt it writes for itself and cleanup choices it makes are kept in the audit trail with your approval against them. You can revisit that record any time in the Audit panel beside each pipeline.",
   },
   {
     title: "Read before you run.",
@@ -77,7 +78,7 @@ export const TURN_7_LEARNING_BULLETS = [
   {
     title: "What you built is AI-generated.",
     body:
-      "The pipeline you just ran was authored by an LLM that interpreted your one-sentence description. The prompt it wrote for itself and cleanup choices such as dropping raw HTML are kept in the audit trail with your approval against them — alongside the source pages you named. You can come back to it from the Audit page at any time.",
+      "The pipeline you just ran was authored by an LLM that interpreted your one-sentence description. The prompt it wrote for itself and cleanup choices such as dropping raw HTML are kept in the audit trail with your approval against them — alongside the source pages you named. You can come back to that record any time in the Audit panel beside your pipeline.",
   },
   {
     title: "Read before you run.",

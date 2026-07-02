@@ -400,8 +400,11 @@ describe("ChatInput pending-interpretation placeholder cue", () => {
     render(<StandaloneHarness />);
 
     const textarea = screen.getByLabelText(/message input/i) as HTMLTextAreaElement;
+    // Directionally neutral (elspeth-eba8820005): the review card sits in a
+    // different column in the guided workspace, so the cue names the card
+    // rather than pointing "above".
     expect(textarea.placeholder).toBe(
-      'Reviewing your interpretation of "cool" above — pick Use mine or Change it to continue.',
+      'Reviewing your interpretation of "cool" — pick Use mine or Change it on the review card to continue.',
     );
   });
 

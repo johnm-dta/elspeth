@@ -14,6 +14,7 @@ import { useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { Button, StatusBadge } from "@/components/ui";
 import type { RunAccounting, RunProgress } from "@/types/index";
 
 function formattedCount(value: number): string {
@@ -111,6 +112,7 @@ export function ProgressView() {
     progress.status === "failed";
   const cancelRequested = progress.cancel_requested === true && !isTerminal;
   const statusAnnouncement = buildStatusAnnouncement(progress, cancelRequested);
+  const displayStatus = cancelRequested ? ("cancelling" as const) : progress.status;
 
   return (
     <div className="progress-container">
@@ -133,21 +135,24 @@ export function ProgressView() {
         </div>
       )}
 
-      {/* Status header with cancel button */}
+      {/* Status header with cancel button. StatusBadge carries the a11y glyph
+          map (⚠ completed_with_failures / ∅ empty) so the distinction is not
+          colour-only (elspeth-e1c5ad0b53); the underscored identifier is
+          rendered space-separated for human reading and the badge CSS handles
+          uppercasing. */}
       <div className="progress-status-header">
-        <span className="progress-status-label">
-          {/* Render underscored identifiers like ``completed_with_failures``
-              as space-separated for human reading; CSS handles uppercasing. */}
-          {cancelRequested ? "cancelling" : progress.status.replace(/_/g, " ")}
-        </span>
+        <StatusBadge status={displayStatus}>
+          {displayStatus.replace(/_/g, " ")}
+        </StatusBadge>
         {!isTerminal && !cancelRequested && (
-          <button
+          <Button
+            variant="danger"
             onClick={() => setShowCancelConfirm(true)}
             aria-label="Cancel pipeline execution"
-            className="btn btn-danger progress-cancel-btn"
+            className="progress-cancel-btn"
           >
             Cancel
-          </button>
+          </Button>
         )}
       </div>
 

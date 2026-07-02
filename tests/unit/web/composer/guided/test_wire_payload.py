@@ -439,5 +439,3 @@ class TestHonestGapRendering:
         assert node["fork_to"] == ["branch_a", "branch_b"]
         assert ("fork", "branch_a") not in {(row["from"], row["to"]) for row in payload["edge_contracts"]}
         assert ("fork", "branch_b") not in {(row["from"], row["to"]) for row in payload["edge_contracts"]}
-
-

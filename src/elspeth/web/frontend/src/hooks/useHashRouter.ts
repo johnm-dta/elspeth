@@ -21,6 +21,8 @@ import {
   OPEN_YAML_MODAL_EVENT,
 } from "@/lib/composer-events";
 import { useSessionStore } from "@/stores/sessionStore";
+import { hasCompositionContent } from "@/utils/compositionState";
+import type { CompositionState } from "@/types/api";
 
 interface HashState {
   sessionId: string | null;
@@ -68,6 +70,44 @@ function parseHash(): HashState {
 
 function buildCanonicalHash(sessionId: string | null): string {
   return sessionId ? `#/${sessionId}` : "";
+}
+
+/**
+ * Dispatch the Export-YAML open event once `sessionId`'s composition state
+ * is KNOWN, and only when the pipeline has content — the same
+ * hasCompositionContent gate ExportYamlButton applies
+ * (elspeth-bff8043d33 residual: the #/{id}/yaml deep link could open the
+ * near-empty modal on a pipeline with nothing to export).
+ *
+ * The deferral matters: on a fresh #/{id}/yaml arrival, selectSession's
+ * fetch is still in flight when the verb is parsed, so gating on the
+ * instantaneous compositionState would break the deep link for every
+ * non-empty pipeline. `compositionStateLoaded` disambiguates "still
+ * fetching" from "loaded and empty"; the one-shot subscription resolves
+ * when the fetch settles and aborts if the user switches sessions first.
+ */
+function dispatchYamlWhenCompositionKnown(sessionId: string): void {
+  const dispatchIfContent = (state: {
+    compositionState: CompositionState | null;
+  }) => {
+    if (hasCompositionContent(state.compositionState)) {
+      window.dispatchEvent(new CustomEvent(OPEN_YAML_MODAL_EVENT));
+    }
+  };
+  const snapshot = useSessionStore.getState();
+  if (snapshot.activeSessionId === sessionId && snapshot.compositionStateLoaded) {
+    queueMicrotask(() => dispatchIfContent(useSessionStore.getState()));
+    return;
+  }
+  const unsub = useSessionStore.subscribe((state) => {
+    if (state.activeSessionId !== sessionId) {
+      unsub();
+      return;
+    }
+    if (!state.compositionStateLoaded) return;
+    unsub();
+    dispatchIfContent(state);
+  });
 }
 
 interface UseHashRouterOptions {
@@ -119,7 +159,10 @@ export function useHashRouter(
       // `new CustomEvent(fn)` would coerce it to a garbage event name.
       // Object.prototype.hasOwnProperty.call() is the ES2020-compatible guard.
       const hasOwn = Object.prototype.hasOwnProperty;
-      if (verb && hasOwn.call(ACTION_VERBS, verb)) {
+      if (verb === "yaml" && sessionId) {
+        // Export YAML is content-gated; see dispatchYamlWhenCompositionKnown.
+        dispatchYamlWhenCompositionKnown(sessionId);
+      } else if (verb && hasOwn.call(ACTION_VERBS, verb)) {
         const eventName = ACTION_VERBS[verb];
         queueMicrotask(() => window.dispatchEvent(new CustomEvent(eventName)));
       }

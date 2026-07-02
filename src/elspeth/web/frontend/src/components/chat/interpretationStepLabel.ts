@@ -33,6 +33,18 @@ function humanisePlugin(plugin: string): string {
 }
 
 /**
+ * Humanised step label for a bare plugin name — the SAME mapping the
+ * acknowledgement cards use ("Summarise step · prompt"), exposed for surfaces
+ * that hold a plugin directly (e.g. the wire-stage topology) rather than a
+ * composition node id. Keeping every surface on this one mapping means the
+ * wiring list, the problems strip, and the acknowledge cards all name a step
+ * identically.
+ */
+export function stepLabelForPlugin(plugin: string): string {
+  return PLUGIN_STEP_LABELS[plugin] ?? humanisePlugin(plugin);
+}
+
+/**
  * Resolve the plugin backing an affected_node_id by searching the
  * composition's nodes, then sources, then outputs.  Returns null when the
  * id is absent (or the composition is unavailable).
@@ -61,7 +73,7 @@ export function humaniseStepLabel(
 ): string {
   const plugin = resolveNodePlugin(state, nodeId);
   if (plugin !== null) {
-    return PLUGIN_STEP_LABELS[plugin] ?? humanisePlugin(plugin);
+    return stepLabelForPlugin(plugin);
   }
   return nodeId ?? "this step";
 }

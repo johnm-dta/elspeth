@@ -64,13 +64,23 @@ def _require_visible_content(value: str, *, field_label: str) -> str:
 
 
 class CreateSessionRequest(_RequestModel):
-    """Request body for POST /api/sessions."""
+    """Request body for POST /api/sessions.
 
-    title: str = pydantic.Field(default="New session", min_length=1)
+    ``title`` is optional: when omitted (or explicitly null) the route
+    mints the app-wide default ("Session — 2 Jul 2026", auto-disambiguated
+    per user — see ``elspeth.web.sessions.titles``). The default is minted
+    server-side so every client shares one naming convention
+    (elspeth-ef8c18a6cb killed the frontend's competing "New session" /
+    "Untitled" defaults).
+    """
+
+    title: str | None = pydantic.Field(default=None, min_length=1)
 
     @field_validator("title")
     @classmethod
-    def _validate_title(cls, value: str) -> str:
+    def _validate_title(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         return _require_visible_content(value, field_label="Session title")
 
 

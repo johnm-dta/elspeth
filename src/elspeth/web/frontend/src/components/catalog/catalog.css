@@ -80,7 +80,7 @@
 .plugin-card-id {
   color: var(--color-text-muted);
   font-family: var(--font-mono);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   line-height: 1.25;
 }
 
@@ -92,7 +92,7 @@
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: 1.6;
   text-transform: uppercase;
@@ -100,7 +100,7 @@
 
 .plugin-card-kind {
   color: var(--color-text-muted);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: 1.2;
   text-transform: uppercase;
@@ -108,7 +108,7 @@
 
 .plugin-card-desc {
   display: -webkit-box;
-  margin-top: 2px;
+  margin-top: var(--space-2xs);
   font-size: var(--font-size-xs);
   color: var(--color-text-muted);
   line-height: 1.35;
@@ -120,7 +120,7 @@
 .plugin-card-audit-strip {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-xs);
   margin-top: var(--space-xs);
 }
 
@@ -129,13 +129,13 @@
   align-items: center;
   max-width: 100%;
   min-height: 22px;
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-elevated);
   /* secondary not muted: muted is ~3.84:1 on elevated at 10px (fails AA). */
   color: var(--color-text-secondary);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 650;
   line-height: 1.2;
 }
@@ -171,7 +171,7 @@
 .plugin-card-detail-toggle,
 .plugin-card-disclosure {
   min-height: 30px;
-  padding: 4px 8px;
+  padding: var(--space-xs) var(--space-sm);
   font-size: var(--font-size-xs);
 }
 
@@ -185,13 +185,13 @@
 
 .plugin-card-prose-section {
   display: grid;
-  gap: 2px;
+  gap: var(--space-2xs);
 }
 
 .plugin-card-prose-label,
 .plugin-card-example-label {
   color: var(--color-text-secondary);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: 1.25;
 }
@@ -205,14 +205,14 @@
 
 .plugin-card-example-code {
   max-height: 140px;
-  margin: 4px 0 0;
+  margin: var(--space-xs) 0 0;
   padding: var(--space-sm);
   overflow: auto;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-bg);
   color: var(--color-text);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   line-height: 1.35;
   white-space: pre-wrap;
 }
@@ -244,14 +244,14 @@
 .plugin-card-variants-hint {
   margin-bottom: var(--space-sm);
   color: var(--color-text-muted);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   line-height: 1.35;
 }
 
 .plugin-card-fields {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 
 .plugin-card-field-name {
@@ -268,13 +268,13 @@
 .plugin-card-field-required {
   color: var(--color-warning);
   margin-left: var(--space-sm);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
 }
 
 .plugin-card-field-desc {
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-  margin-top: 2px;
+  margin-top: var(--space-2xs);
 }
 
 .plugin-card-no-fields {
@@ -320,12 +320,12 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-2xs);
 }
 
 .catalog-header-eyebrow {
   color: var(--color-text-muted);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: 1.2;
   text-transform: uppercase;
@@ -363,7 +363,7 @@
 
 .catalog-search-input {
   width: 100%;
-  padding: 6px 28px 6px 10px;
+  padding: var(--space-1-5) 28px var(--space-1-5) var(--space-2-5);
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-md);
   background-color: var(--color-surface-elevated);
@@ -390,7 +390,7 @@
   color: var(--color-text-muted);
   cursor: pointer;
   font-size: var(--font-size-base);
-  padding: 2px;
+  padding: var(--space-2xs);
   line-height: 1;
 }
 
@@ -417,8 +417,8 @@
 }
 
 .catalog-tab-count {
-  font-size: var(--font-size-3xs);
-  padding: 1px 5px;
+  font-size: var(--font-size-xs);
+  padding: var(--space-2xs) var(--space-xs);
   border-radius: var(--radius-lg);
   font-weight: 600;
 }
@@ -455,9 +455,9 @@
 }
 
 .filter-chip-group-label {
-  padding-top: 3px;
+  padding-top: var(--space-2xs);
   color: var(--color-text-muted);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: 1.2;
   text-transform: uppercase;
@@ -466,7 +466,7 @@
 .filter-chip-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
+  gap: var(--space-xs);
   min-width: 0;
 }
 
@@ -474,14 +474,14 @@
   /* Raised from the WCAG 2.5.8 AA floor (24px exactly) to 28px so the chip
      comfortably clears the floor and tolerates browser font-size variation. */
   min-height: 28px;
-  padding: 2px 8px;
+  padding: var(--space-2xs) var(--space-sm);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-surface-elevated);
   color: var(--color-text-secondary);
   cursor: pointer;
   font: inherit;
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 600;
   line-height: 1.2;
 }
@@ -557,12 +557,12 @@
 }
 
 .inline-chat-source-entry-badge {
-  padding: 2px 6px;
+  padding: var(--space-2xs) var(--space-1-5);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   background-color: var(--color-surface);
-  font-size: var(--font-size-3xs);
+  font-size: var(--font-size-xs);
   font-weight: 700;
   line-height: 1.2;
   text-transform: uppercase;
@@ -578,6 +578,6 @@
 .inline-chat-source-entry-try {
   justify-self: start;
   min-height: 30px;
-  padding: 4px 8px;
+  padding: var(--space-xs) var(--space-sm);
   font-size: var(--font-size-xs);
 }

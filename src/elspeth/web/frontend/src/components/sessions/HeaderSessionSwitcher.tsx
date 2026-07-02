@@ -8,12 +8,14 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   type KeyboardEvent,
 } from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { relativeTime } from "@/utils/time";
 import type { Session } from "@/types/index";
 
 const MENU_ID = "header-session-switcher-menu";
@@ -41,7 +43,13 @@ export function HeaderSessionSwitcher(): JSX.Element {
   const renameInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
-  const triggerLabel = activeSession?.title || "Untitled";
+  // One naming convention: titles are minted server-side and non-empty, so
+  // the id-slice fallback is defensive only. "No session" (not a competing
+  // "Untitled" default) when nothing is active — elspeth-ef8c18a6cb.
+  const triggerLabel = activeSession
+    ? activeSession.title || `Session ${activeSession.id.slice(0, 8)}`
+    : "No session";
+  const renameErrorId = useId();
   const filteredSessions = sessions.filter(
     (s) =>
       (showArchived || !s.archived) &&
@@ -326,6 +334,10 @@ export function HeaderSessionSwitcher(): JSX.Element {
             >
               + New session
             </li>
+            {/* Semantic + visual break between the create ACTION and the
+                session ENTRIES, so a session whose title resembles the
+                action can never be conflated with it (elspeth-ef8c18a6cb). */}
+            <li role="separator" className="header-session-switcher-separator" />
             {filteredSessions.map((session, idx) => {
               const title = session.title || `Session ${session.id.slice(0, 8)}`;
               const selectIndex = 1 + idx * 3;
@@ -356,6 +368,10 @@ export function HeaderSessionSwitcher(): JSX.Element {
                           }
                         }}
                         aria-label="Rename session"
+                        aria-invalid={renameError !== null ? true : undefined}
+                        aria-describedby={
+                          renameError !== null ? renameErrorId : undefined
+                        }
                         disabled={renamePending}
                       />
                       <button
@@ -378,6 +394,7 @@ export function HeaderSessionSwitcher(): JSX.Element {
                     </form>
                     {renameError !== null && (
                       <div
+                        id={renameErrorId}
                         role="alert"
                         className="header-session-switcher-rename-error"
                       >
@@ -399,8 +416,21 @@ export function HeaderSessionSwitcher(): JSX.Element {
                     aria-current={session.id === activeSessionId ? "page" : undefined}
                     onClick={() => onSelect(session.id)}
                     className="header-session-switcher-item header-session-switcher-item-session"
+                    // Explicit name: the visual layout renders title and
+                    // last-modified as adjacent spans whose computed accname
+                    // would mush together ("First48d ago"); the label keeps
+                    // the announcement legible.
+                    aria-label={`${title}, last modified ${relativeTime(session.updated_at)}`}
                   >
-                    {title}
+                    <span className="header-session-switcher-item-title">
+                      {title}
+                    </span>
+                    <span
+                      className="header-session-switcher-item-time"
+                      title={session.updated_at}
+                    >
+                      {relativeTime(session.updated_at)}
+                    </span>
                   </button>
                   <button
                     ref={(el) => {

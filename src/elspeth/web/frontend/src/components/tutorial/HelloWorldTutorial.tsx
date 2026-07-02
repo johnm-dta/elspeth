@@ -47,7 +47,7 @@ export function HelloWorldTutorial(): JSX.Element {
 
   // Orphan cleanup runs ONLY on a fresh tutorial entry. On a resume the
   // persisted tutorial session still carries the pending title — sweeping it
-  // here is exactly the "abandoned-hello-world (pending)-<timestamp>" rename
+  // here is exactly the "abandoned-<title>-<timestamp>" rename
   // the resume path exists to prevent. (The backend also refuses to sweep
   // the session recorded in preferences.tutorial_session_id — defence in
   // depth.)
@@ -125,8 +125,8 @@ export function HelloWorldTutorial(): JSX.Element {
 
   // Create the tutorial session on Start so TutorialGuidedShell has a
   // sessionId. Tag it with the pending title BEFORE the shell's external
-  // POST /guided/start so the backend orphan-cleanup scan (which filters by
-  // the "hello-world (" prefix) catches sessions abandoned mid-tutorial.
+  // POST /guided/start so the backend orphan-cleanup scan (which matches the
+  // exact pending title) catches sessions abandoned mid-tutorial.
   const onStart = async (): Promise<void> => {
     setStarting(true);
     setStartError(null);
@@ -198,6 +198,15 @@ export function HelloWorldTutorial(): JSX.Element {
         <p className="sr-only">
           Step {currentIndex + 1} of {totalSteps}: {currentLabel}
         </p>
+        {/* Visible counterpart of the sr-only line (elspeth-d75756fa2c): the
+            unlabeled 5-dot row sat directly above the 5-chip build stepper and
+            read as a second, broken copy of it. Naming this row "Tutorial ·
+            <stage>" makes the two indicators read as different hierarchies.
+            aria-hidden — the sr-only paragraph above already carries the same
+            signal for AT, so exposing this too would double-announce. */}
+        <span className="tutorial-progress-label" aria-hidden="true">
+          Tutorial · {currentLabel} — step {currentIndex + 1} of {totalSteps}
+        </span>
         {stepLabels.map(({ key, label }, index) => {
           const isActive = index === currentIndex;
           const isComplete = index < currentIndex;

@@ -1,5 +1,5 @@
 import { beforeEach, describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { UserMenu } from "./UserMenu";
 
@@ -116,8 +116,58 @@ describe("UserMenu", () => {
     ).toHaveFocus();
     await userEvent.tab();
     expect(
+      screen.getByRole("link", { name: /help & documentation/i }),
+    ).toHaveFocus();
+    await userEvent.tab();
+    expect(
       screen.getByRole("button", { name: /sign out/i }),
     ).toHaveFocus();
+  });
+
+  // elspeth-8225736807: one honest help entry — a link to the repository
+  // docs directory (the deployment serves no docs site of its own).
+  it("offers a 'Help & documentation' link to the project docs", async () => {
+    render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /account/i }));
+    const help = screen.getByRole("link", { name: /help & documentation/i });
+    expect(help).toHaveAttribute(
+      "href",
+      "https://github.com/johnm-dta/elspeth/tree/main/docs",
+    );
+    // New tab, no opener leakage.
+    expect(help).toHaveAttribute("target", "_blank");
+    expect(help).toHaveAttribute("rel", "noreferrer");
+  });
+
+  // elspeth-83eb51334f: focus leaving the menu subtree closes it — a
+  // keyboard user must not be able to Tab away while the popup stays open.
+  it("closes when focus moves outside the menu subtree", async () => {
+    render(
+      <div>
+        <UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />
+        <button type="button">outside</button>
+      </div>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: /account/i }));
+    const signOut = screen.getByRole("button", { name: /sign out/i });
+    signOut.focus();
+    const outside = screen.getByRole("button", { name: /^outside$/i });
+    fireEvent.blur(signOut, { relatedTarget: outside });
+    expect(
+      screen.queryByRole("button", { name: /sign out/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("stays open when focus moves between items inside the menu", async () => {
+    render(<UserMenu onOpenSettings={vi.fn()} onSignOut={vi.fn()} />);
+    await userEvent.click(screen.getByRole("button", { name: /account/i }));
+    const theme = screen.getByRole("button", { name: /switch to/i });
+    const signOut = screen.getByRole("button", { name: /sign out/i });
+    theme.focus();
+    fireEvent.blur(theme, { relatedTarget: signOut });
+    expect(
+      screen.getByRole("button", { name: /sign out/i }),
+    ).toBeInTheDocument();
   });
 
   it("trigger advertises aria-haspopup=true (disclosure, not menu)", () => {

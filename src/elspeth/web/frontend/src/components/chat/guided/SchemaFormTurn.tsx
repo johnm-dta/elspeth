@@ -46,20 +46,27 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
     });
   }
 
-  function canSubmit(): boolean {
-    for (const field of visibleFields()) {
+  // The fields blocking submit: invalid values (broken JSON / non-numeric
+  // number) on any field, plus unmet required fields. The needs-edit banner
+  // names these so the user knows WHICH values to fix without hunting through
+  // the Edit view (elspeth-eba8820005).
+  function fieldsNeedingAttention(): KnobField[] {
+    return visibleFields().filter((field) => {
       const value = values[field.name];
-      // Block on any field the form already knows holds an invalid value
-      // (broken JSON / non-numeric number), required or not. Previously such a
+      // Any field the form already knows holds an invalid value (broken JSON /
+      // non-numeric number) blocks submit, required or not. Previously such a
       // value rode silently through to submit because canSubmit only inspected
       // required fields and never checked validity.
-      if (fieldHasError(field, value)) return false;
-      if (!field.required) continue;
-      if (field.kind === "checkbox") continue;
-      if (value === undefined || value === null || value === "") return false;
-      if (Array.isArray(value) && value.length === 0) return false;
-    }
-    return true;
+      if (fieldHasError(field, value)) return true;
+      if (!field.required) return false;
+      if (field.kind === "checkbox") return false;
+      if (value === undefined || value === null || value === "") return true;
+      return Array.isArray(value) && value.length === 0;
+    });
+  }
+
+  function canSubmit(): boolean {
+    return fieldsNeedingAttention().length === 0;
   }
 
   function handleContinue() {
@@ -122,21 +129,40 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
         <RecipeContextHeader context={payload.recipe_context} />
       )}
       {view === "summary" ? (
-        <dl className="guided-schema-summary">
-          {visibleFields().map((f) => (
-            <div className="guided-schema-summary-row" key={f.name}>
-              <dt className="guided-schema-summary-label">{f.label}</dt>
-              <dd className="guided-schema-summary-value">
-                {summaryValueNode(f, values[f.name])}
-                {showValidationFailureTeaching && f.name === "on_validation_failure" && (
-                  <p className="guided-schema-summary-caveat" role="note">
-                    {TUTORIAL_VALIDATION_FAILURE_CAVEAT}
-                  </p>
-                )}
-              </dd>
-            </div>
-          ))}
-        </dl>
+        // Empty-row treatment (elspeth-eba8820005): an optional field with no
+        // value carries no decision — elide the row rather than rendering a
+        // literal "null" / "(none)" to a first-run user. A REQUIRED field with
+        // no value stays visible as a muted "Not set" (the needs-edit banner
+        // below names it too).
+        (() => {
+          const summaryRows = visibleFields().filter(
+            (f) => f.required || !isEmptyValue(f, values[f.name]),
+          );
+          if (summaryRows.length === 0) {
+            return (
+              <p className="guided-schema-summary-defaults">
+                No settings need review for this step.
+              </p>
+            );
+          }
+          return (
+            <dl className="guided-schema-summary">
+              {summaryRows.map((f) => (
+                <div className="guided-schema-summary-row" key={f.name}>
+                  <dt className="guided-schema-summary-label">{f.label}</dt>
+                  <dd className="guided-schema-summary-value">
+                    {summaryValueNode(f, values[f.name])}
+                    {showValidationFailureTeaching && f.name === "on_validation_failure" && (
+                      <p className="guided-schema-summary-caveat" role="note">
+                        {TUTORIAL_VALIDATION_FAILURE_CAVEAT}
+                      </p>
+                    )}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          );
+        })()
       ) : (
         <div className="guided-schema-fields">
           {visibleFields().map((field) => (
@@ -157,11 +183,23 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
           (canSubmit() true at mount): a passive learner has no Edit button to
           fix an unmet field, so an invalid tutorial payload would strand them
           on a disabled Continue. Backend guided tutorial payloads satisfy this. */}
-      {!isTutorial && view === "summary" && !canSubmit() && (
-        <p className="guided-schema-summary-needs-edit" role="status">
-          Some values need attention — click Edit to review.
-        </p>
-      )}
+      {!isTutorial &&
+        view === "summary" &&
+        (() => {
+          // Name the fields (elspeth-eba8820005): "Some values need attention"
+          // sent the user hunting through Edit; naming them makes the fix a
+          // direct move.
+          const attention = fieldsNeedingAttention();
+          if (attention.length === 0) return null;
+          const names = attention.map((f) => f.label).join(", ");
+          return (
+            <p className="guided-schema-summary-needs-edit" role="status">
+              {attention.length === 1
+                ? `1 value needs attention: ${names} — open Edit to review.`
+                : `${attention.length} values need attention: ${names} — open Edit to review.`}
+            </p>
+          );
+        })()}
       <div className="guided-schema-actions">
         {!isTutorial && view === "summary" && (
           <button
@@ -205,17 +243,41 @@ export function SchemaFormTurn({ payload, onSubmit, disabled = false, isTutorial
   );
 }
 
+// True when the field currently holds no user-meaningful value — the summary
+// view elides such rows for optional fields and renders a muted "Not set" for
+// required ones (elspeth-eba8820005: never a literal `null` or "(none)").
+// Checkbox never counts as empty (false is a real answer, rendered "No"). A
+// raw string riding in a JSON/number field (broken input) is NOT empty — it
+// renders so the user can see what needs fixing.
+function isEmptyValue(field: KnobField, value: unknown): boolean {
+  if (field.kind === "checkbox") return false;
+  if (value === undefined || value === null) return true;
+  if (field.kind === "string-list") {
+    if (Array.isArray(value)) return value.length === 0;
+    return typeof value === "string" && value === "";
+  }
+  return value === "";
+}
+
+// Muted placeholder for a required-but-empty summary row.
+function notSetNode(): ReactNode {
+  return <span className="guided-schema-summary-not-set">Not set</span>;
+}
+
 // Render a single knob value read-only for the summary view. Pure presentation
 // over the same `values` the editable form holds: short scalars inline, JSON via
 // the shared CodeBlock, string-list comma-joined, checkbox as Yes/No, and the
 // blob `path` masked to its friendly basename so the absolute storage_path never
 // leaks (mirrors the editable form's tutorial mask, here applied for every mode).
+// Empty values render as a muted "Not set" — the literal `null` / "(none)"
+// forms never reach a first-run user (elspeth-eba8820005).
 function summaryValueNode(field: KnobField, value: unknown): ReactNode {
   if (field.kind === "checkbox") return Boolean(value) ? "Yes" : "No";
+  if (isEmptyValue(field, value)) return notSetNode();
   if (field.kind === "json-object" || field.kind === "json-array" || field.kind === "json-value") {
     return (
       <CodeBlock
-        code={typeof value === "string" ? value : JSON.stringify(value ?? null)}
+        code={typeof value === "string" ? value : JSON.stringify(value)}
         prettyJson
         showCopy={false}
         ariaLabel={field.label}
@@ -223,13 +285,12 @@ function summaryValueNode(field: KnobField, value: unknown): ReactNode {
     );
   }
   if (field.kind === "string-list") {
-    const text = Array.isArray(value) ? value.join(", ") : typeof value === "string" ? value : "";
-    return text === "" ? "(none)" : text;
+    return Array.isArray(value) ? value.join(", ") : String(value);
   }
-  const raw = value === null || value === undefined ? "" : String(value);
+  const raw = String(value);
   if (field.name === "path" && raw.startsWith(BLOB_REF_PATH_PREFIX)) return BLOB_REF_FRIENDLY_LABEL;
   if (field.name === "path" && raw.startsWith("/")) return friendlyBlobRef(raw);
-  return raw === "" ? "(none)" : raw;
+  return raw;
 }
 
 function initialValues(fields: KnobField[], prefilled: Record<string, unknown>): FormValues {

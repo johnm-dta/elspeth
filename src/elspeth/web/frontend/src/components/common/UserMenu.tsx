@@ -1,10 +1,24 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type FocusEvent,
+} from "react";
 import { useTheme } from "@/hooks/useTheme";
 
 interface UserMenuProps {
   onOpenSettings: () => void;
   onSignOut: () => void;
 }
+
+/**
+ * Target for the "Help & documentation" entry. The deployment serves no
+ * user-facing docs site of its own, so this points at the repository docs
+ * directory named by the package metadata (pyproject [project.urls]).
+ * Exported so tests pin the single honest destination.
+ */
+export const HELP_DOCS_URL = "https://github.com/johnm-dta/elspeth/tree/main/docs";
 
 /**
  * Account dropdown in the app header. Click-outside, Escape-to-close
@@ -81,8 +95,25 @@ export function UserMenu({
     setOpen(false);
   }, [toggleTheme]);
 
+  // Focus leaving the menu subtree closes it (elspeth-83eb51334f): a
+  // keyboard user could previously Tab past the trigger while the popup
+  // stayed visually open. Only acts when relatedTarget is a real element
+  // outside the wrapper — a null relatedTarget (window blur, or browsers
+  // that don't focus buttons on mousedown) is left to the click-outside
+  // handler so an in-menu click is never swallowed mid-flight.
+  const onWrapperBlur = useCallback((e: FocusEvent<HTMLDivElement>) => {
+    const next = e.relatedTarget;
+    if (
+      next instanceof Node &&
+      wrapperRef.current !== null &&
+      !wrapperRef.current.contains(next)
+    ) {
+      setOpen(false);
+    }
+  }, []);
+
   return (
-    <div ref={wrapperRef} className="user-menu">
+    <div ref={wrapperRef} className="user-menu" onBlur={onWrapperBlur}>
       <button
         ref={triggerRef}
         type="button"
@@ -118,6 +149,20 @@ export function UserMenu({
             >
               Composer preferences
             </button>
+          </li>
+          <li className="user-menu-item">
+            {/* One honest help entry (elspeth-8225736807): the project's
+                documentation directory, opened in a new tab. Not a help
+                centre — the deployment serves no docs of its own. */}
+            <a
+              href={HELP_DOCS_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="user-menu-action user-menu-action--link"
+              onClick={() => setOpen(false)}
+            >
+              Help &amp; documentation
+            </a>
           </li>
           <li className="user-menu-item">
             <button

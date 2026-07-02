@@ -1,22 +1,27 @@
 // ============================================================================
-// components.a11y.test.tsx — Phase 8 Task 7 accessibility audit
+// components.a11y.test.tsx — component accessibility audit
 //
-// One axe-core pass per Phase-1-through-8 user-facing component. The matcher
-// `toHaveNoViolations` is registered globally by `setup.ts` (registered in
-// vite.config.ts's `test.setupFiles`); do NOT call `expect.extend(...)` in
-// this file — that would shadow the global registration and break the
-// "register once" invariant. See `setup.ts` head comment for the rationale.
+// One axe-core pass per user-facing component. Originally the Phase 8 Task 7
+// audit of the Phase-1-through-8 composer components; widened by the
+// 2026-07-02 UX-review regression net (elspeth-adf5e679e7) to cover the
+// tutorial surface, the auth surface, and the chrome/run components that
+// review touched. The matcher `toHaveNoViolations` is registered globally by
+// `setup.ts` (registered in vite.config.ts's `test.setupFiles`); do NOT call
+// `expect.extend(...)` in this file — that would shadow the global
+// registration and break the "register once" invariant. See `setup.ts` head
+// comment for the rationale.
 //
 // Coverage is anchored by the AUDITED_COMPONENTS array. The first test in
 // this file is a snapshot assertion that exits the build with a clear
-// failure if a future PR adds or removes a Phase-1-7 component without
+// failure if a future PR adds or removes an audited component without
 // updating the audit list — preventing silent erosion of the a11y safety
 // net.
 // ============================================================================
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { createRef, type ReactNode } from "react";
 
 import { axe } from "./axe-config";
 
@@ -53,32 +58,71 @@ const AUDITED_COMPONENTS = [
   "ModeSwitchButton",
   "PipelineGloss",
   "PipelineValidationSummary",
+  // 2026-07-02 UX-review regression net (elspeth-adf5e679e7): the tutorial
+  // surface, the acknowledgement cards it leans on, the auth surface, and
+  // the chrome/run components the review epic touched. Added centrally by
+  // the wave-3 a11y-net pass — component waves deliberately do not edit
+  // this list.
+  "AcknowledgementCard",
+  "AcknowledgementStack",
+  "ChatInput",
+  "CommandPalette",
+  "ConfirmDialog",
+  "GraphModal",
+  "GraphView",
+  "HelloWorldTutorial",
+  "LoginPage",
+  "ProgressView",
+  "RecoveryPanel",
+  "RunsHistoryDrawer",
+  "TutorialGuidedShell",
+  "TutorialTurn1Welcome",
+  "TutorialTurn4Run",
+  "TutorialTurn5AuditStory",
+  "TutorialTurn7Graduation",
 ] as const;
 
 const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
+  "AcknowledgementCard",
+  "AcknowledgementStack",
   "AppHeader",
   "AuditReadinessPanel",
+  "ChatInput",
+  "CommandPalette",
   "ComposerPreferencesPanel",
   "CompletionBar",
+  "ConfirmDialog",
   "DefaultModeChangedBanner",
   "ExplainDialog",
   "ExportYamlModal",
   "FilterChipStrip",
   "GraphMiniView",
+  "GraphModal",
+  "GraphView",
   "HeaderSessionSwitcher",
   "HeaderVersionSelector",
+  "HelloWorldTutorial",
   "InlineSourceCreatedTurn",
   "InlineSourceDisambiguationTurn",
   "InlineSourceFallbackPrompt",
+  "LoginPage",
   "ModeSwitchButton",
   "PipelineGloss",
   "PipelineValidationSummary",
   "PluginCard",
+  "ProgressView",
   "ReadinessRowDetail",
+  "RecoveryPanel",
+  "RunsHistoryDrawer",
   "SchemaFormTurn",
   "SideRail",
   "ShortcutsHelp",
   "TemplateCards",
+  "TutorialGuidedShell",
+  "TutorialTurn1Welcome",
+  "TutorialTurn4Run",
+  "TutorialTurn5AuditStory",
+  "TutorialTurn7Graduation",
   "UserMenu",
   "WireStageTurn",
 ];
@@ -106,17 +150,98 @@ vi.mock("@/components/inspector/YamlView", () => ({
   ),
 }));
 
-vi.mock("@/api/client", () => ({
-  fetchUserComposerPreferences: vi.fn(),
-  updateUserComposerPreferences: vi.fn(),
-  fetchSessions: vi.fn(),
-  createSession: vi.fn(),
-}));
+// Spy-style mock of the HTTP layer (same idiom as ChatPanel.test.tsx): the
+// actual module is preserved so exports the audited components merely import
+// stay real, while every endpoint an audited component CALLS during a test is
+// a vi.fn() the test seeds. jsdom has no backend, so an unseeded call would
+// otherwise hit a dead socket.
+vi.mock("@/api/client", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/api/client")>();
+  return {
+    ...actual,
+    fetchUserComposerPreferences: vi.fn(),
+    updateUserComposerPreferences: vi.fn(),
+    fetchSessions: vi.fn(),
+    createSession: vi.fn(),
+    // Auth surface (LoginPage).
+    fetchAuthConfig: vi.fn(),
+    login: vi.fn(),
+    register: vi.fn(),
+    fetchCurrentUser: vi.fn(),
+    // Tutorial surface (elspeth-adf5e679e7).
+    deleteTutorialOrphans: vi.fn(),
+    renameSession: vi.fn(),
+    sendTutorialAbandonBeacon: vi.fn(),
+    startGuidedSession: vi.fn(),
+    getTutorialSample: vi.fn(),
+    runTutorialPipeline: vi.fn(),
+    cancelTutorialRun: vi.fn(),
+    getRunAuditSummary: vi.fn(),
+    // Interpretation acknowledgements (AcknowledgementCard/Stack).
+    listInterpretationEvents: vi.fn(),
+    resolveInterpretation: vi.fn(),
+    optOutOfInterpretations: vi.fn(),
+    getInterpretationOptOutSummary: vi.fn(),
+  };
+});
 
 vi.mock("../../api/auditReadiness", () => ({
   fetchAuditReadiness: vi.fn(),
   fetchAuditReadinessExplain: vi.fn(),
   validateAuditReadinessSnapshot: vi.fn(),
+}));
+
+// GraphView (and GraphModal, which embeds it) render through @xyflow/react,
+// which needs real DOM measurement jsdom cannot provide. Stub the flow canvas
+// to deterministic DOM the same way GraphView's own unit tests do — the axe
+// pass then covers GraphView's real chrome (the keyboard-operable a11y list,
+// the role="img" diagram scope, the config panel) rather than third-party
+// canvas internals.
+vi.mock("@xyflow/react", () => ({
+  ReactFlowProvider: ({ children }: { children?: ReactNode }) => (
+    <div data-testid="react-flow-provider">{children}</div>
+  ),
+  ReactFlow: ({
+    nodes,
+    edges,
+    children,
+  }: {
+    nodes?: Array<{ id: string; data?: { label?: ReactNode } }>;
+    edges?: Array<{ id: string; label?: ReactNode }>;
+    children?: ReactNode;
+  }) => (
+    <div data-testid="react-flow">
+      {nodes?.map((n) => <div key={n.id}>{n.data?.label}</div>)}
+      {edges?.map((e) => <div key={e.id}>{e.label}</div>)}
+      {children}
+    </div>
+  ),
+  Background: () => <div data-testid="react-flow-background" />,
+  Controls: () => <div data-testid="react-flow-controls" />,
+  MiniMap: () => <div data-testid="minimap" />,
+}));
+vi.mock("@xyflow/react/dist/style.css", () => ({}));
+vi.mock("@dagrejs/dagre", () => ({
+  default: {
+    graphlib: {
+      Graph: class {
+        setDefaultEdgeLabel() {}
+        setGraph() {}
+        setNode() {}
+        setEdge() {}
+        node() {
+          return { x: 0, y: 0 };
+        }
+      },
+    },
+    layout() {},
+  },
+}));
+
+// ProgressView's data source — no live socket exists in jsdom. Only
+// ProgressView consumes this hook, so the file-wide mock is safe.
+vi.mock("@/hooks/useWebSocket", () => ({
+  useWebSocket: vi.fn(),
 }));
 
 // --- Imports (post-mock) ---------------------------------------------------
@@ -147,17 +272,45 @@ import { SchemaFormTurn } from "@/components/chat/guided/SchemaFormTurn";
 import { ModeSwitchButton } from "@/components/chat/guided/ModeSwitchButton";
 import { PipelineGloss } from "@/components/chat/guided/PipelineGloss";
 import { PipelineValidationSummary } from "@/components/chat/guided/PipelineValidationSummary";
+import { AcknowledgementCard } from "@/components/chat/AcknowledgementCard";
+import { AcknowledgementStack } from "@/components/chat/AcknowledgementStack";
+import { ChatInput } from "@/components/chat/ChatInput";
+import { LoginPage } from "@/components/auth/LoginPage";
+import { CommandPalette } from "@/components/common/CommandPalette";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
+import { ProgressView } from "@/components/execution/ProgressView";
+import { RunsHistoryDrawer } from "@/components/execution/RunsHistoryDrawer";
+import { GraphView } from "@/components/inspector/GraphView";
+import { GraphModal } from "@/components/sidebar/GraphModal";
+import { OPEN_GRAPH_MODAL_EVENT } from "@/lib/composer-events";
+import { RecoveryPanel } from "@/components/recovery/RecoveryPanel";
+import { HelloWorldTutorial } from "@/components/tutorial/HelloWorldTutorial";
+import { TutorialGuidedShell } from "@/components/tutorial/TutorialGuidedShell";
+import { TutorialTurn1Welcome } from "@/components/tutorial/TutorialTurn1Welcome";
+import { TutorialTurn4Run } from "@/components/tutorial/TutorialTurn4Run";
+import { TutorialTurn5AuditStory } from "@/components/tutorial/TutorialTurn5AuditStory";
+import { TutorialTurn7Graduation } from "@/components/tutorial/TutorialTurn7Graduation";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useExecutionStore } from "@/stores/executionStore";
+import { useAuthStore } from "@/stores/authStore";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useAuditReadinessStore, getInitialState as getAuditInitialState } from "@/stores/auditReadinessStore";
 import * as auditApi from "../../api/auditReadiness";
+import * as apiClient from "@/api/client";
 import { resetStore } from "@/test/store-helpers";
-import type { InlineSourceSummary } from "@/types/api";
-import type { PluginSummary } from "@/types/index";
+import type { InlineSourceSummary, ComposerRecoveryError } from "@/types/api";
+import type {
+  AuthConfig,
+  CompositionState,
+  PluginSummary,
+  Run,
+} from "@/types/index";
 import type { ReadinessRow, AuditReadinessSnapshot } from "@/types/api";
 import type { WireStageData, SchemaFormPayload } from "@/types/guided";
+import type { InterpretationEvent } from "@/types/interpretation";
 
 // --- Shared store reset ----------------------------------------------------
 
@@ -190,12 +343,89 @@ function resetAllStores() {
     validationResult: null,
   } as never);
   useAuditReadinessStore.setState(getAuditInitialState());
+  resetStore(useInterpretationEventsStore);
+  resetStore(useAuthStore);
+  // Simulate a completed auth boot (loadFromStorage resolved, no stored
+  // token) — same convention as LoginPage.test.tsx.
+  useAuthStore.setState({ isLoading: false });
 }
 
 beforeEach(() => {
   resetAllStores();
   vi.clearAllMocks();
+  localStorage.clear();
+  sessionStorage.clear();
 });
+
+// --- Shared fixtures ---------------------------------------------------------
+
+/**
+ * Fully-typed CompositionState (the store's own resetAllStores state is a
+ * minimal `as never` cast that GraphView's edge inference cannot walk).
+ * One source → one transform → one sink, wired through named connection
+ * points, so GraphView renders its accessible node list, the diagram scope,
+ * and at least one inferred edge.
+ */
+function makeFullCompositionState(): CompositionState {
+  return {
+    id: "state-a11y",
+    version: 1,
+    sources: {
+      pages: {
+        plugin: "web_scrape",
+        options: {},
+        on_success: "chain_in",
+      },
+    },
+    nodes: [
+      {
+        id: "summarise",
+        node_type: "transform",
+        plugin: "llm_transform",
+        input: "chain_in",
+        on_success: "results",
+        on_error: null,
+        options: {},
+      },
+    ],
+    edges: [],
+    outputs: [{ name: "results", plugin: "json", options: {} }],
+    metadata: { name: "A11y fixture pipeline", description: null },
+  };
+}
+
+/** Pending interpretation event for the acknowledgement surface. */
+function makeInterpretationEvent(
+  id: string,
+  overrides: Partial<InterpretationEvent> = {},
+): InterpretationEvent {
+  return {
+    id,
+    session_id: "sess-a11y",
+    composition_state_id: "state-a11y",
+    affected_node_id: "summarise",
+    tool_call_id: "tool-1",
+    user_term: "interesting",
+    kind: "vague_term",
+    llm_draft: "novel and relevant to the reader",
+    accepted_value: null,
+    choice: "pending",
+    created_at: "2026-07-01T00:00:00Z",
+    resolved_at: null,
+    actor: "system:composer",
+    interpretation_source: "user_approved",
+    model_identifier: "anthropic/claude-sonnet-4.6",
+    model_version: "20260518",
+    provider: "anthropic",
+    composer_skill_hash: "0".repeat(64),
+    arguments_hash: null,
+    hash_domain_version: null,
+    runtime_model_identifier_at_resolve: null,
+    runtime_model_version_at_resolve: null,
+    resolved_prompt_template_hash: null,
+    ...overrides,
+  };
+}
 
 // --- Per-component audits --------------------------------------------------
 
@@ -671,6 +901,389 @@ describe("PipelineValidationSummary", () => {
       },
     } as never);
     const { container } = render(<PipelineValidationSummary />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+// --- Tutorial surface (elspeth-adf5e679e7) -----------------------------------
+//
+// The tutorial is the surface being promoted to flagship; until this pass it
+// had ZERO automated a11y regression coverage. Each turn is audited in its
+// richest deterministic state; the top-level shell is audited on the welcome
+// step (progress nav + sr-only step announcement + welcome turn).
+
+describe("HelloWorldTutorial", () => {
+  it("has no axe violations on the welcome step (shell + progress nav)", async () => {
+    vi.mocked(apiClient.deleteTutorialOrphans).mockResolvedValue({
+      deleted_count: 0,
+    });
+    const { container } = render(<HelloWorldTutorial />);
+    // Guard against a vacuous pass: the shell + progress nav must be real.
+    screen.getByRole("group", { name: "Tutorial progress" });
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("TutorialTurn1Welcome", () => {
+  it("has no axe violations", async () => {
+    const { container } = render(
+      <TutorialTurn1Welcome onStart={() => {}} onSkip={() => {}} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("TutorialGuidedShell", () => {
+  it("has no axe violations while preparing the guided session", async () => {
+    // A pending start keeps the shell on its own chrome (kicker + sr-only
+    // status + sample-loading line) without mounting the embedded ChatPanel,
+    // whose guided internals are audited via their own components above.
+    vi.mocked(apiClient.startGuidedSession).mockReturnValue(
+      new Promise<never>(() => {}),
+    );
+    const { container } = render(
+      <TutorialGuidedShell sessionId="sess-a11y" onCompleted={() => {}} />,
+    );
+    screen.getByText(/Preparing the tutorial's sample pages/);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("TutorialTurn4Run", () => {
+  // The module-level run cache is keyed by sessionId — each test uses a
+  // distinct id so a cached promise never leaks across tests.
+  it("has no axe violations while the run is executing", async () => {
+    vi.mocked(apiClient.runTutorialPipeline).mockReturnValue(
+      new Promise<never>(() => {}),
+    );
+    const { container } = render(
+      <TutorialTurn4Run
+        sessionId="sess-a11y-run-pending"
+        onCompleted={() => {}}
+        onCancelled={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations on the results table with a discarded-rows notice", async () => {
+    vi.mocked(apiClient.runTutorialPipeline).mockResolvedValue({
+      run_id: "run-a11y",
+      output: {
+        source_data_hash: "a".repeat(64),
+        rows: [
+          {
+            url: "https://example.gov.au/page-1",
+            summary: "A one-line summary of the page.",
+            error: null,
+          },
+        ],
+        discarded_row_count: 1,
+      },
+    });
+    const { container } = render(
+      <TutorialTurn4Run
+        sessionId="sess-a11y-run-done"
+        onResult={() => {}}
+        onCompleted={() => {}}
+        onCancelled={() => {}}
+        onBack={() => {}}
+      />,
+    );
+    await screen.findByText(/rows returned/);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("TutorialTurn5AuditStory", () => {
+  it("has no axe violations with loaded audit evidence", async () => {
+    vi.mocked(apiClient.getRunAuditSummary).mockResolvedValue({
+      run_id: "run-a11y",
+      session_id: "sess-a11y",
+      llm_call_count: 3,
+      source_data_hash: "b".repeat(64),
+      started_at: "2026-07-01T00:00:00Z",
+      plugin_versions: { web_scrape: "1.0.0", llm_transform: "2.1.0" },
+      seeded_from_cache: false,
+      cache_key: null,
+    });
+    const { container } = render(
+      <TutorialTurn5AuditStory
+        sessionId="sess-a11y"
+        runId="run-a11y"
+        onContinue={() => {}}
+        onBack={() => {}}
+      />,
+    );
+    await screen.findByText("Source data hash");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("TutorialTurn7Graduation", () => {
+  it("has no axe violations (completed tutorial)", async () => {
+    const { container } = render(
+      <TutorialTurn7Graduation
+        sessionId="sess-a11y"
+        skipped={false}
+        cancelled={false}
+        onBack={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations (cancelled variant with the status note)", async () => {
+    const { container } = render(
+      <TutorialTurn7Graduation
+        sessionId="sess-a11y"
+        skipped={false}
+        cancelled
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+// --- Acknowledgement surface -------------------------------------------------
+
+describe("AcknowledgementCard", () => {
+  it("has no axe violations (vague_term with the amend affordance)", async () => {
+    const { container } = render(
+      <AcknowledgementCard
+        event={makeInterpretationEvent("evt-1")}
+        sessionId="sess-a11y"
+        stepLabel="Summarise"
+        showAmend
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations (llm_prompt_template with the scroll-gated draft)", async () => {
+    const { container } = render(
+      <AcknowledgementCard
+        event={makeInterpretationEvent("evt-2", {
+          kind: "llm_prompt_template",
+          llm_draft: "Summarise {{ body }} in one paragraph for {{ audience }}.",
+        })}
+        sessionId="sess-a11y"
+        stepLabel="Summarise"
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("AcknowledgementStack", () => {
+  it("has no axe violations with pending acknowledgements", async () => {
+    useSessionStore.setState({
+      compositionState: makeFullCompositionState(),
+    } as never);
+    useInterpretationEventsStore.setState({
+      pendingBySession: {
+        "sess-a11y": {
+          "evt-1": makeInterpretationEvent("evt-1"),
+          "evt-2": makeInterpretationEvent("evt-2", {
+            kind: "llm_model_choice",
+            llm_draft: "anthropic/claude-sonnet-4.6",
+          }),
+        },
+      },
+    });
+    const { container } = render(<AcknowledgementStack sessionId="sess-a11y" />);
+    // Guard against a vacuous pass (the stack renders nothing when no
+    // events are pending): both cards must be mounted.
+    expect(
+      screen.getAllByRole("button", { name: /Acknowledge/ }),
+    ).toHaveLength(2);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+// --- Auth surface --------------------------------------------------------------
+
+describe("LoginPage", () => {
+  function mockLocalAuthConfig(): void {
+    const config: AuthConfig = {
+      provider: "local",
+      registration_mode: "open",
+      oidc_issuer: null,
+      oidc_client_id: null,
+      authorization_endpoint: null,
+    };
+    vi.mocked(apiClient.fetchAuthConfig).mockResolvedValue(config);
+  }
+
+  it("has no axe violations on the sign-in view", async () => {
+    mockLocalAuthConfig();
+    const { container } = render(<LoginPage />);
+    await screen.findByLabelText("Username");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("has no axe violations on the registration view", async () => {
+    mockLocalAuthConfig();
+    const { container } = render(<LoginPage />);
+    await screen.findByLabelText("Username");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Create an account" }),
+    );
+    await screen.findByLabelText("Confirm password");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+// --- Chrome / run surfaces -----------------------------------------------------
+
+describe("ConfirmDialog", () => {
+  it("has no axe violations (danger variant with structured content)", async () => {
+    const { container } = render(
+      <ConfirmDialog
+        title="Discard this run?"
+        message="The run's partial output will be discarded."
+        confirmLabel="Discard"
+        cancelLabel="Keep"
+        variant="danger"
+        onConfirm={() => {}}
+        onCancel={() => {}}
+      >
+        <p>One output file will be removed.</p>
+      </ConfirmDialog>,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("CommandPalette", () => {
+  it("has no axe violations when open", async () => {
+    // jsdom does not implement Element.prototype.scrollIntoView (the
+    // palette scrolls the selected row into view on mount) — same stub as
+    // CommandPalette.test.tsx.
+    Element.prototype.scrollIntoView = vi.fn();
+    const { container } = render(<CommandPalette isOpen onClose={() => {}} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("ChatInput", () => {
+  it("has no axe violations with the composition affordances shown", async () => {
+    const inputRef = createRef<HTMLTextAreaElement>();
+    const { container } = render(
+      <ChatInput
+        onSend={() => {}}
+        disabled={false}
+        inputRef={inputRef}
+        onToggleBlobManager={() => {}}
+        onOpenSecrets={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("ProgressView", () => {
+  it("has no axe violations during a live run", async () => {
+    vi.mocked(useWebSocket).mockReturnValue({
+      activeRunId: "run-a11y",
+      wsDisconnected: false,
+      progress: {
+        source_rows_processed: 3,
+        tokens_succeeded: 2,
+        tokens_failed: 1,
+        tokens_quarantined: 0,
+        tokens_routed_success: 2,
+        tokens_routed_failure: 1,
+        cancel_requested: false,
+        accounting: null,
+        recent_errors: [],
+        status: "running",
+      },
+    } as never);
+    const { container } = render(<ProgressView />);
+    screen.getByText("Source Rows");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("RunsHistoryDrawer", () => {
+  it("has no axe violations on the run list", async () => {
+    const runs = [
+      { id: "run-1", status: "completed" },
+      { id: "run-2", status: "completed_with_failures" },
+      { id: "run-3", status: "running" },
+    ] as unknown as ReadonlyArray<Run>;
+    const { container } = render(
+      <RunsHistoryDrawer onClose={() => {}} runsOverride={runs} />,
+    );
+    // Guard against a vacuous pass: the glyph-carrying StatusBadge row
+    // must be listed.
+    screen.getByText("completed with failures");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("GraphView", () => {
+  it("has no axe violations (accessible node list + diagram scope)", async () => {
+    useSessionStore.setState({
+      compositionState: makeFullCompositionState(),
+      compositionProposals: [],
+    } as never);
+    const { container } = render(<GraphView />);
+    // Guard against the empty-state fallback masquerading as coverage: the
+    // role="img" diagram scope and the keyboard-operable node list must be
+    // real (source + transform + sink = 3 components).
+    screen.getByRole("img", { name: /Pipeline graph with 3 components/ });
+    screen.getByRole("list", {
+      name: /Pipeline components in source-to-sink order \(3\)/,
+    });
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("GraphModal", () => {
+  it("has no axe violations when open", async () => {
+    useSessionStore.setState({
+      compositionState: makeFullCompositionState(),
+      compositionProposals: [],
+    } as never);
+    const { container } = render(<GraphModal />);
+    // Modal only renders once the open event fires (the ExportYamlModal
+    // idiom above, with the dispatch act()-wrapped so the listener's
+    // setState commits before the assertion).
+    act(() => {
+      window.dispatchEvent(new CustomEvent(OPEN_GRAPH_MODAL_EVENT));
+    });
+    screen.getByRole("dialog", { name: "Pipeline graph" });
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("RecoveryPanel", () => {
+  it("has no axe violations", async () => {
+    const recoveryError: ComposerRecoveryError = {
+      status: 500,
+      detail: "Composer failed after a tool call",
+      error_type: "composer_plugin_crash",
+      partial_state: makeFullCompositionState(),
+      failed_turn: {
+        // null keeps RecoveryTranscript in its idle (no-fetch) state.
+        assistant_message_id: null,
+        tool_calls_attempted: 2,
+        tool_responses_persisted: 1,
+        transcript_url: null,
+      },
+    };
+    const { container } = render(
+      <RecoveryPanel
+        activeSessionId="sess-a11y"
+        currentState={makeFullCompositionState()}
+        recoveryError={recoveryError}
+        onApply={() => ({ applied: true, needsConfirmation: false })}
+        onDiscard={() => {}}
+      />,
+    );
+    screen.getByRole("button", { name: /Discard recovery/ });
     expect(await axe(container)).toHaveNoViolations();
   });
 });

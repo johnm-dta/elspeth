@@ -78,6 +78,17 @@ export function RecoveryPanel({
         className="recovery-panel"
         tabIndex={-1}
         onKeyDown={(event) => {
+          // Escape dismisses via Discard — the app-wide dismissal model
+          // (every other dialog/drawer is focus-trapped + Escape); this
+          // panel was the outlier (elspeth-83eb51334f). Discard is the
+          // panel's safe exit: it drops the recovery OFFER, not composed
+          // state. Focus is trapped inside the dialog, so a dialog-level
+          // handler sees every Escape press.
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onDiscard();
+            return;
+          }
           if (event.key === "Enter" && event.target === event.currentTarget) {
             event.preventDefault();
           }

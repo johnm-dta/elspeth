@@ -15,7 +15,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: 2px 8px;
+  padding: var(--space-2xs) var(--space-sm);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
@@ -74,7 +74,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  padding: 2px 8px;
+  padding: var(--space-2xs) var(--space-sm);
   border-radius: var(--radius-sm);
   font-size: var(--font-size-xs);
   font-weight: var(--font-weight-medium);
@@ -107,46 +107,10 @@
   color: var(--color-status-cancelled);
 }
 
-/* Cancel-pending badge — same colour family as cancelled but distinguished
-   by a pulsing glyph that signals "still running, stop requested" rather
-   than "done, was cancelled".  Without this, the only visual distinction
-   between the two states is a 3-character text suffix ("cancelling" vs
-   "cancelled") which is easy to miss in the uppercase 13px badge. */
-.status-badge-cancelling {
-  background-color: rgba(227, 132, 68, 0.15);
-  color: var(--color-status-cancelled);
-}
-
-.status-badge-icon {
-  display: inline-block;
-  line-height: 1;
-}
-
-.status-badge-icon--cancelling {
-  display: inline-block;
-  animation: pulse-dot 1.2s ease-in-out infinite;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .status-badge-icon--cancelling {
-    animation: none;
-    opacity: 0.7;
-  }
-}
-
-/* Phase 2.2 (elspeth-0de989c56d): widened taxonomy.
-   - completed_with_failures: reuses --color-status-completed (teal) so the
-     run is visually grouped with successful runs, but the warning glyph
-     ⚠ signals "completed, with caveats."  No new color token needed.
-   - empty: a distinct neutral grey (separate from the teal-grey of pending)
-     paired with the empty-set glyph ∅ so an operator can tell at a glance
-     that the run produced zero rows.  Adds one new --color-status-empty
-     custom property to the root theme. */
-.status-badge-completed-with-failures {
-  background-color: rgba(20, 176, 174, 0.15);
-  color: var(--color-status-completed);
-}
-
+/* Phase 2.2 (elspeth-0de989c56d): empty is a distinct neutral grey (separate
+   from the teal-grey of pending) paired with the empty-set glyph ∅ so an
+   operator can tell at a glance that the run produced zero rows. Adds one
+   new --color-status-empty custom property to the root theme. */
 .status-badge-empty {
   background-color: rgba(128, 128, 128, 0.15);
   color: var(--color-status-empty);
@@ -318,15 +282,17 @@
 
 
 /* ---------------------------------------------------------------------------
-   Form inputs (ui/Input, ui/Textarea primitives)
+   Form inputs (ui/Input primitive; .textarea/.select kept for parity)
 
    Mirrors the canonical Inputs block in website/tokens/primitives.css. The
    design-system merge (d56197fde) added the components/ui primitive library
    but its CSS lived only in the standalone website/ tree, which is not in the
    app's Vite bundle — so .input / .field-label / .field-hint / .input-mono
    were undefined here and the migrated LoginPage exemplar rendered as default
-   browser inputs. Ported as one cohesive block (input/textarea/select) so the
-   sibling ui/Textarea primitive does not re-open the identical gap.
+   browser inputs. Ported as one cohesive block (input/textarea/select).
+   The ui/Textarea component was retired unused (elspeth-e1c5ad0b53) but the
+   .textarea rule stays: it is gated by inputPrimitives/colorContrast style
+   tests and mirrors the website token sheet as one block.
    --------------------------------------------------------------------------- */
 .input,
 .textarea,
@@ -371,30 +337,8 @@
 }
 .field-hint {
   margin-top: var(--space-xs);
-  font-size: var(--font-size-2xs);
+  font-size: var(--font-size-xs);
   color: var(--color-text-muted);
-}
-
-
-/* ---------------------------------------------------------------------------
-   Card surface (ui/Card, ui/CardHeader primitives)
-
-   Completes the design-system port begun by the Form inputs block above: the
-   components/ui Card primitive emits .card / .card-paper, which lived only in
-   the standalone website/ tree and were undefined in the app bundle. Mirrors
-   website/tokens/primitives.css so a <Card> renders as a real surface, not a
-   bare <div>.
-   --------------------------------------------------------------------------- */
-.card {
-  background-color: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  padding: var(--space-lg);
-}
-
-.card-paper {
-  background-color: var(--color-surface-paper);
-  border-color: var(--color-border);
 }
 
 
@@ -490,7 +434,7 @@
   background-color: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-modal);
   padding: var(--space-xl);
 }
 
@@ -659,7 +603,7 @@
 .validation-banner-header {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-1-5);
 }
 
 .validation-banner-summary {
@@ -668,17 +612,17 @@
 
 .validation-banner-checks {
   margin: 0;
-  padding: 0 0 0 22px;
+  padding: 0 0 0 var(--space-xl);
   font-size: var(--font-size-xs);
   color: var(--color-success);
 }
 
 .validation-banner-check-item {
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2xs);
 }
 
 .validation-banner-warnings-section {
-  margin-top: 6px;
+  margin-top: var(--space-1-5);
 }
 
 .validation-banner-warnings-title {
@@ -688,14 +632,14 @@
 }
 
 .validation-banner-warnings-list {
-  margin: 2px 0 0;
-  padding: 0 0 0 22px;
+  margin: var(--space-2xs) 0 0;
+  padding: 0 0 0 var(--space-xl);
   font-size: var(--font-size-xs);
   color: var(--color-warning);
 }
 
 .validation-banner-warn-item {
-  margin-bottom: 2px;
+  margin-bottom: var(--space-2xs);
 }
 
 .validation-banner-fail-title {
@@ -715,7 +659,7 @@
 .validation-banner-suggestion {
   color: var(--color-text-muted);
   font-size: var(--font-size-xs);
-  margin-top: 2px;
+  margin-top: var(--space-2xs);
 }
 
 .validation-banner-component-btn {

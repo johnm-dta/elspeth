@@ -278,7 +278,7 @@ def test_delete_orphans_soft_renames_only_pending_tutorial_sessions(tmp_path: Pa
     orphan_id = uuid4()
     keep_id = uuid4()
     with app.state.session_engine.begin() as conn:
-        _make_session(conn, session_id=str(orphan_id), user_id="alice", title="hello-world (pending)")
+        _make_session(conn, session_id=str(orphan_id), user_id="alice", title="First-run tutorial (in progress)")
         _make_session(conn, session_id=str(keep_id), user_id="alice", title="ordinary session")
     client = TestClient(app)
 
@@ -288,7 +288,7 @@ def test_delete_orphans_soft_renames_only_pending_tutorial_sessions(tmp_path: Pa
     assert response.json() == {"deleted_count": 1}
     renamed = asyncio.run(app.state.session_service.get_session(orphan_id))
     kept = asyncio.run(app.state.session_service.get_session(keep_id))
-    assert renamed.title.startswith("abandoned-hello-world (pending)-")
+    assert renamed.title.startswith("First-run tutorial (abandoned ")
     assert kept.title == "ordinary session"
 
 
@@ -302,8 +302,8 @@ def test_delete_orphans_never_touches_graduated_tutorial_session(tmp_path: Path)
     pending_id = uuid4()
     with app.state.session_engine.begin() as conn:
         # Graduated title mirrors HELLO_WORLD_SESSION_TITLE in frontend copy.ts.
-        _make_session(conn, session_id=str(graduated_id), user_id="alice", title="hello-world (synthetic project briefs)")
-        _make_session(conn, session_id=str(pending_id), user_id="alice", title="hello-world (pending)")
+        _make_session(conn, session_id=str(graduated_id), user_id="alice", title="First-run tutorial")
+        _make_session(conn, session_id=str(pending_id), user_id="alice", title="First-run tutorial (in progress)")
     # tutorial_completed_at is None for alice (no preferences row) — the
     # graduated session must be protected by its title, not by the flag.
     client = TestClient(app)
@@ -314,8 +314,8 @@ def test_delete_orphans_never_touches_graduated_tutorial_session(tmp_path: Path)
     assert response.json() == {"deleted_count": 1}
     graduated = asyncio.run(app.state.session_service.get_session(graduated_id))
     pending = asyncio.run(app.state.session_service.get_session(pending_id))
-    assert graduated.title == "hello-world (synthetic project briefs)"
-    assert pending.title.startswith("abandoned-hello-world (pending)-")
+    assert graduated.title == "First-run tutorial"
+    assert pending.title.startswith("First-run tutorial (abandoned ")
 
 
 def test_delete_orphans_never_touches_the_resumable_tutorial_session(tmp_path: Path) -> None:
@@ -329,8 +329,8 @@ def test_delete_orphans_never_touches_the_resumable_tutorial_session(tmp_path: P
     resumable_id = uuid4()
     orphan_id = uuid4()
     with app.state.session_engine.begin() as conn:
-        _make_session(conn, session_id=str(resumable_id), user_id="alice", title="hello-world (pending)")
-        _make_session(conn, session_id=str(orphan_id), user_id="alice", title="hello-world (pending)")
+        _make_session(conn, session_id=str(resumable_id), user_id="alice", title="First-run tutorial (in progress)")
+        _make_session(conn, session_id=str(orphan_id), user_id="alice", title="First-run tutorial (in progress)")
     asyncio.run(
         app.state.preferences_service.update_composer_preferences(
             "alice",
@@ -348,5 +348,5 @@ def test_delete_orphans_never_touches_the_resumable_tutorial_session(tmp_path: P
     assert response.json() == {"deleted_count": 1}
     resumable = asyncio.run(app.state.session_service.get_session(resumable_id))
     orphan = asyncio.run(app.state.session_service.get_session(orphan_id))
-    assert resumable.title == "hello-world (pending)"
-    assert orphan.title.startswith("abandoned-hello-world (pending)-")
+    assert resumable.title == "First-run tutorial (in progress)"
+    assert orphan.title.startswith("First-run tutorial (abandoned ")

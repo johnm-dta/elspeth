@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from elspeth.web.sessions.titles import is_default_session_title
+
 from ._helpers import (
     _COMPOSER_REQUESTS_INFLIGHT,
     AUDIT_GRADE_VIEW_QUERY_ARG_ALLOWLIST,
@@ -219,10 +221,11 @@ def register_message_routes(router: APIRouter) -> None:
                 # 3b. First-message auto-titling.
                 #
                 # When the just-persisted user message is the only message
-                # in the session AND the title is still the create-time
-                # default ("New session"), spawn a background task that
-                # asks the composer model for a 3-6 word session title
-                # and writes it via update_session_title. The task is
+                # in the session AND the title is still a mint-time default
+                # ("Session — 2 Jul 2026" or a legacy "New session" /
+                # "Untitled" — see sessions/titles.py), spawn a background
+                # task that asks the composer model for a 3-6 word session
+                # title and writes it via update_session_title. The task is
                 # awaited (with timeout) in the finally block below so
                 # the title is in the DB by the time the route returns —
                 # the frontend's post-send loadSessions() picks it up.
@@ -231,7 +234,7 @@ def register_message_routes(router: APIRouter) -> None:
                 # contract: a user who manually rename-then-sends still
                 # gets re-titled. Tighten to a separate auto_titled_at
                 # column if this becomes annoying.
-                if len(records) == 1 and session.title == "New session":
+                if len(records) == 1 and is_default_session_title(session.title):
                     auto_title_task = asyncio.create_task(
                         maybe_auto_title_session(
                             service=service,

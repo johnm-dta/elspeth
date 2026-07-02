@@ -26,7 +26,7 @@
   color: var(--color-text-muted);
   font-size: var(--font-size-xl);
   line-height: 1;
-  padding: 2px var(--space-xs);
+  padding: var(--space-2xs) var(--space-xs);
   border-radius: var(--radius-sm);
   min-width: 44px;
   min-height: var(--size-control);
@@ -105,7 +105,7 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-2xs);
 }
 
 .secrets-list-name {
@@ -127,7 +127,7 @@
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  padding: 1px var(--space-xs);
+  padding: var(--space-2xs) var(--space-xs);
   border-radius: var(--radius-sm);
   margin-left: var(--space-xs);
 }
@@ -138,7 +138,7 @@
   cursor: pointer;
   color: var(--color-error);
   font-size: var(--font-size-base);
-  padding: 2px var(--space-xs);
+  padding: var(--space-2xs) var(--space-xs);
   line-height: 1;
   border-radius: var(--radius-sm);
   flex-shrink: 0;

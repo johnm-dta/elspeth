@@ -205,6 +205,26 @@ describe("AuditReadinessPanel", () => {
     expect(screen.getByText("Retention")).toBeInTheDocument();
   });
 
+  it("names the panel 'Audit' with a visible heading in collapsed AND expanded states (elspeth-4f69b267dd)", async () => {
+    // The graduation card directs users to "the Audit panel" — the destination
+    // must exist by that name in every rendered state, not only when expanded.
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(allGreenSnapshot(1), { signal }),
+    );
+    const user = userEvent.setup();
+    render(<AuditReadinessPanel />);
+    // Collapsed (all-green) state: heading present above the summary button.
+    await screen.findByRole("button", { name: /Audit ready/i });
+    expect(
+      screen.getByRole("heading", { name: "Audit" }),
+    ).toBeInTheDocument();
+    // Expanded state: same visible name.
+    await user.click(screen.getByRole("button", { name: /Audit ready/i }));
+    expect(
+      screen.getByRole("heading", { name: "Audit" }),
+    ).toBeInTheDocument();
+  });
+
   it("shows all rows by default when any row has warning or error status", async () => {
     vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
       (_sid, signal) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),

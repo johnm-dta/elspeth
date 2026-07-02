@@ -245,6 +245,10 @@ describe("GraphView", () => {
     expect(
       within(panel).getByRole("heading", { name: /colour_lookup config/i }),
     ).toBeInTheDocument();
+    // elspeth-e1c5ad0b53: the panel's type chip is the ui/TypeBadge primitive
+    // composing the shared .type-badge-* token classes.
+    const typeChip = within(panel).getByText("transform");
+    expect(typeChip).toHaveClass("type-badge", "type-badge-transform");
     expect(within(panel).getByText("llm")).toBeInTheDocument();
     expect(within(panel).getByText("prompt")).toBeInTheDocument();
     expect(within(panel).getByText("Find colours")).toBeInTheDocument();

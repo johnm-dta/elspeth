@@ -202,6 +202,78 @@ describe("sessionStore", () => {
       expect(state.compositionState).toBeNull();
       expect(state.isComposing).toBe(false);
       expect(state.error).toBeNull();
+      // Loaded-ness flags: an unfetched list must be distinguishable from a
+      // genuinely empty account / pipeline (auto-resume, empty landing, and
+      // the #/{id}/yaml gate all depend on this).
+      expect(state.sessionsLoaded).toBe(false);
+      expect(state.compositionStateLoaded).toBe(false);
+    });
+  });
+
+  describe("loaded-ness flags", () => {
+    it("loadSessions marks sessionsLoaded on success", async () => {
+      const apiMod = await import("@/api/client");
+      (apiMod.fetchSessions as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      await useSessionStore.getState().loadSessions();
+
+      expect(useSessionStore.getState().sessionsLoaded).toBe(true);
+    });
+
+    it("loadSessions leaves sessionsLoaded false on failure", async () => {
+      const apiMod = await import("@/api/client");
+      (apiMod.fetchSessions as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error("network"),
+      );
+
+      await useSessionStore.getState().loadSessions();
+
+      expect(useSessionStore.getState().sessionsLoaded).toBe(false);
+      expect(useSessionStore.getState().error).toMatch(/failed to load sessions/i);
+    });
+
+    it("selectSession clears compositionStateLoaded while fetching, sets it once settled", async () => {
+      const apiMod = await import("@/api/client");
+      let resolveState!: (value: null) => void;
+      (apiMod.fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      (apiMod.fetchCompositionState as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise((resolve) => {
+          resolveState = resolve;
+        }),
+      );
+      (
+        apiMod.fetchCompositionProposals as ReturnType<typeof vi.fn>
+      ).mockResolvedValue([]);
+      (
+        apiMod.fetchComposerPreferences as ReturnType<typeof vi.fn>
+      ).mockResolvedValue(null);
+      useSessionStore.setState({ compositionStateLoaded: true } as never);
+
+      const selecting = useSessionStore.getState().selectSession("sess-1");
+      expect(useSessionStore.getState().compositionStateLoaded).toBe(false);
+
+      resolveState(null);
+      await selecting;
+
+      // Loaded-and-empty is a KNOWN state, distinct from still-fetching.
+      expect(useSessionStore.getState().compositionStateLoaded).toBe(true);
+      expect(useSessionStore.getState().compositionState).toBeNull();
+    });
+
+    it("createSession marks the fresh session's composition as known-empty", async () => {
+      const apiMod = await import("@/api/client");
+      (apiMod.createSession as ReturnType<typeof vi.fn>).mockResolvedValue({
+        id: "new-1",
+        title: "Session — 2 Jul 2026",
+        created_at: "2026-07-02T00:00:00Z",
+        updated_at: "2026-07-02T00:00:00Z",
+      });
+
+      await useSessionStore.getState().createSession();
+
+      expect(useSessionStore.getState().activeSessionId).toBe("new-1");
+      expect(useSessionStore.getState().compositionStateLoaded).toBe(true);
+      expect(useSessionStore.getState().compositionState).toBeNull();
     });
   });
 

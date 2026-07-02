@@ -244,9 +244,12 @@ export function ChatInput({
   const defaultPlaceholder = isEmptyState
     ? "Describe your pipeline, paste a URL, or type a few rows of data to start..."
     : "Describe the pipeline you want to build...";
+  // Directionally neutral (elspeth-eba8820005): the review card renders in a
+  // different column in the guided workspace, so "above" contradicts the
+  // layout at some breakpoints — name the card, not a direction.
   const interpretationCuePlaceholder =
     pendingInterpretationUserTerm !== null
-      ? `Reviewing your interpretation of "${pendingInterpretationUserTerm}" above — pick Use mine or Change it to continue.`
+      ? `Reviewing your interpretation of "${pendingInterpretationUserTerm}" — pick Use mine or Change it on the review card to continue.`
       : null;
   const effectivePlaceholder =
     placeholder ?? interpretationCuePlaceholder ?? defaultPlaceholder;

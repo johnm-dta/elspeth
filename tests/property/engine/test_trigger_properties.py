@@ -490,6 +490,11 @@ class TestConditionFireTimeSamplingProperties:
 
         true_check_time = threshold + past_delay
         clock.advance(true_check_time - false_check_time)
+        # Float summation of advances can land the observed age a few ULPs
+        # below the threshold when past_delay≈0 — discard exact-boundary
+        # cases; the property under test is fire-time backdating, not
+        # crossing detection.
+        assume(evaluator.batch_age_seconds >= threshold)
         assert evaluator.should_trigger() is True
 
         offset = evaluator.get_condition_fire_offset()

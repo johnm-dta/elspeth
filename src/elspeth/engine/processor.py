@@ -111,6 +111,7 @@ from elspeth.engine.executors import (
 )
 from elspeth.engine.executors.can_drop_rows import verify_zero_emission_declaration_path
 from elspeth.engine.executors.declaration_dispatch import run_batch_flush_checks, run_boundary_checks
+from elspeth.engine.executors.transform import record_transform_error_with_routing
 from elspeth.engine.retry import RetryManager
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.tokens import TokenManager
@@ -2224,33 +2225,23 @@ class RowProcessor:
             )
 
         error_details: TransformErrorReason = {"reason": reason, "error": str(exc)}
-        ctx.record_transform_error(
-            token_id=token.token_id,
-            transform_id=transform.node_id,
+        # Shared error-audit routine (elspeth-aeb0a8f756): identical
+        # transform_error + DIVERT routing_event recording as the executor's
+        # error-result branch. Here the guard already auto-failed the state on
+        # exception exit, so recording happens after completion by design —
+        # the helper is sequencing-agnostic. ctx.state_id was set by
+        # TransformExecutor.execute_transform before the exception propagated.
+        record_transform_error_with_routing(
+            ctx=ctx,
+            execution=self._execution,
+            error_edge_ids=self._error_edge_ids,
+            state_id=ctx.state_id,
+            token=token,
+            transform=transform,
             row=token.row_data,
             error_details=error_details,
-            destination=on_error,
+            on_error=on_error,
         )
-
-        # Record DIVERT routing_event using ctx.state_id (set by
-        # TransformExecutor.execute_transform before the exception propagated).
-        if on_error != "discard":
-            try:
-                error_edge_id = self._error_edge_ids[NodeID(transform.node_id)]
-            except KeyError as key_err:
-                raise OrchestrationInvariantError(
-                    f"Transform '{transform.node_id}' has on_error={on_error!r} but no DIVERT edge registered."
-                ) from key_err
-            if ctx.state_id is None:
-                raise OrchestrationInvariantError(
-                    f"ctx.state_id must be set by TransformExecutor before exception propagated (transform={transform.node_id})"
-                )
-            self._execution.record_routing_event(
-                state_id=ctx.state_id,
-                edge_id=error_edge_id,
-                mode=RoutingMode.DIVERT,
-                reason=error_details,
-            )
 
         return (
             TransformResult.error(error_details, retryable=retryable),

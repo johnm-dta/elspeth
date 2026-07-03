@@ -5048,6 +5048,79 @@ class TestNodeStateGuard:
 # =============================================================================
 
 
+class TestRecordTransformErrorWithRouting:
+    """Shared transform-error audit helper (elspeth-aeb0a8f756).
+
+    Both the executor's error-result branch and the processor's
+    retryable-exception conversion route through this one helper, so audit
+    drift between the two paths can only come from their arguments. The one
+    argument divergence — the executor passes a plain dict row, the
+    processor a PipelineRow — is pinned canonically identical here.
+    """
+
+    def _call(
+        self,
+        *,
+        on_error: str,
+        state_id: str | None = "state-1",
+        row: object | None = None,
+    ) -> tuple[list[dict[str, object]], MagicMock]:
+        from elspeth.engine.executors.transform import record_transform_error_with_routing
+
+        factory = _make_factory()
+        transform = _make_transform(on_error=on_error)
+        token = _make_token()
+        ctx = make_context()
+        recorded: list[dict[str, object]] = []
+        ctx.record_transform_error = lambda **kwargs: recorded.append(kwargs)  # type: ignore[method-assign]
+
+        record_transform_error_with_routing(
+            ctx=ctx,
+            execution=factory.execution,
+            error_edge_ids={NodeID("node_1"): "edge-err-1"},
+            state_id=state_id,
+            token=token,
+            transform=transform,
+            row=row if row is not None else {"field": "value"},
+            error_details={"reason": "network_error", "error": "boom"},
+            on_error=on_error,
+        )
+        return recorded, factory.execution
+
+    def test_dict_and_pipeline_row_rows_canonicalize_identically(self) -> None:
+        """The executor passes a dict, the processor a PipelineRow — the
+        persisted row_hash must be identical (canonicalization normalizes
+        PipelineRow via .to_dict())."""
+        from elspeth.contracts.schema_contract import PipelineRow, SchemaContract
+        from elspeth.core.canonical import stable_hash
+
+        data = {"field": "value", "n": 42}
+        contract = SchemaContract(mode="OBSERVED", fields=(), locked=False)
+        assert stable_hash(data) == stable_hash(PipelineRow(dict(data), contract))
+
+    def test_discard_records_error_but_skips_routing_event(self) -> None:
+        recorded, execution = self._call(on_error="discard", state_id=None)
+
+        assert len(recorded) == 1
+        assert recorded[0]["destination"] == "discard"
+        execution.record_routing_event.assert_not_called()
+
+    def test_divert_records_routing_event_with_same_error_details(self) -> None:
+        recorded, execution = self._call(on_error="error_sink")
+
+        assert len(recorded) == 1
+        execution.record_routing_event.assert_called_once()
+        kwargs = execution.record_routing_event.call_args[1]
+        assert kwargs["state_id"] == "state-1"
+        assert kwargs["edge_id"] == "edge-err-1"
+        assert kwargs["mode"] == RoutingMode.DIVERT
+        assert kwargs["reason"] == recorded[0]["error_details"]
+
+    def test_divert_without_state_id_raises_invariant(self) -> None:
+        with pytest.raises(OrchestrationInvariantError, match="state_id is required"):
+            self._call(on_error="error_sink", state_id=None)
+
+
 class TestTransformExecutorTerminality:
     """Regression tests for B1: TransformExecutor post-processing failures.
 

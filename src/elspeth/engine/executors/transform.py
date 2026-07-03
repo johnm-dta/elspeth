@@ -61,7 +61,7 @@ def record_transform_error_with_routing(
     ctx: PluginContext,
     execution: ExecutionRepository,
     error_edge_ids: dict[NodeID, str],
-    state_id: str,
+    state_id: str | None,
     token: TokenInfo,
     transform: TransformProtocol,
     row: "dict[str, Any] | PipelineRow",
@@ -96,6 +96,13 @@ def record_transform_error_with_routing(
     # Record DIVERT routing_event for audit trail (AUD-002), co-located with
     # the transform_error record. 'discard' has no destination edge.
     if on_error != "discard":
+        if state_id is None:
+            # The executor passes guard.state_id (never None); the processor
+            # passes ctx.state_id, set by TransformExecutor before the
+            # exception propagated — a missing id here is an invariant bug.
+            raise OrchestrationInvariantError(
+                f"state_id is required to record the DIVERT routing_event for transform '{node_id}' (on_error={on_error!r})"
+            )
         try:
             error_edge_id = error_edge_ids[NodeID(node_id)]
         except KeyError as exc:

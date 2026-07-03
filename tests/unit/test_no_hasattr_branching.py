@@ -26,7 +26,7 @@ tests/unit/core/landscape/test_query_methods.py:69
 tests/unit/core/security/test_config_secrets.py:517
 tests/unit/core/security/test_config_secrets.py:552
 tests/unit/core/security/test_config_secrets.py:583
-tests/unit/core/test_config_alignment.py:1012
+tests/unit/core/test_config_alignment.py:1014
 tests/unit/core/test_payload_store.py:16
 tests/unit/core/test_payload_store.py:17
 tests/unit/core/test_payload_store.py:18

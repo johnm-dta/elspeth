@@ -36,6 +36,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _render_exception_message(exc_type: type[BaseException], exc_val: BaseException | None) -> str:
+    """Render a guaranteed non-empty message for the auto-fail audit record.
+
+    ``ExecutionError`` rejects empty exception strings, and a hostile
+    ``__str__`` can raise — either would abort the terminal FAILED write and
+    leave the node state permanently OPEN (elspeth-d67453c22f). Audit
+    terminality outranks message fidelity: fall back to the exception type
+    name (guaranteed non-empty) when the message is empty/whitespace or
+    unrenderable. No scrubbing — ``ExecutionError.exception`` is a Tier-2
+    audit DTO that records the real error verbatim.
+    """
+    if exc_val is None:
+        return exc_type.__name__
+    try:
+        message = str(exc_val)
+    except BaseException:
+        # A raising __str__ must not abort terminality.
+        return exc_type.__name__
+    if not message.strip():
+        return exc_type.__name__
+    return message
+
+
 class NodeStateGuard:
     """Context manager that guarantees a node state reaches terminal status.
 
@@ -171,8 +194,9 @@ class NodeStateGuard:
         # was the reason we did not use a structural Protocol here).
         context, evidence_failure = self._extract_audit_evidence_context(exc_val)
 
+        exc_message = _render_exception_message(exc_type, exc_val)
         exc_error = ExecutionError(
-            exception=str(exc_val),
+            exception=exc_message,
             exception_type=exc_type.__name__,
             phase="executor_post_process",
             context=context,
@@ -189,7 +213,7 @@ class NodeStateGuard:
             self._terminal_persisted = True
             raise AuditIntegrityError(
                 f"FAILED state for {self.state_id} was persisted while handling "
-                f"{exc_type.__name__}: {exc_val}, but it became unreadable immediately "
+                f"{exc_type.__name__}: {exc_message}, but it became unreadable immediately "
                 f"after completion (Tier 1 violation). Recorder error: "
                 f"{type(db_err).__name__}: {db_err}"
             ) from db_err
@@ -198,14 +222,14 @@ class NodeStateGuard:
             # the original exception. Raise AuditIntegrityError with both contexts.
             raise AuditIntegrityError(
                 f"Cannot record FAILED for state {self.state_id} while handling "
-                f"{exc_type.__name__}: {exc_val} — audit trail has permanent OPEN state "
+                f"{exc_type.__name__}: {exc_message} — audit trail has permanent OPEN state "
                 f"(Tier 1 violation). DB error: {type(db_err).__name__}: {db_err}"
             ) from db_err
 
         if evidence_failure is not None:
             raise AuditIntegrityError(
                 f"Recorded FAILED for state {self.state_id} while handling "
-                f"{exc_type.__name__}: {exc_val}, but audit evidence serialization failed "
+                f"{exc_type.__name__}: {exc_message}, but audit evidence serialization failed "
                 f"and structured context was dropped to preserve terminality."
             ) from evidence_failure
 

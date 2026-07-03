@@ -4441,6 +4441,85 @@ class TestNodeStateGuard:
         assert kwargs["error"].phase == "executor_post_process"
         assert kwargs["duration_ms"] >= 0
 
+    def test_empty_exception_message_still_records_failed(self) -> None:
+        """A bare `raise ValueError()` must not abort terminal persistence.
+
+        Regression (elspeth-d67453c22f): ExecutionError rejects empty
+        exception strings, and the auto-fail path constructed it from raw
+        str(exc_val) BEFORE the complete_node_state write — a messageless
+        exception left the node state permanently OPEN.
+        """
+        from elspeth.engine.executors import NodeStateGuard
+
+        factory = _make_factory()
+        guard = NodeStateGuard(
+            factory.execution,
+            token_id="tok_1",
+            node_id="node_1",
+            run_id="run_1",
+            step_index=1,
+            input_data={"v": 1},
+        )
+        with pytest.raises(ValueError), guard:
+            raise ValueError()
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].exception == "ValueError"
+        assert kwargs["error"].exception_type == "ValueError"
+
+    def test_whitespace_only_exception_message_still_records_failed(self) -> None:
+        """Whitespace-only messages fall back to the exception type name."""
+        from elspeth.engine.executors import NodeStateGuard
+
+        factory = _make_factory()
+        guard = NodeStateGuard(
+            factory.execution,
+            token_id="tok_1",
+            node_id="node_1",
+            run_id="run_1",
+            step_index=1,
+            input_data={"v": 1},
+        )
+        with pytest.raises(RuntimeError), guard:
+            raise RuntimeError("   ")
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].exception == "RuntimeError"
+
+    def test_raising_dunder_str_still_records_failed(self) -> None:
+        """An exception whose __str__ raises must not break audit terminality.
+
+        The original exception re-raises; the audit record falls back to the
+        exception type name for its message.
+        """
+        from elspeth.engine.executors import NodeStateGuard
+
+        class _HostileStr(RuntimeError):
+            def __str__(self) -> str:
+                raise RuntimeError("__str__ exploded")
+
+        factory = _make_factory()
+        guard = NodeStateGuard(
+            factory.execution,
+            token_id="tok_1",
+            node_id="node_1",
+            run_id="run_1",
+            step_index=1,
+            input_data={"v": 1},
+        )
+        with pytest.raises(_HostileStr), guard:
+            raise _HostileStr("unrenderable")
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].exception == "_HostileStr"
+        assert kwargs["error"].exception_type == "_HostileStr"
+
     def test_incomplete_audit_evidence_instantiation_inside_guard_records_failed(self) -> None:
         """Construction-time abstract failures still preserve the guard's terminal-state invariant."""
         from elspeth.contracts.audit_evidence import AuditEvidenceBase

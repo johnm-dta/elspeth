@@ -4,21 +4,7 @@
 // operator needs a visible recap of choices made so far, while low-level
 // emitter/type/hash details stay out of the default workflow surface.
 import type { GuidedStep, TurnRecord } from "@/types/guided";
-
-// ── Display mappings ─────────────────────────────────────────────────────────
-
-/**
- * Human-readable labels for each GuidedStep enum value.
- * CLOSED LIST — mirrors GuidedStep in types/guided.ts:28-32.
- * Update here whenever protocol.py adds a new step.
- */
-const STEP_LABELS: Record<GuidedStep, string> = {
-  step_1_source: "Source",
-  step_2_sink: "Output",
-  step_2_5_recipe_match: "Recipe",
-  step_3_transforms: "Transforms",
-  step_4_wire: "Wire",
-};
+import { GUIDED_STEP_LABELS } from "./stepLabels";
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -78,7 +64,7 @@ export function GuidedHistory({ history, currentStep }: Props): React.ReactEleme
         {rows.map((turn) => (
           <li key={turn.step} className="guided-history-item">
             <span className="guided-history-step-name">
-              {STEP_LABELS[turn.step]}
+              {GUIDED_STEP_LABELS[turn.step]}
             </span>
             {/* Only past, summarised steps reach here (the current step and
                 summary-null turns are filtered above), so every row has a real

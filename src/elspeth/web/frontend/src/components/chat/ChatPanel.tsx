@@ -26,6 +26,7 @@ import { ModeSwitchButton } from "./guided/ModeSwitchButton";
 import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedHistory } from "./guided/GuidedHistory";
+import { GUIDED_STEP_LABELS } from "./guided/stepLabels";
 import { GuidedTurn } from "./guided/GuidedTurn";
 import { latestAssistantRationale } from "./guided/guidedRationale";
 import { PipelineGloss } from "./guided/PipelineGloss";
@@ -487,10 +488,12 @@ const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
     "Describe what each row should become, or how to fix the proposed transforms…",
   // Names the real next action instead of circularly pointing at a possibly
   // disabled button (elspeth-3b35abf148 variant 1): at the wire stage the
-  // unblock path is the acknowledgement cards + the Confirm wiring button in
-  // the decision panel.
+  // unblock path is the acknowledgement cards + the Confirm wiring button on
+  // the current decision card. "Card", not "panel": the copy is shared by
+  // both layouts, and the tutorial workspace no longer has a decision panel
+  // beside the composer — the decision is a card in the conversation column.
   step_4_wire:
-    "Resolve any pending acknowledgements, then press Confirm wiring in the decision panel.",
+    "Resolve any pending acknowledgements, then press Confirm wiring on the current decision card.",
 };
 
 interface ChatPanelProps {
@@ -665,6 +668,15 @@ export function ChatPanel({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const guidedLogRef = useRef<HTMLDivElement>(null);
+  // Tutorial workspace conversation column (.guided-workspace-scroll). Its own
+  // ref + at-bottom tracking — NOT freeform's messagesEndRef/scrollContainerRef
+  // machinery, which is keyed to sessionStore.messages and only mounted in the
+  // freeform body. Null on every non-tutorial branch, so the auto-scroll
+  // effect below no-ops there. The at-bottom flag is a ref (not state): it is
+  // only ever read inside the effect, and a scroll listener that set state
+  // would re-render the whole panel on every wheel tick.
+  const guidedWorkspaceScrollRef = useRef<HTMLDivElement>(null);
+  const guidedWorkspaceAtBottomRef = useRef(true);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [showBlobManager, setShowBlobManager] = useState(false);
   const [inputText, setInputText] = useState("");
@@ -694,6 +706,20 @@ export function ChatPanel({
       container.scrollHeight - container.scrollTop - container.clientHeight <
       threshold;
     setShowScrollButton(!atBottom);
+  }
+
+  // Tutorial conversation column: record whether the user sits at the bottom
+  // (freeform's 40px heuristic). Measured on scroll — BEFORE any append — so
+  // the auto-scroll effect below reads the pre-append position; measuring
+  // inside the effect would see the just-appended turn's height and misread
+  // "at bottom" as "scrolled up".
+  function handleGuidedWorkspaceScroll() {
+    const container = guidedWorkspaceScrollRef.current;
+    if (!container) return;
+    const threshold = 40; // pixels from bottom
+    guidedWorkspaceAtBottomRef.current =
+      container.scrollHeight - container.scrollTop - container.clientHeight <
+      threshold;
   }
 
   const shouldShowComposerProgress =
@@ -1203,6 +1229,22 @@ export function ChatPanel({
     [sendMessage],
   );
 
+  // Tutorial workspace auto-scroll: keep the conversation column pinned to the
+  // bottom as turns arrive (chat_history growth) and when a Send starts
+  // (guidedChatPending flips true), but ONLY while the user already sits
+  // within 40px of the bottom — a reader scrolled up into the transcript must
+  // not be yanked down (freeform's heuristic, tracked pre-append by the
+  // onScroll handler above). Deliberately defined BEFORE the step-advance
+  // focus effect below: on a Send both fire, and the focus effect's
+  // scrollIntoView must win so the just-built decision presents itself.
+  const guidedChatHistoryLength = guidedSession?.chat_history.length ?? 0;
+  useEffect(() => {
+    const container = guidedWorkspaceScrollRef.current;
+    if (!container) return;
+    if (!guidedWorkspaceAtBottomRef.current) return;
+    container.scrollTop = container.scrollHeight;
+  }, [guidedChatHistoryLength, guidedChatPending]);
+
   // Spec §7.4 — maintain focus on the first interactive element of the new turn
   // after step advance.  Without this, a step-advancing button click unmounts
   // the button before the browser can return focus elsewhere, so focus falls to
@@ -1234,6 +1276,25 @@ export function ChatPanel({
     const first = guidedLogRef.current.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
     first?.focus();
   }, [guidedNextTurn?.step_index, guidedNextTurn?.type]);
+
+  // Present the respond-rejection when it lands. A failed respond (e.g. a
+  // wire-confirm 409) mutates ONLY error/errorDetails/guidedResponsePending —
+  // nothing the auto-scroll or step-advance effects above watch — and the
+  // alert renders as the LAST content of the decision card, which sits at the
+  // bottom of a scroll region in both guided layouts. Without this presenter
+  // the alert can mount below the fold in the pinned-at-bottom state: a
+  // sighted user clicks Confirm and sees nothing but the button re-enable
+  // (the elspeth-3b35abf148 variant-3 silent-rejection failure, reintroduced
+  // by geometry). block:"nearest" is a no-op when the alert is already in
+  // view. Detail-less failures (errorDetails null) keep the always-visible
+  // top GuidedErrorBanner and need no scroll — do not key this on `error`.
+  const rejectionRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (errorDetails == null || errorDetails.length === 0) {
+      return;
+    }
+    rejectionRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [errorDetails]);
 
   const handleSend = useCallback(
     (content: string) => {
@@ -1400,11 +1461,25 @@ export function ChatPanel({
     // GUIDED_CHAT_PLACEHOLDERS.
     const stepComposer = (
       <section
-        className="guided-step-chat"
+        // Tutorial: --bare strips the dashed card chrome so the composer docks
+        // as a plain input strip under the conversation column (freeform's
+        // border-top idiom). The section + role=region + aria-label survive in
+        // BOTH modes — the "Describe what you want" landmark is load-bearing
+        // for AT navigation and the staging e2e locators
+        // (tutorial-probe/tutorial-reliability .staging.spec.ts).
+        className={
+          isTutorial
+            ? "guided-step-chat guided-step-chat--bare"
+            : "guided-step-chat"
+        }
         role="region"
         aria-label="Describe what you want"
       >
-        <h2 className="guided-step-chat-heading">Describe what you want</h2>
+        {/* Visible heading is live-guided card furniture; the bare tutorial
+            composer keeps only the aria-label for its accessible name. */}
+        {!isTutorial && (
+          <h2 className="guided-step-chat-heading">Describe what you want</h2>
+        )}
         {tutorialStepBuilt ? (
           // Tutorial: the locked prompt was already Sent for this step (it is
           // in the transcript above) AND a forward affordance exists below.
@@ -1463,12 +1538,13 @@ export function ChatPanel({
     );
 
     // The "current decision" panel (eyebrow + per-step rationale + the turn
-    // widget). Extracted so it can be PLACED PER MODE: inside the flex-grow
-    // scroll region for live guided (where the active decision can be a tall
-    // interactive widget that must scroll), or DOCKED at the bottom WITH the
-    // composer for the tutorial (where it collapses to a caption, so the
-    // decision and composer travel together — no gap opens between them on tall
-    // viewports).
+    // widget). Extracted so it can be PLACED PER MODE: inside .guided-scroll
+    // for live guided, or LAST inside the tutorial's conversation-column
+    // scroll region (.guided-workspace-scroll) — the action zone between the
+    // reply and the composer. It is deliberately NOT docked with the composer:
+    // a tall schema/wire widget in a fixed dock crushes the transcript (the
+    // recorded tutorial.css fill-viewport failure); inside the scroll region
+    // the step-advance focus effect scrolls it into view after a Send instead.
     const decisionSection = (() => {
       const stepIsSendDriven =
         isTutorial && (lockedChatPrompt?.[guidedSession.step] ?? "") !== "";
@@ -1542,7 +1618,7 @@ export function ChatPanel({
               rejections; the generic top banner is suppressed while this
               renders so the alert announces once. */}
           {error && errorDetails != null && errorDetails.length > 0 && (
-            <div role="alert" className="guided-respond-rejection">
+            <div ref={rejectionRef} role="alert" className="guided-respond-rejection">
               <p className="guided-respond-rejection-message">{error}</p>
               <ul className="guided-respond-rejection-details">
                 {errorDetails.map((detail, index) => (
@@ -1603,39 +1679,53 @@ export function ChatPanel({
             Live guided keeps the classic chat layout: a single scroll region
             (.guided-scroll) above a bottom-docked composer.
 
-            The TUTORIAL uses a two-column WORKSPACE — a hybrid of the guided +
-            freeform modes, intended to graduate into a first-class interface: the
-            conversation stream + composer on the LEFT, and the pipeline-so-far +
-            current-decision cards pinned (sticky) at the TOP-RIGHT so the thing to
-            act on stays in view as the conversation grows. Both arrangements reuse
-            the SAME content pieces, just placed differently. */}
+            The TUTORIAL uses the WORKSPACE — a hybrid of the guided + freeform
+            modes, intended to graduate into a first-class interface: a
+            freeform-congruent conversation column (internal scroll: bubble
+            transcript → run results → acknowledgements → the current decision
+            as the action zone) over a docked composer, plus a SideRail-width
+            artifact rail (pipeline summary + decisions so far) flush right.
+            Both arrangements reuse the SAME content pieces, just composed
+            per branch. */}
         {(() => {
-          // Conversation stream (shared). aria-live rationale: each piece owns its
-          // OWN live region — GuidedChatHistory (role=log), AcknowledgementLive-
-          // Region (role=status) — announcing independently of wizard advances.
-          // GuidedHistory is resolved-history context and stays OUTSIDE any live
-          // region (replaying it per step would be redundant SR chatter). The live
-          // TURN surface lives in decisionSection's own role=log wrapper —
-          // load-bearing for InspectAndConfirmTurn, which omits its own warnings
-          // live region under the convention that the parent wraps turn content.
-          const conversationStream = (
-            <>
-              <GuidedHistory
-                history={guidedSession.history}
-                currentStep={guidedSession.step}
-              />
-              <GuidedChatHistory chatHistory={guidedSession.chat_history} />
-              <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
-              <AcknowledgementStack
-                sessionId={activeSessionId ?? ""}
-                isTutorial={isTutorial}
-                onResolved={(newState) => {
-                  if (newState !== null) {
-                    useSessionStore.setState({ compositionState: newState });
-                  }
-                }}
-              />
-            </>
+          // Shared pieces. aria-live rationale: each piece owns its OWN live
+          // region — GuidedChatHistory (role=log), AcknowledgementLiveRegion
+          // (role=status) — announcing independently of wizard advances.
+          // GuidedHistory is resolved-history context and stays OUTSIDE any
+          // live region (replaying it per step would be redundant SR chatter).
+          // The live TURN surface lives in decisionSection's own role=log
+          // wrapper — load-bearing for InspectAndConfirmTurn, which omits its
+          // own warnings live region under the convention that the parent
+          // wraps turn content.
+          const decisionsSoFar = (
+            <GuidedHistory
+              history={guidedSession.history}
+              currentStep={guidedSession.step}
+            />
+          );
+          const transcript = (
+            <GuidedChatHistory
+              chatHistory={guidedSession.chat_history}
+              variant={isTutorial ? "bubbles" : "flat"}
+            />
+          );
+          // Persistent-mount contract (AcknowledgementStack.tsx): the stack
+          // returns null when empty, so the count announcer must live outside
+          // it, unconditionally rendered — and in the tutorial OUTSIDE the
+          // scroll wrapper, whose subtree is where content churns.
+          const ackLiveRegion = (
+            <AcknowledgementLiveRegion sessionId={activeSessionId ?? ""} />
+          );
+          const ackStack = (
+            <AcknowledgementStack
+              sessionId={activeSessionId ?? ""}
+              isTutorial={isTutorial}
+              onResolved={(newState) => {
+                if (newState !== null) {
+                  useSessionStore.setState({ compositionState: newState });
+                }
+              }}
+            />
           );
           // The canonical "what I built" verification card (gloss + validation).
           // The graph THUMBNAIL is tutorial-only — live guided shows it in the
@@ -1651,21 +1741,52 @@ export function ChatPanel({
           if (isTutorial) {
             return (
               <div className="guided-workspace">
-                {/* LEFT: the conversation + the composer (the freeform half). */}
+                {/* LEFT: the conversation column (the freeform half) — an
+                    internal scroll region over a docked composer. */}
                 <div className="guided-workspace-stream">
-                  {conversationStream}
-                  <InlineRunResults />
+                  {ackLiveRegion}
+                  {/* role="group" is REQUIRED for the aria-label to be exposed
+                      (a name on a role-less div is AT-invisible and an axe
+                      aria-prohibited-attr violation, elspeth-37293a3b7c).
+                      Deliberately NOT role=log / NOT a live region: the
+                      transcript log and the wizard log live INSIDE it and
+                      must not nest in an outer live region (double-announce).
+                      tabIndex=0 so keyboard users can arrow-scroll it
+                      (elspeth-5e43a0c8b2 — same contract as freeform's
+                      .chat-panel-messages). */}
+                  <div
+                    ref={guidedWorkspaceScrollRef}
+                    onScroll={handleGuidedWorkspaceScroll}
+                    className="guided-workspace-scroll"
+                    role="group"
+                    aria-label="Conversation"
+                    tabIndex={0}
+                  >
+                    {transcript}
+                    <InlineRunResults />
+                    {ackStack}
+                    {/* The decision rides LAST in the scroll region — the
+                        action zone between the reply and the composer. */}
+                    {decisionSection}
+                  </div>
                   {stepComposer}
                 </div>
-                {/* RIGHT: the structured cards, pinned (sticky) top-right (the
-                    guided half). Its own scroll if taller than the viewport so
-                    the decision's forward button is always reachable. */}
+                {/* RIGHT: the artifact rail (the guided half) — ambient
+                    pipeline state only; no decision/submit/composer
+                    affordances (GraphMiniView's expand button is the accepted
+                    exception, matching live's SideRail). */}
+                {/* tabIndex=0: the rail scrolls (overflow-y:auto, and the
+                    ≤900px strip caps at 30vh while hiding its only focusable
+                    furniture) — without a tab stop its overflow is
+                    keyboard-unreachable (WCAG 2.1.1). The complementary role
+                    carries the accessible name. */}
                 <aside
-                  className="guided-workspace-decision"
-                  aria-label="Pipeline so far and current decision"
+                  className="guided-workspace-rail"
+                  aria-label="Pipeline summary"
+                  tabIndex={0}
                 >
                   {summaryCard}
-                  {decisionSection}
+                  {decisionsSoFar}
                 </aside>
               </div>
             );
@@ -1673,11 +1794,16 @@ export function ChatPanel({
 
           // Live guided: single scroll region + bottom-docked composer. The
           // decision renders INSIDE the scroll (it can be a tall interactive
-          // widget that must scroll with the log).
+          // widget that must scroll with the log). Composition and order are
+          // pinned — this branch must render identically to the pre-workspace
+          // layout.
           return (
             <>
               <div className="guided-scroll">
-                {conversationStream}
+                {decisionsSoFar}
+                {transcript}
+                {ackLiveRegion}
+                {ackStack}
                 {summaryCard}
                 {decisionSection}
                 <InlineRunResults />
@@ -2057,13 +2183,15 @@ const GUIDED_WORKFLOW_STEPS: ReadonlyArray<{
   id: WorkflowStepId;
   label: string;
 }> = [
-  { id: "step_1_source", label: "Source" },
-  { id: "step_2_sink", label: "Output" },
+  { id: "step_1_source", label: GUIDED_STEP_LABELS.step_1_source },
+  { id: "step_2_sink", label: GUIDED_STEP_LABELS.step_2_sink },
   // step_2_5_recipe_match is a vestigial, collapsed step (the recipe-offer
   // deviation was removed; the sink commit hops straight to transforms). It is
   // intentionally NOT shown in the stepper.
-  { id: "step_3_transforms", label: "Transforms" },
-  { id: "step_4_wire", label: "Wire" },
+  { id: "step_3_transforms", label: GUIDED_STEP_LABELS.step_3_transforms },
+  { id: "step_4_wire", label: GUIDED_STEP_LABELS.step_4_wire },
+  // "ready" is a stepper-only pseudo-step, not a GuidedStep — its label
+  // stays local rather than widening the shared wire-keyed map.
   { id: "ready", label: "Ready" },
 ];
 

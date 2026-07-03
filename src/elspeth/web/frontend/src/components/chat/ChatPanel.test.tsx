@@ -90,6 +90,9 @@ vi.mock("./MessageBubble", () => ({
 // on the real ChatInput's textarea internals. Phase A slice 4 needs:
 //   - per-step placeholder visible (guided-active branch)
 //   - onSend callback wired so the test can simulate user submit
+// data-value / data-read-only expose the tutorial locked-prompt contract
+// (value prefilled per stage + readOnly) so the bare-composer tests can pin
+// it — before these attrs the lock was unpinned at the ChatPanel level.
 vi.mock("./ChatInput", () => ({
   ChatInput: ({
     placeholder,
@@ -97,12 +100,16 @@ vi.mock("./ChatInput", () => ({
     onCancel,
     disabled,
     maxLength,
+    value,
+    readOnly,
   }: {
     placeholder?: string;
     onSend?: (content: string) => void;
     onCancel?: () => void;
     disabled?: boolean;
     maxLength?: number;
+    value?: string;
+    readOnly?: boolean;
   }) => (
     <button
       type="button"
@@ -111,6 +118,8 @@ vi.mock("./ChatInput", () => ({
       data-disabled={disabled ? "true" : "false"}
       data-has-cancel={onCancel ? "true" : "false"}
       data-max-length={maxLength ?? ""}
+      data-value={value ?? ""}
+      data-read-only={readOnly ? "true" : "false"}
       onClick={() => onSend?.("test-chat-message")}
     >
       {placeholder ?? ""}
@@ -725,7 +734,7 @@ describe("ChatPanel mode discriminator", () => {
     expect(container.querySelector(".graph-modal")).toBeNull();
   });
 
-  it("renders the in-column graph thumbnail in the tutorial (which has no SideRail)", () => {
+  it("renders the graph thumbnail in the tutorial rail (which has no SideRail)", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -735,22 +744,24 @@ describe("ChatPanel mode discriminator", () => {
       compositionState: sourceLlmCsvComposition(),
     });
 
-    render(
+    const { container } = render(
       <ChatPanel
         isTutorial
         lockedChatPrompt={{ step_1_source: "create the source" }}
       />,
     );
 
-    // Panel + gloss + summary present in the tutorial too.
-    expect(
-      screen.getByRole("region", { name: "Pipeline so far" }),
-    ).toBeInTheDocument();
+    // Panel + gloss + summary present in the tutorial too — anchored in the
+    // artifact rail (the workspace's right column), not the conversation.
+    const rail = container.querySelector("aside.guided-workspace-rail");
+    expect(rail).not.toBeNull();
+    const panel = screen.getByRole("region", { name: "Pipeline so far" });
+    expect(rail!.contains(panel)).toBe(true);
     expect(screen.getByTestId("pipeline-gloss")).toBeInTheDocument();
     expect(
       screen.getByTestId("pipeline-validation-summary"),
     ).toBeInTheDocument();
-    // The tutorial gets the in-column thumbnail (populated → the expand button).
+    // The tutorial gets the rail thumbnail (populated → the expand button).
     expect(
       screen.getByRole("button", {
         name: "Pipeline graph (click to expand)",
@@ -832,14 +843,20 @@ describe("ChatPanel mode discriminator", () => {
       },
     } as never);
 
-    render(
+    const { container } = render(
       <ChatPanel
         isTutorial
         lockedChatPrompt={{ step_1_source: "create the source" }}
       />,
     );
 
-    // The panel is built purely from compositionState + validationResult.
+    // The panel is built purely from compositionState + validationResult,
+    // and lives in the artifact rail.
+    expect(
+      container.querySelector(
+        'aside.guided-workspace-rail [data-testid="pipeline-gloss"]',
+      ),
+    ).not.toBeNull();
     expect(screen.getByTestId("pipeline-gloss")).toBeInTheDocument();
     expect(
       screen.getByTestId("pipeline-validation-summary"),
@@ -887,7 +904,7 @@ describe("ChatPanel mode discriminator", () => {
       },
     } as never);
 
-    render(
+    const { container } = render(
       <ChatPanel
         isTutorial
         lockedChatPrompt={{ step_1_source: "create the source" }}
@@ -895,8 +912,14 @@ describe("ChatPanel mode discriminator", () => {
     );
 
     // (a) the summary reflects validationResult, with the PLAIN node name
-    // mapped from the finding's component_id (not the raw id).
+    // mapped from the finding's component_id (not the raw id) — rendered in
+    // the artifact rail.
     const summary = screen.getByTestId("pipeline-validation-summary");
+    expect(
+      container
+        .querySelector("aside.guided-workspace-rail")
+        ?.contains(summary),
+    ).toBe(true);
     expect(summary).toHaveTextContent(/rate each row/);
     expect(summary).toHaveTextContent(/review the prompt wording/i);
 
@@ -1109,7 +1132,7 @@ describe("ChatPanel mode discriminator", () => {
     render(<ChatPanel />);
 
     expect(screen.getByTestId("chat-input").dataset.placeholder).toBe(
-      "Resolve any pending acknowledgements, then press Confirm wiring in the decision panel.",
+      "Resolve any pending acknowledgements, then press Confirm wiring on the current decision card.",
     );
   });
 
@@ -1177,12 +1200,57 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeInTheDocument();
   });
 
-  it("tutorial guided: two-column workspace — composer in the conversation column, decision in the sticky cards column", () => {
+  // A pending user_approved interpretation card for the workspace-order tests:
+  // seeds the AcknowledgementStack so the conversation column's full DOM-order
+  // chain (transcript → acks → decision → composer) is assertable.
+  function pendingAckCard(): InterpretationEvent {
+    return {
+      id: "card-workspace-1",
+      session_id: "session-guided",
+      composition_state_id: "state-1",
+      affected_node_id: "rate_node",
+      tool_call_id: "backend_auto_surface:workspace",
+      user_term: "llm_model_choice:rate_node",
+      kind: "llm_model_choice",
+      llm_draft: "anthropic/claude-sonnet-4.6",
+      accepted_value: null,
+      choice: "pending",
+      created_at: "2026-06-22T00:00:00Z",
+      resolved_at: null,
+      actor: "system:composer",
+      interpretation_source: "user_approved",
+      model_identifier: "anthropic/claude-opus-4-7",
+      model_version: "anthropic/claude-opus-4-7",
+      provider: "anthropic",
+      composer_skill_hash: "0".repeat(64),
+      arguments_hash: null,
+      hash_domain_version: null,
+      runtime_model_identifier_at_resolve: null,
+      runtime_model_version_at_resolve: null,
+      resolved_prompt_template_hash: null,
+    };
+  }
+
+  it("tutorial guided: workspace — transcript, acks, decision and composer share the conversation column in order; the rail holds no decision", () => {
+    useInterpretationEventsStore.setState({
+      pendingBySession: { "session-guided": { "card-workspace-1": pendingAckCard() } },
+    });
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
       messages: [],
-      guidedSession: activeGuidedSession(),
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "user",
+            content: "create the source",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-05-12T10:00:00Z",
+          },
+        ],
+      },
       guidedNextTurn: singleSelectTurn(),
     });
 
@@ -1193,26 +1261,49 @@ describe("ChatPanel mode discriminator", () => {
       />,
     );
 
-    // The tutorial renders the two-column WORKSPACE (the future first-class
-    // hybrid): the composer lives in the LEFT conversation column, the decision
-    // cards in the RIGHT sticky column — not a single bottom dock.
+    // The workspace: conversation column (stream) + artifact rail.
     const stream = container.querySelector(".guided-workspace-stream");
-    const cards = container.querySelector(".guided-workspace-decision");
+    const rail = container.querySelector("aside.guided-workspace-rail");
     expect(stream).not.toBeNull();
-    expect(cards).not.toBeNull();
-    expect(stream!.querySelector(".guided-step-chat")).not.toBeNull();
-    expect(cards!.querySelector(".guided-current-decision")).not.toBeNull();
-    // The decision is NOT in the conversation stream, and the composer is NOT in
-    // the cards column — they are genuinely separate columns.
-    expect(stream!.querySelector(".guided-current-decision")).toBeNull();
-    expect(cards!.querySelector(".guided-step-chat")).toBeNull();
+    expect(rail).not.toBeNull();
+    // The rail is ambient pipeline state — labelled for what it now holds
+    // ("Pipeline summary", distinct from the inner "Pipeline so far" section),
+    // with NO decision card in it.
+    expect(rail!.getAttribute("aria-label")).toBe("Pipeline summary");
+    expect(rail!.querySelector(".guided-current-decision")).toBeNull();
+    expect(rail!.querySelector(".guided-step-chat")).toBeNull();
+
+    // The decision lives INSIDE the conversation column's internal scroll
+    // region, and the composer docks after it in the stream.
+    const scroll = container.querySelector(".guided-workspace-scroll");
+    expect(scroll).not.toBeNull();
+    expect(scroll!.querySelector(".guided-current-decision")).not.toBeNull();
+    const composer = stream!.querySelector(".guided-step-chat");
+    expect(composer).not.toBeNull();
+    expect(scroll!.contains(composer)).toBe(false);
+
+    // DOM-order chain inside the column: transcript → AcknowledgementStack →
+    // decision → composer (DOCUMENT_POSITION_FOLLOWING = the argument follows
+    // the receiver).
+    const transcript = stream!.querySelector(".guided-chat-bubbles");
+    const acks = stream!.querySelector('[data-testid="acknowledgement-stack"]');
+    const decision = stream!.querySelector(".guided-current-decision");
+    expect(transcript).not.toBeNull();
+    expect(acks).not.toBeNull();
+    expect(decision).not.toBeNull();
+    const follows = (earlier: Element, later: Element) =>
+      earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING;
+    expect(follows(transcript!, acks!)).toBeTruthy();
+    expect(follows(acks!, decision!)).toBeTruthy();
+    expect(follows(decision!, composer!)).toBeTruthy();
+
     // Tutorial suppresses the exit affordance, so there is no header/exit.
     expect(
       screen.queryByRole("button", { name: "Exit to freeform" }),
     ).toBeNull();
   });
 
-  it("tutorial: pins the decision into the bottom dock (out of the scroll region) and suppresses the rival source chips", () => {
+  it("tutorial: the conversation column is a named, keyboard-focusable scroll region (not a live region)", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -1228,14 +1319,114 @@ describe("ChatPanel mode discriminator", () => {
       />,
     );
 
-    // The decision exists, but is lifted OUT of the flex-grow scroll region so
-    // it docks at the bottom WITH the composer (they travel together; the
-    // short-content gap opens above the summary instead of between the decision
-    // and the composer).
-    expect(container.querySelector(".guided-current-decision")).not.toBeNull();
+    const scroll = container.querySelector<HTMLElement>(
+      ".guided-workspace-scroll",
+    );
+    expect(scroll).not.toBeNull();
+    // role="group" is required for the accessible name to be exposed
+    // (aria-label on a role-less div is AT-invisible, elspeth-37293a3b7c);
+    // tabIndex=0 makes it arrow-scrollable (elspeth-5e43a0c8b2).
+    expect(scroll!.getAttribute("role")).toBe("group");
+    expect(scroll!.getAttribute("aria-label")).toBe("Conversation");
+    expect(scroll!.getAttribute("tabindex")).toBe("0");
+    // NOT a live region — the transcript log and the wizard log live inside
+    // it; nesting them in an outer live region would double-announce.
+    expect(scroll!.getAttribute("aria-live")).toBeNull();
+    expect(scroll!.getAttribute("role")).not.toBe("log");
+  });
+
+  it("tutorial: the artifact rail is a keyboard-scrollable tab stop", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The rail scrolls (overflow-y:auto; the ≤900px strip caps at 30vh while
+    // hiding its only focusable furniture) — without a tab stop its overflow
+    // is keyboard-unreachable (WCAG 2.1.1). The complementary role already
+    // carries the accessible name.
+    const rail = container.querySelector("aside.guided-workspace-rail");
+    expect(rail).not.toBeNull();
+    expect(rail!.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("presents the respond-rejection alert by scrolling it into view when it lands", () => {
+    // A failed respond (e.g. a wire-confirm 409) mutates ONLY
+    // error/errorDetails/guidedResponsePending — nothing the auto-scroll or
+    // step-advance effects watch — and the alert renders as the LAST content
+    // of the decision card at the bottom of the scroll region. The dedicated
+    // presenter effect must scroll the alert itself into view or the
+    // rejection is visually silent in the pinned-at-bottom state
+    // (elspeth-3b35abf148 variant 3, reintroduced by geometry).
+    const receivers: Element[] = [];
+    Element.prototype.scrollIntoView = vi.fn(function (this: Element) {
+      receivers.push(this);
+    });
+    // error/errorDetails reach ChatPanel through useComposer (mocked here) —
+    // seeding the session store alone never reaches the panel.
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error: "That wiring can't be confirmed yet.",
+      errorDetails: ["Node llm-1 has no downstream consumer."],
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    const rejection = container.querySelector(".guided-respond-rejection");
+    expect(rejection).not.toBeNull();
+    expect(receivers).toContain(rejection);
+  });
+
+  it("tutorial: pins the decision INSIDE the conversation column's scroll region and suppresses the rival source chips", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The decision is the action zone at the END of the internal scroll region
+    // — between the reply and the composer, never docked with the composer
+    // (a tall schema/wire widget in a fixed dock crushes the transcript).
     expect(
-      container.querySelector(".guided-scroll .guided-current-decision"),
-    ).toBeNull();
+      container.querySelector(".guided-workspace-scroll .guided-current-decision"),
+    ).not.toBeNull();
+    // .guided-scroll is the LIVE guided arrangement — the tutorial never
+    // renders it (the old assertion here passed vacuously against it).
+    expect(container.querySelector(".guided-scroll")).toBeNull();
 
     // The live, submit-on-click source chips are suppressed in the tutorial — a
     // passive learner's only action is Send. (singleSelectTurn() asks
@@ -1250,6 +1441,432 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       container.querySelector(".guided-current-decision-tutorial-note"),
     ).not.toBeNull();
+  });
+
+  it("tutorial rail: pipeline summary + decisions so far, and nothing actionable (no decision/submit/composer affordances)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        step: "step_2_sink",
+        // A PAST summarised step so GuidedHistory ("Decisions so far") renders
+        // — it returns null until a step the learner moved past has a summary.
+        history: [
+          {
+            step: "step_1_source",
+            turn_type: "single_select",
+            payload_hash: "h1",
+            response_hash: "r1",
+            summary: "Source selected: csv",
+            emitter: "server",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+      compositionState: sourceLlmCsvComposition(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_2_sink: "create the sink" }}
+      />,
+    );
+
+    const rail = container.querySelector("aside.guided-workspace-rail");
+    expect(rail).not.toBeNull();
+    // Summary card: gloss + validation + graph thumbnail, inside the rail.
+    expect(rail!.querySelector('[data-testid="pipeline-gloss"]')).not.toBeNull();
+    expect(
+      rail!.querySelector('[data-testid="pipeline-validation-summary"]'),
+    ).not.toBeNull();
+    const expandButton = screen.getByRole("button", {
+      name: "Pipeline graph (click to expand)",
+    });
+    expect(rail!.contains(expandButton)).toBe(true);
+    // "Decisions so far" folded into the rail (single mount — it left the
+    // conversation column).
+    const decisionsHeading = screen.getByRole("heading", {
+      name: "Decisions so far",
+    });
+    expect(rail!.contains(decisionsHeading)).toBe(true);
+    expect(screen.getAllByRole("heading", { name: "Decisions so far" })).toHaveLength(1);
+
+    // Nothing actionable: no composer, no decision widget, no submit controls.
+    // (GraphMiniView's expand button above is the accepted exception — it
+    // matches live's SideRail; "actionable" = decision/submit/composer
+    // affordances.)
+    expect(rail!.querySelector('[data-testid="chat-input"]')).toBeNull();
+    expect(rail!.querySelector("fieldset")).toBeNull();
+    expect(rail!.querySelector("textarea")).toBeNull();
+    expect(rail!.querySelector(".guided-current-decision")).toBeNull();
+    expect(rail!.querySelector(".guided-step-chat")).toBeNull();
+  });
+
+  it("tutorial: bare composer — locked read-only prompt in the named region, no visible card heading", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The region + accessible name survive de-carding (a11y landmark + the
+    // staging e2e locator both depend on the name)...
+    const region = screen.getByRole("region", {
+      name: "Describe what you want",
+    });
+    expect(region).toContainElement(screen.getByTestId("chat-input"));
+    // ...but the visible card heading and chrome are tutorial-suppressed.
+    expect(container.querySelector(".guided-step-chat-heading")).toBeNull();
+    expect(region.classList.contains("guided-step-chat--bare")).toBe(true);
+    // The locked-prompt contract: prefilled with the CURRENT stage's prompt,
+    // read-only (the learner Sends, never types).
+    const input = screen.getByTestId("chat-input");
+    expect(input.dataset.value).toBe("create the source");
+    expect(input.dataset.readOnly).toBe("true");
+  });
+
+  it("live guided: layout net — no workspace, dashed composer card with its heading, decision inside .guided-scroll", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // The workspace is tutorial-only — live guided keeps the classic
+    // .guided-scroll + bottom-docked composer arrangement, byte-identical.
+    expect(container.querySelector(".guided-workspace")).toBeNull();
+    expect(container.querySelector(".guided-workspace-scroll")).toBeNull();
+    expect(container.querySelector(".guided-workspace-rail")).toBeNull();
+    expect(
+      container.querySelector(".guided-scroll .guided-current-decision"),
+    ).not.toBeNull();
+    // The composer keeps its card heading and never gains the --bare modifier.
+    expect(container.querySelector(".guided-step-chat-heading")).not.toBeNull();
+    expect(container.querySelector(".guided-step-chat--bare")).toBeNull();
+    // Live input is editable (no tutorial lock).
+    expect(screen.getByTestId("chat-input").dataset.readOnly).toBe("false");
+  });
+
+  it("tutorial: the workflow stepper renders above the workspace", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    const stepper = screen.getByRole("list", { name: /guided workflow/i });
+    const workspace = container.querySelector(".guided-workspace");
+    expect(workspace).not.toBeNull();
+    expect(
+      stepper.compareDocumentPosition(workspace!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("tutorial: the ComposingIndicator mounts OUTSIDE every role=log region (elspeth-76a0cc485e parity)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "user",
+            content: "create the source",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-05-12T10:00:00Z",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: true,
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    const indicator = container.querySelector(".composing-indicator");
+    expect(indicator).not.toBeNull();
+    expect(indicator!.getAttribute("role")).toBe("status");
+    // Never nested inside a role=log container (transcript log or wizard log)
+    // where both live regions could announce the same change.
+    for (const log of container.querySelectorAll('[role="log"]')) {
+      expect(log.contains(indicator)).toBe(false);
+    }
+  });
+
+  it("tutorial: the acknowledgement count announcer mounts once, in the stream, OUTSIDE the scroll wrapper", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // AcknowledgementLiveRegion: the persistent visually-hidden role=status
+    // counter. It must sit OUTSIDE the scroll wrapper's churning subtree so
+    // its 0→1 announce contract (content mutation inside a pre-existing node)
+    // survives the relayout, and there must be exactly one.
+    const announcers = container.querySelectorAll(
+      '.guided-workspace-stream [role="status"].visually-hidden',
+    );
+    expect(announcers).toHaveLength(1);
+    const scroll = container.querySelector(".guided-workspace-scroll");
+    expect(scroll).not.toBeNull();
+    expect(scroll!.contains(announcers[0])).toBe(false);
+  });
+
+  it("tutorial auto-scroll: an appended chat turn scrolls the conversation column when the user is at the bottom", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "user",
+            content: "create the source",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-05-12T10:00:00Z",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    const scroll = container.querySelector<HTMLElement>(
+      ".guided-workspace-scroll",
+    );
+    expect(scroll).not.toBeNull();
+    // Stub the scroll geometry (jsdom has no layout): content overflows the
+    // 400px viewport; track scrollTop assignments through a setter.
+    let scrollTop = 0;
+    Object.defineProperty(scroll!, "scrollHeight", {
+      configurable: true,
+      get: () => 1000,
+    });
+    Object.defineProperty(scroll!, "clientHeight", {
+      configurable: true,
+      get: () => 400,
+    });
+    Object.defineProperty(scroll!, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (v: number) => {
+        scrollTop = v;
+      },
+    });
+
+    // No scroll event has fired — the at-bottom default (a fresh column starts
+    // pinned) holds. Append the assistant reply.
+    act(() => {
+      const session = useSessionStore.getState().guidedSession!;
+      useSessionStore.setState({
+        guidedSession: {
+          ...session,
+          chat_history: [
+            ...session.chat_history,
+            {
+              role: "assistant",
+              content: "Source created.",
+              seq: 2,
+              step: "step_1_source",
+              ts_iso: "2026-05-12T10:00:01Z",
+            },
+          ],
+        },
+      });
+    });
+
+    // The effect pinned the column to the bottom (scrollTop = scrollHeight).
+    expect(scrollTop).toBe(1000);
+  });
+
+  it("tutorial auto-scroll: an appended chat turn does NOT yank the column when the user has scrolled up", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "user",
+            content: "create the source",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-05-12T10:00:00Z",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    const scroll = container.querySelector<HTMLElement>(
+      ".guided-workspace-scroll",
+    );
+    expect(scroll).not.toBeNull();
+    let scrollTop = 100; // 1000 - 100 - 400 = 500px from the bottom (> 40px).
+    Object.defineProperty(scroll!, "scrollHeight", {
+      configurable: true,
+      get: () => 1000,
+    });
+    Object.defineProperty(scroll!, "clientHeight", {
+      configurable: true,
+      get: () => 400,
+    });
+    Object.defineProperty(scroll!, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (v: number) => {
+        scrollTop = v;
+      },
+    });
+    // The user scrolls up into the transcript — the handler records the
+    // pre-append position.
+    fireEvent.scroll(scroll!);
+
+    act(() => {
+      const session = useSessionStore.getState().guidedSession!;
+      useSessionStore.setState({
+        guidedSession: {
+          ...session,
+          chat_history: [
+            ...session.chat_history,
+            {
+              role: "assistant",
+              content: "Source created.",
+              seq: 2,
+              step: "step_1_source",
+              ts_iso: "2026-05-12T10:00:01Z",
+            },
+          ],
+        },
+      });
+    });
+
+    // A reader reviewing earlier turns is not yanked to the bottom.
+    expect(scrollTop).toBe(100);
+  });
+
+  it("tutorial completed: the completion surface renders under the guided shell with the stepper and the --completed frame escape hook", () => {
+    const terminal: TerminalState = {
+      kind: "completed",
+      reason: null,
+      pipeline_yaml: "source:\n  plugin: csv\n",
+    };
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_4_wire",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedTerminal: terminal,
+    });
+
+    const { container } = render(<ChatPanel isTutorial />);
+
+    // The completed branch has NO internal scroll region — tutorial.css keys
+    // its overflow escape (.tutorial-shell--guided .chat-panel--completed)
+    // on this modifier class; without it the guided shell's overflow:hidden
+    // frame would strand the completion content off-screen.
+    const chatMain = container.querySelector("#chat-main");
+    expect(chatMain?.classList.contains("chat-panel--completed")).toBe(true);
+    // Stepper (all steps done → "Ready") + the completion summary render.
+    expect(
+      screen.getByRole("list", { name: /guided workflow/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Review YAML" }),
+    ).toBeInTheDocument();
+    // Tutorial completion suppresses the freeform handoff (concern B).
+    expect(
+      screen.queryByRole("button", { name: "Open freeform editor" }),
+    ).toBeNull();
+  });
+
+  it("workspace CSS: internal scroll region focus ring is inset, and the 900px collapse bounds the stream row with the rail strip first", () => {
+    // jsdom runs with css:false — media queries and computed styles are
+    // invisible, so the responsive contract is pinned as CSS text (same idiom
+    // as the stepper-grid test above).
+    const css = readFileSync(
+      join(process.cwd(), "src/components/chat/guided/guided.css"),
+      "utf8",
+    );
+    // The keyboard-focusable scroll region draws its ring INSET — the
+    // workspace frame clips overflow, so the default +2px offset ring would
+    // be invisible on all four sides.
+    expect(css).toMatch(
+      /\.guided-workspace-scroll:focus-visible\s*\{[^}]*outline-offset: -2px/,
+    );
+    // ≤900px: single column; the rail collapses to a strip ABOVE the
+    // conversation (order:-1) and the stream row stays bounded
+    // (minmax(0, 1fr)) so the internal scroll still engages.
+    const media900 = css.match(/@media \(max-width: 900px\)[\s\S]*?\n\}/);
+    expect(media900).not.toBeNull();
+    expect(media900![0]).toContain("grid-template-rows: auto minmax(0, 1fr);");
+    expect(media900![0]).toContain("order: -1;");
   });
 
   it("invokes sessionStore.chatGuided when the guided ChatInput onSend fires", async () => {

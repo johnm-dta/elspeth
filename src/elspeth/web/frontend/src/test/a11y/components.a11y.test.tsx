@@ -80,6 +80,13 @@ const AUDITED_COMPONENTS = [
   "TutorialTurn4Run",
   "TutorialTurn5AuditStory",
   "TutorialTurn7Graduation",
+  // Tutorial workspace relayout (elspeth-16aa94c4bb): the two-column guided
+  // workspace ChatPanel renders under isTutorial. Until this entry the guided
+  // branch was never mounted by this suite — TutorialGuidedShell's audit
+  // deliberately holds startGuidedSession pending — so the workspace layout
+  // itself (landmark structure, live-region siblinghood, the named scroll
+  // group) had zero axe coverage.
+  "ChatPanelTutorialWorkspace",
 ] as const;
 
 const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
@@ -88,6 +95,7 @@ const EXPECTED_AUDITED_COMPONENTS_SORTED: readonly string[] = [
   "AppHeader",
   "AuditReadinessPanel",
   "ChatInput",
+  "ChatPanelTutorialWorkspace",
   "CommandPalette",
   "ComposerPreferencesPanel",
   "CompletionBar",
@@ -177,6 +185,9 @@ vi.mock("@/api/client", async (importOriginal) => {
     runTutorialPipeline: vi.fn(),
     cancelTutorialRun: vi.fn(),
     getRunAuditSummary: vi.fn(),
+    // Run surfaces (ChatPanelTutorialWorkspace mounts InlineRunResults,
+    // which loads the session's runs on mount).
+    fetchRuns: vi.fn(),
     // Interpretation acknowledgements (AcknowledgementCard/Stack).
     listInterpretationEvents: vi.fn(),
     resolveInterpretation: vi.fn(),
@@ -275,6 +286,7 @@ import { PipelineValidationSummary } from "@/components/chat/guided/PipelineVali
 import { AcknowledgementCard } from "@/components/chat/AcknowledgementCard";
 import { AcknowledgementStack } from "@/components/chat/AcknowledgementStack";
 import { ChatInput } from "@/components/chat/ChatInput";
+import { ChatPanel } from "@/components/chat/ChatPanel";
 import { LoginPage } from "@/components/auth/LoginPage";
 import { CommandPalette } from "@/components/common/CommandPalette";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
@@ -309,7 +321,12 @@ import type {
   Run,
 } from "@/types/index";
 import type { ReadinessRow, AuditReadinessSnapshot } from "@/types/api";
-import type { WireStageData, SchemaFormPayload } from "@/types/guided";
+import type {
+  GuidedSession,
+  SchemaFormPayload,
+  TurnPayload,
+  WireStageData,
+} from "@/types/guided";
 import type { InterpretationEvent } from "@/types/interpretation";
 
 // --- Shared store reset ----------------------------------------------------
@@ -945,6 +962,119 @@ describe("TutorialGuidedShell", () => {
       <TutorialGuidedShell sessionId="sess-a11y" onCompleted={() => {}} />,
     );
     screen.getByText(/Preparing the tutorial's sample pages/);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+describe("ChatPanelTutorialWorkspace", () => {
+  // The tutorial two-column workspace (elspeth-16aa94c4bb): conversation
+  // column (bubble transcript → run results → acknowledgements → current
+  // decision) over the docked composer, plus the artifact rail. Audited in
+  // its richest deterministic state — a transcript spanning two stages (so
+  // the stage dividers render), a prior decision in the rail's "Decisions so
+  // far", a schema_form current decision, and the "Sent" composer state —
+  // covering the landmark structure and the sibling (never nested) live
+  // regions the layout moved: transcript log, wizard-step log, the
+  // acknowledgement announcer, and the Sent status line.
+
+  function makeTutorialGuidedSession(): GuidedSession {
+    return {
+      step: "step_2_sink",
+      history: [
+        {
+          step: "step_1_source",
+          turn_type: "single_select",
+          payload_hash: "aabbcc001122",
+          response_hash: "ddeeff334455",
+          emitter: "server",
+          summary: "Source selected: web_scrape",
+        },
+      ],
+      terminal: null,
+      chat_history: [
+        {
+          role: "user",
+          content: "Summarise these pages:\nhttps://example.gov.au/page-1",
+          seq: 1,
+          step: "step_1_source",
+          ts_iso: "2026-07-03T00:00:00Z",
+        },
+        {
+          role: "assistant",
+          content: "**Source created** — reading the sample pages.",
+          seq: 2,
+          step: "step_1_source",
+          ts_iso: "2026-07-03T00:00:01Z",
+        },
+        {
+          role: "user",
+          content: "Write the results out as JSONL.",
+          seq: 3,
+          step: "step_2_sink",
+          ts_iso: "2026-07-03T00:00:02Z",
+        },
+        {
+          role: "assistant",
+          content: "I set up a JSONL output for the summaries.",
+          seq: 4,
+          step: "step_2_sink",
+          ts_iso: "2026-07-03T00:00:03Z",
+        },
+      ],
+      chat_turn_seq: 4,
+      profile: null,
+    };
+  }
+
+  function makeSchemaFormNextTurn(): TurnPayload {
+    const payload: SchemaFormPayload = {
+      mode: "plugin_options",
+      plugin: "json",
+      knobs: {
+        fields: [
+          { name: "path", label: "Path", kind: "text", required: true, nullable: false },
+        ],
+      },
+      prefilled: { path: "results.jsonl" },
+    };
+    return { type: "schema_form", step_index: 1, payload };
+  }
+
+  it("has no axe violations on the two-column tutorial workspace", async () => {
+    // jsdom does not implement Element.prototype.scrollIntoView (the
+    // step-advance focus effect scrolls the just-built decision into view
+    // on mount) — same stub as CommandPalette above.
+    Element.prototype.scrollIntoView = vi.fn();
+    // InlineRunResults loads the session's runs on mount; jsdom has no
+    // backend, so seed an empty list.
+    vi.mocked(apiClient.fetchRuns).mockResolvedValue([]);
+    useSessionStore.setState({
+      compositionState: makeFullCompositionState(),
+      compositionProposals: [],
+      guidedSession: makeTutorialGuidedSession(),
+      guidedNextTurn: makeSchemaFormNextTurn(),
+    } as never);
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{
+          step_1_source: "Summarise these pages:\nhttps://example.gov.au/page-1",
+          step_2_sink: "Write the results out as JSONL.",
+        }}
+      />,
+    );
+
+    // Guard against a vacuous pass: the named scroll group, the artifact
+    // rail, both role=log regions (transcript + wizard step), the rail's
+    // decision history, and the Sent composer state must all be mounted.
+    screen.getByRole("group", { name: "Conversation" });
+    screen.getByRole("complementary", { name: "Pipeline summary" });
+    screen.getByRole("log", { name: "Step chat history" });
+    screen.getByRole("log", { name: "Guided wizard step" });
+    screen.getByRole("heading", { name: /decisions so far/i });
+    screen.getByText(/your request is in the transcript above/i);
+
     expect(await axe(container)).toHaveNoViolations();
   });
 });

@@ -49,10 +49,11 @@
 }
 
 .tutorial-kicker {
-  /* Align the kicker's left edge with the 64rem centred sheet that the stepper
-     and pipeline gloss sit in (was full-width-left, which left it misaligned
-     with the centred stepper below it). Centre the 64rem block; text stays
-     left-aligned inside it. */
+  /* Centre the 64rem block; text stays left-aligned inside it. This centring
+     now only serves the bookend-turn context (where the cap rarely binds) —
+     in the guided step the whole header band is full-bleed and the
+     .tutorial-shell--guided override below neutralises the cap so the kicker
+     shares the progress row's and stepper's left edge. */
   margin: 0 auto var(--space-sm);
   max-width: 64rem;
   width: 100%;
@@ -72,27 +73,96 @@
   width: 100%;
 }
 
-/* ── Guided step: two-column WORKSPACE on a single document scroll ─────────────
-   The bookend turns (welcome/run/audit/graduation) are short centred cards on the
-   base `.tutorial-shell` document scroll. The guided step renders the two-column
-   WORKSPACE (guided.css `.guided-workspace`) — conversation + composer on the
-   left, the pipeline-so-far + current-decision cards pinned sticky top-right — on
-   that SAME single document scroll. The sticky right column replaces the old
-   bottom dock; top-aligned so the cards sit at the top-right as requested.
+/* ── Guided step: height-bounded WORKSPACE frame (the column scrolls) ──────────
+   The bookend turns (welcome/run/audit/graduation) are short centred cards on
+   the base `.tutorial-shell` document scroll. The guided step instead becomes a
+   FIXED FRAME: the shell stops scrolling and the conversation column inside the
+   workspace (guided.css `.guided-workspace-scroll`) owns the scroll, freeform-
+   style, with the composer docked beneath it and the artifact rail flush right.
 
    (History: the guided step once borrowed the freeform chat model — a flex:1
    inner scroll that FILLS the viewport + a flex-shrink:0 bottom dock — which
    produced a ~550px void when content under-flowed and a clipped, unreachable
-   forward button when it over-flowed.)
+   forward button when it over-flowed. The difference THIS time: the CONTENT
+   COLUMN owns the scroll and the decision card lives inside it, so underflow
+   just leaves empty column space and overflow scrolls — nothing is docked that
+   can outgrow the viewport.)
+
+   The height chain below is all-or-nothing: shell → guided-shell → chat-panel →
+   workspace → stream → scroll wrapper each need flex:1/min-height:0 (or
+   flex-shrink:0 for fixed bands). Miss ONE min-height:0 and the chain silently
+   reverts to content-height growth — the internal scroll never engages.
 
    Scoped under `.tutorial-shell--guided` (live-guided + freeform never render
-   under `.tutorial-shell`), so the shared `.chat-panel` / `.guided-scroll`
-   dock-and-fill base rules — correct for a real chat log — stay untouched. With no
-   `overflow:hidden` override the base `.tutorial-shell{overflow-y:auto}` governs
-   (one document scroll); the workspace's right column is sticky against it. */
-.tutorial-shell--guided .chat-panel {
+   under `.tutorial-shell`). tutorial.css imports BEFORE chat.css/guided.css, so
+   every override here must WIN ON SPECIFICITY, never on source order —
+   `.tutorial-shell.tutorial-shell--guided` (0,2,0) also outranks the (0,1,0)
+   base rules later in THIS file (the ≤760px shell padding). */
+.tutorial-shell.tutorial-shell--guided {
+  /* The fixed frame: no document scroll on the guided step. */
+  overflow: hidden;
+  flex: 1 1 auto;
+  min-height: 0;
   height: auto;
-  overflow: visible;
+  /* Full-bleed workspace: children span the frame; the bands that need an
+     inset (progress row, kicker, stepper) re-add their own inline padding. */
+  align-items: stretch;
+  padding: var(--space-sm) 0 0;
+  /* Header-band tightening (D9): the macro dots, kicker and stepper are three
+     distinct hierarchies — keep all three, close ranks between them. */
+  gap: var(--space-sm);
+}
+
+.tutorial-shell--guided .tutorial-progress {
+  flex-shrink: 0;
+  padding-inline: var(--space-lg);
+}
+
+.tutorial-shell--guided .tutorial-kicker {
+  flex-shrink: 0;
+  padding-inline: var(--space-lg);
+  margin-bottom: var(--space-2xs);
+  /* Join the full-bleed band: the base rule's centred 64rem cap would leave
+     this single line indented ~200px between two left-anchored bands (dots
+     row above, stepper below) on wide viewports. */
+  max-width: none;
+  margin-inline: 0;
+}
+
+.tutorial-shell--guided .tutorial-guided-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Re-bound the panel (chat.css's base .chat-panel is height:100% against a
+   full-height parent; here the parent is a flex column, so height:auto +
+   flex:1 is the correct fill). overflow:hidden clips to the frame — the
+   conversation column inside owns the scroll. */
+.tutorial-shell--guided .chat-panel {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
+  overflow: hidden;
+}
+
+/* The COMPLETED branch renders persistently under this same shell (back-nav
+   state, TutorialGuidedShell sawActiveRef) but has NO internal scroll region —
+   a plain overflow:hidden frame would strand its content off-screen. Let the
+   completed panel scroll itself instead. */
+.tutorial-shell--guided .chat-panel--completed {
+  overflow-y: auto;
+}
+
+/* Stepper full-bleed alignment: (0,3,0) outranks guided.css's centred 64rem
+   sheet cap (`.chat-panel--guided > .guided-workflow`, (0,2,0)) — a centred
+   stepper over a full-bleed workspace reads as misaligned. Top padding drops
+   to --space-xs (header-band tightening, D9). */
+.tutorial-shell--guided .chat-panel--guided > .guided-workflow {
+  max-width: none;
+  margin-inline: 0;
+  padding: var(--space-xs) var(--space-lg) 0;
 }
 
 .tutorial-sample-loading {

@@ -163,41 +163,31 @@
   margin: var(--space-md) auto;
 }
 
-/* Tutorial: the decision renders OUT of .guided-scroll (ChatPanel places it as a
-   direct child of .chat-panel--guided in tutorial mode), so it flows in document
-   order after the summary and directly above the composer — one continuous stack
-   on the single-document tutorial layout (see tutorial.css `.tutorial-shell--guided`).
-   As a flex-column child it needs an explicit width to fill the 64rem cap before
-   the auto margins centre it (same reason as .guided-step-chat). The small bottom
-   margin groups it with the composer below. Card chrome (solid border / radius /
-   surface) is inherited from the base rule, matching the summary card.
-   (flex-shrink:0 is inert here — the tutorial panel is content-height — but kept
-   for parity with the composer rule.) */
-.chat-panel--guided > .guided-current-decision {
-  flex-shrink: 0;
-  width: 100%;
-  max-width: 64rem;
-  margin: var(--space-md) auto var(--space-sm);
-}
-
-/* ── Two-column WORKSPACE (tutorial; the future first-class hybrid layout) ─────
-   Conversation stream + composer on the LEFT (the freeform half); the
-   pipeline-so-far + current-decision cards pinned sticky TOP-RIGHT (the guided
-   half). Lives inside the single-document tutorial flow (tutorial.css
-   `.tutorial-shell--guided` — the PAGE scrolls). The right column is sticky so
-   the cards stay in view as the conversation grows, and takes its OWN scroll when
-   it is taller than the viewport so the decision's forward button is always
-   reachable. Built with general `.guided-workspace*` classes (not tutorial-only)
-   so it can be promoted to a first-class mode later. */
+/* ── WORKSPACE (tutorial; the future first-class hybrid layout) ───────────────
+   Freeform-congruent conversation column (internal scroll region over a docked
+   composer) on the LEFT; a SideRail-width artifact rail flush RIGHT. Rendered
+   inside the height-bounded tutorial frame (tutorial.css
+   `.tutorial-shell--guided` — the COLUMN scrolls, not the page). Grid mirrors
+   the freeform `.app-layout` template (shared.css) so the rail reads as the
+   same chrome. Built with general `.guided-workspace*` classes (not
+   tutorial-only) so it can be promoted to a first-class mode later. */
 .guided-workspace {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--space-lg);
-  align-items: start;
+  grid-template-columns: minmax(0, 1fr) var(--siderail-width);
+  /* Bound the single row to the container so the column's internal scroll can
+     engage: an auto row sizes to CONTENT and silently defeats every
+     min-height:0 below it. Belt-and-braces with the items' min-height:0. */
+  grid-template-rows: minmax(0, 1fr);
+  /* No gap — the rail's border-left is the seam (SideRail idiom). */
+  gap: 0;
+  align-items: stretch;
   width: 100%;
-  max-width: 90rem;
-  margin-inline: auto;
-  padding-inline: var(--space-md);
+  max-width: none;
+  margin-inline: 0;
+  padding-inline: 0;
+  /* The growing flex child of the height-bounded .chat-panel. */
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .guided-workspace-stream {
@@ -205,45 +195,113 @@
   flex-direction: column;
   gap: var(--space-md);
   min-width: 0;
+  /* Grid items default min-height:auto — without this the column grows to
+     content height and the internal scroll never engages. */
+  min-height: 0;
 }
 
-.guided-workspace-decision {
-  position: sticky;
-  top: var(--space-md);
-  align-self: start;
+/* The conversation column's internal scroll region (transcript → run results →
+   acknowledgements → current decision). Mirrors freeform's
+   .chat-panel-messages; the bubbles carry their own row gutters
+   (.message-row), so only a modest inline pad is needed. */
+.guided-workspace-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-lg) var(--space-md);
+}
+
+/* Keyboard-focusable scroll region (tabIndex=0 in ChatPanel): the standard
+   app focus ring, drawn INSET because the workspace frame clips overflow —
+   the default +2px offset ring would be invisible on all four sides (same
+   failure chat.css already fixes for .chat-panel-messages). */
+.guided-workspace-scroll:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* The rail scrolls too (overflow-y:auto both at desktop and as the ≤900px
+   strip) and is keyboard-focusable for the same WCAG 2.1.1 reason — at ≤900px
+   the strip hides its only focusable furniture (graph thumbnail), so without
+   a tab stop its overflow is keyboard-unreachable. Same inset-ring rationale
+   as the scroll region above. */
+.guided-workspace-rail:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+/* The docked composer must keep its intrinsic height when the column is
+   squeezed — only the scroll region above it may shrink. */
+.guided-workspace-stream > .guided-step-chat {
+  flex-shrink: 0;
+}
+
+/* Artifact rail: ambient pipeline state (summary card + decisions so far).
+   SideRail chrome congruence (shared.css .layout-siderail idiom): border-left
+   seam, inspector surface, own scroll within the bounded row. */
+.guided-workspace-rail {
   display: flex;
   flex-direction: column;
   gap: var(--space-md);
   min-width: 0;
-  /* Own scroll when the cards exceed the viewport — Continue stays reachable
-     without scrolling the whole page to its very bottom. */
-  max-height: calc(100vh - 8rem);
+  min-height: 0;
   overflow-y: auto;
+  border-left: 1px solid var(--color-border);
+  background-color: var(--color-surface-inspector);
+  padding: var(--space-sm);
 }
 
 /* Each column owns its vertical rhythm via `gap`; reset the pieces' own block
-   margins (they centre in a 64rem sheet in the single-column layout) and let them
-   fill their column. The chat narration keeps its readable 70ch measure via
-   .guided-chat-history-content. */
-.guided-workspace-stream > *,
-.guided-workspace-decision > * {
+   margins (they centre in a 64rem sheet in the single-column layout) and let
+   them fill their column. Transcript rows live INSIDE .guided-workspace-scroll
+   — never as direct stream children — so `max-width:none` can not kill the
+   .bubble width caps. Specificity (0,2,0) is load-bearing: the rail cards'
+   own `margin: var(--space-md) auto` sheet-centring rules (.guided-graph-panel,
+   .guided-history) appear LATER in this file and would win a same-specificity
+   tie, leaving stray margins inside the rail. */
+.guided-workspace .guided-workspace-stream > *,
+.guided-workspace .guided-workspace-rail > * {
   width: 100%;
   max-width: none;
   margin: 0;
 }
 
-/* Narrow screens: collapse to one column (one document scroll, no sticky). Keep
-   the conversation + composer first so Send stays near the top; the cards follow. */
+/* Cards inside the scroll region align their left/right edges with the bubble
+   rows' content gutter (wrapper --space-md pad + .message-row --space-lg
+   padding); their base rules carry sheet-centring margins sized for the live
+   .guided-scroll column, which read as ragged edges here. InlineRunResults is
+   deliberately absent: it already carries margin-inline var(--space-lg) and a
+   ≤760px --space-sm tightening this (0,2,0) rule would clobber. */
+.guided-workspace-scroll > .ack-stack,
+.guided-workspace-scroll > .guided-current-decision {
+  margin-inline: var(--space-lg);
+}
+
+/* Narrow screens: single column with the rail collapsed to a compact strip
+   ABOVE the conversation (order:-1 — the strip is ambient context the learner
+   should pass before the transcript). DOM order stays stream-first, so visual
+   order diverges from source/tab order here — a documented reading-order
+   divergence, matching the stacked .app-layout rail precedent. The bounded
+   second row (minmax(0,1fr)) keeps the internal scroll engaged. */
 @media (max-width: 900px) {
   .guided-workspace {
     grid-template-columns: minmax(0, 1fr);
-    max-width: 64rem;
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
-  .guided-workspace-decision {
-    position: static;
-    max-height: none;
-    overflow: visible;
+  .guided-workspace-rail {
+    order: -1;
+    border-left: none;
+    border-bottom: 1px solid var(--color-border);
+    max-height: 30vh;
+    overflow-y: auto;
+  }
+
+  /* Compact strip keeps only the one-line gloss + validation signal; the
+     graph thumbnail and decision history are desktop-rail furniture. */
+  .guided-workspace-rail .graph-mini,
+  .guided-workspace-rail .guided-history {
+    display: none;
   }
 }
 
@@ -499,6 +557,31 @@
 .guided-step-chat {
   border-style: dashed;
   background-color: var(--color-surface-elevated);
+}
+
+/* Tutorial workspace: the composer docks bare under the conversation column —
+   freeform's input-strip idiom, not a dashed card floating in the stream.
+   Kills the base card chrome (margin/padding/border/radius/surface + the
+   dashed restyle above); same-specificity later-source wins within this file.
+   The inner .chat-input carries the border-top seam + padding (chat.css), so
+   the section itself must stay flush or the seam doubles. Live guided keeps
+   the dashed card untouched. */
+.guided-step-chat--bare {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+}
+
+/* Sent state swaps the ChatInput (and its .chat-input padding AND border-top
+   seam) for a static status line — give that line the input strip's FULL
+   chrome, not just an inset: without the border-top the docked band loses its
+   seam for the whole review-the-decision phase, and a --space-md inset would
+   shift the text 4px sideways every time the composer flips states. */
+.guided-step-chat--bare .guided-step-chat-sent {
+  padding: var(--space-sm) var(--space-lg);
+  border-top: 1px solid var(--color-border);
 }
 
 /* Tutorial: shown in place of the locked chat box once the step's prompt has
@@ -1845,6 +1928,28 @@
   font-size: var(--font-size-sm);
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+/* ---------------------------------------------------------------------------
+   Stage dividers — GuidedChatHistory bubbles variant (tutorial workspace).
+   One centred divider per step-change boundary in the transcript. Rides
+   freeform's .bubble-system centred full-width visual (chat.css); the base
+   class is shared with freeform system notices, so divider-specific styling
+   lives in this SUBCLASS — never mutate .bubble-system itself. Guided-scoped,
+   hence owned here rather than in chat.css's .bubble* family.
+   --------------------------------------------------------------------------- */
+.bubble-system--stage {
+  /* Marker, not a notice: drop the italic notice voice and background; echo
+     the flat transcript's uppercase step-badge treatment so the stage
+     vocabulary reads the same in both transcript idioms. */
+  font-style: normal;
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  background-color: transparent;
+  padding-block: var(--space-2xs);
 }
 
 /* ---------------------------------------------------------------------------

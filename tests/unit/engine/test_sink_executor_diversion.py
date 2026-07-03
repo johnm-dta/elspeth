@@ -112,17 +112,23 @@ def _assert_single_primary_divert_cleanup(
     phase: str,
     exception_type: str,
 ) -> None:
+    # Failsink states now open BEFORE failsink I/O (elspeth-adaca19c75), so a
+    # single diverted token has TWO open states (primary anchor + failsink
+    # destination) and cleanup must terminalize both.
     begin_calls = execution.begin_node_state.call_args_list
-    assert len(begin_calls) == 1
+    assert len(begin_calls) == 2
     assert begin_calls[0].kwargs["token_id"] == "t0"
     assert begin_calls[0].kwargs["node_id"] == "node-primary"
+    assert begin_calls[1].kwargs["token_id"] == "t0"
+    assert begin_calls[1].kwargs["node_id"] == "node-failsink"
 
     completion_by_state = _complete_node_state_kwargs_by_state(execution)
-    assert set(completion_by_state) == {"state-1"}
-    failed_kwargs = completion_by_state["state-1"]
-    assert failed_kwargs["status"] == NodeStateStatus.FAILED
-    assert failed_kwargs["error"].phase == phase
-    assert failed_kwargs["error"].exception_type == exception_type
+    assert set(completion_by_state) == {"state-1", "state-2"}
+    for state_id in ("state-1", "state-2"):
+        failed_kwargs = completion_by_state[state_id]
+        assert failed_kwargs["status"] == NodeStateStatus.FAILED
+        assert failed_kwargs["error"].phase == phase
+        assert failed_kwargs["error"].exception_type == exception_type
 
 
 class TestNoDiversions:
@@ -566,15 +572,65 @@ class TestFailsinkErrorHandling:
             )
 
 
+class TestFailsinkStateOrdering:
+    """Failsink node_states open BEFORE external failsink I/O (elspeth-adaca19c75).
+
+    Mirrors the primary path's open-before-I/O invariant: a durable failsink
+    write must never exist without a failsink node_state — a crash between
+    flush and audit recording would otherwise leave a durable artifact with
+    no node_state, routing_event, DIVERTED outcome, or checkpoint.
+    """
+
+    def test_failsink_states_opened_before_external_failsink_write(self) -> None:
+        executor, execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        tokens = [_make_token("t0")]
+
+        call_order: list[str] = []
+        orig_begin = execution.begin_node_state.side_effect
+
+        def _begin(**kwargs: Any) -> Any:
+            if kwargs.get("node_id") == failsink.node_id:
+                call_order.append("failsink_begin_node_state")
+            return orig_begin(**kwargs)
+
+        def _write(rows: Any, ctx: Any) -> SinkWriteResult:
+            call_order.append("failsink_write")
+            return SinkWriteResult(artifact=_make_artifact("/tmp/failsink"))
+
+        execution.begin_node_state.side_effect = _begin
+        failsink.write.side_effect = _write
+
+        from elspeth.contracts.plugin_context import PluginContext
+
+        executor.write(
+            sink=sink,
+            tokens=tokens,  # type: ignore[arg-type]
+            ctx=MagicMock(spec=PluginContext, run_id="run-1"),
+            step_in_pipeline=5,
+            sink_name="primary",
+            pending_outcome=_default_pending(),
+            failsink=failsink,
+            failsink_name="csv_failsink",
+            failsink_edge_id="edge-failsink-1",
+        )
+
+        assert call_order == ["failsink_begin_node_state", "failsink_write"], (
+            f"failsink node_state must open BEFORE the external failsink write, got: {call_order}"
+        )
+
+
 class TestFailsinkCleanup:
     """Verify node_state recording when failsink write/flush fails."""
 
     def test_failsink_write_failure_completes_failsink_states_as_failed(self) -> None:
-        """When failsink.write() raises, no failsink node_states are opened.
+        """When failsink.write() raises, the pre-opened failsink states FAIL.
 
-        Batch: 1 token, 1 diversion. The failsink write crashes before
-        begin_node_state is called for failsink states, so complete_node_state
-        is never called with FAILED for the failsink node.
+        Batch: 1 token, 1 diversion. Failsink node_states open BEFORE the
+        external failsink write (elspeth-adaca19c75), so a write crash must
+        terminalize BOTH the primary divert anchor and the failsink state.
         """
         executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
@@ -594,25 +650,26 @@ class TestFailsinkCleanup:
                 failsink_name="csv_failsink",
                 failsink_edge_id="edge-failsink-1",
             )
-        # t0's primary divert state was opened (divert anchor), then failsink
-        # write crashed. The cleanup marks the primary divert state as FAILED.
+        # t0's primary divert anchor AND its pre-opened failsink state were
+        # open when the failsink write crashed — cleanup fails BOTH.
         complete_calls = execution.complete_node_state.call_args_list
         failed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED]
         completed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.COMPLETED]
-        assert len(failed_calls) == 1  # primary divert anchor cleaned up
+        assert len(failed_calls) == 2  # primary divert anchor + failsink state
         assert len(completed_calls) == 0
-        # Primary divert state opened, but no failsink states (write crashed first)
+        # Failsink state opened BEFORE the write (open-before-I/O invariant)
         begin_calls = execution.begin_node_state.call_args_list
         primary_begins = [c for c in begin_calls if c.kwargs.get("node_id") == sink.node_id]
         failsink_begins = [c for c in begin_calls if c.kwargs.get("node_id") == failsink.node_id]
         assert len(primary_begins) == 1  # divert anchor
-        assert len(failsink_begins) == 0
+        assert len(failsink_begins) == 1
 
     def test_failsink_failure_does_not_affect_primary_states(self) -> None:
         """Primary COMPLETED states remain intact when failsink fails.
 
         Batch: 2 tokens, 1 diversion at index 1.
-        Expect: t0 COMPLETED at primary, t1 gets no failsink state (write crashes).
+        Expect: t0 COMPLETED at primary; t1's divert anchor AND its pre-opened
+        failsink state both FAIL when the failsink write crashes.
         """
         executor, execution, _data_flow = _make_executor()
         diversions = (RowDiversion(row_index=1, reason="bad", row_data={"x": 1}),)
@@ -634,17 +691,18 @@ class TestFailsinkCleanup:
             )
         complete_calls = execution.complete_node_state.call_args_list
         # t0: COMPLETED at primary (Phase 2)
-        # t1: FAILED at primary (divert anchor — failsink write crashed)
+        # t1: FAILED at primary (divert anchor) + FAILED at failsink (pre-opened)
         completed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.COMPLETED]
         failed_calls = [c for c in complete_calls if c.kwargs.get("status") == NodeStateStatus.FAILED]
         assert len(completed_calls) == 1  # t0
-        assert len(failed_calls) == 1  # t1 primary divert state cleaned up
-        # Verify: 2 primary states opened (t0 + t1 divert anchor), 0 failsink states
+        assert len(failed_calls) == 2  # t1 primary divert anchor + t1 failsink state
+        # Verify: 2 primary states opened (t0 + t1 divert anchor), 1 failsink
+        # state (opened BEFORE the crashing write — open-before-I/O invariant)
         begin_calls = execution.begin_node_state.call_args_list
         primary_begins = [c for c in begin_calls if c.kwargs.get("node_id") == sink.node_id]
         failsink_begins = [c for c in begin_calls if c.kwargs.get("node_id") == failsink.node_id]
         assert len(primary_begins) == 2  # t0 + t1 divert anchor
-        assert len(failsink_begins) == 0  # failsink write crashed before state opening
+        assert len(failsink_begins) == 1
 
     def test_failsink_flush_failure_crashes(self) -> None:
         """If failsink.flush() raises, crash — it's the last resort."""

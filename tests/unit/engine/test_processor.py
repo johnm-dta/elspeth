@@ -3751,6 +3751,89 @@ class TestDurableSchedulerResumeDrain:
             )
         assert statuses == ["pending_sink"]
 
+    def test_evicted_worker_disposition_is_refused_mid_drain(self) -> None:
+        """ADR-030 §G parity (elspeth-ba7b2cc25d): a registered worker whose
+        run_workers row is evicted MID-PROCESSING cannot commit the claimed
+        item's disposition — the drain raises RunWorkerEvictedError and the
+        item stays LEASED (abandoned for the reaper) instead of landing in
+        pending_sink under an evicted owner."""
+        from sqlalchemy import select, update
+
+        from elspeth.contracts.errors import RunWorkerEvictedError
+        from elspeth.core.landscape.schema import run_workers_table, token_work_items_table
+
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-ready")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        transform = _make_mock_transform(node_id=str(transform_node), on_success="default")
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            node_to_plugin={transform_node: transform},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="worker-evictable",
+        )
+        ctx = make_context(landscape=factory.plugin_audit_writer())
+        success_result = TransformResult.success(
+            make_row({"value": 42, "resumed": True}),
+            success_reason={"action": "resume_drain"},
+        )
+
+        def executor_side_effect(*, transform, token, ctx, attempt=0):
+            # Evict the worker AFTER its claim succeeded but BEFORE the
+            # drain's disposition write — the ticket's exact window.
+            with db.engine.begin() as conn:
+                conn.execute(
+                    update(run_workers_table)
+                    .where(run_workers_table.c.worker_id == "worker-evictable")
+                    .values(status="evicted", evicted_at=datetime.now(UTC))
+                )
+            return (success_result, token, None)
+
+        with (
+            patch.object(processor._transform_executor, "execute_transform", side_effect=executor_side_effect),
+            pytest.raises(RunWorkerEvictedError),
+        ):
+            processor.drain_scheduled_work(ctx)
+
+        with db.connection() as conn:
+            item_row = conn.execute(
+                select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
+                    token_work_items_table.c.run_id == "test-run"
+                )
+            ).one()
+        assert item_row.status == "leased", "evicted worker's disposition must not commit"
+        assert item_row.lease_owner == "worker-evictable"
+
     def test_sink_bound_scheduler_work_terminalizes_only_after_sink_callback(self) -> None:
         """Sink-bound work remains durable until sink outcome recording completes."""
         db, factory = _make_factory()

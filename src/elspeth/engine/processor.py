@@ -78,6 +78,7 @@ from elspeth.contracts.errors import (
     PassThroughContractViolation,
     PluginContractViolation,
     PluginRetryableError,
+    RunWorkerEvictedError,
     SchedulerLeaseLostError,
     TransformErrorCategory,
     TransformErrorReason,
@@ -4406,7 +4407,16 @@ class RowProcessor:
                             now=self._clock.now_utc(),
                             expected_lease_owner=claimed_lease_owner,
                             branch_loss=self._take_claim_branch_loss(claimed.token_id),
+                            worker_id=self._disposition_fence_worker_id(),
                         )
+                    except RunWorkerEvictedError as evicted_exc:
+                        # The membership fence refused the failure bookkeeping:
+                        # this worker was evicted mid-processing, so the peer
+                        # reap path owns the item now. Propagate the eviction
+                        # signal (followers exit on it) instead of wrapping it
+                        # as an audit-integrity crash.
+                        evicted_exc.add_note(f"processing exception {type(processing_exc).__name__} was superseded by the eviction refusal")
+                        raise
                     except Exception as scheduler_exc:
                         raise AuditIntegrityError(
                             f"Scheduler failed to mark work_item_id={claimed.work_item_id!r} failed after original "
@@ -4456,6 +4466,7 @@ class RowProcessor:
                     now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                     branch_loss=self._take_claim_branch_loss(claimed.token_id),
+                    worker_id=self._disposition_fence_worker_id(),
                 )
                 result = self._with_scheduler_pending_sink_handoff(result, claimed.token_id)
             elif self._scheduler_result_failed_claimed_token(result, claimed.token_id):
@@ -4464,6 +4475,7 @@ class RowProcessor:
                     now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                     branch_loss=self._take_claim_branch_loss(claimed.token_id),
+                    worker_id=self._disposition_fence_worker_id(),
                 )
             else:
                 self._scheduler.mark_terminal(
@@ -4471,6 +4483,7 @@ class RowProcessor:
                     now=self._clock.now_utc(),
                     expected_lease_owner=claimed_lease_owner,
                     branch_loss=self._take_claim_branch_loss(claimed.token_id),
+                    worker_id=self._disposition_fence_worker_id(),
                 )
 
             if result is not None:
@@ -4639,7 +4652,19 @@ class RowProcessor:
             barrier_key=barrier_key,
             now=now,
             expected_lease_owner=self._claimed_scheduler_lease_owner(claimed),
+            worker_id=self._disposition_fence_worker_id(),
         )
+
+    def _disposition_fence_worker_id(self) -> str | None:
+        """Membership-fence identity for drain disposition writes.
+
+        ADR-030 §G parity (filigree elspeth-ba7b2cc25d): registered workers
+        thread their identity so an evicted worker's dispositions are refused
+        at the scheduler; unregistered (N=0 / legacy / test-fixture) builds
+        pass None and stay unfenced — the same gating ``enqueue_ready``'s
+        slice-5 fence uses.
+        """
+        return self._scheduler_lease_owner if self._scheduler_lease_owner_registered else None
 
     @staticmethod
     def _claimed_scheduler_lease_owner(claimed: TokenWorkItem) -> str:

@@ -1646,8 +1646,13 @@ class TokenSchedulerRepository:
         barrier_key: str | None,
         now: datetime,
         expected_lease_owner: str,
+        worker_id: str | None = None,
     ) -> TokenWorkItem:
-        """Move an item to BLOCKED at a queue or barrier."""
+        """Move an item to BLOCKED at a queue or barrier.
+
+        ``worker_id`` (optional): membership-fence identity — see
+        :meth:`mark_terminal`.
+        """
         if queue_key is None and barrier_key is None:
             raise AuditIntegrityError(
                 f"Scheduler cannot block work_item_id={work_item_id!r} without a queue_key or barrier_key; "
@@ -1658,6 +1663,7 @@ class TokenSchedulerRepository:
             now=now,
             status=TokenWorkStatus.BLOCKED,
             expected_lease_owner=expected_lease_owner,
+            fenced_worker_id=worker_id,
             queue_key=queue_key,
             barrier_key=barrier_key,
             # F1: barrier holds are restored from the journal using this
@@ -1676,6 +1682,7 @@ class TokenSchedulerRepository:
         now: datetime,
         expected_lease_owner: str,
         branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
     ) -> TokenWorkItem:
         """Mark a leased work item terminal.
 
@@ -1683,12 +1690,20 @@ class TokenSchedulerRepository:
         fork-lineage branch feeding a coalesce (filter-drop / gate-discard)
         records its durable loss in the SAME transaction (record-then-notify
         uniformity rule).
+
+        ``worker_id`` (optional): membership-fence identity (ADR-030 §G
+        parity, filigree elspeth-ba7b2cc25d). When supplied, the disposition
+        UPDATE also requires the worker to be an active member of the row's
+        run (LENIENT ``claim_verb_fence_clause`` — N=0 runs pass); an
+        evicted/departed worker is refused with ``RunWorkerEvictedError``
+        and zero mutation.
         """
         return self._transition(
             work_item_id=work_item_id,
             now=now,
             status=TokenWorkStatus.TERMINAL,
             expected_lease_owner=expected_lease_owner,
+            fenced_worker_id=worker_id,
             branch_loss=branch_loss,
             row_payload_json=self._scrubbed_row_payload_json(work_item_id),
             lease_owner=None,
@@ -1702,18 +1717,23 @@ class TokenSchedulerRepository:
         now: datetime,
         expected_lease_owner: str,
         branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
     ) -> TokenWorkItem:
         """Mark a leased work item failed after retries are exhausted.
 
         ``branch_loss`` (§E.5): when the failed item is a fork-lineage branch
         feeding a coalesce, the durable loss record commits in the SAME
         transaction as this disposition (record-then-notify uniformity rule).
+
+        ``worker_id`` (optional): membership-fence identity — see
+        :meth:`mark_terminal`.
         """
         return self._transition(
             work_item_id=work_item_id,
             now=now,
             status=TokenWorkStatus.FAILED,
             expected_lease_owner=expected_lease_owner,
+            fenced_worker_id=worker_id,
             branch_loss=branch_loss,
             row_payload_json=self._scrubbed_row_payload_json(work_item_id),
             lease_owner=None,
@@ -1733,8 +1753,12 @@ class TokenSchedulerRepository:
         now: datetime,
         expected_lease_owner: str,
         branch_loss: BranchLossSpec | None = None,
+        worker_id: str | None = None,
     ) -> TokenWorkItem:
         """Move a claimed item to a durable sink handoff state.
+
+        ``worker_id`` (optional): membership-fence identity — see
+        :meth:`mark_terminal`.
 
         Attributed park (ADR-030 strict pending-sink terminalization): the
         parked row KEEPS ``lease_owner=expected_lease_owner`` with
@@ -1753,6 +1777,7 @@ class TokenSchedulerRepository:
             status=TokenWorkStatus.PENDING_SINK,
             expected_lease_owner=expected_lease_owner,
             branch_loss=branch_loss,
+            fenced_worker_id=worker_id,
             row_payload_json=row_payload_json,
             pending_sink_name=sink_name,
             pending_outcome=outcome,
@@ -3570,6 +3595,7 @@ class TokenSchedulerRepository:
         expected_statuses: tuple[TokenWorkStatus, ...] = (TokenWorkStatus.LEASED,),
         expected_lease_owner: str | None = None,
         branch_loss: BranchLossSpec | None = None,
+        fenced_worker_id: str | None = None,
         **values: object,
     ) -> TokenWorkItem:
         update_values = {"status": status.value, "updated_at": now, **values}
@@ -3581,6 +3607,14 @@ class TokenSchedulerRepository:
         ]
         if expected_lease_owner is not None:
             predicates.append(token_work_items_table.c.lease_owner == expected_lease_owner)
+        if fenced_worker_id is not None:
+            # Membership fence, ADR-030 §G parity (filigree elspeth-ba7b2cc25d):
+            # disposition verbs carry the same LENIENT fence as claim_ready —
+            # an evicted/departed worker cannot commit a disposition, while the
+            # N=0 OR-branch keeps runs with no registered workers unfenced.
+            # Correlated on the row's own run_id (the work_item_id predicate
+            # already pins the row).
+            predicates.append(claim_verb_fence_clause(worker_id=fenced_worker_id, run_id=token_work_items_table.c.run_id))
         with begin_write(self._engine) as conn:
             before = (
                 conn.execute(select(token_work_items_table).where(token_work_items_table.c.work_item_id == work_item_id))
@@ -3589,6 +3623,23 @@ class TokenSchedulerRepository:
             )
             result = conn.execute(update(token_work_items_table).where(and_(*predicates)).values(**update_values))
             if result.rowcount != 1:
+                if fenced_worker_id is not None and before is not None:
+                    # The base predicates may still match — then the membership
+                    # fence was the blocker. Mirror claim_ready's re-probe:
+                    # a registered-but-not-active worker raises the canonical
+                    # eviction signal (zero mutation) instead of the generic
+                    # audit-integrity crash.
+                    base_predicates_match = before["status"] in expected_status_values and (
+                        expected_lease_owner is None or before["lease_owner"] == expected_lease_owner
+                    )
+                    if base_predicates_match:
+                        worker_status = conn.execute(
+                            select(run_workers_table.c.status)
+                            .where(run_workers_table.c.worker_id == fenced_worker_id)
+                            .where(run_workers_table.c.run_id == before["run_id"])
+                        ).scalar()
+                        if worker_status is not None and str(worker_status) != "active":
+                            raise RunWorkerEvictedError(worker_id=fenced_worker_id, run_id=str(before["run_id"]))
                 actual = (
                     conn.execute(
                         select(token_work_items_table.c.status, token_work_items_table.c.lease_owner).where(
@@ -3603,11 +3654,12 @@ class TokenSchedulerRepository:
                 else:
                     actual_message = f"actual status {actual['status']}, actual lease_owner {actual['lease_owner']!r}"
                 expected_owner_message = "" if expected_lease_owner is None else f" and expected lease_owner {expected_lease_owner!r}"
+                fence_message = "" if fenced_worker_id is None else f" under membership fence for worker {fenced_worker_id!r}"
                 raise AuditIntegrityError(
                     f"Scheduler transition to {status.name!r} for work_item_id={work_item_id!r} "
                     f"affected {result.rowcount} rows; expected exactly 1 row with expected status {expected_status_text}"
-                    f"{expected_owner_message}. Caller assumed ownership but the row is missing or in an unexpected "
-                    f"state ({actual_message})."
+                    f"{expected_owner_message}{fence_message}. Caller assumed ownership but the row is missing or in an "
+                    f"unexpected state ({actual_message})."
                 )
             if before is None:
                 raise AuditIntegrityError(

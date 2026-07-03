@@ -239,17 +239,17 @@ repos:
         # be set to false here (the framework's commit-msg stage passes the
         # message file path as the sole positional argument).
         always_run: true
-  - repo: local
-    hooks:
-      - id: wardline-scan
-        name: wardline scan
-        entry: wardline scan
-        # Arm the trust-boundary gate: exit 1 on any ERROR finding so the hook
-        # actually blocks the commit. Without --fail-on the scan reports
-        # `gate: NOT_EVALUATED` and exits 0, giving a false green. Mirrors the
-        # documented project gate `wardline scan . --fail-on ERROR` (AGENTS.md /
-        # CLAUDE.md). `.` scans the whole tree (pass_filenames is false).
-        args: ['.', '--fail-on', 'ERROR']
-        language: system
-        types: [python]
-        pass_filenames: false
+# The wardline-scan hook was REMOVED here (2026-07-03, operator-approved),
+# per the wardline team's RCA of the "intermittent first-commit failure":
+# pre-commit fails any hook whose execution window sees the tracked-file diff
+# change, and this whole-tree scan was the slowest, last-running hook — so a
+# concurrent agent session's writes during its ~15s window were misattributed
+# to it and the commit was rejected ("files were modified by this hook", no
+# exit-code line). It also violated this file's header contract (whole-repo
+# gates belong to CI, triggered locally only by their own policy metadata)
+# and was inert: zero trust boundaries are bound in weft.toml, so a green
+# scan enforced nothing while blocking commits. The agent-level gate stands
+# unchanged — run `wardline scan . --fail-on ERROR` before handing back code
+# that touches external input (AGENTS.md / CLAUDE.md / the wardline-gate
+# skill). Reinstate enforcement in CI (not here) once wardline is installable
+# from the project's dependency graph AND boundaries are bound in weft.toml.

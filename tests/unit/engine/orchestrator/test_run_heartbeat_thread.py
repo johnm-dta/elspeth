@@ -199,6 +199,68 @@ class TestBeatsCorrectly:
 # ---------------------------------------------------------------------------
 
 
+class TestFatalIntegrityLatch:
+    """Tier-1 integrity failures fail closed at the drain boundary (elspeth-d0ce4e12af).
+
+    The heartbeat's swallow-and-continue doctrine is scoped to DB CONTENTION
+    (liveness-unknown). A Tier-1 error from worker_heartbeat — e.g.
+    AuditIntegrityError when the worker's registry row has vanished — is
+    corruption, not contention: the thread latches it (never raising on its
+    own stack) and check_and_raise() surfaces it at the next drain boundary.
+    """
+
+    def test_audit_integrity_error_latches_fatal_and_raises_at_boundary(self) -> None:
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        repo = _StubRepo()
+        repo.side_effect = AuditIntegrityError("worker_heartbeat for unregistered worker_id")
+
+        thread = _make_thread(repo, degraded_threshold=100)
+        thread._step_beat()  # must not raise on the beat thread's stack
+
+        # Not the busy path: no degraded counting for corruption.
+        assert thread._consecutive_busy == 0
+        # Not the eviction latch: the follower finalize-departure read-only
+        # view (coordination_lost) must be unaffected by the fatal latch.
+        assert thread.coordination_lost is False
+
+        with pytest.raises(AuditIntegrityError, match="unregistered worker_id"):
+            thread.check_and_raise()
+
+    def test_fatal_latch_persists_across_subsequent_beats(self) -> None:
+        from elspeth.contracts.errors import AuditIntegrityError
+
+        repo = _StubRepo()
+        repo.side_effects = [
+            AuditIntegrityError("registry row vanished"),
+            _HEALTHY_SNAPSHOT,
+        ]
+
+        thread = _make_thread(repo, degraded_threshold=100)
+        thread._step_beat()  # fatal
+        thread._step_beat()  # healthy — must NOT clear the fatal latch
+
+        with pytest.raises(AuditIntegrityError, match="registry row vanished"):
+            thread.check_and_raise()
+
+    def test_unexpected_exception_logged_with_traceback_not_debug_busy(self, caplog: pytest.LogCaptureFixture) -> None:
+        """A programming error is actionable: WARNING with traceback, not a
+        DEBUG 'busy' line — but still liveness-unknown (no latch, no crash)."""
+        import logging
+
+        repo = _StubRepo()
+        repo.side_effect = RuntimeError("repository contract regression")
+
+        thread = _make_thread(repo, degraded_threshold=100)
+        with caplog.at_level(logging.DEBUG, logger="elspeth.engine.orchestrator.heartbeat"):
+            thread._step_beat()
+
+        assert not thread._coordination_lost_event.is_set()
+        thread.check_and_raise()  # not fatal — must not raise
+        unexpected = [r for r in caplog.records if r.levelno >= logging.WARNING and r.exc_info]
+        assert unexpected, "unexpected exceptions must be logged at WARNING+ with traceback"
+
+
 class TestBusyTolerated:
     def test_operational_error_does_not_set_latch(self) -> None:
         """SQLITE_BUSY does NOT set the coordination-lost latch."""

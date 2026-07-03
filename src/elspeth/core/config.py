@@ -294,6 +294,12 @@ class TriggerConfig(BaseModel):
         Individual row data is NOT accessible in trigger conditions. For row-level
         routing decisions, use Gates instead of triggers.
 
+        Time-based condition fire times are sampled-at-evaluation: under
+        "first to fire wins", a condition's fire time is the first instant it
+        was OBSERVED true (bounded by poll cadence), never a computed
+        crossing instant. A condition truly crossing between polls can lose
+        to a timeout that fired in the gap — that is the defined semantic.
+
     Example YAML (combined triggers):
         trigger:
           count: 1000           # Fire after 1000 rows

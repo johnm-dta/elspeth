@@ -395,6 +395,87 @@ class TestTriggerFirstToFireWins:
         )
 
 
+class TestConditionFireTimeSampling:
+    """Time-based condition fire times are sampled-at-evaluation (elspeth-06df383e4a).
+
+    A poll-driven engine only KNOWS condition truth at observation time. The
+    old code backdated a newly-true condition to the previous (known-false)
+    check time — or first accept — letting a condition beat a timeout whose
+    real fire instant came first, corrupting the TriggerType audit value and
+    the persisted condition_fire_offset.
+    """
+
+    def test_backdated_condition_cannot_steal_timeout_win(self) -> None:
+        """Panel scenario: timeout=10, condition age>=15, false check at t=5,
+        next check at t=20. Timeout (t=10) must win, not a condition
+        backdated to the known-false t=5."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        clock = MockClock(start=0.0)
+        config = TriggerConfig(
+            timeout_seconds=10.0,
+            condition="row['batch_age_seconds'] >= 15",
+        )
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.record_accept()  # t=0
+
+        clock.advance(5.0)  # t=5: neither trigger ready
+        assert evaluator.should_trigger() is False
+
+        clock.advance(15.0)  # t=20: timeout fired at t=10, condition observed true now
+        assert evaluator.should_trigger() is True
+        assert evaluator.which_triggered() == "timeout", (
+            "Timeout fired at t=10; condition was first OBSERVED true at t=20. "
+            "Backdating the condition to the known-false t=5 check must not steal the win."
+        )
+
+    def test_condition_fire_offset_reflects_observation_time(self) -> None:
+        """The persisted checkpoint offset is the observation instant, never a
+        backdated known-false check time."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        clock = MockClock(start=0.0)
+        config = TriggerConfig(condition="row['batch_age_seconds'] >= 15")
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.record_accept()  # t=0
+
+        clock.advance(5.0)  # t=5: condition false, records a check
+        assert evaluator.should_trigger() is False
+
+        clock.advance(15.0)  # t=20: condition first observed true
+        assert evaluator.should_trigger() is True
+        assert evaluator.which_triggered() == "condition"
+        assert evaluator.get_condition_fire_offset() == 20.0
+
+    def test_condition_true_on_first_evaluation_uses_observation_time(self) -> None:
+        """With no prior false check, the fire time is still the observation
+        instant — not first_accept_time."""
+        from elspeth.core.config import TriggerConfig
+        from elspeth.engine.clock import MockClock
+        from elspeth.engine.triggers import TriggerEvaluator
+
+        clock = MockClock(start=0.0)
+        config = TriggerConfig(
+            timeout_seconds=10.0,
+            condition="row['batch_age_seconds'] >= 15",
+        )
+        evaluator = TriggerEvaluator(config, clock=clock)
+
+        evaluator.record_accept()  # t=0
+
+        clock.advance(20.0)  # t=20: first evaluation ever; both fired
+        assert evaluator.should_trigger() is True
+        assert evaluator.which_triggered() == "timeout", (
+            "Condition first observed true at t=20 must not be backdated to first accept (t=0)."
+        )
+
+
 class TestTriggerConditionLatching:
     """Tests for P1-2026-02-05: Condition trigger must latch once fired.
 

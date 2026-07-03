@@ -67,7 +67,6 @@ class TriggerEvaluator:
         # Per plugin-protocol.md:1211: "Multiple triggers can be combined (first one to fire wins)"
         self._count_fire_time: float | None = None
         self._condition_fire_time: float | None = None
-        self._last_condition_check_time: float | None = None
 
         # Pre-parse condition expression if applicable
         self._condition_parser: ExpressionParser | None = None
@@ -154,6 +153,13 @@ class TriggerEvaluator:
         When multiple triggers are satisfied, we report the one that fired EARLIEST,
         not the one checked first in code order.
 
+        Condition fire times are sampled-at-evaluation: a condition's fire
+        time is the first instant it was OBSERVED true (bounded by poll
+        cadence), not the unknowable exact crossing instant. Accepted
+        residual: a condition truly crossing at t=15 but first observed at a
+        t=20 poll loses to a timeout firing at t=18 — that is the defined
+        semantic, not a bug.
+
         Returns:
             True if any configured trigger should fire, False otherwise.
 
@@ -201,12 +207,15 @@ class TriggerEvaluator:
                         f"Expression: {self._condition_parser.expression!r}"
                     )
                 if result:
-                    self._condition_fire_time = (
-                        self._last_condition_check_time if self._last_condition_check_time is not None else self._first_accept_time
-                    )
+                    # Sampled-at-evaluation semantic (elspeth-06df383e4a): a
+                    # poll-driven engine only KNOWS condition truth at
+                    # observation time, so the fire time is the first instant
+                    # the condition was actually observed true — never a
+                    # backdated known-false check time or first accept, which
+                    # could steal a win from a timeout that genuinely fired
+                    # first and corrupt the TriggerType audit value.
+                    self._condition_fire_time = current_time
                     candidates.append((self._condition_fire_time, "condition"))
-                else:
-                    self._last_condition_check_time = current_time
 
         if not candidates:
             return False
@@ -321,13 +330,11 @@ class TriggerEvaluator:
         if condition_fire_offset is not None:
             self._condition_fire_time = self._first_accept_time + condition_fire_offset
         else:
+            # Not yet fired at checkpoint time. On resume, the first
+            # should_trigger() that observes the condition true latches the
+            # observation instant (sampled-at-evaluation) — same semantic as
+            # live evaluation.
             self._condition_fire_time = None
-
-        # _last_condition_check_time is not persisted in checkpoints.
-        # On resume, the first should_trigger() call that finds a condition
-        # newly true will fall back to _first_accept_time as the fire time
-        # lower bound — same behavior as the first batch evaluation.
-        self._last_condition_check_time = None
 
     def reset(self) -> None:
         """Reset state for a new batch.
@@ -339,4 +346,3 @@ class TriggerEvaluator:
         self._last_triggered = None
         self._count_fire_time = None
         self._condition_fire_time = None
-        self._last_condition_check_time = None

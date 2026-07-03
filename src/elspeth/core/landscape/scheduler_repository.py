@@ -3399,7 +3399,7 @@ class TokenSchedulerRepository:
         read and this call — a non-matching count is logged but not fatal because
         the next intake pass will re-classify the row correctly).
 
-        Called from ``_restore_barriers_from_journal`` for holdless non-completed
+        Called from ``BarrierRecoveryCoordinator.restore_from_journal`` for holdless non-completed
         rows (before ``restore_from_journal`` runs, so no executor state is
         touched).  The operation is epoch-fence-free (it runs before the new
         leader's first fenced verb and its safety derives from the takeover CAS

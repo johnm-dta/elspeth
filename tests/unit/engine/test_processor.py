@@ -97,7 +97,7 @@ def _make_source_row(data: dict[str, Any] | None = None) -> SourceRow:
 
 def test_aggregation_restore_plan_freezes_sequence_fields() -> None:
     from elspeth.contracts.barrier_scalars import AggregationNodeScalars
-    from elspeth.engine.processor import _AggregationRestorePlan
+    from elspeth.engine.barrier_coordination import _AggregationRestorePlan
 
     plan = _AggregationRestorePlan(
         node_id=NodeID("agg"),
@@ -6452,7 +6452,9 @@ class TestMaybeCoalesceToken:
 
         with (
             patch.object(factory.data_flow, "record_token_outcome") as record_outcome,
-            patch.object(processor, "_emit_token_completed") as emit_token_completed,
+            # The intake path emits through the BarrierIntakeCoordinator's
+            # construction-bound seam, not the processor attribute.
+            patch.object(processor._barrier_intake, "_emit_token_completed") as emit_token_completed,
         ):
             results, child_items = processor._run_barrier_intake_pass(ctx)
 

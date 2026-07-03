@@ -189,9 +189,11 @@ class AggregationExecutor:
         trigger latches at ``accept_time`` (the row's ``barrier_blocked_at``
         on the monotonic scale — backdated accept timing, §H 476).
 
-        Caller obligations: call ``open_batch_membership`` first (the batch
-        must exist) and ONLY on the adoption verb's ``adopted=True`` arm —
-        the idempotent SKIP arm must not re-feed memory.
+        The open-batch -> fenced-adopt -> accept ordering (and the rule that
+        the idempotent adopted=False SKIP arm must not re-feed memory) is
+        owned by ``BarrierIntakeCoordinator._adopt_aggregation_row`` — the
+        sole production caller. The no-open-batch guard below is the
+        residual defence for out-of-sequence callers.
 
         Raises:
             OrchestrationInvariantError: If node_id is not a configured

@@ -948,7 +948,7 @@ class ResumeCoordinator:
             with shutdown_ctx as active_event:
                 # F1: bundle the journal-restore inputs (checkpoint scalars +
                 # batch remap) for the processor's construction-time restore
-                # sweep (RowProcessor._restore_barriers_from_journal).
+                # sweep (BarrierRecoveryCoordinator.restore_from_journal).
                 barrier_restore = BarrierJournalRestoreContext(
                     resume_checkpoint_id=resume_checkpoint_id,
                     barrier_scalars=resume_point.barrier_scalars,

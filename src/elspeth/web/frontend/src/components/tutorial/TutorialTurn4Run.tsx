@@ -404,7 +404,10 @@ function formatError(err: unknown): string {
   ) {
     return (err as { detail: string }).detail;
   }
-  if (err instanceof Error) {
+  if (err instanceof Error && err.message !== "") {
+    // An ApiError can carry an empty message (structured detail withheld from
+    // the client) — falling through to the fixed copy beats rendering an
+    // empty alert strip with a bare Retry button.
     return err.message;
   }
   return "The tutorial run failed.";

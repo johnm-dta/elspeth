@@ -7,11 +7,13 @@ import {
   TUTORIAL_SOURCE_PROMPT,
   TUTORIAL_TRANSFORMS_PROMPT,
 } from "./tutorialMachine";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useSessionStore } from "@/stores/sessionStore";
 
 const startGuidedSessionMock = vi.fn();
 const startGuidedMock = vi.fn();
 const getTutorialSampleMock = vi.fn();
+const refreshInterpretationsMock = vi.fn();
 
 const SAMPLE_URLS = [
   "https://elspeth.example/tutorial-site/project-1.html",
@@ -87,6 +89,13 @@ describe("TutorialGuidedShell", () => {
       recoveryStartedCompositionVersion: null,
       startGuided: startGuidedMock,
     } as never);
+    // The shell rehydrates the interpretation-event projection on start (the
+    // tutorial bridge bypasses selectSession, which normally does this) — stub
+    // the store action so the mocked api module doesn't need the route.
+    refreshInterpretationsMock.mockReset().mockResolvedValue(undefined);
+    useInterpretationEventsStore.setState({
+      refreshAll: refreshInterpretationsMock,
+    } as never);
   });
 
   it("posts the TUTORIAL profile and enters guided on mount", async () => {
@@ -100,6 +109,20 @@ describe("TutorialGuidedShell", () => {
     // The shell must have bound the store's activeSessionId; otherwise
     // startGuided discards its payload and ChatPanel renders the empty surface.
     expect(useSessionStore.getState().activeSessionId).toBe("sess-1");
+  });
+
+  it("rehydrates pending interpretation events on start (resume must not drop the ack gate)", async () => {
+    // The tutorial bridge bypasses selectSession (which normally rehydrates
+    // pendingBySession). Without this call a mid-Build reload resumed with NO
+    // pending acknowledgement cards: the wire-stage Confirm was not blocked
+    // and the run later failed server-side with
+    // UnresolvedInterpretationPlaceholderError.
+    render(
+      <TutorialGuidedShell sessionId="sess-1" onCompleted={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(refreshInterpretationsMock).toHaveBeenCalledWith("sess-1"),
+    );
   });
 
   it("mounts the ChatPanel guided surface with isTutorial set", async () => {

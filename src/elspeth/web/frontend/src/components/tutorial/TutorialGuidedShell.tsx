@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getTutorialSample, startGuidedSession } from "@/api/client";
 import { ChatPanel } from "@/components/chat/ChatPanel";
+import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import type { GuidedStep } from "@/types/guided";
 import {
@@ -105,6 +106,18 @@ export function TutorialGuidedShell({
         // set an allowlist (a client-set allowlist is an SSRF widening vector).
         setSampleUrls(sample.sample_urls);
         await startGuided(sessionId);
+        // Rehydrate the interpretation-event projection for THIS session.
+        // Every other route into a session goes through selectSession, which
+        // does this (Phase 5b Task 3) — the tutorial bridge bypasses it, so
+        // without this a mid-Build reload resumed with pendingBySession
+        // EMPTY: no acknowledgement cards rendered, the wire-stage Confirm
+        // was not blocked, and the run then failed server-side with
+        // UnresolvedInterpretationPlaceholderError (the backend run gate is
+        // the final guard; the ack-before-advance UX gate lives client-side).
+        // Awaited, not fire-and-forget: a resume can land DIRECTLY on the
+        // wire stage, where the gate must be up before the first paint of an
+        // enabled Confirm.
+        await useInterpretationEventsStore.getState().refreshAll(sessionId);
       } catch (err) {
         setError(formatError(err));
       } finally {

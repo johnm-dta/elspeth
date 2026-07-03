@@ -30,6 +30,7 @@ class DAGTraversalSnapshot(Protocol):
     node_to_plugin: Mapping[NodeID, RowPlugin | GateSettings]
     node_to_next: Mapping[NodeID, NodeID | None]
     branch_first_node: Mapping[str, NodeID]
+    structural_node_ids: frozenset[NodeID]
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,13 +100,18 @@ class DAGNavigator:
     ) -> DAGNavigator:
         """Create a DAGNavigator from a DAGTraversalContext plus supplementary params.
 
-        Derives structural_node_ids and coalesce_name_by_node_id automatically.
+        Consumes the context's explicit structural_node_ids allowlist —
+        never the complement of node_to_plugin, which silently classified
+        unmapped plugin nodes as skippable (elspeth-c522931bd1) — and
+        derives coalesce_name_by_node_id automatically.
         """
         coalesce_node_ids = dict(traversal.coalesce_node_map)
         node_to_plugin = dict(traversal.node_to_plugin)
         node_to_next = dict(traversal.node_to_next)
 
-        structural_node_ids = frozenset(nid for nid in node_to_next if nid not in node_to_plugin)
+        # Coalesce nodes are structural by definition; the union keeps that
+        # invariant even for snapshot implementations that omit them.
+        structural_node_ids = frozenset(traversal.structural_node_ids) | frozenset(coalesce_node_ids.values())
         coalesce_name_by_node_id = {node_id: coalesce_name for coalesce_name, node_id in coalesce_node_ids.items()}
 
         return cls(

@@ -147,6 +147,11 @@ class DAGTraversalContext:
     node_to_next: Mapping[NodeID, NodeID | None]
     coalesce_node_map: Mapping[CoalesceName, NodeID]
     branch_first_node: Mapping[str, NodeID] = MappingProxyType({})
+    # Explicit allowlist of non-plugin traversal nodes (sources, queues,
+    # coalesce points). Nodes in node_to_next that are neither plugin-bearing
+    # nor in this set fail closed at resolution instead of being skipped.
+    # Coalesce nodes are structural by definition and always unioned in.
+    structural_node_ids: frozenset[NodeID] = frozenset()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "node_step_map", deep_freeze(self.node_step_map))
@@ -154,6 +159,11 @@ class DAGTraversalContext:
         object.__setattr__(self, "node_to_next", deep_freeze(self.node_to_next))
         object.__setattr__(self, "coalesce_node_map", deep_freeze(self.coalesce_node_map))
         object.__setattr__(self, "branch_first_node", deep_freeze(self.branch_first_node))
+        object.__setattr__(
+            self,
+            "structural_node_ids",
+            frozenset(self.structural_node_ids) | frozenset(self.coalesce_node_map.values()),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -532,7 +542,10 @@ class RowProcessor:
         self._coalesce_name_by_node_id: dict[NodeID, CoalesceName] = {
             node_id: coalesce_name for coalesce_name, node_id in self._coalesce_node_ids.items()
         }
-        self._structural_node_ids: frozenset[NodeID] = frozenset(nid for nid in self._node_to_next if nid not in self._node_to_plugin)
+        # Explicit allowlist from the traversal context (elspeth-c522931bd1):
+        # never derived as the complement of node_to_plugin, which silently
+        # skipped plugin nodes missing from the mapping (fail-open).
+        self._structural_node_ids: frozenset[NodeID] = traversal.structural_node_ids
         self._branch_to_coalesce: dict[BranchName, CoalesceName] = branch_to_coalesce or {}
         self._branch_to_sink: dict[BranchName, SinkName] = branch_to_sink or {}
         overlap = set(self._branch_to_coalesce.keys()) & set(self._branch_to_sink.keys())

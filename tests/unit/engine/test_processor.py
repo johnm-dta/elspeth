@@ -318,6 +318,7 @@ def _make_processor(
     scheduler_lease_owner: str | None = None,
     clock: Any = None,
     stamp_blocked_rows_adopted: bool = True,
+    structural_node_ids: frozenset[NodeID] | None = None,
 ) -> RowProcessor:
     """Create a RowProcessor with sensible defaults."""
     if scheduler_lease_owner is not None:
@@ -379,11 +380,15 @@ def _make_processor(
             schema_config=_DYNAMIC_SCHEMA,
         )
 
+    # Sources are structural in production (graph_wiring's type-based
+    # allowlist); coalesce nodes are auto-unioned by the context itself.
+    traversal_structural = structural_node_ids if structural_node_ids is not None else frozenset({NodeID(source_node_id)})
     traversal = DAGTraversalContext(
         node_step_map=traversal_steps,
         node_to_plugin=traversal_node_to_plugin,
         node_to_next=traversal_next,
         coalesce_node_map=coalesce_nodes,
+        structural_node_ids=traversal_structural,
     )
 
     if barrier_restore is not None and stamp_blocked_rows_adopted:
@@ -3116,6 +3121,9 @@ class TestProcessRowGateBranching:
             },
             coalesce_node_ids={CoalesceName("merge"): coalesce_node},
             # Intentionally omit coalesce_on_success_map
+            # router-1 is plugin-less walk topology — declare it structural so
+            # the jump walk reaches the coalesce on_success invariant under test.
+            structural_node_ids=frozenset({source_node, router_node}),
         )
 
         with pytest.raises(OrchestrationInvariantError, match="Coalesce 'merge' not in on_success map"):
@@ -5779,6 +5787,7 @@ class TestInnerTraversalCycleGuard:
                 s2: s1,  # cycle back
             },
             node_step_map={NodeID("source-0"): 0, s1: 1, s2: 2},
+            structural_node_ids=frozenset({NodeID("source-0"), s1, s2}),
         )
         ctx = make_context(landscape=factory.plugin_audit_writer())
         token = make_token_info(data={"value": 1})
@@ -8212,6 +8221,9 @@ class TestReadyEmissionEnqueueParity:
             node_step_map={NodeID("source-0"): 0, coalesce_node: 1, continue_node: 2},
             node_to_next={NodeID("source-0"): coalesce_node, coalesce_node: continue_node, continue_node: None},
             coalesce_on_success_map={CoalesceName("merge"): "merged_sink"},
+            # after-merge models a QUEUE node: structural by explicit
+            # allowlist (production classifies queues by node type).
+            structural_node_ids=frozenset({NodeID("source-0"), continue_node}),
         )
 
         # Lineage note: the audit trail enforces fork_group_id XOR

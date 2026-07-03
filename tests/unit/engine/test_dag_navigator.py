@@ -422,6 +422,56 @@ class TestFromTraversalContext:
         # Verify the walk can resolve through coalesce
         assert nav.resolve_jump_target_sink(coalesce_node) == "output_sink"
 
+    def test_unmapped_plugin_node_fails_closed(self) -> None:
+        """A traversal node with no plugin and no structural role raises, not skips.
+
+        Regression for elspeth-c522931bd1: the complement derivation classified
+        every plugin-less node_to_next entry as structural, so a transform
+        missing from node_to_plugin was silently skipped (fail-open).
+        """
+        transform = _make_mock_transform()
+        traversal = DAGTraversalContext(
+            node_step_map={NodeID("transform-1"): 1, NodeID("transform-2"): 2},
+            node_to_plugin={NodeID("transform-1"): transform},
+            node_to_next={
+                NodeID("transform-1"): NodeID("transform-2"),
+                NodeID("transform-2"): None,
+            },
+            coalesce_node_map={},
+        )
+
+        nav = DAGNavigator.from_traversal_context(traversal)
+
+        with pytest.raises(OrchestrationInvariantError, match="transform-2"):
+            nav.resolve_plugin_for_node(NodeID("transform-2"))
+
+    def test_explicit_structural_node_ids_are_honored(self) -> None:
+        """Nodes in the context's explicit structural set resolve to None (skip)."""
+        traversal = DAGTraversalContext(
+            node_step_map={},
+            node_to_plugin={},
+            node_to_next={NodeID("queue-1"): None},
+            coalesce_node_map={},
+            structural_node_ids=frozenset({NodeID("queue-1")}),
+        )
+
+        nav = DAGNavigator.from_traversal_context(traversal)
+
+        assert nav.resolve_plugin_for_node(NodeID("queue-1")) is None
+
+    def test_coalesce_nodes_are_always_structural(self) -> None:
+        """Coalesce map entries are unioned into the structural set by the context."""
+        coalesce_node = NodeID("coalesce::merge")
+        traversal = DAGTraversalContext(
+            node_step_map={},
+            node_to_plugin={},
+            node_to_next={coalesce_node: None},
+            coalesce_node_map={CoalesceName("merge"): coalesce_node},
+            structural_node_ids=frozenset(),
+        )
+
+        assert coalesce_node in traversal.structural_node_ids
+
     def test_passes_through_supplementary_params(self) -> None:
         """Supplementary params (sink_names, coalesce_on_success_map) are passed through."""
         traversal = DAGTraversalContext(

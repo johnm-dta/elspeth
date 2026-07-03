@@ -21,9 +21,14 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from elspeth.contracts.enums import NodeType
 from elspeth.contracts.errors import OrchestrationInvariantError
 from elspeth.contracts.types import GateName, NodeID, SinkName
 from elspeth.engine.processor import DAGTraversalContext
+
+# Node types that legitimately appear in traversal with no plugin to execute.
+# Closed vocabulary — extend deliberately, never derive by complement.
+_STRUCTURAL_NODE_TYPES = frozenset({NodeType.SOURCE, NodeType.QUEUE, NodeType.COALESCE})
 
 if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol, SourceProtocol
@@ -115,10 +120,26 @@ def build_dag_traversal_context(
     for coalesce_node_id in graph.get_coalesce_id_map().values():
         node_to_next[coalesce_node_id] = graph.get_next_node(coalesce_node_id)
 
+    # Structural nodes are the explicit closed set of node types that carry no
+    # plugin: sources (traversal origins), queues (ADR-025 fan-in primitives),
+    # and coalesce points. Anything else in node_to_next must be plugin-bearing
+    # — a transform/gate missing from node_to_plugin means the graph and the
+    # config have drifted, and skipping it would bypass whatever that node
+    # enforced (elspeth-c522931bd1).
+    structural_node_ids = frozenset(node_id for node_id in node_to_next if graph.get_node_info(node_id).node_type in _STRUCTURAL_NODE_TYPES)
+    unaccounted = sorted(node_id for node_id in node_to_next if node_id not in node_to_plugin and node_id not in structural_node_ids)
+    if unaccounted:
+        raise OrchestrationInvariantError(
+            f"DAG traversal contains node(s) with neither a plugin mapping nor a structural role: {unaccounted}. "
+            "Every traversal node must be plugin-bearing (transform/gate) or structural (source/queue/coalesce). "
+            "This indicates graph/config construction drift."
+        )
+
     return DAGTraversalContext(
         node_step_map=node_step_map,
         node_to_plugin=node_to_plugin,
         node_to_next=node_to_next,
         coalesce_node_map=graph.get_coalesce_id_map(),
         branch_first_node=graph.get_branch_first_nodes(),
+        structural_node_ids=structural_node_ids,
     )

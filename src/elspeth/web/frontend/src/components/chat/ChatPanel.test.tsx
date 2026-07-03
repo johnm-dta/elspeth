@@ -13,6 +13,7 @@ import {
   looksLikeData,
   parseProposedRowsFromUserInput,
 } from "./ChatPanel";
+import { GUIDED_EXPLAIN_MESSAGE } from "./guided/explainPrompt";
 import { useSessionStore } from "@/stores/sessionStore";
 import { usePreferencesStore } from "@/stores/preferencesStore";
 import { useInlineSourceStore } from "@/stores/inlineSourceStore";
@@ -1889,6 +1890,103 @@ describe("ChatPanel mode discriminator", () => {
         expect.any(AbortSignal),
       );
     });
+  });
+
+  it("decision card offers Explain — one click sends the canned question down the chat path", async () => {
+    const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      chatGuided: chatGuidedSpy,
+    });
+
+    render(<ChatPanel />);
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Explain this step" }).click();
+    });
+
+    await waitFor(() => {
+      expect(chatGuidedSpy).toHaveBeenCalledWith(
+        GUIDED_EXPLAIN_MESSAGE,
+        expect.any(AbortSignal),
+      );
+    });
+  });
+
+  it("Explain is disabled while a chat or respond is in flight (same 409 guard as the composer)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedResponsePending: true,
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      (screen.getByRole("button", { name: "Explain this step" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("no Explain without a current decision (nothing on screen to explain)", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: null,
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.queryByRole("button", { name: "Explain this step" }),
+    ).toBeNull();
+  });
+
+  it("tutorial: an Explain send does NOT count as the step's prompt (locked box must not flip to 'Sent')", () => {
+    // On confirm-only steps the Explain user-turn shares the current step;
+    // without the exact-content filter it would satisfy
+    // tutorialPromptSentForStep and prematurely swap the locked box for the
+    // "Sent" line, stranding the learner.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        ...activeGuidedSession(),
+        chat_history: [
+          {
+            role: "user",
+            content: GUIDED_EXPLAIN_MESSAGE,
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-07-03T00:00:00Z",
+          },
+        ],
+      },
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{ step_1_source: "create the source" }}
+      />,
+    );
+
+    // The locked box (mocked ChatInput) is still offered — NOT the Sent line.
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/your request is in the transcript above/i),
+    ).toBeNull();
   });
 
   it("swaps the ChatInput for the pending strip with Stop while a guided chat is in flight", () => {

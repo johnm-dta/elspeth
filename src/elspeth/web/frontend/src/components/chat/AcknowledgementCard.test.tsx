@@ -105,47 +105,6 @@ function makeApiError(status: number, detail = ""): ApiError {
   };
 }
 
-function mockScrollMetrics({
-  scrollHeight,
-  clientHeight,
-}: {
-  scrollHeight: number;
-  clientHeight: number;
-}): () => void {
-  const prevScroll = Object.getOwnPropertyDescriptor(
-    HTMLElement.prototype,
-    "scrollHeight",
-  );
-  const prevClient = Object.getOwnPropertyDescriptor(
-    HTMLElement.prototype,
-    "clientHeight",
-  );
-  Object.defineProperty(HTMLElement.prototype, "scrollHeight", {
-    configurable: true,
-    get() {
-      return scrollHeight;
-    },
-  });
-  Object.defineProperty(HTMLElement.prototype, "clientHeight", {
-    configurable: true,
-    get() {
-      return clientHeight;
-    },
-  });
-  return () => {
-    if (prevScroll) {
-      Object.defineProperty(HTMLElement.prototype, "scrollHeight", prevScroll);
-    } else {
-      Reflect.deleteProperty(HTMLElement.prototype, "scrollHeight");
-    }
-    if (prevClient) {
-      Object.defineProperty(HTMLElement.prototype, "clientHeight", prevClient);
-    } else {
-      Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
-    }
-  };
-}
-
 function renderCard(
   event: InterpretationEvent,
   props: Partial<ComponentProps<typeof AcknowledgementCard>> = {},
@@ -493,139 +452,112 @@ describe("AcknowledgementCard — error mapping", () => {
   });
 
   it("422 placeholder-unavailable on a prompt template → stale-review message", async () => {
-    const restore = mockScrollMetrics({ scrollHeight: 100, clientHeight: 100 });
-    try {
-      const user = userEvent.setup();
-      vi.mocked(api.resolveInterpretation).mockRejectedValue({
-        ...makeApiError(422, "placeholder gone"),
-        error_type: "interpretation_placeholder_unavailable",
-      });
-      renderCard(
-        makeEvent({ kind: "llm_prompt_template", llm_draft: "Classify {{ x }}." }),
-        { showAmend: false },
-      );
-      // Open the View expander so the scroll gate clears (no overflow → ready).
-      await user.click(screen.getByRole("button", { name: /^view prompt/i }));
-      const accept = screen.getByRole("button", {
-        name: /acknowledge the llm prompt template/i,
-      }) as HTMLButtonElement;
-      await waitFor(() => expect(accept.disabled).toBe(false));
-      await user.click(accept);
-      const alert = await screen.findByRole("alert");
-      expect(alert.textContent).toMatch(/stale review/i);
-      expect(alert.textContent).toMatch(/reload the session/i);
-    } finally {
-      restore();
-    }
+    const user = userEvent.setup();
+    vi.mocked(api.resolveInterpretation).mockRejectedValue({
+      ...makeApiError(422, "placeholder gone"),
+      error_type: "interpretation_placeholder_unavailable",
+    });
+    renderCard(
+      makeEvent({ kind: "llm_prompt_template", llm_draft: "Classify {{ x }}." }),
+      { showAmend: false },
+    );
+    // Two-stage primary: click 1 reveals the prompt, click 2 approves.
+    await user.click(screen.getByRole("button", { name: "View prompt" }));
+    await user.click(
+      screen.getByRole("button", { name: /approve the llm prompt template/i }),
+    );
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/stale review/i);
+    expect(alert.textContent).toMatch(/reload the session/i);
   });
 });
 
-// ── Prompt-template scroll gate (inside the View expander) ────────────────────
+// ── Prompt-template two-stage primary (View prompt → Approve) ────────────────
 
-describe("AcknowledgementCard — prompt-template scroll gate", () => {
-  it("keeps Acknowledge disabled until the View expander is opened and scrolled to end", async () => {
-    const restore = mockScrollMetrics({ scrollHeight: 300, clientHeight: 100 });
-    try {
-      const user = userEvent.setup();
-      const event = makeEvent({
+describe("AcknowledgementCard — prompt-template two-stage primary", () => {
+  it("first click reveals the prompt, second click approves — one primary button", async () => {
+    const user = userEvent.setup();
+    const event = makeEvent({
+      kind: "llm_prompt_template",
+      llm_draft: "Summarise {{ row.body }} for an auditor.",
+    });
+    vi.mocked(api.resolveInterpretation).mockResolvedValue(
+      makeResolveResponse(event),
+    );
+    renderCard(event, { showAmend: false });
+
+    // Stage 1: the PRIMARY button is the view affordance (disclosure
+    // semantics), the prompt is hidden, and nothing resolves yet. No
+    // separate small "View prompt" toggle exists pre-view — two buttons
+    // with the same name would be a duplicate-name trap.
+    const primary = screen.getByRole("button", {
+      name: "View prompt",
+    }) as HTMLButtonElement;
+    expect(primary.disabled).toBe(false);
+    expect(primary.className).toContain("ack-card-accept-btn");
+    expect(primary.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      screen.queryByRole("region", { name: /prompt template review/i }),
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: /view prompt/i })).toHaveLength(1);
+
+    await user.click(primary);
+
+    // Stage 2: prompt revealed; the SAME button now approves; the first
+    // click must NOT have resolved anything.
+    expect(
+      screen.getByRole("region", { name: /prompt template review/i }),
+    ).toBeTruthy();
+    expect(api.resolveInterpretation).not.toHaveBeenCalled();
+    const approve = screen.getByRole("button", {
+      name: /approve the llm prompt template/i,
+    });
+    expect(approve).toBe(primary);
+    expect(approve.textContent).toBe("Approve");
+
+    await user.click(approve);
+    await waitFor(() =>
+      expect(api.resolveInterpretation).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  // Successor of elspeth-3b35abf148 variant 2: the primary button's first
+  // stage says WHY as visible text wired via aria-describedby.
+  it("explains stage 1 in visible text wired to the button, cleared once viewed", async () => {
+    const user = userEvent.setup();
+    renderCard(
+      makeEvent({
         kind: "llm_prompt_template",
-        llm_draft: "Summarise {{ row.body }} for an auditor.",
-      });
-      vi.mocked(api.resolveInterpretation).mockResolvedValue(
-        makeResolveResponse(event),
-      );
-      renderCard(event, { showAmend: false });
+        llm_draft: "Summarise {{ row.body }}.",
+      }),
+      { showAmend: false },
+    );
 
-      const accept = screen.getByRole("button", {
-        name: /acknowledge the llm prompt template/i,
-      }) as HTMLButtonElement;
-      // Collapsed: gate closed.
-      expect(accept.disabled).toBe(true);
+    const note = screen.getByText(/shows the llm's instruction/i);
+    expect(note.classList.contains("visually-hidden")).toBe(false);
+    const primary = screen.getByRole("button", { name: "View prompt" });
+    expect(primary.getAttribute("aria-describedby")).toBe(note.id);
 
-      await user.click(screen.getByRole("button", { name: /^view prompt/i }));
-      // Open but not scrolled: still gated (content overflows).
-      expect(accept.disabled).toBe(true);
-
-      const surface = screen.getByRole("region", {
-        name: /prompt template review/i,
-      });
-      Object.defineProperty(surface, "scrollTop", {
-        configurable: true,
-        value: 200,
-      });
-      fireEvent.scroll(surface);
-
-      await waitFor(() => expect(accept.disabled).toBe(false));
-      await user.click(accept);
-      await waitFor(() =>
-        expect(api.resolveInterpretation).toHaveBeenCalledTimes(1),
-      );
-    } finally {
-      restore();
-    }
+    await user.click(primary);
+    expect(screen.queryByText(/shows the llm's instruction/i)).toBeNull();
   });
 
-  it("enables Acknowledge once the View expander is opened when the prompt does not overflow", async () => {
-    const restore = mockScrollMetrics({ scrollHeight: 100, clientHeight: 100 });
-    try {
-      const user = userEvent.setup();
-      renderCard(
-        makeEvent({ kind: "llm_prompt_template", llm_draft: "Classify {{ x }}." }),
-        { showAmend: false },
-      );
-      const accept = screen.getByRole("button", {
-        name: /acknowledge the llm prompt template/i,
-      }) as HTMLButtonElement;
-      expect(accept.disabled).toBe(true);
-      await user.click(screen.getByRole("button", { name: /^view prompt/i }));
-      await waitFor(() => expect(accept.disabled).toBe(false));
-    } finally {
-      restore();
-    }
-  });
-
-  // elspeth-3b35abf148 variant 2: the disabled Acknowledge says WHY as visible
-  // text (not title-only), and the View button carries its required intent.
-  it("explains the closed gate in visible text wired to the disabled button", async () => {
-    const restore = mockScrollMetrics({ scrollHeight: 300, clientHeight: 100 });
-    try {
-      const user = userEvent.setup();
-      renderCard(
-        makeEvent({
-          kind: "llm_prompt_template",
-          llm_draft: "Summarise {{ row.body }}.",
-        }),
-        { showAmend: false },
-      );
-
-      // Visible explanation (must NOT be visually-hidden) + intent-carrying label.
-      const note = screen.getByText(/read it to the end to enable/i);
-      expect(note.classList.contains("visually-hidden")).toBe(false);
-      const view = screen.getByRole("button", { name: "View prompt (required)" });
-      expect(view).toBeTruthy();
-      // aria-describedby on the disabled button points at the SAME element.
-      const accept = screen.getByRole("button", {
-        name: /acknowledge the llm prompt template/i,
-      });
-      expect(accept.getAttribute("aria-describedby")).toBe(note.id);
-
-      // Once the gate clears (open + no overflow scenario is covered above),
-      // scrolling to the end removes the note.
-      await user.click(view);
-      const surface = screen.getByRole("region", {
-        name: /prompt template review/i,
-      });
-      Object.defineProperty(surface, "scrollTop", {
-        configurable: true,
-        value: 200,
-      });
-      fireEvent.scroll(surface);
-      await waitFor(() =>
-        expect(screen.queryByText(/read it to the end to enable/i)).toBeNull(),
-      );
-    } finally {
-      restore();
-    }
+  it("collapsing the prompt after viewing does NOT demote Approve back to stage 1", async () => {
+    const user = userEvent.setup();
+    renderCard(
+      makeEvent({ kind: "llm_prompt_template", llm_draft: "Classify {{ x }}." }),
+      { showAmend: false },
+    );
+    await user.click(screen.getByRole("button", { name: "View prompt" }));
+    // The small toggle appears only after viewing; it hides the prompt
+    // without resetting the viewed state.
+    await user.click(screen.getByRole("button", { name: "Hide prompt" }));
+    expect(
+      screen.queryByRole("region", { name: /prompt template review/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /approve the llm prompt template/i }),
+    ).toBeTruthy();
   });
 
   it("has a stable DOM id the wire-stage blocker links can target", () => {

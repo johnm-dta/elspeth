@@ -23,6 +23,7 @@ from elspeth.web.composer.guided.chat_solver import (
     _build_step_1_source_dynamic_block,
     _build_step_2_sink_tool_prompt,
     _parse_step_1_source_tool_arguments,
+    build_step_chat_context_block,
     solve_step_chat,
 )
 from elspeth.web.composer.guided.errors import InvariantError
@@ -152,6 +153,92 @@ async def test_whitespace_only_response_raises(monkeypatch: pytest.MonkeyPatch) 
             temperature=None,
             seed=None,
         )
+
+
+def test_build_step_chat_context_block_names_artifacts_llm_safely() -> None:
+    """The advisory context block carries plugin names / schema modes / field
+    lists via the SAME LLM-safe serializers the revision prompts use — never
+    raw options, blob paths, or secret-bearing values."""
+    current_source = SourceResolved(
+        plugin="csv",
+        options={
+            "schema": {"mode": "observed", "guaranteed_fields": ["url"]},
+            "blob_ref": {"id": "blob-1", "storage_path": "/srv/elspeth/blobs/private.csv"},
+            "raw_option_should_not_leave": "sk-secret",
+        },
+        observed_columns=("url",),
+        sample_rows=({"url": "https://example.test/a"},),
+        on_validation_failure="discard",
+    )
+    current_sink = SinkResolved(
+        outputs=(
+            SinkOutputResolved(
+                plugin="json",
+                options={"path": "results.jsonl", "token": "sk-sink-secret"},
+                required_fields=("url", "score"),
+                schema_mode="observed",
+            ),
+        )
+    )
+
+    block = build_step_chat_context_block(
+        step=GuidedStep.STEP_2_SINK,
+        current_source=current_source,
+        current_sink=current_sink,
+        state=None,
+    )
+
+    assert "step_2_sink" in block
+    assert '"plugin": "csv"' in block
+    assert '"plugin": "json"' in block
+    assert '"guaranteed_fields": ["url"]' in block
+    # LLM-safe: raw option values, blob paths, and secrets never egress.
+    assert "sk-secret" not in block
+    assert "sk-sink-secret" not in block
+    assert "/srv/elspeth/blobs" not in block
+    assert "results.jsonl" not in block
+
+
+def test_build_step_chat_context_block_is_honest_when_nothing_is_built() -> None:
+    block = build_step_chat_context_block(
+        step=GuidedStep.STEP_1_SOURCE,
+        current_source=None,
+        current_sink=None,
+        state=None,
+    )
+    assert "Applied source: none yet." in block
+    assert "Applied output(s): none yet." in block
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_threads_context_block_as_second_system_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The context block rides in messages[1] — the per-step skill stays the
+    byte-stable, cache-markable head (same split as the step-1 resolve path)."""
+    captured: dict[str, Any] = {}
+
+    async def fake_acompletion(**kwargs: Any) -> _FakeLLMResponse:
+        captured.update(kwargs)
+        return _ok_response("here's what you're seeing")
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    reply = await solve_step_chat(
+        model="test/model",
+        step=GuidedStep.STEP_2_SINK,
+        user_message="explain this",
+        temperature=None,
+        seed=None,
+        context_block="## Current build\n\nApplied source: none yet.\n",
+    )
+
+    assert reply == "here's what you're seeing"
+    messages = captured["messages"]
+    assert len(messages) == 3
+    assert messages[1]["role"] == "system"
+    assert messages[1]["content"].startswith("## Current build")
+    assert messages[2] == {"role": "user", "content": "explain this"}
 
 
 @pytest.mark.asyncio

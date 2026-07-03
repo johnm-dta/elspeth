@@ -1228,7 +1228,7 @@ describe("AcknowledgementCard", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("has no axe violations (llm_prompt_template with the scroll-gated draft)", async () => {
+  it("has no axe violations (llm_prompt_template with the two-stage View→Approve primary)", async () => {
     const { container } = render(
       <AcknowledgementCard
         event={makeInterpretationEvent("evt-2", {

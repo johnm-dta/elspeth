@@ -606,6 +606,15 @@
   line-height: 1.45;
 }
 
+/* Decision-card footer: the one-click Explain affordance sits under the turn
+   widget's own action row (Continue / Confirm wiring / Apply recipe), reading
+   as the card's secondary action for every widget type. */
+.guided-current-decision-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-sm);
+}
+
 /* Pending swap (elspeth-6a9673ecd3): while /guided/chat is in flight the
    composer's child content is a lean single-row strip — pulse dots +
    adaptive headline + elapsed + Stop. It replaces the whole .chat-input

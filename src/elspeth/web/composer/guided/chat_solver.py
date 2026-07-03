@@ -331,6 +331,58 @@ def _sink_revision_context_for_llm(current_sink: SinkResolved) -> dict[str, Any]
     return {"outputs": outputs}
 
 
+def build_step_chat_context_block(
+    *,
+    step: GuidedStep,
+    current_source: SourceResolved | None,
+    current_sink: SinkResolved | None,
+    state: CompositionState | None,
+) -> str:
+    """Compose the LLM-safe "current build" block for the advisory chat path.
+
+    The advisory solver previously saw only the step playbook + the user's
+    message, so "explain what I'm seeing" questions could only be answered
+    generically. This block names the applied artifacts via the SAME LLM-safe
+    serializers the revision prompts use (plugin names, schema modes, field
+    lists, counts — never raw options, blob paths, or secret-bearing values)
+    plus a plugins-only pipeline sketch from the composition state.
+
+    Rides as a SECOND system message in ``solve_step_chat`` — the stable
+    per-step skill stays the byte-stable, cache-markable head (the same split
+    the step-1 resolve path uses for its dynamic block).
+    """
+    lines: list[str] = [
+        "## Current build (what the user is looking at)",
+        "",
+        f"The user is on wizard step {step.value}. When they ask what they are "
+        "seeing or why, explain from THIS build context: name the concrete "
+        "plugins and settings below, why they fit what the user asked for, and "
+        "what each setting means in plain language. Do not invent settings that "
+        "are not listed here.",
+        "",
+    ]
+    if current_source is not None:
+        lines.append(f"Applied source: {json.dumps(_source_revision_context_for_llm(current_source), sort_keys=True)}")
+    else:
+        lines.append("Applied source: none yet.")
+    if current_sink is not None:
+        lines.append(f"Applied output(s): {json.dumps(_sink_revision_context_for_llm(current_sink), sort_keys=True)}")
+    else:
+        lines.append("Applied output(s): none yet.")
+    if state is not None:
+        source_plugins = sorted({spec.plugin for spec in state.sources.values()})
+        node_plugins = [node.plugin if node.plugin is not None else "(gate/coalesce)" for node in state.nodes]
+        output_plugins = [output.plugin for output in state.outputs]
+        lines.append(
+            "Pipeline so far: "
+            f"sources={json.dumps(source_plugins)}, "
+            f"transform_nodes={json.dumps(node_plugins)}, "
+            f"outputs={json.dumps(output_plugins)}, "
+            f"edge_count={len(state.edges)}."
+        )
+    return "\n".join(lines) + "\n"
+
+
 def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | None) -> Step1SourceChatResolution:
     """Validate the resolve_source tool arguments from a LiteLLM response."""
     data = json.loads(arguments)
@@ -918,6 +970,7 @@ async def solve_step_chat(
     seed: int | None,
     recorder: BufferingRecorder | None = None,
     timeout_seconds: float | None = None,
+    context_block: str | None = None,
 ) -> str:
     """Send a user chat message to the LLM scoped to *step*; return the assistant reply.
 
@@ -929,6 +982,11 @@ async def solve_step_chat(
         user_message: The user's typed message.  Tier 3 by trust model — the
             route handler is responsible for non-empty / length validation
             before this is called.
+        context_block: Optional LLM-safe "current build" block
+            (:func:`build_step_chat_context_block`) so what-am-I-seeing / why
+            questions get answers grounded in the actual applied artifacts.
+            Rides as a SECOND system message — the per-step skill stays the
+            byte-stable, cache-markable head.
 
     Returns:
         The assistant's reply as a plain string (no tool calls in Phase A).
@@ -950,8 +1008,10 @@ async def solve_step_chat(
     system_prompt = load_step_chat_skill(step)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message},
     ]
+    if context_block is not None:
+        messages.append({"role": "system", "content": context_block})
+    messages.append({"role": "user", "content": user_message})
     # Anthropic-family routes honor an explicit ``cache_control`` marker on the
     # stable skill head (the freeform pattern; ``service.py``). Mark BEFORE
     # kwargs so the SAME marked list feeds both the wire call and the audit

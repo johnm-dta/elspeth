@@ -6,9 +6,9 @@
 // InlineMessage presentation.  The behaviour — resolve / amend / error
 // mapping / 8 KB cap — is reused VERBATIM via `useInterpretationResolver`;
 // this component owns only the compact card rendering, the per-kind copy, the
-// value rendering (shared CodeBlock for JSON; scroll-gated monospace for the
-// prompt template behind a View expander), ARIA wiring, and focus on amend
-// toggle.
+// value rendering (shared CodeBlock for JSON; monospace prompt template
+// behind the two-stage View→Approve primary button), ARIA wiring, and focus
+// on amend toggle.
 //
 // Acknowledge == today's accept (`accepted_as_drafted`).  The card NEVER
 // auto-steals focus on mount (the stack is persistent and must not yank focus
@@ -16,7 +16,6 @@
 // ============================================================================
 
 import {
-  useCallback,
   useEffect,
   useId,
   useRef,
@@ -31,8 +30,6 @@ import {
   INTERPRETATION_AMENDMENT_MAX_BYTES,
   useInterpretationResolver,
 } from "@/hooks/useInterpretationResolver";
-
-const SCROLL_END_TOLERANCE_PX = 1;
 
 const PROMPT_TEMPLATE_STYLE: CSSProperties = {
   maxHeight: "16rem",
@@ -69,16 +66,6 @@ function assertNever(value: never): never {
   throw new Error(`Unhandled interpretation kind: ${String(value)}`);
 }
 
-function hasScrolledToEnd(element: HTMLElement): boolean {
-  const overflows =
-    element.scrollHeight > element.clientHeight + SCROLL_END_TOLERANCE_PX;
-  if (!overflows) return true;
-  return (
-    element.scrollTop + element.clientHeight >=
-    element.scrollHeight - SCROLL_END_TOLERANCE_PX
-  );
-}
-
 interface CardPresentation {
   /** Title row: humanised step label · kind (e.g. "Summarise step · model"). */
   title: string;
@@ -99,7 +86,10 @@ function getCardPresentation(
       return {
         title: `${stepLabel} step · prompt`,
         line: "The LLM wrote the instruction for this step.",
-        acceptAriaLabel: "Acknowledge the LLM prompt template",
+        // Prompt cards use the two-stage View→Approve button, so the accept
+        // action is named "Approve" (visible label and accessible name must
+        // agree — WCAG 2.5.3 label-in-name).
+        acceptAriaLabel: "Approve the LLM prompt template",
       };
     case "pipeline_decision":
       return {
@@ -185,9 +175,8 @@ export interface AcknowledgementCardProps {
   acceptButtonRef?: (el: HTMLButtonElement | null) => void;
   /**
    * Callback ref for the card's labelled <section> (tabIndex=-1).  Used by the
-   * stack as a focus fallback when the next card's Acknowledge button is
-   * absent or disabled (e.g. a prompt-template card whose scroll gate is
-   * still closed).
+   * stack as a focus fallback when the next card's primary button is absent
+   * or disabled (e.g. amend mode, or a resolve in flight).
    */
   sectionRef?: (el: HTMLElement | null) => void;
 }
@@ -227,43 +216,35 @@ export function AcknowledgementCard({
   const llmDraft = event.llm_draft ?? "";
   const userTerm = event.user_term ?? "this term";
 
-  const requiresPromptScroll = event.kind === "llm_prompt_template";
+  const requiresPromptView = event.kind === "llm_prompt_template";
   const valueIsLong =
     llmDraft.length > 140 || llmDraft.split("\n").length > 4;
   // invented_source shows pretty-printed JSON; short values inline, long
   // values behind the View expander.  The prompt template is ALWAYS behind
-  // the View expander (with the scroll gate inside it).
+  // an expander — opened by the primary button's first stage.
   const hasViewExpander =
-    requiresPromptScroll ||
+    requiresPromptView ||
     (event.kind === "invented_source" && valueIsLong);
   const hasInlineValue = event.kind === "invented_source" && !valueIsLong;
 
   const [expanded, setExpanded] = useState(false);
-  const [promptScrolledToEnd, setPromptScrolledToEnd] = useState<
-    boolean | null
-  >(requiresPromptScroll ? null : true);
-  const promptSurfaceRef = useRef<HTMLDivElement | null>(null);
+  // Two-stage primary button for prompt cards (operator ask 2026-07-03): the
+  // big green button does double duty — click 1 reveals the prompt ("View
+  // prompt"), the label flips to "Approve", click 2 accepts. Replaces the
+  // old scroll-to-end gate, whose disabled-Acknowledge-beside-a-small-View
+  // arrangement read as a dead end. Once viewed, always viewed — collapsing
+  // the prompt afterwards does not demote the button back to stage 1.
+  const [promptViewed, setPromptViewed] = useState(!requiresPromptView);
 
-  const reportPromptReview = useCallback(() => {
-    const surface = promptSurfaceRef.current;
-    if (surface === null) return;
-    setPromptScrolledToEnd(hasScrolledToEnd(surface));
-  }, []);
+  const acceptDisabled = primaryButtonsDisabled;
 
-  // When the prompt-template expander opens, report its initial review state
-  // (a short prompt that does not overflow is immediately reviewed).
-  useEffect(() => {
-    if (requiresPromptScroll && expanded) {
-      reportPromptReview();
-    }
-  }, [requiresPromptScroll, expanded, reportPromptReview, llmDraft]);
-
-  const promptReadyForAccept =
-    !requiresPromptScroll || (expanded && promptScrolledToEnd === true);
-  const acceptDisabled = primaryButtonsDisabled || !promptReadyForAccept;
-
-  function handleAccept(): void {
+  function handlePrimaryAction(): void {
     if (acceptDisabled) return;
+    if (!promptViewed) {
+      setExpanded(true);
+      setPromptViewed(true);
+      return;
+    }
     void handleUseMine();
   }
 
@@ -309,14 +290,13 @@ export function AcknowledgementCard({
 
       <div className="ack-card-main">
         <p className="ack-card-line">{presentation.line}</p>
-        {/* The scroll gate's WHY, as visible text (not title-only): a disabled
-            Acknowledge beside an unexplained View was an unexplained dead-end
-            (elspeth-3b35abf148 variant 2). Same element the disabled button's
-            aria-describedby points at, so sighted and SR users read one truth. */}
-        {chooseMode && requiresPromptScroll && !promptReadyForAccept && (
+        {/* Two-stage note: names what the first click does so the primary
+            button is never a mystery (successor of the old scroll-gate note,
+            elspeth-3b35abf148 variant 2). */}
+        {chooseMode && requiresPromptView && !promptViewed && (
           <p id={promptGateId} className="ack-card-gate-note">
-            Open <strong>View prompt</strong> and read it to the end to enable
-            Acknowledge.
+            <strong>View prompt</strong> shows the LLM's instruction; the same
+            button then approves it.
           </p>
         )}
         {chooseMode && (
@@ -325,16 +305,25 @@ export function AcknowledgementCard({
               ref={acceptButtonRef}
               type="button"
               className="btn btn-primary ack-card-accept-btn"
-              aria-label={presentation.acceptAriaLabel}
+              // Stage 1 is a disclosure (visible label is its own accessible
+              // name + expander semantics); stage 2 carries the decision-
+              // naming accept label.
+              aria-label={promptViewed ? presentation.acceptAriaLabel : undefined}
+              aria-expanded={!promptViewed ? expanded : undefined}
+              aria-controls={!promptViewed ? valueRegionId : undefined}
               aria-describedby={
-                requiresPromptScroll && !promptReadyForAccept
-                  ? promptGateId
-                  : undefined
+                requiresPromptView && !promptViewed ? promptGateId : undefined
               }
-              onClick={handleAccept}
+              onClick={handlePrimaryAction}
               disabled={acceptDisabled}
             >
-              {resolveInFlight ? spinner : "Acknowledge"}
+              {!promptViewed
+                ? "View prompt"
+                : resolveInFlight
+                  ? spinner
+                  : requiresPromptView
+                    ? "Approve"
+                    : "Acknowledge"}
             </button>
             {showAmend && (
               <button
@@ -362,40 +351,40 @@ export function AcknowledgementCard({
 
       {hasViewExpander && (
         <div className="ack-card-value">
-          <button
-            type="button"
-            className="ack-card-view-toggle"
-            aria-expanded={expanded}
-            aria-controls={valueRegionId}
-            onClick={() => setExpanded((prev) => !prev)}
-          >
-            {/* The prompt-template View is REQUIRED reading (it gates
-                Acknowledge) — carry that intent in the label instead of an
-                unexplained "View" (elspeth-3b35abf148 variant 2). */}
-            {requiresPromptScroll
-              ? expanded
-                ? "Hide prompt"
-                : "View prompt (required)"
-              : expanded
-                ? "Hide"
-                : "View"}
-          </button>
+          {/* Prompt cards: the PRIMARY button owns the first reveal (two-stage
+              View→Approve), so this small toggle only appears once viewed —
+              two side-by-side "View prompt" buttons would be a duplicate-name
+              trap. It then offers collapse/re-open without demoting the
+              primary back to stage 1. */}
+          {(!requiresPromptView || promptViewed) && (
+            <button
+              type="button"
+              className="ack-card-view-toggle"
+              aria-expanded={expanded}
+              aria-controls={valueRegionId}
+              onClick={() => setExpanded((prev) => !prev)}
+            >
+              {requiresPromptView
+                ? expanded
+                  ? "Hide prompt"
+                  : "View prompt"
+                : expanded
+                  ? "Hide"
+                  : "View"}
+            </button>
+          )}
           {expanded &&
-            (requiresPromptScroll ? (
-              <>
-                <div
-                  ref={promptSurfaceRef}
-                  id={valueRegionId}
-                  role="region"
-                  aria-label="Prompt template review"
-                  tabIndex={0}
-                  className="ack-card-prompt-template"
-                  style={PROMPT_TEMPLATE_STYLE}
-                  onScroll={reportPromptReview}
-                >
-                  <pre className="ack-card-prompt-pre">{llmDraft}</pre>
-                </div>
-              </>
+            (requiresPromptView ? (
+              <div
+                id={valueRegionId}
+                role="region"
+                aria-label="Prompt template review"
+                tabIndex={0}
+                className="ack-card-prompt-template"
+                style={PROMPT_TEMPLATE_STYLE}
+              >
+                <pre className="ack-card-prompt-pre">{llmDraft}</pre>
+              </div>
             ) : (
               <div id={valueRegionId}>
                 <CodeBlock

@@ -33,6 +33,7 @@ import { ModeSwitchButton } from "./guided/ModeSwitchButton";
 import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
 import { GuidedPendingStrip } from "./guided/GuidedPendingStrip";
+import { GUIDED_EXPLAIN_MESSAGE } from "./guided/explainPrompt";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GUIDED_STEP_LABELS } from "./guided/stepLabels";
 import { GuidedTurn } from "./guided/GuidedTurn";
@@ -1479,7 +1480,13 @@ export function ChatPanel({
     const tutorialPromptSentForStep =
       isTutorial === true &&
       guidedSession.chat_history.some(
-        (t) => t.role === "user" && t.step === guidedSession.step,
+        (t) =>
+          t.role === "user" &&
+          t.step === guidedSession.step &&
+          // The Explain button's canned question is NOT the step's prompt:
+          // on confirm-only steps it must not flip the locked box to the
+          // "Sent" line (exact-string filter; the constant owns the copy).
+          t.content !== GUIDED_EXPLAIN_MESSAGE,
       );
     // Only swap the locked box for the static "Sent" line when there is actually
     // a forward affordance to confirm below — the turn widget OR a pending
@@ -1673,6 +1680,25 @@ export function ChatPanel({
               />
             )}
           </div>
+          {/* One-click "why am I seeing this?" — sends a canned question down
+              the NORMAL guided-chat path (user turn + assistant bubble in the
+              transcript; the pending strip shows while it runs). The backend
+              advisory prompt now carries the LLM-safe current-build context,
+              so the answer names the actual plugins/settings on screen. Only
+              offered when a decision is actually showing; disabled while any
+              chat/respond is in flight (same 409 guard as the composer). */}
+          {guidedNextTurn && (
+            <div className="guided-current-decision-footer">
+              <button
+                type="button"
+                className="btn btn-compact guided-explain-btn"
+                onClick={() => void sendGuidedChat(GUIDED_EXPLAIN_MESSAGE)}
+                disabled={guidedChatPending || guidedResponsePending}
+              >
+                Explain this step
+              </button>
+            </div>
+          )}
           {guidedResponsePending && (
             <p className="guided-current-decision-pending" role="status">
               Saving decision...

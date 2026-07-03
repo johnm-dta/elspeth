@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from elspeth.web.composer.guided.chat_solver import build_step_chat_context_block
 from elspeth.web.composer.guided.errors import WireConfirmRejectedError
 from elspeth.web.composer.guided.profile import TUTORIAL_PROFILE, WorkflowProfileKind, profile_for_kind
 from elspeth.web.composer.guided.protocol import Turn
@@ -2677,6 +2678,15 @@ async def post_guided_chat(
                         seed=settings.composer_seed,
                         recorder=recorder,
                         timeout_seconds=settings.composer_timeout_seconds,
+                        # LLM-safe current-build context so "explain what I'm
+                        # seeing / why" gets a grounded answer (the decision
+                        # card's Explain affordance rides this same path).
+                        context_block=build_step_chat_context_block(
+                            step=guided.step,
+                            current_source=guided.step_1_result,
+                            current_sink=guided.step_2_result,
+                            state=state,
+                        ),
                     )
                 except InvariantError as exc:
                     finished_at = datetime.now(UTC)

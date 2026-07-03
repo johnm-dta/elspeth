@@ -183,12 +183,23 @@ function App() {
     useExecutionStore.getState().dismissFanoutGuard();
   }, []);
 
-  // Check backend health
+  // Check backend health. healthChecking/lastHealthCheckAt exist because a
+  // Retry that changes NOTHING visible on failure reads as a dead button
+  // (operator-observed during a network drop): the button now shows a
+  // checking state while in flight, and a failed attempt stamps the banner
+  // with the attempt time — the role=alert content change doubles as the
+  // "still unreachable" announcement for AT.
+  const [healthChecking, setHealthChecking] = useState(false);
+  const [lastHealthCheckAt, setLastHealthCheckAt] = useState<string | null>(
+    null,
+  );
   const checkHealth = useCallback(async () => {
+    setHealthChecking(true);
     try {
       const status = await api.fetchSystemStatus();
       setSystemStatus(status);
       setBackendAvailable(true);
+      setLastHealthCheckAt(null);
     } catch (err) {
       // Preserve diagnostic detail (network vs CORS vs auth vs 5xx) for
       // operators inspecting DevTools when Retry keeps failing.  The
@@ -197,6 +208,9 @@ function App() {
       console.error("[health-check] fetchSystemStatus failed:", err);
       setSystemStatus(null);
       setBackendAvailable(false);
+      setLastHealthCheckAt(new Date().toLocaleTimeString());
+    } finally {
+      setHealthChecking(false);
     }
   }, []);
 
@@ -370,14 +384,19 @@ function App() {
             <span>
               <strong>Backend unavailable</strong> — Cannot connect to the
               ELSPETH server. Check that the backend is running.
+              {lastHealthCheckAt !== null && (
+                <> Last attempt: {lastHealthCheckAt}.</>
+              )}
             </span>
             <button
               onClick={checkHealth}
+              disabled={healthChecking}
+              aria-busy={healthChecking}
               aria-label="Retry connection"
               title="Retry connection"
               className="alert-banner-action"
             >
-              Retry
+              {healthChecking ? "Checking…" : "Retry"}
             </button>
           </div>
         )}

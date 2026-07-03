@@ -606,6 +606,24 @@
   line-height: 1.45;
 }
 
+/* Assistant replies in the tutorial transcript arrive as documents —
+   headings and settings tables from the Explain button — not chat quips.
+   chat.css caps every bubble at min(80%, 68ch) (the right prose measure for
+   freeform), which wrapped table headers mid-word in a ~1700px column
+   (operator screenshot, 2560px). Assistant bubbles get the full column
+   measure here; user bubbles keep the chat idiom. */
+.guided-chat-bubbles .message-row--assistant .message-bubble-content {
+  max-width: 100%;
+}
+
+/* A wide table still wider than the column scrolls inside the bubble rather
+   than stretching the workspace (the page must never scroll horizontally). */
+.guided-chat-bubbles .message-row--assistant .markdown-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 /* Decision-card footer: the one-click Explain affordance sits under the turn
    widget's own action row (Continue / Confirm wiring / Apply recipe), reading
    as the card's secondary action for every widget type. */

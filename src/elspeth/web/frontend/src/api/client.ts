@@ -309,7 +309,13 @@ export async function fetchCurrentUser(): Promise<UserProfile> {
 
 /** Return boot-time system readiness for the web UX. */
 export async function fetchSystemStatus(): Promise<SystemStatus> {
-  const response = await fetch("/api/system/status");
+  // Health probe must be snappy: during a network drop a bare fetch can hang
+  // for the OS connect timeout (30-120s), which made the outage banner's
+  // Retry button look dead (operator-observed). 5s is generous for a
+  // same-origin health endpoint.
+  const response = await fetch("/api/system/status", {
+    signal: AbortSignal.timeout(5000),
+  });
   return parseResponse<SystemStatus>(response);
 }
 

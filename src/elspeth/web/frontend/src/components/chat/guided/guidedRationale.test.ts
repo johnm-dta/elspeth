@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { GUIDED_EXPLAIN_MESSAGE } from "./explainPrompt";
 import { latestAssistantRationale } from "./guidedRationale";
 import type { GuidedSession } from "@/types/guided";
 
@@ -54,6 +55,46 @@ describe("latestAssistantRationale", () => {
     const s = session({
       chat_history: [
         { role: "assistant", content: "x".repeat(300), seq: 2, step: "step_1_source", ts_iso: "t" },
+      ],
+    });
+    expect(latestAssistantRationale(s)).toBeNull();
+  });
+
+  it("unwraps inline markdown emphasis — the h2 renders plain text (operator-observed literal asterisks)", () => {
+    const s = session({
+      chat_history: [
+        {
+          role: "assistant",
+          content: "You're at **Step 1: Source** — nothing configured `yet`.",
+          seq: 2,
+          step: "step_1_source",
+          ts_iso: "t",
+        },
+      ],
+    });
+    expect(latestAssistantRationale(s)).toBe(
+      "You're at Step 1: Source — nothing configured yet.",
+    );
+  });
+
+  it("skips replies to the Explain question — an explanation is not a build rationale", () => {
+    const s = session({
+      chat_history: [
+        { role: "assistant", content: "Source created as a 3-row CSV.", seq: 2, step: "step_1_source", ts_iso: "t" },
+        { role: "user", content: GUIDED_EXPLAIN_MESSAGE, seq: 3, step: "step_1_source", ts_iso: "t" },
+        { role: "assistant", content: "You're at Step 1 — here's everything set up so far.", seq: 4, step: "step_1_source", ts_iso: "t" },
+      ],
+    });
+    // The headline stays the BUILD rationale (seq 2), not the higher-seq
+    // explain answer that would otherwise hijack it.
+    expect(latestAssistantRationale(s)).toBe("Source created as a 3-row CSV.");
+  });
+
+  it("falls back to the static purpose when the ONLY assistant turn is an explain reply", () => {
+    const s = session({
+      chat_history: [
+        { role: "user", content: GUIDED_EXPLAIN_MESSAGE, seq: 1, step: "step_1_source", ts_iso: "t" },
+        { role: "assistant", content: "You're at Step 1 — nothing configured yet.", seq: 2, step: "step_1_source", ts_iso: "t" },
       ],
     });
     expect(latestAssistantRationale(s)).toBeNull();

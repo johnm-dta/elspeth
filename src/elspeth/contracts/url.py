@@ -302,7 +302,18 @@ class SanitizedDatabaseUrl:
         # audit record. ``url.partition(":")`` isolates everything after the
         # scheme and handles compound schemes (``postgresql+psycopg2://...``).
         if url.partition(":")[2].startswith("//"):
-            tail = urlunparse(("", "", parsed.path, parsed.params, sanitized_query, sanitized_fragment))
+            # Assemble the tail by hand: ``urlunparse`` with an empty netloc
+            # prepends its own ``//`` whenever the path itself starts with
+            # ``//`` (the absolute-path sqlite form ``sqlite:////abs.db``
+            # parses to path ``//abs.db``), which would double the authority
+            # introducer we add below and inflate the slash count.
+            tail = parsed.path
+            if parsed.params:
+                tail = f"{tail};{parsed.params}"
+            if sanitized_query:
+                tail = f"{tail}?{sanitized_query}"
+            if sanitized_fragment:
+                tail = f"{tail}#{sanitized_fragment}"
             sanitized = f"{parsed.scheme}://{netloc}{tail}"
         else:
             sanitized = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, sanitized_query, sanitized_fragment))

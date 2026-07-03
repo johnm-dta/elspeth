@@ -51,7 +51,65 @@ from elspeth.engine.executors.state_guard import NodeStateGuard
 from elspeth.engine.spans import SpanFactory
 
 if TYPE_CHECKING:
+    from elspeth.contracts import TransformErrorReason
+    from elspeth.contracts.schema_contract import PipelineRow
     from elspeth.engine.batch_adapter import SharedBatchAdapter
+
+
+def record_transform_error_with_routing(
+    *,
+    ctx: PluginContext,
+    execution: ExecutionRepository,
+    error_edge_ids: dict[NodeID, str],
+    state_id: str,
+    token: TokenInfo,
+    transform: TransformProtocol,
+    row: "dict[str, Any] | PipelineRow",
+    error_details: "TransformErrorReason",
+    on_error: str,
+) -> None:
+    """Record a transform error + its DIVERT routing_event (audit trail).
+
+    Shared, sequencing-agnostic error-audit routine (elspeth-aeb0a8f756):
+    used by TransformExecutor's error-result branch (which records BEFORE
+    terminal completion) and by RowProcessor's retryable-exception
+    conversion (which records AFTER the guard already auto-failed the
+    state). It therefore must NOT complete node states — each caller owns
+    its own completion sequencing.
+
+    ``row`` accepts a plain dict or a PipelineRow: canonicalization
+    normalizes PipelineRow via ``.to_dict()``, so the persisted row_hash /
+    row_data_json are identical either way.
+    """
+    node_id = transform.node_id
+    if node_id is None:
+        raise OrchestrationInvariantError(f"Transform '{transform.name}' executed without node_id - orchestrator bug")
+
+    ctx.record_transform_error(
+        token_id=token.token_id,
+        transform_id=node_id,
+        row=row,
+        error_details=error_details,
+        destination=on_error,
+    )
+
+    # Record DIVERT routing_event for audit trail (AUD-002), co-located with
+    # the transform_error record. 'discard' has no destination edge.
+    if on_error != "discard":
+        try:
+            error_edge_id = error_edge_ids[NodeID(node_id)]
+        except KeyError as exc:
+            raise OrchestrationInvariantError(
+                f"Transform '{node_id}' has on_error={on_error!r} but no "
+                f"DIVERT edge registered. DAG construction should have created an "
+                f"__error_{{name}}__ edge in from_plugin_instances()."
+            ) from exc
+        execution.record_routing_event(
+            state_id=state_id,
+            edge_id=error_edge_id,
+            mode=RoutingMode.DIVERT,
+            reason=error_details,
+        )
 
 
 class TransformExecutor:
@@ -600,12 +658,6 @@ class TransformExecutor:
             else:
                 # Transform returned error status (not exception)
                 # This is a LEGITIMATE processing failure, not a bug
-                guard.complete(
-                    NodeStateStatus.FAILED,
-                    duration_ms=duration_ms,
-                    error=result.reason,
-                    context_after=result.context_after,
-                )
 
                 # Handle error routing - on_error is part of TransformProtocol
                 on_error = transform.on_error
@@ -618,10 +670,6 @@ class TransformExecutor:
                 # Set error_sink so caller knows where the error was routed
                 error_sink = on_error
 
-                # Record error event (always, even for discard - audit completeness)
-                # Use node_id (unique DAG identifier), not name (plugin type)
-                # Bug fix: use node_id (unique) not name (shared across instances)
-                #
                 # result.reason MUST be set for error results - TransformResult.error() requires it.
                 # If None, that's a bug in the transform (constructed error result without reason).
                 if result.reason is None:
@@ -629,33 +677,34 @@ class TransformExecutor:
                         f"Transform '{transform.name}' returned error but reason is None. "
                         'Use TransformResult.error({{"reason": "...", ...}}) to create error results.'
                     )
-                ctx.record_transform_error(
-                    token_id=token.token_id,
-                    transform_id=transform.node_id,
+
+                # Record transform_error + DIVERT routing_event BEFORE terminal
+                # completion (record-before-complete, elspeth-2d65e04912 —
+                # same B1 doctrine as the success path above): once
+                # guard.complete() runs the guard stands down, and a failing
+                # audit write would escape its terminality protection. If a
+                # write raises here, the guard auto-fails the state
+                # (phase='executor_post_process', carrying the audit-write
+                # error rather than result.reason) and the error propagates —
+                # fail-closed, never completed-then-crashed.
+                record_transform_error_with_routing(
+                    ctx=ctx,
+                    execution=self._execution,
+                    error_edge_ids=self._error_edge_ids,
+                    state_id=guard.state_id,
+                    token=token,
+                    transform=transform,
                     row=input_dict,  # Use extracted dict for Landscape recording
                     error_details=result.reason,
-                    destination=on_error,
+                    on_error=on_error,
                 )
 
-                # Record DIVERT routing_event for audit trail (AUD-002).
-                # This follows the same pattern as GateExecutor._record_routing():
-                # the routing_event is recorded inside the executor where state_id
-                # is in scope, co-located with the node_state lifecycle.
-                if on_error != "discard":
-                    try:
-                        error_edge_id = self._error_edge_ids[NodeID(transform.node_id)]
-                    except KeyError as exc:
-                        raise OrchestrationInvariantError(
-                            f"Transform '{transform.node_id}' has on_error={on_error!r} but no "
-                            f"DIVERT edge registered. DAG construction should have created an "
-                            f"__error_{{name}}__ edge in from_plugin_instances()."
-                        ) from exc
-                    self._execution.record_routing_event(
-                        state_id=guard.state_id,
-                        edge_id=error_edge_id,
-                        mode=RoutingMode.DIVERT,
-                        reason=result.reason,
-                    )
+                guard.complete(
+                    NodeStateStatus.FAILED,
+                    duration_ms=duration_ms,
+                    error=result.reason,
+                    context_after=result.context_after,
+                )
 
                 updated_token = token
 

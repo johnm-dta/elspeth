@@ -966,6 +966,61 @@ class TestTransformExecutor:
         with pytest.raises(OrchestrationInvariantError, match="DIVERT edge"):
             executor.execute_transform(transform, token, ctx)
 
+    def test_error_path_records_audit_before_terminal_completion(self) -> None:
+        """transform_error + DIVERT routing_event persist BEFORE the FAILED
+        node_state write (record-before-complete, elspeth-2d65e04912) —
+        matching the B1 doctrine already applied on the success path."""
+        factory = _make_factory()
+        edge_ids = {NodeID("node_1"): "divert_edge_1"}
+        executor = TransformExecutor(
+            factory.execution, _make_span_factory(), _make_step_resolver(), error_edge_ids=edge_ids, data_flow=factory.data_flow
+        )
+        transform = _make_transform(on_error="quarantine_sink")
+        transform.process.return_value = TransformResult.error(
+            reason={"reason": "test_error"},
+        )
+        token = _make_token()
+        ctx = make_context(landscape=factory.execution)
+
+        order: list[str] = []
+        ctx.record_transform_error = lambda **kwargs: order.append("transform_error")  # type: ignore[method-assign]
+        factory.execution.record_routing_event.side_effect = lambda **kwargs: order.append("routing_event")
+        factory.execution.complete_node_state.side_effect = lambda **kwargs: order.append("complete_node_state")
+
+        executor.execute_transform(transform, token, ctx)
+
+        assert order == ["transform_error", "routing_event", "complete_node_state"], (
+            f"audit side-effects must precede terminal completion, got: {order}"
+        )
+
+    def test_error_path_audit_write_failure_fails_closed_via_guard(self) -> None:
+        """A LandscapeRecordError from the error-audit write must land the
+        node_state FAILED via the guard's auto-fail path (terminality intact)
+        and still propagate — never completed-then-crashed."""
+        from elspeth.core.landscape.errors import LandscapeRecordError
+
+        factory = _make_factory()
+        executor = TransformExecutor(factory.execution, _make_span_factory(), _make_step_resolver(), data_flow=factory.data_flow)
+        transform = _make_transform(on_error="discard")
+        transform.process.return_value = TransformResult.error(
+            reason={"reason": "test_error"},
+        )
+        token = _make_token()
+        ctx = make_context()
+
+        def _boom(**kwargs: object) -> None:
+            raise LandscapeRecordError("transform_error write failed")
+
+        ctx.record_transform_error = _boom  # type: ignore[method-assign]
+
+        with pytest.raises(LandscapeRecordError):
+            executor.execute_transform(transform, token, ctx)
+
+        factory.execution.complete_node_state.assert_called_once()
+        kwargs = factory.execution.complete_node_state.call_args[1]
+        assert kwargs["status"] == NodeStateStatus.FAILED
+        assert kwargs["error"].phase == "executor_post_process"
+
     # --- Exception path ---
 
     def test_exception_from_process_records_failed_and_reraises(self) -> None:

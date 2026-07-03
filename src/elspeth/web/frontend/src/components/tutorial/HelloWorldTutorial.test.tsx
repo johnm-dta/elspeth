@@ -9,6 +9,16 @@ import { resetStore } from "@/test/store-helpers";
 
 vi.mock("@/api/client", () => ({
   deleteTutorialOrphans: vi.fn().mockResolvedValue({ deleted_count: 0 }),
+  // Mount-time resume validation lists live sessions; default includes the
+  // canonical resume session so the existing resume tests read as "alive".
+  fetchSessions: vi.fn().mockResolvedValue([
+    {
+      id: "sess-resume",
+      title: "First-run tutorial (in progress)",
+      created_at: "2026-05-19T12:00:00Z",
+      updated_at: "2026-05-19T12:00:00Z",
+    },
+  ]),
   createSession: vi.fn().mockResolvedValue({
     id: "sess-new",
     title: "New session",
@@ -360,6 +370,41 @@ describe("HelloWorldTutorial — server-persisted resume (elspeth-918f4434b3)", 
     expect(api.deleteTutorialOrphans).not.toHaveBeenCalled();
     // And no session re-creation — the persisted session is reused.
     expect(api.createSession).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a fresh Welcome when the resumed session no longer exists", async () => {
+    // The persisted resume fields can outlive their session (orphan sweep,
+    // archive, prerelease wipe). Without recovery the guided stage dead-ends
+    // on "Session not found" with NO affordance (skip/exit are suppressed
+    // past Welcome) — the operator-observed blank-page failure.
+    const api = await import("@/api/client");
+    // Once, not a standing override: clearAllMocks clears CALLS but keeps
+    // implementations, so a standing mockResolvedValue([]) here would poison
+    // the sibling resume tests into the recovery path.
+    vi.mocked(api.fetchSessions).mockResolvedValueOnce([]);
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-resume",
+    });
+    render(<HelloWorldTutorial />);
+    // Recovery lands on the Welcome bookend, not the guided shell.
+    expect(
+      await screen.findByRole("heading", { name: /welcome/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "finish-guided" })).toBeNull();
+    // And the stale server-side resume fields are cleared (welcome → all-null).
+    await waitFor(() => {
+      const bodies = vi
+        .mocked(api.updateUserComposerPreferences)
+        .mock.calls.map(([body]) => body);
+      expect(
+        bodies.some(
+          (body) =>
+            "tutorial_stage" in body && body.tutorial_stage === null,
+        ),
+      ).toBe(true);
+    });
   });
 
   it("resumes a completed run at the audit step without re-executing", async () => {

@@ -111,6 +111,25 @@ describe("TutorialGuidedShell", () => {
     expect(useSessionStore.getState().activeSessionId).toBe("sess-1");
   });
 
+  it("routes a 404 start failure to onSessionMissing instead of the dead-end error", async () => {
+    // The persisted resume session can be gone (swept/archived/wiped). The
+    // shell must hand recovery to the parent — rendering the raw error here
+    // strands the learner: no ChatPanel, no skip, no forward affordance.
+    startGuidedSessionMock
+      .mockReset()
+      .mockRejectedValue({ status: 404, detail: "Session not found" });
+    const onSessionMissing = vi.fn();
+    render(
+      <TutorialGuidedShell
+        sessionId="sess-gone"
+        onCompleted={vi.fn()}
+        onSessionMissing={onSessionMissing}
+      />,
+    );
+    await waitFor(() => expect(onSessionMissing).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("rehydrates pending interpretation events on start (resume must not drop the ack gate)", async () => {
     // The tutorial bridge bypasses selectSession (which normally rehydrates
     // pendingBySession). Without this call a mid-Build reload resumed with NO

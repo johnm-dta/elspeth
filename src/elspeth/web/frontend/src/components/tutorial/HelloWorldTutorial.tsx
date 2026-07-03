@@ -1,7 +1,8 @@
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
   createSession,
   deleteTutorialOrphans,
+  fetchSessions,
   renameSession,
   sendTutorialAbandonBeacon,
 } from "@/api/client";
@@ -60,6 +61,48 @@ export function HelloWorldTutorial(): JSX.Element {
       console.error("[tutorial] orphan cleanup failed:", err);
     });
   }, []);
+
+  // The persisted resume session can outlive its session row (orphan sweep,
+  // archive, a prerelease DB wipe). A dead session dead-ends EVERY resumed
+  // stage — guided renders "Session not found" with no forward affordance
+  // (the tutorial suppresses skip/exit past Welcome), run/audit 404 into a
+  // Retry that can never succeed. Recovery: fall back to a fresh Welcome;
+  // the stage-persist effect above then clears the stale server-side resume
+  // fields (welcome maps to all-null in progressForTutorialState).
+  const onSessionMissing = useCallback((): void => {
+    console.warn(
+      "[tutorial] persisted resume session no longer exists — restarting at Welcome",
+    );
+    setSessionId(null);
+    dispatch({ type: "reset" });
+  }, []);
+
+  // Mount-time validation of the resumed session (covers the run/audit
+  // stages, which have no equivalent of TutorialGuidedShell's 404 recovery).
+  // Best-effort: a failed LIST keeps the resume — the shell's own 404
+  // recovery still applies for the guided stage, and a transient list error
+  // must not throw away a healthy resume.
+  const initialResumeSessionIdRef = useRef(state.resumed ? state.sessionId : null);
+  useEffect(() => {
+    const resumedSessionId = initialResumeSessionIdRef.current;
+    if (resumedSessionId === null) {
+      return;
+    }
+    let active = true;
+    void fetchSessions(false)
+      .then((sessions) => {
+        if (!active) {
+          return;
+        }
+        if (!sessions.some((session) => session.id === resumedSessionId)) {
+          onSessionMissing();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [onSessionMissing]);
 
   // Persist the tutorial stage server-side on every stage transition so a
   // reload resumes instead of restarting. Best-effort: a failed persist
@@ -258,6 +301,7 @@ export function HelloWorldTutorial(): JSX.Element {
           onCompleted={(id) =>
             dispatch({ type: "guidedCompleted", sessionId: id })
           }
+          onSessionMissing={onSessionMissing}
         />
       )}
       {state.step === "run" && state.sessionId !== null && (

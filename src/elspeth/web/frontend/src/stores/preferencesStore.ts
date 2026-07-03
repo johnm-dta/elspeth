@@ -381,6 +381,15 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     try {
       const payload = await updateUserComposerPreferences({
         tutorial_completed_at: null,
+        // Explicitly clear the resume fields too. The completion-clears-
+        // progress rule covers the graduated path, but Reset is now also
+        // offered MID-tutorial (the wedged-resume escape hatch) — there the
+        // stale stage/session must not survive the reset, or the next load
+        // resumes straight back into the state being escaped.
+        tutorial_stage: null,
+        tutorial_session_id: null,
+        tutorial_run_id: null,
+        tutorial_source_data_hash: null,
       });
       set({
         defaultMode: payload.default_mode,

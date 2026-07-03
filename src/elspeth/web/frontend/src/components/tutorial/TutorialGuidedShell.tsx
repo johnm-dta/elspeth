@@ -32,6 +32,24 @@ function buildLockedPrompts(
 interface TutorialGuidedShellProps {
   sessionId: string;
   onCompleted: (sessionId: string) => void;
+  /**
+   * The persisted resume session no longer exists server-side (404 from the
+   * start chain). Without this the shell dead-ends on a "Session not found"
+   * error with NO forward affordance — the tutorial suppresses skip/exit, so
+   * the learner is stranded on an empty page. The parent resets to a fresh
+   * Welcome and clears the stale resume fields.
+   */
+  onSessionMissing?: () => void;
+}
+
+/** The start chain 404s when the persisted resume session was swept/archived. */
+function isSessionMissingError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "status" in err &&
+    (err as { status?: unknown }).status === 404
+  );
 }
 
 /**
@@ -48,6 +66,7 @@ interface TutorialGuidedShellProps {
 export function TutorialGuidedShell({
   sessionId,
   onCompleted,
+  onSessionMissing,
 }: TutorialGuidedShellProps): JSX.Element {
   const guidedSession = useSessionStore((s) => s.guidedSession);
   const startGuided = useSessionStore((s) => s.startGuided);
@@ -119,12 +138,16 @@ export function TutorialGuidedShell({
         // enabled Confirm.
         await useInterpretationEventsStore.getState().refreshAll(sessionId);
       } catch (err) {
+        if (isSessionMissingError(err) && onSessionMissing !== undefined) {
+          onSessionMissing();
+          return;
+        }
         setError(formatError(err));
       } finally {
         setStarting(false);
       }
     })();
-  }, [sessionId, startGuided, resetForTutorialSession]);
+  }, [sessionId, startGuided, resetForTutorialSession, onSessionMissing]);
 
   // Hand off to the run/audit/graduation tail when guided reaches completion —
   // but ONLY on a completion this mount OBSERVED transition to. The back-nav

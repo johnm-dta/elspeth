@@ -108,6 +108,30 @@ describe("ComposerPreferencesForm", () => {
 
     expect(resetTutorial).toHaveBeenCalledTimes(1);
   });
+
+  it("shows Reset tutorial while a tutorial is IN PROGRESS (the wedged-resume escape hatch)", () => {
+    // Gating this on completion hid the escape hatch from exactly the users
+    // who needed it: a wedged mid-tutorial resume (persisted session swept
+    // out from under it) left NO affordance anywhere — the tutorial
+    // suppresses skip/exit past Welcome.
+    usePreferencesStore.setState({
+      tutorialCompletedAt: null,
+      tutorialCompleted: false,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-in-progress",
+    });
+    render(<ComposerPreferencesForm />);
+    expect(
+      screen.getByRole("button", { name: /reset tutorial/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides Reset tutorial for a fresh user (nothing to reset)", () => {
+    render(<ComposerPreferencesForm />);
+    expect(
+      screen.queryByRole("button", { name: /reset tutorial/i }),
+    ).toBeNull();
+  });
 });
 
 // ── Modal chrome (Panel test analyzer #2) ────────────────────────────────

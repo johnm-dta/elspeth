@@ -22,6 +22,7 @@ export function ComposerPreferencesForm(): JSX.Element | null {
   const writing = usePreferencesStore((s) => s.writing);
   const writeError = usePreferencesStore((s) => s.writeError);
   const tutorialCompleted = usePreferencesStore((s) => s.tutorialCompleted);
+  const tutorialStage = usePreferencesStore((s) => s.tutorialStage);
   const setDefaultMode = usePreferencesStore((s) => s.setDefaultMode);
   const resetTutorial = usePreferencesStore((s) => s.resetTutorial);
 
@@ -95,7 +96,14 @@ export function ComposerPreferencesForm(): JSX.Element | null {
           {writeError}
         </div>
       )}
-      {tutorialCompleted && (
+      {/* Offered after graduation AND while a tutorial is in progress. The
+          in-progress case is the escape hatch: a wedged resume (e.g. the
+          persisted session swept out from under it) used to leave the learner
+          with NO affordance anywhere — the tutorial suppresses skip/exit past
+          Welcome, and gating this on completion hid it from exactly the users
+          who needed it. resetTutorial clears completion AND the resume fields
+          server-side, so the next load starts a fresh Welcome. */}
+      {(tutorialCompleted || tutorialStage !== null) && (
         <button
           type="button"
           className="btn btn-compact"

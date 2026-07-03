@@ -249,7 +249,17 @@ describe("preferencesStore", () => {
 
     await usePreferencesStore.getState().resetTutorial();
 
-    expect(mockUpdate).toHaveBeenCalledWith({ tutorial_completed_at: null });
+    // Completion AND the resume fields clear in one PATCH: Reset is also
+    // offered mid-tutorial (the wedged-resume escape hatch), where a stale
+    // stage/session surviving the reset would resume straight back into the
+    // state being escaped.
+    expect(mockUpdate).toHaveBeenCalledWith({
+      tutorial_completed_at: null,
+      tutorial_stage: null,
+      tutorial_session_id: null,
+      tutorial_run_id: null,
+      tutorial_source_data_hash: null,
+    });
     expect(usePreferencesStore.getState().tutorialCompletedAt).toBeNull();
     expect(selectTutorialCompleted(usePreferencesStore.getState())).toBe(false);
   });

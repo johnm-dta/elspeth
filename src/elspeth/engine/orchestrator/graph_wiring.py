@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from elspeth.contracts import SinkProtocol, SourceProtocol
     from elspeth.core.config import GateSettings
     from elspeth.core.dag import ExecutionGraph
+    from elspeth.core.landscape.data_flow_repository import DataFlowRepository
     from elspeth.engine.orchestrator.types import PipelineConfig, RowPlugin
 
 
@@ -91,6 +92,42 @@ def assign_plugin_node_ids(
             # This happens for post-run sinks (e.g., landscape.export.sink)
             continue
         sink.node_id = sink_id_map[sink_name_typed]
+
+
+def build_source_id_map(graph: ExecutionGraph) -> dict[str, NodeID]:
+    """Source-name -> source-node-id map from the graph's source nodes.
+
+    ONE loader for every processor-assembly seam — leader
+    (``Orchestrator._register_graph_nodes_and_edges``), resume
+    (``setup_resume_context``), and follower (``build_follower_processor``)
+    — which previously each hand-rolled this loop (elspeth-07b2031e41).
+
+    Per ADR-025 §2 the DAG builder unconditionally sets ``source_name`` on
+    every source node; a missing key would collide entries across multiple
+    sources, silently overwriting earlier ones, so it fails closed.
+    """
+    source_id_map: dict[str, NodeID] = {}
+    for candidate_source_id in graph.get_sources():
+        source_info = graph.get_node_info(candidate_source_id)
+        if "source_name" not in source_info.config:
+            raise OrchestrationInvariantError(
+                f"DAG source node {candidate_source_id!r} is missing 'source_name' in its config. "
+                f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
+                f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
+            )
+        source_id_map[str(source_info.config["source_name"])] = candidate_source_id
+    return source_id_map
+
+
+def load_edge_map(data_flow: DataFlowRepository, run_id: str) -> dict[tuple[NodeID, str], str]:
+    """Load the run's registered edge map from Landscape, keyed for RowProcessor.
+
+    The leader registered nodes and edges at run start; resume and follower
+    load the REAL edge ids (FK integrity for routing events) and rekey from
+    the DB's ``(str, str)`` to RowProcessor's ``(NodeID, label)``.
+    """
+    raw_edge_map = data_flow.get_edge_map(run_id)
+    return {(NodeID(key[0]), key[1]): edge_id for key, edge_id in raw_edge_map.items()}
 
 
 def build_dag_traversal_context(

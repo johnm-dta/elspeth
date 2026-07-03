@@ -467,7 +467,12 @@ def build_follower_processor(
     from elspeth.contracts.coordination import CoordinationToken
     from elspeth.contracts.errors import OrchestrationInvariantError
     from elspeth.contracts.types import NodeID
-    from elspeth.engine.orchestrator.graph_wiring import assign_plugin_node_ids, build_dag_traversal_context
+    from elspeth.engine.orchestrator.graph_wiring import (
+        assign_plugin_node_ids,
+        build_dag_traversal_context,
+        build_source_id_map,
+        load_edge_map,
+    )
     from elspeth.engine.processor import RowProcessor
     from elspeth.engine.spans import SpanFactory
 
@@ -477,19 +482,9 @@ def build_follower_processor(
     # assign_plugin_node_ids call, but the follower path omitted it (slice 5
     # bug: build_follower_processor never called assign_plugin_node_ids).
     #
-    # Mirrors the leader's source_id_map construction (core.py:840-854):
-    # iterate graph.get_sources() and read config["source_name"] from each
-    # source node's info dict.
-    source_id_map: dict[str, NodeID] = {}
-    for candidate_source_id in graph.get_sources():
-        source_info = graph.get_node_info(candidate_source_id)
-        if "source_name" not in source_info.config:
-            raise OrchestrationInvariantError(
-                f"DAG source node {candidate_source_id!r} is missing 'source_name' in its config. "
-                f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
-                f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
-            )
-        source_id_map[str(source_info.config["source_name"])] = candidate_source_id
+    # source_id_map comes from the SAME loader the leader and resume use
+    # (elspeth-07b2031e41 — the loop was previously copy-pasted per seam).
+    source_id_map = build_source_id_map(graph)
 
     assign_plugin_node_ids(
         sources=config.sources,
@@ -522,11 +517,9 @@ def build_follower_processor(
             "Sources must be constructed through the runtime factory bridge before execution."
         )
 
-    # Build the edge_map from the database (same as the resume path).
-    # The leader already registered nodes and edges in Landscape; the follower
-    # loads them so GateExecutor has the correct edge_id for routing events.
-    raw_edge_map = factory.data_flow.get_edge_map(run_id)
-    edge_map: dict[tuple[NodeID, str], str] = {(NodeID(k[0]), k[1]): v for k, v in raw_edge_map.items()}
+    # Load the edge_map through the shared loader (same helper as the resume
+    # path) so GateExecutor has the correct edge_id for routing events.
+    edge_map = load_edge_map(factory.data_flow, run_id)
 
     # Coordination token: followers carry their own token for the heartbeat
     # thread, but do NOT use it as an epoch fence (no leader-fenced verbs).

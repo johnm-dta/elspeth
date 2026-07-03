@@ -95,6 +95,7 @@ from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import (
     export_landscape,
 )
+from elspeth.engine.orchestrator.graph_wiring import build_source_id_map
 from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.landscape_registration import (
     register_nodes_with_landscape,
@@ -842,22 +843,11 @@ class Orchestrator:
         # Get execution order from graph
         execution_order = graph.topological_order()
 
-        # Build node_id -> plugin instance mapping for metadata extraction.
-        source_id_map: dict[str, NodeID] = {}
-        for candidate_source_id in graph.get_sources():
-            source_info = graph.get_node_info(candidate_source_id)
-            # Per ADR-025 §2, the DAG builder unconditionally sets
-            # ``source_name`` on every source node. A missing key would
-            # collide ``source_id_map["source"] = ...`` across multiple
-            # sources, silently overwriting earlier entries.
-            if "source_name" not in source_info.config:
-                raise OrchestrationInvariantError(
-                    f"DAG source node {candidate_source_id!r} is missing 'source_name' in its config. "
-                    f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
-                    f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
-                )
-            source_name = str(source_info.config["source_name"])
-            source_id_map[source_name] = candidate_source_id
+        # Build source-name -> node-id mapping via the SAME loader resume and
+        # follower use (elspeth-07b2031e41); it fails closed on a source node
+        # missing ADR-025 §2 source_name (which would silently collide
+        # entries across multiple sources).
+        source_id_map = build_source_id_map(graph)
         source_id = next(iter(source_id_map.values()))
         transform_id_map: dict[int, NodeID] = graph.get_transform_id_map()
         sink_id_map: dict[SinkName, NodeID] = graph.get_sink_id_map()

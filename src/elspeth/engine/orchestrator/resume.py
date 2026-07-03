@@ -70,6 +70,7 @@ from elspeth.engine.orchestrator.aggregation import (
 )
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.export import reconstruct_schema_from_json
+from elspeth.engine.orchestrator.graph_wiring import build_source_id_map, load_edge_map
 from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
@@ -134,30 +135,20 @@ def setup_resume_context(
     Returns:
         GraphArtifacts populated from existing Landscape records.
     """
-    # Get explicit node ID mappings from graph. Resume must preserve every
+    # Get explicit node ID mappings from graph via the SAME loader the leader
+    # and follower use (elspeth-07b2031e41). Resume must preserve every
     # source root from the original multi-source DAG; a singleton
     # ``graph.get_source()`` lookup is intentionally single-source-only.
-    source_id_map: dict[str, NodeID] = {}
-    for candidate_source_id in graph.get_sources():
-        source_info = graph.get_node_info(candidate_source_id)
-        if "source_name" not in source_info.config:
-            raise OrchestrationInvariantError(
-                f"DAG source node '{source_info.node_id}' is missing 'source_name' in its config. "
-                f"Per ADR-025 §2 the DAG builder MUST set source_name on every source node. "
-                f"This is a graph-construction bug — node config keys: {sorted(source_info.config.keys())}."
-            )
-        source_id_map[str(source_info.config["source_name"])] = candidate_source_id
+    source_id_map = build_source_id_map(graph)
     source_id = next(iter(source_id_map.values()))
     sink_id_map = graph.get_sink_id_map()
     transform_id_map = graph.get_transform_id_map()
     config_gate_id_map = graph.get_config_gate_id_map()
     coalesce_id_map = graph.get_coalesce_id_map()
 
-    # Build edge_map from database (load real edge IDs registered in original run)
-    # CRITICAL: Must use real edge_ids for FK integrity when recording routing events
-    # Convert keys from (str, str) to (NodeID, str) to match RowProcessor's type
-    raw_edge_map = factory.data_flow.get_edge_map(run_id)
-    edge_map: dict[tuple[NodeID, str], str] = {(NodeID(k[0]), k[1]): v for k, v in raw_edge_map.items()}
+    # Load edge_map from database via the shared loader (real edge IDs
+    # registered in the original run — FK integrity for routing events).
+    edge_map = load_edge_map(factory.data_flow, run_id)
 
     # Get route resolution map for validation
     route_resolution_map = graph.get_route_resolution_map()

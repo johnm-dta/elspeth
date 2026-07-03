@@ -72,6 +72,20 @@ _TOOL_SCAFFOLD_MARKERS: Final[tuple[str, ...]] = (
 )
 
 
+class AssistantScaffoldLeakError(ValueError):
+    """The model leaked tool-call scaffolding into a user-facing message.
+
+    A ``ValueError`` subclass so the step-1/step-2 resolve wrappers' existing
+    ``ValueError`` absorption (synthetic-unavailable fallback) is unchanged.
+    The advisory wrapper (``solve_step_chat_with_auto_drop``) catches THIS
+    class specifically — a bare ``ValueError`` there still signals a caller
+    bug and propagates. Observed live twice (tutorial resolve_source
+    2026-07-03, live-guided advisory reply 2026-07-03): the model writes a
+    pseudo agentic transcript as literal text, which persists verbatim into
+    chat_history and renders as the user-facing reply.
+    """
+
+
 def _require_prose_assistant_message(value: object, *, tool: str) -> str:
     """Validate an LLM-supplied assistant_message is user-facing prose."""
     if not isinstance(value, str) or not value.strip():
@@ -79,7 +93,7 @@ def _require_prose_assistant_message(value: object, *, tool: str) -> str:
     lowered = value.lower()
     for marker in _TOOL_SCAFFOLD_MARKERS:
         if marker in lowered:
-            raise ValueError(
+            raise AssistantScaffoldLeakError(
                 f"{tool} assistant_message must be user-facing prose; it contains raw "
                 f"tool-call scaffolding ({marker!r}) — the model leaked its internal "
                 "transcript into the chat message"
@@ -976,9 +990,16 @@ async def solve_step_chat(
         content = message.content
         if content is None or not content.strip():
             raise InvariantError(f"solve_step_chat: LLM response missing message content (step={step.value}, model={model!r})")
+        # Same register guard as the resolve-path assistant_message args: this
+        # reply persists into chat_history and renders verbatim as the
+        # user-facing bubble. Observed live 2026-07-03 (live guided, step_1):
+        # the model answered the advisory path with a full pseudo
+        # <tool_call>/<tool_response> transcript as literal content. Raises
+        # AssistantScaffoldLeakError → MALFORMED_RESPONSE in the audit record;
+        # the advisory wrapper absorbs it to the synthetic-unavailable retry.
+        prose = _require_prose_assistant_message(str(content), tool="solve_step_chat")
         status = ComposerLLMCallStatus.SUCCESS
-        # mypy: LiteLLM's response is `Any`, narrow to str at the trust boundary.
-        return str(content)
+        return prose
     except TimeoutError:
         status = ComposerLLMCallStatus.TIMEOUT
         error_class = "TimeoutError"
@@ -1004,7 +1025,7 @@ async def solve_step_chat(
         error_class = type(exc).__name__
         error_message = type(exc).__name__
         raise
-    except (IndexError, AttributeError, json.JSONDecodeError, InvariantError) as exc:
+    except (IndexError, AttributeError, json.JSONDecodeError, InvariantError, AssistantScaffoldLeakError) as exc:
         status = ComposerLLMCallStatus.MALFORMED_RESPONSE
         error_class = type(exc).__name__
         error_message = "malformed_response"

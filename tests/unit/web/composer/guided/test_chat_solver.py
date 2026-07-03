@@ -18,6 +18,7 @@ import pytest
 
 from elspeth.web.composer.guided import chat_solver
 from elspeth.web.composer.guided.chat_solver import (
+    AssistantScaffoldLeakError,
     Step1SourceChatResolution,
     _build_step_1_source_dynamic_block,
     _build_step_2_sink_tool_prompt,
@@ -148,6 +149,34 @@ async def test_whitespace_only_response_raises(monkeypatch: pytest.MonkeyPatch) 
             model="test/model",
             step=GuidedStep.STEP_2_SINK,
             user_message="hello",
+            temperature=None,
+            seed=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_solve_step_chat_rejects_tool_scaffolding_in_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The advisory reply persists into chat_history verbatim — same register
+    guard as the resolve-path assistant_message args.
+
+    Observed live 2026-07-03 (live guided, step_1): the model answered the
+    advisory path with a full pseudo <tool_call>/<tool_response> transcript
+    as literal content, which rendered raw in the user-facing bubble. The
+    dedicated subclass lets the auto-drop wrapper absorb it (synthetic
+    unavailable, Send retryable) while bare ValueError still propagates as a
+    caller bug.
+    """
+
+    async def fake_acompletion(**_kwargs: Any) -> _FakeLLMResponse:
+        return _ok_response('Let me look. <tool_call>{"name": "list_sources"}</tool_call> ...prose after.')
+
+    monkeypatch.setattr(chat_solver, "_litellm_acompletion", fake_acompletion)
+
+    with pytest.raises(AssistantScaffoldLeakError, match="user-facing prose"):
+        await solve_step_chat(
+            model="test/model",
+            step=GuidedStep.STEP_1_SOURCE,
+            user_message="read my csv",
             temperature=None,
             seed=None,
         )

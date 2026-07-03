@@ -32,6 +32,7 @@ from elspeth.contracts.secrets import WebSecretResolver
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.composer.audit import BufferingRecorder
 from elspeth.web.composer.guided.chat_solver import (
+    AssistantScaffoldLeakError,
     Step1SourceChatResolution,
     maybe_resolve_step_1_source_chat,
     maybe_resolve_step_2_sink_chat,
@@ -330,9 +331,15 @@ async def solve_step_chat_with_auto_drop(
     **The session is not modified** — unlike the chain-solver auto-drop,
     chat failure does not terminate guided mode.
 
-    ``InvariantError`` and ``ValueError`` from ``solve_step_chat`` are NOT
-    absorbed — they propagate so real programming bugs (the solver
+    ``InvariantError`` and bare ``ValueError`` from ``solve_step_chat`` are
+    NOT absorbed — they propagate so real programming bugs (the solver
     violating its own contract, or a bad caller payload) continue to raise.
+    The one ``ValueError`` subclass that IS absorbed is
+    ``AssistantScaffoldLeakError``: the model writing tool-call scaffolding
+    into its user-facing reply is model behaviour (Tier 3), not a caller
+    bug — it maps to the synthetic-unavailable message so the user's Send
+    stays retryable instead of 500ing (observed live 2026-07-03, guided
+    step_1 advisory reply).
 
     The transient exception set mirrors the project canonical at
     ``composer/service.py`` / ``_guided_solve_chain.py``:
@@ -403,6 +410,28 @@ async def solve_step_chat_with_auto_drop(
             status=ComposerChatTurnStatus.SUCCESS,
             latency_ms=latency_ms,
             error_class=None,
+        )
+    except AssistantScaffoldLeakError as exc:
+        # Distinct slog event from the transient set: a scaffold leak is a
+        # model register violation worth counting separately in triage, not
+        # provider weather. Same user-facing outcome — synthetic unavailable,
+        # Send retryable.
+        latency_ms = int((time.perf_counter() - started) * 1000)
+        slog.error(
+            "guided.step_chat_scaffold_leak",
+            session_id=session_id,
+            user_id=user_id,
+            site=site,
+            step=step.value,
+            exc_class=type(exc).__name__,
+            latency_ms=latency_ms,
+            frames=_safe_frame_strings(exc),
+        )
+        return StepChatResult(
+            assistant_message=_SYNTHETIC_UNAVAILABLE_MESSAGE,
+            status=ComposerChatTurnStatus.SYNTHETIC_UNAVAILABLE,
+            latency_ms=latency_ms,
+            error_class=type(exc).__name__,
         )
     except (
         LiteLLMAPIError,

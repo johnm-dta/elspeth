@@ -846,6 +846,47 @@ class TestStepChatTransientFailure:
         assert chat_history[0]["content"] == "anything"
         assert chat_history[1]["content"] == "I'm unavailable right now; you can still use the wizard controls."
 
+    def test_scaffold_leak_in_advisory_reply_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
+        """A model reply carrying raw <tool_call> scaffolding → 200 synthetic message.
+
+        Observed live 2026-07-03 (guided step_1): the model answered the
+        advisory chat path with a full pseudo tool-call transcript as literal
+        content, which persisted into chat_history and rendered raw in the
+        user-facing bubble — the same register violation the resolve-path
+        guards already reject. The advisory reply is now guarded too:
+        AssistantScaffoldLeakError is absorbed by the auto-drop wrapper, the
+        session is untouched, and the user's Send stays retryable.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        scaffold_reply = (
+            'Let me look up what is available. <tool_call> {"name": "list_sources"} '
+            "</tool_call> <tool_response> [...] </tool_response> Good — csv_file fits. "
+            "What is the category column called?"
+        )
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply(scaffold_reply)),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="Read my CSV and count rows per category.",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message"] == "I'm unavailable right now; you can still use the wizard controls."
+        # The scaffolding never lands in chat_history — only the user turn and
+        # the synthetic reply.
+        chat_history = body["guided_session"]["chat_history"]
+        assert len(chat_history) == 2
+        assert "<tool_call" not in chat_history[1]["content"]
+        # Session unharmed: still at step_1, no terminal.
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["guided_session"]["terminal"] is None
+
     def test_route_enforces_server_side_timeout_bound(self, composer_test_client: TestClient) -> None:
         """A HUNG LLM call is bounded by ``settings.composer_timeout_seconds``.
 

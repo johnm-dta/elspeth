@@ -5551,7 +5551,11 @@ class TestReRaiseGuardPattern:
     # sink.py has best-effort cleanup of OPEN node_states before re-raise —
     # without this, a system error leaves states permanently OPEN (a Tier 1
     # violation worse than the original error). See _best_effort_cleanup().
-    _HANDLER_ALLOWLIST = frozenset({"cli.py", "sink.py"})
+    # heartbeat.py latches Tier-1 errors instead of raising on the beat
+    # thread's own stack (raising there would silently kill the daemon
+    # thread, NOT fail closed); check_and_raise() re-raises the latched
+    # exception verbatim at the next drain boundary (elspeth-d0ce4e12af).
+    _HANDLER_ALLOWLIST = frozenset({"cli.py", "sink.py", "heartbeat.py"})
 
     def test_all_reraise_guards_have_bare_raise(self) -> None:
         """Every except (FrameworkBugError, AuditIntegrityError) must contain only 'raise'.

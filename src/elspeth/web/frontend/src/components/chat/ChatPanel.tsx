@@ -489,7 +489,7 @@ function isInlineSourceBlob(metadata: BlobMetadata): boolean {
  */
 const GUIDED_CHAT_PLACEHOLDERS: Record<GuidedStep, string> = {
   step_1_source:
-    "Describe the source you want — e.g. a CSV, a store query, or pages to scrape…",
+    "Describe the source you have — e.g. a CSV, a store query, or pages to scrape…",
   step_2_sink:
     "Describe the output you want — the shape and fields the pipeline should produce…",
   step_2_5_recipe_match:

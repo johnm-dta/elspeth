@@ -1107,7 +1107,7 @@ describe("ChatPanel mode discriminator", () => {
     // string updates here.
     const chatInput = screen.getByTestId("chat-input");
     expect(chatInput.dataset.placeholder).toBe(
-      "Describe the source you want — e.g. a CSV, a store query, or pages to scrape…",
+      "Describe the source you have — e.g. a CSV, a store query, or pages to scrape…",
     );
   });
 

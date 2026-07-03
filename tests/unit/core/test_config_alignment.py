@@ -250,7 +250,9 @@ class TestLandscapeSettingsAlignment:
         from elspeth.core.config import LandscapeExportSettings
 
         # These are all accessed in orchestrator export logic
-        expected_fields = {"enabled", "sink", "format", "sign"}
+        # (include_raw_error_rows: read by export_landscape and threaded into
+        # LandscapeExporter — elspeth-384184c6ab).
+        expected_fields = {"enabled", "sink", "format", "sign", "include_raw_error_rows"}
         actual_fields = set(LandscapeExportSettings.model_fields.keys())
 
         assert actual_fields == expected_fields, (

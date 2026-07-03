@@ -1156,8 +1156,8 @@ class TestErrorRecords:
         assert transform["row_data_json"] == '{"amount": "oops"}'
 
     def test_constructor_defaults_to_redacted_error_rows(self) -> None:
-        db = Mock()
-        with patch("elspeth.core.landscape.exporter.RecorderFactory", return_value=Mock()):
+        db: Any = object()
+        with patch("elspeth.core.landscape.exporter.RecorderFactory"):
             exporter = LandscapeExporter(db)
         assert exporter._include_raw_error_rows is False
 

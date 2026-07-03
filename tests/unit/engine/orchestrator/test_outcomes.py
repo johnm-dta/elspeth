@@ -11,6 +11,7 @@ _execute_run() and _process_resumed_rows(). These tests verify that:
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -248,18 +249,20 @@ class TestAccumulateAuthoritativeErrorHash:
     the accumulator must prefer it over recomputation.
     """
 
-    def _routed_on_error_result(self, *, authoritative_error_hash: str | None, message: str, exception_type: str) -> Mock:
+    def _routed_on_error_result(self, *, authoritative_error_hash: str | None, message: str, exception_type: str) -> Any:
+        from types import SimpleNamespace
+
         from elspeth.contracts.results import FailureInfo
 
-        result = Mock()
-        result.outcome = TerminalOutcome.FAILURE
-        result.path = TerminalPath.ON_ERROR_ROUTED
-        result.token = make_token_info()
-        result.sink_name = "error_sink"
-        result.error = FailureInfo(exception_type=exception_type, message=message)
-        result.scheduler_pending_sink = True
-        result.authoritative_error_hash = authoritative_error_hash
-        return result
+        return SimpleNamespace(
+            outcome=TerminalOutcome.FAILURE,
+            path=TerminalPath.ON_ERROR_ROUTED,
+            token=make_token_info(),
+            sink_name="error_sink",
+            error=FailureInfo(exception_type=exception_type, message=message),
+            scheduler_pending_sink=True,
+            authoritative_error_hash=authoritative_error_hash,
+        )
 
     def test_replayed_pending_sink_prefers_persisted_hash(self) -> None:
         counters = _make_counters()

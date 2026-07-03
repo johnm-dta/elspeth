@@ -157,45 +157,49 @@ per_file_rules:
   expires: null
   max_hits: 2
 allow_hits:
-- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=9d56af854588542e
+- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=c55a1dfdb0de7249
   owner: john
   reason: |-
     In CSVSource.load (csv_source.py:202), the except UnicodeDecodeError catches a decode failure at open() time (BOM/header bytes for codecs like utf-16). This is a Tier-3 source boundary: the bytes are external file content whose contract we did not author, so the policy mandates quarantine, not crash. The handler records the failure via ctx.record_validation_error(schema_mode='parse'), then yields SourceRow.quarantined unless on_validation_failure=='discard', and returns. The catch is narrow (UnicodeDecodeError only), the absence is recorded as an audit fact with the file path and encoding rather than fabricated, and processing of the pipeline is preserved. Not silent data loss. The existing rationale matches the current code.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-08-31'
-- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=b34be06cb6ed5bf9
+- key: plugins/sources/csv_source.py:R6:CSVSource:load:fp=e7ee3490967ac0e5
   owner: john
   reason: |-
     In CSVSource.load (csv_source.py:223), the except UnicodeDecodeError wraps `yield from self._load_from_file(f, ctx)` to catch decode failures that surface during row iteration (e.g. utf-16/utf-32 truncation mid-stream). External file bytes are Tier 3; per the source boundary policy this is quarantined, not crashed. The handler records a parse-level validation error and yields SourceRow.quarantined unless discard mode, deliberately not fabricating a line number (a comment explains file-level decode errors precede CSV parsing so no meaningful lineno exists). The catch is narrow and processing stops only for this corrupt stream, with the failure recorded as an audit fact. Matches the existing rationale.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-08-31'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=0804131ae3dffb11
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=d3cf5ffa356a45ab
   owner: john
   reason: |-
     In CSVSource._load_from_file (csv_source.py:303), the except csv.Error catches a parser error raised by csv.reader (strict=True) during the skip_rows preamble on external CSV input. This is a Tier-3 source boundary. The handler records a validation error via ctx.record_validation_error, yields SourceRow.quarantined when configured, and returns to halt rather than continue on corrupted parser state (an unmatched quote can have consumed subsequent lines) — explicitly avoiding silent data loss. The catch is narrow (csv.Error), the failure is recorded with the physical line number, and quarantine/audit are intact. Matches the source-tier validate-record-quarantine pattern in the existing rationale.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-08-31'
-- key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=f31f9a038a08b359
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=1c28edea7d8baa1d
   owner: john
   reason: |-
     In JSONSource._load_jsonl (json_source.py:275), the except (json.JSONDecodeError, ValueError) catches json.loads failures on a single external JSONL line (Tier 3). The ValueError arm is specifically parse_constant=_reject_nonfinite_constant rejecting NaN/Infinity per the canonical-JSON policy — part of the same parse operation, not a generic swallow. The handler stores the raw line plus line number and routes through _record_parse_error (records validation error, yields quarantined row), then continues to the next line. Narrow catch, audited quarantine, no fabrication. Matches the existing rationale.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-08-31'
 - key: plugins/infrastructure/manager.py:R4:PluginManager:register:fp=0e88b71c015f8aa0
   owner: john
@@ -469,15 +473,16 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[22]/body[14]/body[1]/body[1]/test/values[0]'
   judge_metadata_signature: 'hmac-sha256:v2:9e2ec04026cc7b268e72d4e5e6a9716b0b99c7771cd4aced5700a231ff38508f'
-- key: plugins/sources/text_source.py:R6:TextSource:_validate_and_yield:fp=e2ad6e5d9260b13c
+- key: plugins/sources/text_source.py:R6:TextSource:_validate_and_yield:fp=924793ebd8590642
   owner: john
   reason: |-
     In TextSource._validate_and_yield (text_source.py:254), `except ValidationError as exc` is a Tier-3 source boundary: external row data is validated via Pydantic model_validate, and ValidationError means the external input violated the configured schema. The narrow catch (not broad Exception) routes to ctx.record_validation_error and, unless on_validation_failure is discard, yields a quarantined SourceRow — exactly the validate-at-boundary, record-and-quarantine pattern for Tier-3 data. Not silent suppression; the failure is recorded and the row quarantined. Existing rationale accurate.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-08-31'
 - key: plugins/infrastructure/pooling/executor.py:R6:PooledExecutor:_execute_batch_locked:fp=d90958e285a74a8e
   owner: john
@@ -517,35 +522,38 @@ allow_hits:
   judge_transport: claude_agent_sdk
   ast_path: 'body[23]/body[16]/body[2]/body[0]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:2d0ea6176fc164d17ab0f520ff9f4a568adccf0def8bb041b1dea056fa1e2dad'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=5d8280f319a29f27
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=2bcbd199162d4907
   owner: john
   reason: |-
     In CSVSource._load_from_file (csv_source.py:415), `except ExternalHeaderError as e` catches a Tier-3 fault in the source's own header bytes (normalization collision, empty/duplicate headers). The handler records via ctx.record_validation_error and, unless on_validation_failure is discard, yields a quarantined SourceRow built from the raw header line — the validate-at-boundary, record-and-quarantine pattern for malformed external input (a header collision means no rows are parseable). The catch is narrow to ExternalHeaderError; config faults like a bad field_mapping raise plain ValueError and crash as our bug. No silent suppression — the failure is recorded and quarantined.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-08-31'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=9c1058fc97d74571
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=18e3aa5a0339497f
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. In CSVSource._load_from_file (csv_source.py:358), `except csv.Error as e` catches a parser error raised by csv.reader (constructed with strict=True at line 269) while reading the HEADER row via next_nonblank_record() -> next(reader). csv.Error is raised EXCLUSIVELY by the stdlib csv C-parser on malformed external CSV bytes (unmatched quote, bad quoting); there is no config or our-code path that produces it, so the catch is exhaustively external-origin. This is the canonical Tier-3 source boundary: the file bytes are external content whose contract we did not author. It is not a silent swallow: the handler builds a raw_row carrying audit metadata (file path, physical line number from reader.line_num, a raw_line marker) and calls ctx.record_validation_error(schema_mode='parse') UNCONDITIONALLY (writing a verr_* record into the Landscape audit trail), then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == 'discard' (explicit operator routing that suppresses only the quarantine yield, never the audit record), and then RETURNS — deliberately halting rather than continuing on a corrupted parser state (an unmatched quote can have consumed subsequent lines), explicitly avoiding silent data loss. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); the per-line allowlist is the prescribed honest mechanism. Mirrors the already-signed skip_rows csv.Error handler at line 303.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-08-31'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=f164d02404de5105
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=894a8230ab37856a
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 schema-validation quarantine, recorded not swallowed, type-narrow catch. In CSVSource._load_from_file (csv_source.py:567), `except ValidationError as e` catches the pydantic ValidationError raised by self._schema_class.model_validate(row) — the source-boundary schema validation of an external CSV row whose coerced values may be invalid (the canonical Tier-3 trust boundary: external data may not conform to the declared/inferred schema). It is not a silent swallow: it calls ctx.record_validation_error(schema_mode=self._schema_config.mode) UNCONDITIONALLY (writing a verr_* record into the Landscape audit trail), then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == 'discard'. CRITICAL DISCRIMINATION: the catch is type-narrow to pydantic ValidationError, NOT the broad ValueError. The enclosing try also wraps to_row(), ContractBuilder.process_first_row(), require_schema_contract(), and contract.validate(), but none of those raise pydantic ValidationError: to_row() is model_dump() (serialization, never validates); process_first_row() raises plain ValueError on a field_resolution collision (an explicit 'source plugin bug', i.e. ours) or on a NaN/Infinity value (Tier-1 audit-integrity rejection via normalize_type_for_contract); require_schema_contract() raises an assertion; contract.validate() RETURNS a list of violations rather than raising; and the two SourceRow constructors evaluated inside the try (SourceRow.quarantined at line 556, SourceRow.valid at line 563) are frozen-dataclass (@dataclass(frozen=True, slots=True)) constructors, not pydantic models, whose __post_init__ raises only plain ValueError on an invariant breach. A plain ValueError or AssertionError is not a ValidationError (catching the child never catches the parent, and the dataclass ValueError is an unrelated type to pydantic ValidationError), so all of these our-code / Tier-1 faults PROPAGATE and crash — exactly correct, and exactly the data-vs-config discrimination the sibling azure_blob_source path had to be FIXED to achieve (its broad except ValueError was narrowed); the CSV path gets it for free via the type-narrow catch. Verified empirically: the schema built with allow_coercion=True rejects non-finite float cells ('NaN'/'Infinity'/'inf') as ValidationError at model_validate, so a NaN cell is quarantined HERE and never reaches process_first_row — there is no crash-on-first-row path. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit handling. The method is a generator (yields rows, never raises), so @trust_boundary is infeasible (raising-test contract); the per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-08-31'
 - key: plugins/infrastructure/clients/llm.py:R4:AuditedLLMClient:_emit_telemetry_after_audit:fp=bbfdc3112d58d4a4
   owner: john
@@ -585,65 +593,71 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[14]/body[18]/body[2]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:4b9154da6a3fbdb61b2958a4712e3cfdfc47126b519946bb4e5e7fbd1b57120e'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=79526caaed2b8c15
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=3309035ca05ac6c6
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_csv catch narrow, external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, csv.Error on header parse and on per-row parse, and ExternalHeaderError (the field-normalization data-fault marker) on header resolution. None is a silent swallow: each builds a raw_row carrying audit metadata (raw line/preview, encoding, line/row number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — which writes a verr_* record into the Landscape audit trail (data_flow_repository.record_validation_error) — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine-routing yield, never the audit record). This is the exact CLAUDE.md source doctrine: a CSV with garbage in one row records the problem, quarantines that row/file, and keeps processing the rest. The caught types are narrow (never bare Exception); config/our-code faults are deliberately NOT caught here — the header path catches only ExternalHeaderError and lets a plain ValueError from a bad field_mapping propagate and crash (it is ours), per the inline comment. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-02'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=c8e4df5dd3b7f9ed
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=2a6335700d1c7a23
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_csv catch narrow, external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, csv.Error on header parse and on per-row parse, and ExternalHeaderError (the field-normalization data-fault marker) on header resolution. None is a silent swallow: each builds a raw_row carrying audit metadata (raw line/preview, encoding, line/row number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — which writes a verr_* record into the Landscape audit trail (data_flow_repository.record_validation_error) — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine-routing yield, never the audit record). This is the exact CLAUDE.md source doctrine: a CSV with garbage in one row records the problem, quarantines that row/file, and keeps processing the rest. The caught types are narrow (never bare Exception); config/our-code faults are deliberately NOT caught here — the header path catches only ExternalHeaderError and lets a plain ValueError from a bad field_mapping propagate and crash (it is ours), per the inline comment. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-02'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=b3d72616fff56451
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=be29fd3a24c7cb14
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_csv catch narrow, external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, csv.Error on header parse and on per-row parse, and ExternalHeaderError (the field-normalization data-fault marker) on header resolution. None is a silent swallow: each builds a raw_row carrying audit metadata (raw line/preview, encoding, line/row number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — which writes a verr_* record into the Landscape audit trail (data_flow_repository.record_validation_error) — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine-routing yield, never the audit record). This is the exact CLAUDE.md source doctrine: a CSV with garbage in one row records the problem, quarantines that row/file, and keeps processing the rest. The caught types are narrow (never bare Exception); config/our-code faults are deliberately NOT caught here — the header path catches only ExternalHeaderError and lets a plain ValueError from a bad field_mapping propagate and crash (it is ours), per the inline comment. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-02'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=d5dc011c899e40af
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_csv:fp=b19fe22f979c966f
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_csv catch narrow, external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, csv.Error on header parse and on per-row parse, and ExternalHeaderError (the field-normalization data-fault marker) on header resolution. None is a silent swallow: each builds a raw_row carrying audit metadata (raw line/preview, encoding, line/row number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — which writes a verr_* record into the Landscape audit trail (data_flow_repository.record_validation_error) — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine-routing yield, never the audit record). This is the exact CLAUDE.md source doctrine: a CSV with garbage in one row records the problem, quarantines that row/file, and keeps processing the rest. The caught types are narrow (never bare Exception); config/our-code faults are deliberately NOT caught here — the header path catches only ExternalHeaderError and lets a plain ValueError from a bad field_mapping propagate and crash (it is ours), per the inline comment. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (its contract requires a raising-rejection test_ref); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-02'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=e8581c555e6793e5
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=bec09706ddbb5264
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_jsonl catch narrow external-origin parse faults on raw blob bytes: (json.JSONDecodeError, ValueError) on the per-line json.loads (the ValueError arm is bounded to _reject_nonfinite_constant rejecting NaN/Infinity literals — a data fault), and UnicodeDecodeError raised by the streaming TextIOWrapper on a truncated byte sequence. Neither is a silent swallow: each builds a raw_row carrying audit metadata (raw line or raw bytes hex, line number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — writing a verr_* record into the Landscape audit trail — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (explicit operator routing; suppresses only the quarantine yield, never the audit record). Per-line JSONL parse handling continues to the next line on a bad line (a line-level quarantine); the file-level UnicodeDecodeError records and returns. This is the CLAUDE.md source doctrine: a malformed JSONL line is recorded and quarantined, the rest of the file keeps processing. The caught types are narrow (never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so @trust_boundary is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-02'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=79a02205af523543
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_jsonl:fp=354195a41d9e3bca
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_jsonl catch narrow external-origin parse faults on raw blob bytes: (json.JSONDecodeError, ValueError) on the per-line json.loads (the ValueError arm is bounded to _reject_nonfinite_constant rejecting NaN/Infinity literals — a data fault), and UnicodeDecodeError raised by the streaming TextIOWrapper on a truncated byte sequence. Neither is a silent swallow: each builds a raw_row carrying audit metadata (raw line or raw bytes hex, line number) and calls ctx.record_validation_error(...) UNCONDITIONALLY — writing a verr_* record into the Landscape audit trail — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (explicit operator routing; suppresses only the quarantine yield, never the audit record). Per-line JSONL parse handling continues to the next line on a bad line (a line-level quarantine); the file-level UnicodeDecodeError records and returns. This is the CLAUDE.md source doctrine: a malformed JSONL line is recorded and quarantined, the rest of the file keeps processing. The caught types are narrow (never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so @trust_boundary is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-02'
 - key: plugins/infrastructure/batching/mixin.py:R6:BatchTransformMixin:_complete_ticket:fp=f6b5a60d4c2ae50c
   owner: john
@@ -740,54 +754,60 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[25]/body[10]/body[2]/handlers[2]'
   judge_metadata_signature: 'hmac-sha256:v2:f5bfe1ffe358770b3b8102b430c6f3978241a09f993bfe189eca481a2fe0dca7'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=7453e6ed0299b7a0
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=6783ed5388156ba6
   owner: john
   reason: |-
     In DataverseSource.load (dataverse.py:596), the except ValueError wraps self._strip_odata_metadata(raw_row) where raw_row is an external Dataverse API row (Tier 3). A formatted-value/field collision raises ValueError; the handler increments quarantine_count, records via ctx.record_validation_error(schema_mode='odata_strip'), yields SourceRow.quarantined unless discard, and continues with the next row. This is the canonical source-boundary pattern: narrow typed exception, audited quarantine, no fabrication, pipeline keeps processing other rows. Matches the existing rationale.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-03'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=fc6f4a824dc6b094
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=074f0cde5af3d0f6
   owner: john
   reason: |-
     In DataverseSource.load (dataverse.py:620), the except ValueError wraps self._normalize_row_fields on a cleaned external API row (Tier 3). normalize_field_name raises ValueError when an arbitrary Dataverse field name normalizes to empty (all-special-character names); the handler quarantines the row via ctx.record_validation_error(schema_mode='field_normalization') and continues. Narrow catch, audited quarantine, no inferred/fabricated field — the absence of a usable field name is recorded, not papered over. Continuing per the configured failure policy is correct for Tier-3 user data. Matches the existing rationale.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-03'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=47b1de7366b1e4a8
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=36c675d763795770
   owner: john
   reason: |-
     In AzureBlobSource._validate_and_yield (azure_blob_source.py:1063), the except ExternalHeaderError catches Tier-3 data faults raised by _normalize_row_keys on an external JSON/JSONL row: a non-object row, an external-key normalization failure, or a row-created field-mapping collision reclassified by _resolve_json_field_names. Config/our-code faults — bad field_mapping keys/values or a normalization-algorithm bug — remain plain ValueError and are deliberately NOT caught (they crash), mirroring the CSV header path's ExternalHeaderError/ValueError split. The handler records the failure UNCONDITIONALLY via ctx.record_validation_error(schema_mode='field_normalization'), then yields SourceRow.quarantined unless on_validation_failure == 'discard', and returns. Narrow catch, audited quarantine, no fabricated field names — the unusable external key set is recorded as an audit fact, not papered over.
   safety: |-
-    Pending cicd-judge justification: this catch has no prior ACCEPTED verdict to
-    carry (the ExternalHeaderError split landed with the multi-source ingestion
-    work). The rationale above was verified against the current code at this site.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-03'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=8f47644ffe3f99c7
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=b34ba0b6d6f08c19
   owner: john
   reason: |-
     In AzureBlobSource._validate_and_yield (azure_blob_source.py:1140), the except ContractFieldLimitExceeded catches the contract builder's field-count cap firing during sparse-field contract inference (process_sparse_fields) on an external JSON/JSONL row. Sparse external rows can mint unbounded new keys — attacker-controllable input — and the cap is the Tier-3 defence against contract-inflation; exceeding it is a property of the external data, not of our code. The handler records the failure UNCONDITIONALLY via ctx.record_validation_error(schema_mode=self._schema_config.mode) and yields SourceRow.quarantined unless on_validation_failure == 'discard'. Narrow catch, audited quarantine; only the offending row is quarantined and the pipeline keeps processing.
   safety: |-
-    Pending cicd-judge justification: this catch has no prior ACCEPTED verdict to
-    carry (the sparse-field contract cap landed with the multi-source ingestion
-    work). The rationale above was verified against the current code at this site.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-03'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=6446ea48324b6b04
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=7eb7d56e93a24f8d
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 schema-validation quarantine, recorded not swallowed. This except block in AzureBlobSource._validate_and_yield (azure_blob_source.py:1154) catches pydantic ValidationError from self._schema_class.model_validate(row_to_validate) — the source-boundary schema validation of an external row whose values may be invalid (the canonical Tier-3 trust boundary: external data may not conform to the declared/inferred schema). It is not a silent swallow: it calls ctx.record_validation_error(...) UNCONDITIONALLY with the validation error string and schema_mode (writing a verr_* record into the Landscape audit trail), then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (explicit operator routing that suppresses only the quarantine yield, never the audit record). This is the CLAUDE.md source doctrine: a row that fails schema validation is recorded and quarantined, the pipeline keeps processing other rows. The caught type is the narrow, expected pydantic ValidationError (never bare Exception); a wrong-type bug in our own validation wiring would surface as a different exception and crash — the in-try raise ValueError sites for missing field_resolution are code faults and propagate. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
-    multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried; the fingerprint rotated
-    from fp=8aae88666dc782aa (that stale entry is replaced by this one). The
-    rationale above was re-verified against the current code at this site.
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-03'
 - key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_send_ssrf_safe_request:fp=bdc0a2470c42fe8d
   owner: john
@@ -960,44 +980,28 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[28]/body[20]/body[5]/body[2]/body[0]/handlers[0]'
   judge_metadata_signature: 'hmac-sha256:v2:756475ddd5afa2fca01ae9f642d87807796550f8da7cbdcc82d37685ce50c082'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=48845cdce0bd6e0f
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=1e594410d1dda5e2
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_json_array catch narrow external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, and (json.JSONDecodeError, ValueError) on json.loads (the ValueError arm is bounded to _reject_nonfinite_constant rejecting NaN/Infinity literals — a data fault, since parse_constant only fires on parsed JSON tokens). Neither is a silent swallow: both route through the local _record_file_level_error helper, which builds a raw_row (container, blob_path, error) and calls ctx.record_validation_error(...) UNCONDITIONALLY — writing a verr_* record into the Landscape audit trail — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine yield, never the audit record). This is the CLAUDE.md source doctrine: malformed external JSON is recorded and quarantined at the boundary, the run is not crashed. The caught types are narrow (never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:53:16.040832+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.86
-  judge_rationale: |-
-    PRESCRIBED FORM — Tier-3 source-boundary quarantine. The excerpt shows narrow except clauses (UnicodeDecodeError; JSONDecodeError/ValueError from json.loads on raw blob bytes) routed to _record_file_level_error, which unconditionally calls ctx.record_validation_error (Landscape audit record) and yields SourceRow.quarantined unless explicit operator config selects discard. This is the documented source-tier behaviour: validate at the boundary, record what we got, quarantine the unit — not a silent swallow. R6 is syntactically firing on the except shape but the handler produces an explicit recorded quarantine result, which is exactly the prescribed form. The rationale's note that the method is a generator (decorator's raising contract doesn't apply) is consistent with the visible code.
-  judge_signature_version: 2
-  scope_fingerprint: 69aa24698f934dca0a900b1e78b968e51cf4eb810a3b5dc92b3a917979c8c336
-  judge_transport: openrouter
-  ast_path: 'body[34]/body[11]/body[4]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:3faef69655c37497c82e9d920f183ea5d5e19f2ad0ed867367f8ff35c3cbdee9'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=f4247a38d45a894e
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_load_json_array:fp=4f8205430a175d4e
   owner: john
   reason: |-
     PRESCRIBED FORM — Tier-3 source-boundary quarantine, recorded not swallowed. These except blocks in AzureBlobSource._load_json_array catch narrow external-origin parse faults on raw blob bytes: UnicodeDecodeError on the configured-encoding decode, and (json.JSONDecodeError, ValueError) on json.loads (the ValueError arm is bounded to _reject_nonfinite_constant rejecting NaN/Infinity literals — a data fault, since parse_constant only fires on parsed JSON tokens). Neither is a silent swallow: both route through the local _record_file_level_error helper, which builds a raw_row (container, blob_path, error) and calls ctx.record_validation_error(...) UNCONDITIONALLY — writing a verr_* record into the Landscape audit trail — then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (an explicit operator routing choice that suppresses only the quarantine yield, never the audit record). This is the CLAUDE.md source doctrine: malformed external JSON is recorded and quarantined at the boundary, the run is not crashed. The caught types are narrow (never bare Exception). R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:53:22.791764+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM — Tier-3 source boundary handling external blob bytes. The except blocks catch narrow, specific exceptions (UnicodeDecodeError; JSONDecodeError/ValueError from parse_constant rejection of NaN/Infinity), and both route through _record_file_level_error which calls ctx.record_validation_error unconditionally (audit record written) and yields SourceRow.quarantined unless explicitly configured to discard. This is the exact source-boundary doctrine: validate, record what we got, quarantine — not a silent swallow. R6 is a syntactic detector that doesn't recognize record_validation_error + quarantine yield as explicit error handling. Decorator nudge is inapplicable: R6 is not in the {R1, R5} suppressible set.
-  judge_signature_version: 2
-  scope_fingerprint: 69aa24698f934dca0a900b1e78b968e51cf4eb810a3b5dc92b3a917979c8c336
-  judge_transport: openrouter
-  ast_path: 'body[34]/body[11]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:72c39d4ab79edbc36129ba55825df7322da991c07a8793906a270a10b408e3aa'
 - key: plugins/sinks/database_sink.py:R6:DatabaseSink:_insert_with_per_row_diversion:fp=7a5f676a0fb41f80
   owner: john
   reason: |-
@@ -1171,219 +1175,131 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[34]/body[14]/body[2]/handlers[1]'
   judge_metadata_signature: 'hmac-sha256:v2:108c2e3edc9153d21400539168f7fed731f3a7f6a1868ab3949e5e5c28c04130'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=2c8a05bce14cdc37
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=a23f99d2b5035239
   owner: john
   reason: |-
     This is a legitimate Tier-3 source-ingestion boundary, not a Tier-1 audit-data violation. In `src/elspeth/plugins/sources/dataverse.py:633-641`, `DataverseSource.load` explicitly marks Dataverse field names as external data and narrows the catch to `ExternalHeaderError`: "field names from Dataverse can be arbitrary strings" and "Catch only ExternalHeaderError (data faults: header normalizes to empty, normalization collision in the entity's own field names)." The handler at `src/elspeth/plugins/sources/dataverse.py:644-659` does not silently ignore the exception: it increments the quarantine counter, records a validation error with `schema_mode="field_normalization"`, yields `SourceRow.quarantined(...)` unless configured to discard, and then continues to the next external row. Plain `ValueError` from config faults is intentionally not caught per `src/elspeth/plugins/sources/dataverse.py:637-640`, so our config/code defects still crash.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:17:56.750934+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.93
-  judge_rationale: |-
-    PRESCRIBED FORM. This is a Tier-3 source ingestion boundary in a Source plugin, exactly where quarantine-on-coercion-failure is the prescribed pattern. The except narrowly catches ExternalHeaderError (not bare Exception), records a validation error via ctx.record_validation_error with schema_mode='field_normalization', yields SourceRow.quarantined(...), and continues — this is recorded quarantine, not silent swallow. Plain ValueError is deliberately not caught so config/code defects still crash, satisfying the typed-exception routing discipline. R6's concern (swallow without re-raise or explicit error result) does not apply: an explicit quarantine result is produced.
-  judge_signature_version: 2
-  scope_fingerprint: a585dd498b49026cc31a4e4021cfe96437bf72a63f24aeeef6be07cfe33a4ba7
-  judge_transport: openrouter
-  ast_path: 'body[26]/body[13]/body[10]/body[1]/body[3]/body[3]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:78f309e5f156d83a05dfe8a932f6ddc1d06546441adc663c0416ba1f56ba6c79'
-- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=6c3ae9cd0db407f9
+- key: plugins/sources/dataverse.py:R6:DataverseSource:load:fp=24cdc9a54bfa48f3
   owner: john
   reason: |-
     `DataverseSource.load` is processing external Dataverse payloads: `for raw_row in page.rows:` at `src/elspeth/plugins/sources/dataverse.py:609`. The flagged handler is immediately after sparse-field contract inference for that external row: `contract = self._contract_builder.process_sparse_fields(validated_row, self._field_resolution.resolution_mapping)` at lines 706-710. `ContractFieldLimitExceeded` is a prescribed Tier-3 source-boundary validation failure here, not a Tier-1 audit-data invariant: the exception is raised when a sparse external row would exceed the inferred schema field cap (`contract_builder.py:111-115`). The site records the validation failure and either emits an explicit quarantine row or discards only under the configured validation policy: `ctx.record_validation_error(...)` at lines 712-717, `yield SourceRow.quarantined(...)` at lines 718-724, then `continue` at line 725. This is not a silent swallow; it converts an untrusted source-row shape violation into the source plugin's validation/quarantine channel.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:03.316178+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. The except clause catches a specific, typed exception (ContractFieldLimitExceeded) raised at the Tier-3 source boundary when sparse external Dataverse rows exceed the inferred schema field cap. The handler does not swallow silently: it calls ctx.record_validation_error(...), then either yields SourceRow.quarantined(...) or discards per the configured on_validation_failure policy, then continues to the next row. This is exactly the prescribed source-boundary quarantine pattern for malformed external rows — recoverable per-row failure peeled off so the run continues — which is what R6 explicitly allows (raise or return an explicit error/quarantine result).
-  judge_signature_version: 2
-  scope_fingerprint: a585dd498b49026cc31a4e4021cfe96437bf72a63f24aeeef6be07cfe33a4ba7
-  judge_transport: openrouter
-  ast_path: 'body[26]/body[13]/body[10]/body[1]/body[3]/body[8]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:4788883532327057b154557eb3a7ce08f4960ad5456d9d745845d094c1aeb316'
-- key: plugins/sources/text_source.py:R6:TextSource:load:fp=9cf9a6496ca3f6e6
+- key: plugins/sources/text_source.py:R6:TextSource:load:fp=8a07bddba8538639
   owner: john
   reason: |-
     `TextSource.load` is a source-ingestion Tier-3 boundary: it opens the configured external text file at `src/elspeth/plugins/sources/text_source.py:141-143` and converts malformed external input into a source parse/quarantine result. The `UnicodeDecodeError` at line 178 is not silently ignored: it calls `_record_parse_error(...)` with `"Text parse error at line {error_line}: invalid {self._encoding} encoding ({exc})"` at lines 180-185, then `yield quarantined` at lines 186-187 when quarantine output exists. This is the prescribed source-boundary pattern for bad external file bytes, not a Tier-1 audit-data violation that must crash. Suppression is valid only while this catch remains tied to that parse-error/quarantine path.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:09.628244+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.88
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on the bare `except UnicodeDecodeError`, but the handler is exactly the source-boundary quarantine pattern policy prescribes: external file bytes (Tier-3) that cannot be decoded are routed through `_record_parse_error` with the line number and exception message, then yielded as a quarantined row when present. This is recorded handling of malformed external input, not silent swallowing — the exception's information is preserved in the parse-error record and the unit is quarantined rather than killing the run. The visible code matches the rationale's claim.
-  judge_signature_version: 2
-  scope_fingerprint: 9c51572943fbd1fbac3de6d47678675113fd2feb75b12040e003e8d42cb80adc
-  judge_transport: openrouter
-  ast_path: 'body[19]/body[8]/body[5]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:e895d87defd0afa1fae4fac6a57ed2da3f968183aafca889fb5a8ae833485c5e'
-- key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=c14cd624766b0ad7
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_jsonl:fp=84123aeed592c85f
   owner: john
   reason: |-
     This is a source-plugin Tier-3 ingestion boundary, not Tier-1 audit data. In `JSONSource._load_jsonl`, the file bytes are external input and the handler is specifically for decode failure while reading that external file. The function documents the boundary at `src/elspeth/plugins/sources/json_source.py:245-247`: "external data (Tier 3) that fails to parse is quarantined, not crash the pipeline." The caught `UnicodeDecodeError` at `src/elspeth/plugins/sources/json_source.py:293` is not silently ignored: it constructs a site-specific parse error, `error_msg = f"JSON parse error at line {error_line}: invalid {self._encoding} encoding ({e})"`, records it through `_record_parse_error(...)`, and yields the quarantined row when present. Future drift that removed the `_record_parse_error` call or changed this from source-file decode handling into an internal/audit read would invalidate this suppression.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:16.328411+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. This is a Tier-3 source boundary: bytes read from an external JSON file are being decoded, and UnicodeDecodeError represents external malformed input, not a bug in code we control. The handler does not swallow silently — it builds a site-specific error message, calls _record_parse_error for audit traceability, and yields the quarantined row. This matches the policy's prescribed quarantine pattern for Tier-3 ingestion failures (Quick Reference: 'Source: coerce OK, validate, quarantine failures'). R6's concern (silent swallow) does not apply because the error is explicitly recorded.
-  judge_signature_version: 2
-  scope_fingerprint: aee3f2c6fc021f90af139f2ee6f31932c44be4a2598fbc2b749c8650b28fe535
-  judge_transport: openrouter
-  ast_path: 'body[19]/body[9]/body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:3c44aac825a9104785a00a627e12fd7563cbb565529c8c4e32c1f917589e5508'
-- key: plugins/sources/json_source.py:R6:JSONSource:_load_json_array:fp=b2c1f6ce744777a4
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_json_array:fp=09bdc898942ffaa5
   owner: john
   reason: |-
     `plugins/sources/json_source.py:314-335` is a source-ingestion Tier-3 boundary for an external JSON file. The flagged handler wraps `json.load(f, parse_constant=_reject_nonfinite_constant)` and converts malformed external input into an explicit quarantined source row, not a silent success: `except (json.JSONDecodeError, ValueError) as e:`, then builds `error_msg`, calls `self._record_parse_error(...)`, yields the quarantined row when present, and `return  # Stop processing this file`. This is the prescribed source-boundary form: external data parse failure is reified as validation/quarantine instead of crashing or being ignored.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:23.098688+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.95
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on the except block, but the visible code shows the prescribed Tier-3 source-boundary pattern: external JSON parse failure is reified into an explicit quarantined row via _record_parse_error, yielded to the pipeline, and the file processing stops. This is not a silent swallow — it's the documented quarantine path for Tier-3 external data, exactly the alternative R6's remediation text names ('return an explicit error/quarantine result'). Rationale matches the code and the policy's source-coercion-and-quarantine prescription.
-  judge_signature_version: 2
-  scope_fingerprint: 1889a9761767761338ff99dd87298b97f73661d15645dd3aa080abc9871ec149
-  judge_transport: openrouter
-  ast_path: 'body[19]/body[10]/body[1]/body[0]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:e1531f043a2786c8ff5c8f4d7e4dd2e15741511de3005b11a3e15dacce77d436'
-- key: plugins/sources/json_source.py:R6:JSONSource:_load_json_array:fp=8274e8ae0b6879c8
+- key: plugins/sources/json_source.py:R6:JSONSource:_load_json_array:fp=7fe9f3ef017bf33c
   owner: john
   reason: |-
     This is a source-plugin Tier-3 ingestion boundary, not a Tier-1 audit-data read path. In `src/elspeth/plugins/sources/json_source.py:308-313`, `_load_json_array` documents that external JSON input parse/decode failures are quarantined: `"external data (Tier 3) that fails to parse or decode is quarantined, not crash the pipeline."` The flagged handler at `src/elspeth/plugins/sources/json_source.py:336-348` catches only `UnicodeDecodeError`, converts it into the explicit parse error `"JSON parse error: invalid {self._encoding} encoding ({e})"`, records it through `_record_parse_error(...)`, yields the quarantined `SourceRow` when present, then returns. Future drift that removes the `_record_parse_error(...)` call, stops yielding the quarantined row, broadens the caught exception beyond this external decode failure, or moves this handler onto Tier-1 data would invalidate this suppression.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:29.456422+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. This is a Tier-3 ingestion boundary in a Source plugin reading external JSON from disk — exactly where the policy prescribes quarantine over crash. The except catches a narrow, specific exception (UnicodeDecodeError) from the external file read, constructs an explicit error message, calls _record_parse_error to create an auditable quarantine record, yields the quarantined SourceRow, and returns. This is not silent swallowing — it is the recorded-quarantine form the policy explicitly endorses for Tier-3 boundaries, and the rationale identifies the exact mechanism visible in the code.
-  judge_signature_version: 2
-  scope_fingerprint: 1889a9761767761338ff99dd87298b97f73661d15645dd3aa080abc9871ec149
-  judge_transport: openrouter
-  ast_path: 'body[19]/body[10]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:7c252f384f7af7b7fc578fb93ea026c9993d054a6d507f4ef362aafa45bbe1c2'
-- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=17a378799e23e8e5
+- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=9382c3fae5eb7f0f
   owner: john
   reason: |-
     This is a legitimate Tier-3 source-boundary quarantine, not a swallowed Tier-1 invariant failure. In `src/elspeth/plugins/sources/json_source.py:513-519`, `_validate_and_yield` states that JSON keys are normalized at the source boundary and that only `ExternalHeaderError` is caught for "Tier-3 data faults: non-object row, external-header collision after normalization, header normalizes to empty"; config `ValueError`s are deliberately allowed to crash. The handler at `src/elspeth/plugins/sources/json_source.py:522-531` converts that external header fault into a recorded validation failure via `_record_validation_failure(..., error_msg=str(exc), source_row_index=source_row_index)`, yields the quarantined `SourceRow` when configured to do so, and returns. Drift that broadened this catch beyond `ExternalHeaderError`, stopped recording the failure, or caught config/internal errors here would invalidate this suppression.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:36.254703+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. This is a Tier-3 source boundary: `_normalize_row_keys` is processing external JSON row data, and the except narrowly targets `ExternalHeaderError` — a typed Tier-3 data-fault exception — while explicitly allowing plain `ValueError` (config faults) to propagate. The handler does not swallow: it records the failure via `_record_validation_failure` and yields a quarantined `SourceRow`, which is the policy-prescribed quarantine pattern for recoverable external-input failures. The narrow exception type, the recording, and the yield together establish that this is the legitimate quarantine form rather than R6's silent-except concern.
-  judge_signature_version: 2
-  scope_fingerprint: d38db43ba5471a48c85ecc5cdcaca342e33874fa97fa9b093bc22433f4506b43
-  judge_transport: openrouter
-  ast_path: 'body[19]/body[12]/body[1]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:2b43d8905cf00aa218e7d3f9b8851fa970cbd93e25abf2ee15bbe8886497c90b'
-- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=73a48ae62d5c0512
+- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=fecd3868bccecb29
   owner: john
   reason: |-
     This is a source-boundary validation path, not a Tier-1 audit-data read or internal invariant swallow. In `src/elspeth/plugins/sources/json_source.py:498-507`, `_validate_and_yield` receives `row: Any` where the docstring says the row "May be a non-dict JSON value from the external source boundary." The caught exception at `src/elspeth/plugins/sources/json_source.py:586` is raised while converting external JSON into a contract-owned `SourceRow`: the function normalizes Tier-3 JSON keys at `src/elspeth/plugins/sources/json_source.py:513`, validates/coerces with `self._schema_class.model_validate(normalized_row)` at `src/elspeth/plugins/sources/json_source.py:535`, updates sparse-field contract metadata at `src/elspeth/plugins/sources/json_source.py:560-564`, then emits `SourceRow.valid(...)` only after `contract.validate(...)` passes at `src/elspeth/plugins/sources/json_source.py:566-585`.
 
     The `except ContractFieldLimitExceeded as e:` block is a prescribed source-boundary quarantine form: it calls `_record_validation_failure(... row=normalized_row, error_msg=str(e), source_row_index=source_row_index)` and yields the returned quarantined row if not in discard mode (`src/elspeth/plugins/sources/json_source.py:586-594`). That helper records the validation error to the source context and returns `SourceRow.quarantined(...)` with the same `source_row_index` (`src/elspeth/plugins/sources/json_source.py:638-650`). If this site stops recording `ctx.record_validation_error`, stops yielding `SourceRow.quarantined`, catches broader internal exceptions, or moves to Tier-1 persisted/audit data, this suppression should become stale and invalid.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:42.932079+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 fires on the except-block, and the visible code shows the prescribed Tier-3 source-boundary quarantine pattern: a specifically-typed exception (ContractFieldLimitExceeded) is caught at the external JSON ingestion boundary, the failure is recorded via ctx.record_validation_error inside _record_validation_failure, and a SourceRow.quarantined is yielded (unless discard mode). This is neither silent swallow nor a defensive guard on first-party data — it is the explicit quarantine-the-unit form that the policy prescribes for recoverable Tier-3 input. The parallel ValidationError branch below confirms the structural pattern.
-  judge_signature_version: 2
-  scope_fingerprint: d38db43ba5471a48c85ecc5cdcaca342e33874fa97fa9b093bc22433f4506b43
-  judge_transport: openrouter
-  ast_path: 'body[19]/body[12]/body[2]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:1c34920ca50b801275239af93c1c1c101e5c16c57606113f450b2f65ea01cb58'
-- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=13f42d7a92187063
+- key: plugins/sources/json_source.py:R6:JSONSource:_validate_and_yield:fp=d34ff269dbb5a891
   owner: john
   reason: |-
     This is a source ingestion boundary for untrusted JSON rows, not a Tier-1 audit-data read. In `src/elspeth/plugins/sources/json_source.py:498-507`, `_validate_and_yield` explicitly accepts `row: Any` because the row "May be a non-dict JSON value from the external source boundary." The caught `ValidationError` is raised while validating/coercing that external row with `validated = self._schema_class.model_validate(normalized_row)` at line 535. The handler at lines 595-603 does not silently swallow it: it calls `_record_validation_failure(... error_msg=str(e) ...)` and yields the resulting quarantined `SourceRow` unless validation policy is `"discard"`. `_record_validation_failure` records the error through `ctx.record_validation_error(...)` at lines 638-643 and returns `SourceRow.quarantined(...)` at lines 646-651. That is the prescribed Tier-3 source boundary form: normalize/validate external data at ingestion, record/quarantine bad rows, and continue rather than crash the run.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:48.820424+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. This is a Tier-3 source-ingestion boundary where ValidationError arises from pydantic's model_validate on an external JSON row. The except clause does not swallow: it routes through _record_validation_failure, which records the error via ctx.record_validation_error and returns a quarantined SourceRow (or None under discard policy), which is then yielded. That matches the policy's prescribed Tier-3 boundary behavior — validate, record, quarantine, continue — and mirrors the adjacent ContractFieldLimitExceeded handler. R6's concern (silent swallow without explicit error result) does not apply here.
-  judge_signature_version: 2
-  scope_fingerprint: d38db43ba5471a48c85ecc5cdcaca342e33874fa97fa9b093bc22433f4506b43
-  judge_transport: openrouter
-  ast_path: 'body[19]/body[12]/body[2]/handlers[1]'
-  judge_metadata_signature: 'hmac-sha256:v2:bdc98b54d6c7bd73d5e0f7cd60788e239b28c67514493a399d70dd48a0113ece'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=ab29eca350ff1ebd
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=f44d4a37494da4b3
   owner: john
   reason: |-
     `src/elspeth/plugins/sources/csv_source.py:252-257` defines `_load_from_file` as the CSV file-read boundary: it says the function handles `UnicodeDecodeError` at the "file-reading boundary (Tier 3 external data)." The flagged handler at `src/elspeth/plugins/sources/csv_source.py:463-490` is not silently suppressing a Tier-1 invariant failure: it converts an external decode failure into a source-boundary validation event with `ctx.record_validation_error(...)`, optionally emits `SourceRow.quarantined(...)`, and then `return`s to stop processing an unreadable external file. This is the prescribed source-plugin Tier-3 boundary pattern, not a defensive-programming defect.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:18:55.845575+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    RULE MISFIRES / PRESCRIBED FORM. The R6 silent-except rule fires on a UnicodeDecodeError handler in a CSV source plugin, but the handler is the prescribed Tier-3 source-boundary pattern: it records a validation error via ctx.record_validation_error, yields a SourceRow.quarantined when configured, and returns to stop processing the unreadable external file. This is exactly the 'quarantine on the upgrade to Tier-2' path the Data Manifesto prescribes for malformed external input at a source boundary — not silent suppression. The decoded bytes are Tier-3 external data, and the handler converts the decode failure into a recorded boundary event rather than swallowing it.
-  judge_signature_version: 2
-  scope_fingerprint: dd9f09db61de1b0c504d6f3194ed3f77a977874cf658db351f1745a163b22434
-  judge_transport: openrouter
-  ast_path: 'body[16]/body[14]/body[12]/body[0]/handlers[0]'
-  judge_metadata_signature: 'hmac-sha256:v2:ca1f2b69b22c12f2ce7a491b12b11bd76eac78ed1a3f7f246f575f3b3ba14bae'
-- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=4ab75e8fa6844c43
+- key: plugins/sources/csv_source.py:R6:CSVSource:_load_from_file:fp=99c99c4096a62de6
   owner: john
   reason: |-
     This is a source-ingestion Tier-3 boundary, not a Tier-1 defensive-programming defect. In `src/elspeth/plugins/sources/csv_source.py:252-257`, `_load_from_file` is explicitly the file-reading boundary: `"Load rows from an open CSV file handle"` and `"file-reading boundary (Tier 3 external data)"`. The `csv.Error` at `src/elspeth/plugins/sources/csv_source.py:491` is raised while parsing external CSV bytes via `next_nonblank_record()`.
 
     The exception is not silently swallowed: the site reifies the parse failure into audit/validation state with `ctx.record_validation_error(...)` at `src/elspeth/plugins/sources/csv_source.py:510-515`, optionally emits a quarantined row carrying `error=error_msg` at `src/elspeth/plugins/sources/csv_source.py:517-523`, and then stops with `return  # Don't continue with corrupted parser state` at `src/elspeth/plugins/sources/csv_source.py:524`. That is the prescribed source-boundary pattern for malformed external data: record/quarantine or discard according to policy, then stop rather than trusting a corrupted CSV parser.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Pending cicd-judge re-justification: the enclosing function changed with the
+    quarantine error-text redaction work (elspeth-a300402c58), so any prior
+    verdict (which binds to the exact code the judge inspected) could not be
+    carried. The qname-level rationale above was re-verified against the
+    current code at this site.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T16:19:02.458384+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.92
-  judge_rationale: |-
-    PRESCRIBED FORM. R6 (silent-except) fires on the `except csv.Error` block, but the visible code is the policy-prescribed Tier-3 source-boundary handling: the parse error is reified via `ctx.record_validation_error(...)`, optionally emitted as a quarantined `SourceRow` carrying the error message, and then processing stops via `return` to avoid trusting a corrupted parser state. This matches the Quick Reference rule for Sources (validate, quarantine failures, record what we got) and is not a silent swallow — the error is recorded, the row is quarantined per policy, and the iterator terminates rather than fabricating further rows.
-  judge_signature_version: 2
-  scope_fingerprint: dd9f09db61de1b0c504d6f3194ed3f77a977874cf658db351f1745a163b22434
-  judge_transport: openrouter
-  ast_path: 'body[16]/body[14]/body[12]/body[0]/handlers[1]'
-  judge_metadata_signature: 'hmac-sha256:v2:7c62b2d683cbbc78fcdf5583458ac2eefb46e892d495d32494cb7cc31f006c07'
 - key: plugins/sinks/azure_blob_sink.py:R6:AzureBlobSink:write:fp=327e2b1a5d5834ff
   owner: john
   reason: |-

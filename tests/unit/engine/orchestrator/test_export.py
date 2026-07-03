@@ -151,7 +151,7 @@ class TestExportLandscapeJSON:
         """The export-config classification flag reaches the exporter
         (elspeth-384184c6ab): default False redacts raw failing rows from
         error records; the explicit opt-in restores them."""
-        db = Mock()
+        db: Any = object()
         settings = self._make_settings(include_raw_error_rows=True)
         _sink, factory = _make_sink_and_factory()
 

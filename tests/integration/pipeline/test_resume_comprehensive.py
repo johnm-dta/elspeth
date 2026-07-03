@@ -548,7 +548,9 @@ class TestResumeComprehensive:
 
         # Build graph manually
         resume_graph = ExecutionGraph()
-        schema_config = {"schema": strict_schema}
+        schema_config = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
@@ -640,7 +642,9 @@ class TestResumeComprehensive:
             sinks={"default": inject_write_failure(CSVSink({"path": str(output_path), "schema": strict_schema, "mode": "append"}))},
         )
         resume_graph = ExecutionGraph()
-        schema_config = {"schema": strict_schema}
+        schema_config = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
@@ -793,7 +797,9 @@ class TestResumeComprehensive:
         )
 
         resume_graph = ExecutionGraph()
-        schema_config = {"schema": strict_schema}
+        schema_config = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
         resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
@@ -1039,7 +1045,9 @@ class TestResumeComprehensive:
         )
 
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_schema_config: dict[str, Any] = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node(
             "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
         )
@@ -1272,7 +1280,9 @@ class TestResumeComprehensive:
         )
 
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_schema_config: dict[str, Any] = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node(
             "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
         )
@@ -1940,7 +1950,7 @@ class TestResumeComprehensive:
         schema_config = {"schema": {"mode": "observed"}}
         resume_graph.add_node("src", node_type=NodeType.SOURCE, plugin_name="null", config={**schema_config, "source_name": "source"})
         resume_graph.add_node("xform", node_type=NodeType.TRANSFORM, plugin_name="passthrough", config=schema_config)
-        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="json", config=schema_config)
+        resume_graph.add_node("sink", node_type=NodeType.SINK, plugin_name="csv", config=schema_config)
         resume_graph.add_edge("src", "xform", label="continue")
         resume_graph.add_edge("xform", "sink", label="continue")
         resume_graph.set_sink_id_map({SinkName("default"): NodeID("sink")})
@@ -2061,7 +2071,9 @@ class TestResumeComprehensive:
             },
         )
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_schema_config: dict[str, Any] = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node(
             "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
         )
@@ -2241,7 +2253,9 @@ class TestResumeComprehensive:
             },
         )
         resume_graph = ExecutionGraph()
-        resume_schema_config: dict[str, Any] = {"schema": resume_schema}
+        resume_schema_config: dict[str, Any] = {
+            "schema": {"mode": "observed"}
+        }  # must hash-match the checkpointed graph's node configs (one run_id = one configuration)
         resume_graph.add_node(
             "src", node_type=NodeType.SOURCE, plugin_name="null", config={**resume_schema_config, "source_name": "source"}
         )

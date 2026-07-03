@@ -476,6 +476,26 @@ def test_resume_calls_prepare_for_run() -> None:
             )
         orchestrator = Orchestrator(db)
 
+        # elspeth-5129406607: the entry guard's checkpoint-currency and
+        # topology checks run BEFORE prepare_for_run; satisfy them (guard
+        # behavior is pinned in test_resume_entry_guard.py) so the bootstrap
+        # ordering under test stays reachable.
+        from elspeth.contracts.checkpoint import ResumeCheck
+        from elspeth.engine.orchestrator import resume as resume_module
+
+        class _LatestServingManager:
+            def get_latest_checkpoint(self, run_id: str) -> Checkpoint:
+                return checkpoint
+
+        manager = _LatestServingManager()
+        orchestrator._checkpoint_manager = manager  # type: ignore[assignment]
+        orchestrator._resume_coordinator._checkpoint_manager = manager  # type: ignore[assignment]
+        monkeypatch.setattr(
+            resume_module.CheckpointCompatibilityValidator,
+            "validate",
+            lambda self, cp, graph: ResumeCheck(can_resume=True),
+        )
+
         with pytest.raises(ReconstructReached):
             orchestrator.resume(
                 resume_point=resume_point,

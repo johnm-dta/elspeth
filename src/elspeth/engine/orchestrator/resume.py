@@ -50,6 +50,7 @@ from elspeth.contracts.events import RunFinished, RunSummary
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.types import NodeID
 from elspeth.core.canonical import canonical_json
+from elspeth.core.checkpoint.compatibility import CheckpointCompatibilityValidator
 from elspeth.core.checkpoint.recovery import NonResumableRunError, check_run_status_resumable
 from elspeth.core.landscape.factory import RecorderFactory
 
@@ -768,6 +769,45 @@ class ResumeCoordinator:
             else:
                 refusal_reason = status_check.reason or f"Run status {run_status!r} precludes resume"
             raise NonResumableRunError(guarded_run_id, refusal_reason)
+
+        # ---- resume() entry guard, part 2: checkpoint currency + topology ----
+        # (elspeth-5129406607) RecoveryManager.get_resume_point() is ADVISORY
+        # like can_resume() — a caller may hand-build a ResumePoint — so
+        # re-verify at the enforcing boundary that (a) the supplied checkpoint
+        # is the run's LATEST resume baseline (resuming a superseded one would
+        # replay work the run has already progressed past) and (b) its recorded
+        # topology matches the graph this resume runs under (one run_id = one
+        # configuration). Both are READ-ONLY refusals fired before the first
+        # mutation (prepare_for_run / rebase_sequence / the seat CAS in
+        # reconstruct_resume_state), mirroring the status guard above. A
+        # format-incompatible checkpoint row (IncompatibleCheckpointError from
+        # get_latest_checkpoint) propagates as-is — structured, fail-closed.
+        if self._checkpoint_manager is None:
+            raise OrchestrationInvariantError(
+                "CheckpointManager is required for resume - Orchestrator must be initialized with checkpoint_manager"
+            )
+        latest_checkpoint = self._checkpoint_manager.get_latest_checkpoint(guarded_run_id)
+        if latest_checkpoint is None:
+            raise NonResumableRunError(
+                guarded_run_id,
+                "run has no checkpoint rows; the supplied resume point cannot be validated as the run's resume baseline",
+            )
+        if (
+            latest_checkpoint.checkpoint_id != resume_point.checkpoint.checkpoint_id
+            or latest_checkpoint.sequence_number != resume_point.sequence_number
+        ):
+            raise NonResumableRunError(
+                guarded_run_id,
+                f"supplied checkpoint '{resume_point.checkpoint.checkpoint_id}' (sequence {resume_point.sequence_number}) "
+                f"is not the run's latest resume point '{latest_checkpoint.checkpoint_id}' "
+                f"(sequence {latest_checkpoint.sequence_number})",
+            )
+        topology_check = CheckpointCompatibilityValidator().validate(resume_point.checkpoint, graph)
+        if not topology_check.can_resume:
+            raise NonResumableRunError(
+                guarded_run_id,
+                topology_check.reason or "checkpoint topology is incompatible with the current execution graph",
+            )
 
         # ADR-010 §Decision 3: freeze both registries at bootstrap, mirroring
         # run(). Recovery happens in a new process — the module import chain

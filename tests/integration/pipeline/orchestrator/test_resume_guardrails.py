@@ -78,6 +78,27 @@ def _make_resume_point(run_id: str) -> ResumePoint:
     )
 
 
+def _persist_resume_point(env: dict[str, Any], run_id: str, graph: Any) -> ResumePoint:
+    """Create the run's REAL latest checkpoint and wrap it as a ResumePoint.
+
+    The resume() entry guard (elspeth-5129406607) verifies the supplied point
+    is the run's latest checkpoint and that its topology hash matches the
+    current graph, so tests targeting DOWNSTREAM guardrails must supply a
+    genuine current baseline rather than a synthetic one.
+    """
+    checkpoint = env["checkpoint_manager"].create_checkpoint(
+        run_id=run_id,
+        sequence_number=0,
+        barrier_scalars=None,
+        graph=graph,
+    )
+    return ResumePoint(
+        checkpoint=checkpoint,
+        sequence_number=checkpoint.sequence_number,
+        barrier_scalars=None,
+    )
+
+
 def _build_pipeline() -> tuple[PipelineConfig, Any]:
     """Build a minimal source->sink pipeline and production graph."""
     source = ListSource([{"id": 1, "value": "alpha"}], on_success="default")
@@ -214,7 +235,7 @@ class TestResumeGuardrails:
             pytest.raises(EmptyResumeStateError) as exc_info,
         ):
             orchestrator.resume(
-                resume_point=_make_resume_point(run_id),
+                resume_point=_persist_resume_point(resume_test_env, run_id, graph),
                 config=config,
                 graph=graph,
                 payload_store=resume_test_env["payload_store"],
@@ -258,7 +279,7 @@ class TestResumeGuardrails:
             pytest.raises(AuditIntegrityError, match="has no edges registered") as exc_info,
         ):
             orchestrator.resume(
-                resume_point=_make_resume_point(run_id),
+                resume_point=_persist_resume_point(resume_test_env, run_id, graph),
                 config=config,
                 graph=graph,
                 payload_store=resume_test_env["payload_store"],
@@ -292,7 +313,7 @@ class TestResumeGuardrails:
             pytest.raises(OrchestrationInvariantError, match="runtime VAL manifest") as exc_info,
         ):
             orchestrator.resume(
-                resume_point=_make_resume_point(run_id),
+                resume_point=_persist_resume_point(resume_test_env, run_id, graph),
                 config=config,
                 graph=graph,
                 payload_store=resume_test_env["payload_store"],
@@ -338,7 +359,7 @@ class TestResumeGuardrails:
             pytest.raises(EmptyResumeStateError) as exc_info,
         ):
             orchestrator.resume(
-                resume_point=_make_resume_point(run_id),
+                resume_point=_persist_resume_point(resume_test_env, run_id, graph),
                 config=config,
                 graph=graph,
                 payload_store=resume_test_env["payload_store"],
@@ -356,3 +377,76 @@ class TestResumeGuardrails:
         # match this exception so callers without explicit
         # EmptyResumeStateError handling do not silently miss it.
         assert isinstance(exc_info.value, OrchestrationInvariantError)
+
+    def test_resume_refuses_stale_checkpoint(self, resume_test_env: dict[str, Any]) -> None:
+        """resume() with a superseded checkpoint is refused before any mutation.
+
+        Regression for elspeth-5129406607: get_resume_point() (advisory)
+        always serves the LATEST checkpoint, but resume() must not trust its
+        callers to have gone through it — a hand-built ResumePoint naming an
+        older checkpoint would rewind the run's durable progress anchor.
+        """
+        from elspeth.core.checkpoint.recovery import NonResumableRunError
+
+        run_id = _create_failed_run(resume_test_env["factory"], include_contract=True)
+        orchestrator = Orchestrator(
+            resume_test_env["db"],
+            checkpoint_manager=resume_test_env["checkpoint_manager"],
+        )
+        config, graph = _build_pipeline()
+
+        stale_point = _persist_resume_point(resume_test_env, run_id, graph)
+        # A later checkpoint supersedes the one the resume point names.
+        resume_test_env["checkpoint_manager"].create_checkpoint(
+            run_id=run_id,
+            sequence_number=1,
+            barrier_scalars=None,
+            graph=graph,
+        )
+
+        with pytest.raises(NonResumableRunError, match="not the run's latest resume point") as exc_info:
+            orchestrator.resume(
+                resume_point=stale_point,
+                config=config,
+                graph=graph,
+                payload_store=resume_test_env["payload_store"],
+            )
+
+        assert exc_info.value.run_id == run_id
+
+    def test_resume_refuses_topology_divergent_checkpoint(self, resume_test_env: dict[str, Any]) -> None:
+        """resume() against a graph that diverged from the checkpoint is refused.
+
+        Regression for elspeth-5129406607: the CheckpointCompatibilityValidator
+        previously ran only on the advisory can_resume()/get_resume_point()
+        surface; the enforcing resume() entry now re-validates so one run_id
+        cannot span two pipeline configurations.
+        """
+        from elspeth.core.checkpoint.recovery import NonResumableRunError
+
+        run_id = _create_failed_run(resume_test_env["factory"], include_contract=True)
+        orchestrator = Orchestrator(
+            resume_test_env["db"],
+            checkpoint_manager=resume_test_env["checkpoint_manager"],
+        )
+        _config, graph = _build_pipeline()
+        resume_point = _persist_resume_point(resume_test_env, run_id, graph)
+
+        # Divergent current graph: same shape, different source payload/config.
+        divergent_source = ListSource([{"id": 2, "value": "beta"}], name="divergent_source", on_success="default")
+        divergent_config = PipelineConfig(
+            sources={"primary": as_source(divergent_source)},
+            transforms=[],
+            sinks={"default": as_sink(CollectSink("default"))},
+        )
+        divergent_graph = build_production_graph(divergent_config)
+
+        with pytest.raises(NonResumableRunError, match="configuration changed") as exc_info:
+            orchestrator.resume(
+                resume_point=resume_point,
+                config=divergent_config,
+                graph=divergent_graph,
+                payload_store=resume_test_env["payload_store"],
+            )
+
+        assert exc_info.value.run_id == run_id

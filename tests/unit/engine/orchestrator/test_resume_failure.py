@@ -12,6 +12,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -19,6 +20,7 @@ from pydantic import BaseModel
 
 from elspeth.contracts import Checkpoint, NodeID, ResumedRow, ResumePoint, RoutingMode, RunStatus
 from elspeth.contracts.audit import DISCARD_SINK_NAME, TokenOutcome
+from elspeth.contracts.checkpoint import ResumeCheck
 from elspeth.contracts.coordination import CoordinationSnapshot, CoordinationToken
 from elspeth.contracts.enums import NodeType, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
@@ -100,6 +102,28 @@ def _insert_failed_run(db: LandscapeDB, run_id: str) -> None:
                 openrouter_catalog_source="bundled",
             )
         )
+
+
+def _admit_resume_point(orch: Orchestrator, resume_point: ResumePoint) -> Any:
+    """Satisfy the resume() entry guard's read-only checkpoint checks.
+
+    elspeth-5129406607: resume() refuses a resume point that is not the run's
+    LATEST checkpoint or whose recorded topology diverges from the supplied
+    graph. These tests pin DOWNSTREAM finalization behavior (the guard has
+    its own pins in test_resume_entry_guard.py), so the guard is satisfied,
+    not exercised: the stub manager serves the test's own checkpoint as the
+    latest, and the returned context manager patches the compatibility
+    validator to report compatible (the tests' graphs are mocks with no
+    hashable topology).
+    """
+    manager = MagicMock(spec=CheckpointManager)
+    manager.get_latest_checkpoint.return_value = resume_point.checkpoint
+    orch._checkpoint_manager = manager
+    orch._resume_coordinator._checkpoint_manager = manager
+    return patch(
+        "elspeth.engine.orchestrator.resume.CheckpointCompatibilityValidator.validate",
+        return_value=ResumeCheck(can_resume=True),
+    )
 
 
 # Protocol-specced plugin doubles. ``SourceProtocol``/``SinkProtocol``/
@@ -198,14 +222,17 @@ class TestResumeFinalizesAsFailed:
         orch = _make_orchestrator(db)
         _insert_failed_run(db, "test-run-123")
 
-        # Mock the checkpoint manager requirement
-        orch._checkpoint_manager = MagicMock(spec=CheckpointManager)
-        orch._resume_coordinator._checkpoint_manager = orch._checkpoint_manager
-
-        # Create a mock resume_point
-        resume_point = MagicMock(spec=ResumePoint)
-        resume_point.checkpoint.run_id = "test-run-123"
-        resume_point.aggregation_state = None
+        # Real resume point anchored to the run's (stubbed) latest checkpoint
+        checkpoint = Checkpoint(
+            checkpoint_id="cp-test-run-123",
+            run_id="test-run-123",
+            sequence_number=1,
+            created_at=datetime.now(UTC),
+            upstream_topology_hash="a" * 64,
+            format_version=Checkpoint.CURRENT_FORMAT_VERSION,
+        )
+        resume_point = ResumePoint(checkpoint=checkpoint, sequence_number=checkpoint.sequence_number)
+        admit_guard = _admit_resume_point(orch, resume_point)
 
         # Create mock config and graph
         config = MagicMock(spec=PipelineConfig)
@@ -253,6 +280,7 @@ class TestResumeFinalizesAsFailed:
 
         # Make _process_resumed_rows raise a RuntimeError (non-shutdown)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "process_resumed_rows", side_effect=RuntimeError("test failure")),
             patch("elspeth.engine.orchestrator.resume.RecorderFactory", return_value=mock_factory),
             patch("elspeth.engine.orchestrator.resume.reconstruct_schema_from_json", return_value=MagicMock(spec=SchemaContract)),
@@ -343,7 +371,9 @@ class TestResumeFinalizesAsFailed:
         baseline_counters.routed_destinations.update({"default": 2, "failsink": 1})
         failure = RuntimeError("resume sweep failed")
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(
                 orch._resume_coordinator,
@@ -1170,7 +1200,9 @@ class TestResumeFinalizesAsFailed:
             coordination_token=coordination_token,
         )
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("empty journal should early-exit")),
             patch(
@@ -1257,7 +1289,9 @@ class TestResumeFinalizesAsFailed:
             rows_quarantined=0,
         )
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(orch._resume_coordinator, "process_resumed_rows", return_value=resumed_result) as process_resumed,
             patch.object(orch._ceremony, "emit_telemetry"),
@@ -1385,7 +1419,9 @@ class TestResumeFinalizesAsFailed:
             coordination_token=coordination_token,
         )
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(
                 orch._resume_coordinator, "process_resumed_rows", side_effect=AssertionError("all-terminal resume should early-exit")
@@ -1461,7 +1497,9 @@ class TestResumeFinalizesAsFailed:
             rows_quarantined=0,
         )
 
+        admit_guard = _admit_resume_point(orch, resume_point)
         with (
+            admit_guard,
             patch.object(orch._resume_coordinator, "reconstruct_resume_state", return_value=resume_state),
             patch.object(orch._resume_coordinator, "process_resumed_rows", return_value=resumed_result) as process_resumed,
             patch.object(orch._ceremony, "emit_telemetry"),

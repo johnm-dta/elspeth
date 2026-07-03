@@ -72,6 +72,80 @@ def _make_loop_ctx(ctx: PluginContext, *, coalesce_executor: MagicMock | None = 
     )
 
 
+class TestFinalizeFieldResolutionRerecord:
+    """finalize_source_iteration re-records the field-resolution union at EOF.
+
+    Regression (elspeth-fb108a77c9): the EOF path was gated on "not yet
+    recorded", so sparse sources that extended the mapping after row 1 never
+    refreshed the run-level overwrite UPDATE. The finalizer now re-records
+    unconditionally, skipping the write (and its telemetry) only when the
+    mapping is unchanged from the provisional first-row snapshot.
+    """
+
+    def _finalize(
+        self,
+        source: MagicMock,
+        recorded: tuple[dict[str, str], str | None] | None,
+    ) -> MagicMock:
+        from elspeth.core.landscape.factory import RecorderFactory
+
+        ctx = PluginContext(
+            run_id="test-run",
+            config={},
+            node_id="source-node",
+            operation_id=None,
+        )
+        orchestrator = _make_orchestrator()
+        loop_ctx = _make_loop_ctx(ctx)
+        factory = MagicMock(spec=RecorderFactory)
+        orchestrator._source_driver.finalize_source_iteration(
+            loop_ctx,
+            factory=factory,
+            run_id="test-run",
+            source_id=NodeID("source-node"),
+            active_source_name="rows",
+            source_operation_id="op-source-load",
+            recorded_field_resolution=recorded,
+            schema_contract_recorded=True,
+            source_exhausted=True,
+            interrupted_by_shutdown=False,
+            flush_end_of_input=False,
+            active_source=source,
+        )
+        return factory
+
+    def test_grown_union_is_rerecorded_at_eof(self) -> None:
+        source = _make_active_source()
+        union = {"id": "id", "Extra Field": "extra_field"}
+        source.get_field_resolution.return_value = (union, "v1")
+
+        factory = self._finalize(source, recorded=({"id": "id"}, "v1"))
+
+        factory.run_lifecycle.record_source_field_resolution.assert_called_once_with(
+            run_id="test-run",
+            resolution_mapping=union,
+            normalization_version="v1",
+        )
+
+    def test_unchanged_mapping_is_not_rewritten(self) -> None:
+        source = _make_active_source()
+        snapshot = ({"id": "id"}, "v1")
+        source.get_field_resolution.return_value = snapshot
+
+        factory = self._finalize(source, recorded=snapshot)
+
+        factory.run_lifecycle.record_source_field_resolution.assert_not_called()
+
+    def test_empty_loop_source_still_records_once_at_finalize(self) -> None:
+        """Header-only sources where the loop never ran keep their single record."""
+        source = _make_active_source()
+        source.get_field_resolution.return_value = ({"id": "id"}, "v1")
+
+        factory = self._finalize(source, recorded=None)
+
+        factory.run_lifecycle.record_source_field_resolution.assert_called_once()
+
+
 class TestFinalizeSourceIterationContext:
     """Verify _finalize_source_iteration restores both node_id and operation_id."""
 
@@ -103,7 +177,7 @@ class TestFinalizeSourceIterationContext:
             source_id=source_id,
             active_source_name="source-node-001",
             source_operation_id=source_operation_id,
-            field_resolution_recorded=True,
+            recorded_field_resolution=None,
             schema_contract_recorded=True,
             source_exhausted=False,
             interrupted_by_shutdown=True,
@@ -138,7 +212,7 @@ class TestFinalizeSourceIterationContext:
             source_id=source_id,
             active_source_name="source-node-002",
             source_operation_id=source_operation_id,
-            field_resolution_recorded=True,
+            recorded_field_resolution=None,
             schema_contract_recorded=True,
             source_exhausted=True,
             interrupted_by_shutdown=False,
@@ -171,7 +245,7 @@ class TestFinalizeSourceIterationContext:
                 source_id=NodeID("source-orders"),
                 active_source_name="orders",
                 source_operation_id="op-source-load-orders",
-                field_resolution_recorded=True,
+                recorded_field_resolution=None,
                 schema_contract_recorded=True,
                 source_exhausted=True,
                 interrupted_by_shutdown=False,
@@ -203,7 +277,7 @@ class TestFinalizeSourceIterationContext:
                 source_id=NodeID("source-refunds"),
                 active_source_name="refunds",
                 source_operation_id="op-source-load-refunds",
-                field_resolution_recorded=True,
+                recorded_field_resolution=None,
                 schema_contract_recorded=True,
                 source_exhausted=True,
                 interrupted_by_shutdown=False,
@@ -235,7 +309,7 @@ class TestFinalizeSourceIterationContext:
                 source_id=NodeID("source-orders"),
                 active_source_name="orders",
                 source_operation_id="op-source-load-orders",
-                field_resolution_recorded=True,
+                recorded_field_resolution=None,
                 schema_contract_recorded=True,
                 source_exhausted=True,
                 interrupted_by_shutdown=False,
@@ -268,7 +342,7 @@ class TestFinalizeSourceIterationContext:
                 source_id=NodeID("source-refunds"),
                 active_source_name="refunds",
                 source_operation_id="op-source-load-refunds",
-                field_resolution_recorded=True,
+                recorded_field_resolution=None,
                 schema_contract_recorded=True,
                 source_exhausted=True,
                 interrupted_by_shutdown=False,

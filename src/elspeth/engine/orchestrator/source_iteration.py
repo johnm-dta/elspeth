@@ -275,19 +275,31 @@ class SourceIterationDriver:
         run_id: str,
         *,
         active_source: SourceProtocol,
-    ) -> bool:
-        """Record source field resolution mapping if available.
+        previously_recorded: tuple[Mapping[str, str], str | None] | None = None,
+    ) -> tuple[Mapping[str, str], str | None] | None:
+        """Record the source field-resolution mapping if available.
 
-        Called once per run — on first iteration (after generator body executes)
-        or post-loop for empty sources (header-only files where the loop never
-        executes but the source computed field resolution).
+        Called on first iteration (provisional — after the generator body
+        executes) and again from ``finalize_source_iteration`` (authoritative —
+        sparse sources can extend the mapping on later rows, and the run-level
+        column is an overwrite UPDATE; elspeth-fb108a77c9). Empty sources
+        (header-only files where the loop never runs) record once at finalize.
+
+        ``previously_recorded`` is the snapshot returned by the earlier call;
+        when the source's current resolution is identical, the write and its
+        ``FieldResolutionApplied`` telemetry are skipped, so an unchanged
+        mapping (fixed-header sources — the common case) emits exactly one
+        event and a grown union emits a provisional then an authoritative one.
 
         Returns:
-            True if field resolution was recorded, False otherwise.
+            The recorded (mapping, normalization_version) snapshot, or None if
+            the source has no field resolution.
         """
         field_resolution = active_source.get_field_resolution()
         if field_resolution is None:
-            return False
+            return None
+        if previously_recorded is not None and field_resolution == previously_recorded:
+            return previously_recorded
 
         resolution_mapping, normalization_version = field_resolution
         factory.run_lifecycle.record_source_field_resolution(
@@ -306,7 +318,7 @@ class SourceIterationDriver:
                 resolution_mapping=resolution_mapping,
             )
         )
-        return True
+        return field_resolution
 
     def restore_source_iteration_context(
         self,
@@ -550,7 +562,7 @@ class SourceIterationDriver:
         source_id: NodeID,
         active_source_name: str,
         source_operation_id: str,
-        field_resolution_recorded: bool,
+        recorded_field_resolution: tuple[Mapping[str, str], str | None] | None,
         schema_contract_recorded: bool,
         *,
         source_exhausted: bool,
@@ -595,8 +607,19 @@ class SourceIterationDriver:
         # aggregation/coalesce flushing after StopIteration must be resumable as
         # source-exhausted engine work, not indistinguishable from mid-source
         # interruption.
-        if not field_resolution_recorded:
-            self.record_field_resolution(factory, run_id, active_source=active_source)
+        #
+        # Unconditional re-record (elspeth-fb108a77c9): sparse sources extend
+        # the field-resolution union on later rows, so the first-row write is
+        # provisional; the overwrite UPDATE here lands the final union — also
+        # on shutdown interruption (the audit reflects fields observed up to
+        # that point). Skipped internally when the mapping is unchanged, so
+        # fixed-header sources see no second write or telemetry event.
+        self.record_field_resolution(
+            factory,
+            run_id,
+            active_source=active_source,
+            previously_recorded=recorded_field_resolution,
+        )
 
         if not schema_contract_recorded:
             record_schema_contract(factory, run_id, source_id, ctx, active_source=active_source)
@@ -784,6 +807,7 @@ class SourceIterationDriver:
             # source-scoped run_sources contracts are backfilled even when the
             # legacy run-level singleton already exists.
             field_resolution_recorded = False
+            recorded_field_resolution: tuple[Mapping[str, str], str | None] | None = None
             schema_contract_recorded = False
 
             # PROCESS phase
@@ -833,10 +857,11 @@ class SourceIterationDriver:
                     ingest_sequence = counters.rows_processed
                     counters.rows_processed += 1
 
-                    # Record field resolution on first iteration (generators execute body on first next())
+                    # Record field resolution on first iteration (generators execute body on first next()).
+                    # Provisional: the finalizer re-records the union at EOF (elspeth-fb108a77c9).
                     if not field_resolution_recorded:
                         field_resolution_recorded = True
-                        self.record_field_resolution(factory, run_id, active_source=active_source)
+                        recorded_field_resolution = self.record_field_resolution(factory, run_id, active_source=active_source)
 
                     # Quarantine path — route directly to sink, skip normal processing
                     if source_item.is_quarantined:
@@ -953,7 +978,7 @@ class SourceIterationDriver:
                     source_id,
                     active_source_name,
                     source_operation_id,
-                    field_resolution_recorded,
+                    recorded_field_resolution,
                     schema_contract_recorded,
                     source_exhausted=source_exhausted,
                     interrupted_by_shutdown=interrupted_by_shutdown,

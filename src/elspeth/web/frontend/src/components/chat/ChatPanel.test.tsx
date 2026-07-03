@@ -1588,23 +1588,16 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeTruthy();
   });
 
-  it("tutorial: the ComposingIndicator mounts OUTSIDE every role=log region (elspeth-76a0cc485e parity)", () => {
+  it("tutorial: the pending strip's status region mounts OUTSIDE every role=log region (elspeth-76a0cc485e parity)", () => {
+    // chat_history is EMPTY while the chat is in flight — the user turn is
+    // server-emitted on response. (A populated history plus a forward
+    // affordance means tutorialStepBuilt, which renders the "Sent" line
+    // instead of the composer/strip slot.)
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
       messages: [],
-      guidedSession: {
-        ...activeGuidedSession(),
-        chat_history: [
-          {
-            role: "user",
-            content: "create the source",
-            seq: 1,
-            step: "step_1_source",
-            ts_iso: "2026-05-12T10:00:00Z",
-          },
-        ],
-      },
+      guidedSession: activeGuidedSession(),
       guidedNextTurn: singleSelectTurn(),
       guidedChatPending: true,
     });
@@ -1616,13 +1609,13 @@ describe("ChatPanel mode discriminator", () => {
       />,
     );
 
-    const indicator = container.querySelector(".composing-indicator");
-    expect(indicator).not.toBeNull();
-    expect(indicator!.getAttribute("role")).toBe("status");
+    const status = container.querySelector(".guided-pending-strip-status");
+    expect(status).not.toBeNull();
+    expect(status!.getAttribute("role")).toBe("status");
     // Never nested inside a role=log container (transcript log or wizard log)
     // where both live regions could announce the same change.
     for (const log of container.querySelectorAll('[role="log"]')) {
-      expect(log.contains(indicator)).toBe(false);
+      expect(log.contains(status)).toBe(false);
     }
   });
 
@@ -1898,7 +1891,11 @@ describe("ChatPanel mode discriminator", () => {
     });
   });
 
-  it("offers Stop (onCancel) to the guided ChatInput while a guided chat is in flight", () => {
+  it("swaps the ChatInput for the pending strip with Stop while a guided chat is in flight", () => {
+    // Pending swap (elspeth-6a9673ecd3): the input is UNMOUNTED — not
+    // disabled — while /guided/chat is in flight; the working strip carries
+    // the abort affordance. The landmark section must survive the swap (AT
+    // navigation + staging e2e locators find the composer by region name).
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -1908,12 +1905,23 @@ describe("ChatPanel mode discriminator", () => {
       guidedChatPending: true,
     });
 
-    render(<ChatPanel />);
+    const { container } = render(<ChatPanel />);
 
-    expect(screen.getByTestId("chat-input").dataset.hasCancel).toBe("true");
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Stop composing" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Describe what you want" }),
+    ).toBeInTheDocument();
   });
 
-  it("does NOT offer Stop while only a turn-respond is pending (nothing to abort)", () => {
+  it("does NOT swap (and offers no Stop) while only a turn-respond is pending", () => {
+    // Deliberate asymmetry: a respond in flight has its own adjacent
+    // "Saving decision..." status and nothing abortable — and a live-guided
+    // user can have a typed draft in the textarea when they submit a
+    // decision card; unmounting the input would destroy the draft.
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -1924,9 +1932,12 @@ describe("ChatPanel mode discriminator", () => {
       guidedResponsePending: true,
     });
 
-    render(<ChatPanel />);
+    const { container } = render(<ChatPanel />);
 
-    expect(screen.getByTestId("chat-input").dataset.hasCancel).toBe("false");
+    expect(container.querySelector(".guided-pending-strip")).toBeNull();
+    const input = screen.getByTestId("chat-input");
+    expect(input.dataset.disabled).toBe("true");
+    expect(input.dataset.hasCancel).toBe("false");
   });
 
   it("tutorial: keeps the retry chat box (not the 'Sent' line) when a Send-driven step was sent but produced no forward affordance", () => {
@@ -2023,22 +2034,11 @@ describe("ChatPanel mode discriminator", () => {
     expect(screen.getByTestId("chat-input").dataset.maxLength).toBe("4096");
   });
 
-  it("disables the guided ChatInput while guidedChatPending=true", () => {
-    useSessionStore.setState({
-      activeSessionId: "session-guided",
-      sessions: [guidedSessionFixture],
-      messages: [],
-      guidedSession: activeGuidedSession(),
-      guidedNextTurn: singleSelectTurn(),
-      guidedChatPending: true,
-    });
-
-    render(<ChatPanel />);
-
-    expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
-  });
-
-  it("shows the ComposingIndicator while guidedChatPending=true and keeps the input disabled (409-race pin)", () => {
+  it("unmounts the guided ChatInput while guidedChatPending=true (409-race pin)", () => {
+    // Regression pin (sits next to the guided-resend 409 fix): with the
+    // pending swap, no input is mounted while the build is in flight, so a
+    // second send cannot race it AT ALL — stronger than the old disabled
+    // gate, whose textarea never actually received `disabled`.
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2050,16 +2050,14 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    // Silent-compute affordance: the "thinking" indicator appears during a
-    // /guided/chat build (queried by class — `.composing-indicator` is unique
-    // vs the other role="status" nodes on the guided surface).
-    expect(container.querySelector(".composing-indicator")).not.toBeNull();
-    // Regression pin (sits next to the guided-resend 409 fix): the input must
-    // STAY disabled while the build is in flight so a second send cannot race.
-    expect(screen.getByTestId("chat-input").dataset.disabled).toBe("true");
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    // Silent-compute affordance: the lean working strip is the busy signal
+    // (the old detached ComposingIndicator card is gone from guided).
+    expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
+    expect(container.querySelector(".composing-indicator")).toBeNull();
   });
 
-  it("does not show the ComposingIndicator on the guided surface when guidedChatPending=false", () => {
+  it("does not show the pending strip on the guided surface when guidedChatPending=false", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -2071,7 +2069,80 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    expect(container.querySelector(".composing-indicator")).toBeNull();
+    expect(container.querySelector(".guided-pending-strip")).toBeNull();
+    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+  });
+
+  it("pending-swap focus contract: strip wrapper takes focus in, composer section takes it back out", () => {
+    // Unmounting the focused composer content would strand focus at <body>
+    // (WCAG 2.4.3). Into pending: focus moves to the strip's tabIndex=-1
+    // wrapper — never the Stop button (double-Enter would abort the request
+    // just sent). Out of pending: focus returns into the composer (under the
+    // ChatInput mock inputRef never attaches, so the section is the landing).
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: false,
+    });
+
+    const { container } = render(<ChatPanel />);
+
+    // Focus inside the composer (the mocked ChatInput button), as after Send.
+    act(() => {
+      screen.getByTestId("chat-input").focus();
+    });
+    act(() => {
+      useSessionStore.setState({ guidedChatPending: true });
+    });
+    const strip = container.querySelector(".guided-pending-strip");
+    expect(strip).not.toBeNull();
+    expect(document.activeElement).toBe(strip);
+
+    act(() => {
+      useSessionStore.setState({ guidedChatPending: false });
+    });
+    const section = screen.getByRole("region", {
+      name: "Describe what you want",
+    });
+    expect(section.contains(document.activeElement)).toBe(true);
+  });
+
+  it("pending-swap focus contract: leaves focus alone when the user had moved away from the composer", () => {
+    // A user re-reading the transcript during a long compose must not be
+    // yanked back into the composer when the request resolves.
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedChatPending: false,
+    });
+
+    render(<ChatPanel />);
+
+    // The mount-time step-advance effect focuses the decision widget's first
+    // control — an element OUTSIDE the composer section. That is exactly the
+    // "user is working elsewhere" state; both flips must leave it alone.
+    const before = document.activeElement;
+    expect(
+      screen
+        .getByRole("region", { name: "Describe what you want" })
+        .contains(before),
+    ).toBe(false);
+
+    act(() => {
+      useSessionStore.setState({ guidedChatPending: true });
+    });
+    expect(document.activeElement).toBe(before);
+
+    act(() => {
+      useSessionStore.setState({ guidedChatPending: false });
+    });
+    expect(document.activeElement).toBe(before);
   });
 
   it("renders CompletionSummary surface when terminal.kind === 'completed'", () => {

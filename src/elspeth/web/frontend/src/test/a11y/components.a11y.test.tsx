@@ -1077,6 +1077,44 @@ describe("ChatPanelTutorialWorkspace", () => {
 
     expect(await axe(container)).toHaveNoViolations();
   });
+
+  it("has no axe violations while a guided chat is in flight (pending strip swap)", async () => {
+    // Pending swap (elspeth-6a9673ecd3): while /guided/chat is in flight the
+    // composer's child content is the GuidedPendingStrip (status region +
+    // Stop), not the ChatInput. chat_history holds only the PRIOR step's
+    // turns — the current step's user turn is server-emitted on response, so
+    // mid-flight the step is not "built" and the strip owns the slot.
+    Element.prototype.scrollIntoView = vi.fn();
+    vi.mocked(apiClient.fetchRuns).mockResolvedValue([]);
+    const session = makeTutorialGuidedSession();
+    session.chat_history = session.chat_history.slice(0, 2);
+    useSessionStore.setState({
+      compositionState: makeFullCompositionState(),
+      compositionProposals: [],
+      guidedSession: session,
+      guidedNextTurn: makeSchemaFormNextTurn(),
+      guidedChatPending: true,
+    } as never);
+
+    const { container } = render(
+      <ChatPanel
+        isTutorial
+        lockedChatPrompt={{
+          step_1_source: "Summarise these pages:\nhttps://example.gov.au/page-1",
+          step_2_sink: "Write the results out as JSONL.",
+        }}
+      />,
+    );
+
+    // Non-vacuous: the strip replaced the input, Stop is offered, and the
+    // composer landmark survived the swap.
+    expect(container.querySelector(".guided-pending-strip")).not.toBeNull();
+    screen.getByRole("button", { name: "Stop composing" });
+    screen.getByRole("region", { name: "Describe what you want" });
+    expect(screen.queryByLabelText("Message input")).toBeNull();
+
+    expect(await axe(container)).toHaveNoViolations();
+  });
 });
 
 describe("TutorialTurn4Run", () => {

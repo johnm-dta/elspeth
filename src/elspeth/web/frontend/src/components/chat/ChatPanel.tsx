@@ -1,5 +1,12 @@
 // src/components/chat/ChatPanel.tsx
-import { useEffect, useMemo, useRef, useCallback, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useCallback,
+  useState,
+} from "react";
 import { useSessionStore } from "@/stores/sessionStore";
 import {
   deriveInlineSourceRowCount,
@@ -25,6 +32,7 @@ import { CompletionSummary } from "./guided/CompletionSummary";
 import { ModeSwitchButton } from "./guided/ModeSwitchButton";
 import { PendingProposalsBanner } from "./PendingProposalsBanner";
 import { GuidedChatHistory } from "./guided/GuidedChatHistory";
+import { GuidedPendingStrip } from "./guided/GuidedPendingStrip";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GUIDED_STEP_LABELS } from "./guided/stepLabels";
 import { GuidedTurn } from "./guided/GuidedTurn";
@@ -668,6 +676,40 @@ export function ChatPanel({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const guidedLogRef = useRef<HTMLDivElement>(null);
+  // Pending-swap focus contract (elspeth-6a9673ecd3). While a /guided/chat
+  // request is in flight the composer's ChatInput is UNMOUNTED and replaced
+  // by GuidedPendingStrip; unmounting the focused textarea/Send would strand
+  // focus at <body> (WCAG 2.4.3). composerFocusWithinRef tracks whether focus
+  // is inside the composer section via bubbled focus/blur on the section —
+  // event-driven, so it is already correct BEFORE the pending flag flips
+  // (checking document.activeElement after the swap is too late: the focused
+  // node is gone and focus already sits at body).
+  const composerSectionRef = useRef<HTMLElement | null>(null);
+  const pendingStripRef = useRef<HTMLDivElement>(null);
+  const composerFocusWithinRef = useRef(false);
+  const prevGuidedChatPendingRef = useRef(guidedChatPending);
+  // useLayoutEffect (not useEffect) so no frame paints with focus at body.
+  // Into pending: focus the strip's tabIndex=-1 wrapper — NEVER the Stop
+  // button (a habitual double-Enter after Send would abort the request just
+  // started). Out of pending: restore to the textarea only if focus stayed
+  // inside the composer — a user who moved away to re-read the transcript
+  // must not be yanked back. Tutorial resolve renders the static "Sent" line
+  // instead of ChatInput (inputRef null — React clears detached refs before
+  // layout effects), so focus lands on the section; the step-advance effect
+  // then owns the move to the fresh decision card.
+  useLayoutEffect(() => {
+    const was = prevGuidedChatPendingRef.current;
+    prevGuidedChatPendingRef.current = guidedChatPending;
+    if (guidedChatPending === was) return;
+    if (!composerFocusWithinRef.current) return;
+    if (guidedChatPending) {
+      pendingStripRef.current?.focus({ preventScroll: true });
+    } else if (inputRef.current !== null) {
+      inputRef.current.focus({ preventScroll: true });
+    } else {
+      composerSectionRef.current?.focus({ preventScroll: true });
+    }
+  }, [guidedChatPending]);
   // Tutorial workspace conversation column (.guided-workspace-scroll). Its own
   // ref + at-bottom tracking — NOT freeform's messagesEndRef/scrollContainerRef
   // machinery, which is keyed to sessionStore.messages and only mounted in the
@@ -1474,6 +1516,26 @@ export function ChatPanel({
         }
         role="region"
         aria-label="Describe what you want"
+        // Pending-swap focus contract plumbing (see the useLayoutEffect by
+        // the ref declarations). tabIndex=-1 makes the section itself a legal
+        // programmatic focus landing (tutorial resolve path). The focus/blur
+        // pair track focus-within via bubbling; a null relatedTarget (window
+        // blur, click on non-focusable page chrome) counts as "left" — erring
+        // that way skips a restore after an app-switch, erring the other way
+        // yanks focus back from a user who clicked into the transcript.
+        ref={composerSectionRef}
+        tabIndex={-1}
+        onFocus={() => {
+          composerFocusWithinRef.current = true;
+        }}
+        onBlur={(e) => {
+          if (
+            !(e.relatedTarget instanceof Node) ||
+            !e.currentTarget.contains(e.relatedTarget)
+          ) {
+            composerFocusWithinRef.current = false;
+          }
+        }}
       >
         {/* Visible heading is live-guided card furniture; the bare tutorial
             composer keeps only the aria-label for its accessible name. */}
@@ -1492,19 +1554,37 @@ export function ChatPanel({
             Sent — your request is in the transcript above and the assistant
             has built this step. Review the decision, then continue.
           </p>
+        ) : guidedChatPending ? (
+          // Pending swap (elspeth-6a9673ecd3, UX-critic spec 2026-07-03): the
+          // composer's CHILD content swaps to a lean working strip while the
+          // /guided/chat build is in flight — the landmark section above stays
+          // mounted (AT navigation + staging e2e locators). The swap replaces
+          // the old arrangement (ChatInput with a gated Send but a fully
+          // alive-looking textarea, plus a detached ComposingIndicator card
+          // below that grew the dock and clipped at wide viewports). With no
+          // input mounted a second send cannot race the in-flight one.
+          // Deliberately gated on guidedChatPending ONLY, not
+          // guidedResponsePending: a respond in flight has its own adjacent
+          // "Saving decision..." status, nothing abortable (elspeth-fb4464cdf0),
+          // and — decisive — a live-guided user can have a typed draft in the
+          // textarea when they submit a decision card; unmounting it would
+          // destroy the draft.
+          <GuidedPendingStrip
+            composerProgress={composerProgress}
+            onStop={cancelGuidedChat}
+            stripRef={pendingStripRef}
+          />
         ) : (
           <ChatInput
             onSend={(content) => void sendGuidedChat(content)}
-            // Stop affordance (elspeth-fb4464cdf0): only while THIS composer's
-            // chat is in flight — a respond-pending disable has no fetch this
-            // controller could abort, so no Stop is offered for it.
-            onCancel={guidedChatPending ? cancelGuidedChat : undefined}
-            // Gate on BOTH pending flags: `guidedChatPending` blocks
-            // double-submits of a chat in flight; `guidedResponsePending` blocks
-            // a chat WHILE a turn-respond is advancing the step — otherwise the
-            // chat captures the stale `guidedSession.step` and the backend
-            // rejects the step mismatch with 409 (guided.py step-match guard).
-            disabled={guidedChatPending || guidedResponsePending}
+            // `guidedResponsePending` blocks a chat WHILE a turn-respond is
+            // advancing the step — otherwise the chat captures the stale
+            // `guidedSession.step` and the backend rejects the step mismatch
+            // with 409 (guided.py step-match guard). A chat in flight needs no
+            // gate here: the pending swap above unmounts the input entirely.
+            // Stop moved into GuidedPendingStrip (it renders only while the
+            // abortable chat fetch exists).
+            disabled={guidedResponsePending}
             inputRef={inputRef}
             placeholder={GUIDED_CHAT_PLACEHOLDERS[guidedSession.step]}
             maxLength={GUIDED_CHAT_MESSAGE_MAX_LENGTH}
@@ -1518,20 +1598,6 @@ export function ChatPanel({
             }
             onChange={isTutorial ? () => undefined : undefined}
             readOnly={isTutorial === true}
-          />
-        )}
-        {/* Silent-compute affordance: while a /guided/chat build is in flight the
-            input is disabled (above) with no "thinking" feedback. Reuse the
-            freeform ComposingIndicator so the guided surface shows the same
-            working view. `latestRequest` is null: the just-sent message is not
-            yet in chat_history (server-emitted on response), so deriving the last
-            user turn would surface stale text — null falls back cleanly to the
-            compositionState-driven heuristic working view. */}
-        {guidedChatPending && (
-          <ComposingIndicator
-            latestRequest={null}
-            compositionState={compositionState}
-            composerProgress={composerProgress}
           />
         )}
       </section>

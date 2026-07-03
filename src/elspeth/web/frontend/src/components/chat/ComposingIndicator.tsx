@@ -167,8 +167,11 @@ export function formatElapsed(totalSeconds: number): string {
  * live region and a once-per-second text mutation would spam screen readers
  * with announcements. Sighted users get the timer; AT users get the phase
  * headline changes, which already convey progress.
+ *
+ * Exported for the guided pending strip (GuidedPendingStrip.tsx), which
+ * shares the same aria-hidden/mount-reset semantics.
  */
-function ElapsedReadout() {
+export function ElapsedReadout() {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const startRef = useRef<number>(Date.now());
 

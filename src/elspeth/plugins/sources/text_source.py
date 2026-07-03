@@ -25,6 +25,7 @@ from elspeth.contracts.schema_contract_factory import create_contract_from_confi
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sources._safe_validation_errors import safe_validation_error_text
 
 
 def _contains_surrogateescape_chars(value: str) -> bool:
@@ -73,7 +74,7 @@ class TextSource(BaseSource):
     name = "text"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:6943b40c2d2d9cbe"
+    source_file_hash: str | None = "sha256:52f62dabd8bdef5e"
     config_model = TextSourceConfig
     _on_validation_failure: str
 
@@ -256,16 +257,19 @@ class TextSource(BaseSource):
 
             yield SourceRow.valid(validated_row, contract=contract, source_row_index=source_row_index)
         except ValidationError as exc:
+            # Input-free text: str(exc) echoes the offending Tier-3 value
+            # into audit surfaces (elspeth-a300402c58).
+            error_text = safe_validation_error_text(exc)
             ctx.record_validation_error(
                 row=row,
-                error=str(exc),
+                error=error_text,
                 schema_mode=self._schema_config.mode,
                 destination=self._on_validation_failure,
             )
             if self._on_validation_failure != "discard":
                 yield SourceRow.quarantined(
                     row=row,
-                    error=str(exc),
+                    error=error_text,
                     destination=self._on_validation_failure,
                     source_row_index=source_row_index,
                 )

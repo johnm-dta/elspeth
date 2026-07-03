@@ -70,6 +70,22 @@ if TYPE_CHECKING:
     from elspeth.contracts import SourceProtocol
     from elspeth.core.events import EventBusProtocol
 
+# Backstop cap for plugin-authored quarantine error text (elspeth-a300402c58).
+# Source plugins own producing input-free error strings
+# (plugins/sources/_safe_validation_errors.py); this bound stops an
+# unbounded or input-echoing plugin string from flooding every audit
+# surface the text lands on (node_states.error_json, the DIVERT routing
+# reason, exports). Genuine validation messages are far shorter.
+QUARANTINE_ERROR_MAX_CHARS = 2000
+
+
+def _bound_quarantine_error(error_text: str) -> str:
+    """Truncate over-long quarantine error text with an explicit marker."""
+    if len(error_text) <= QUARANTINE_ERROR_MAX_CHARS:
+        return error_text
+    elided = len(error_text) - QUARANTINE_ERROR_MAX_CHARS
+    return f"{error_text[:QUARANTINE_ERROR_MAX_CHARS]} [truncated {elided} chars]"
+
 
 class SourceIterationDriver:
     """Owns the source-iteration / row-loop cluster of an Orchestrator run.
@@ -193,6 +209,10 @@ class SourceIterationDriver:
                 f"This is a plugin bug: quarantined rows MUST specify a non-empty validation error. "
                 f"Use SourceRow.quarantined(row, error, destination, source_row_index=...) factory method."
             )
+        # Backstop length-bound (elspeth-a300402c58): applied BEFORE every use
+        # below — node_state error, routing reason, and error_hash all see the
+        # same bounded text, so the hash stays stable for the persisted evidence.
+        quarantine_error_msg = _bound_quarantine_error(quarantine_error_msg)
         source_state = factory.execution.begin_node_state(
             token_id=quarantine_token.token_id,
             node_id=source_id,

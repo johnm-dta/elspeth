@@ -24,6 +24,7 @@ from elspeth.contracts.schema_contract_factory import create_contract_from_confi
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import SourceDataConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sources._safe_validation_errors import safe_validation_error_text
 from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
     FieldResolution,
@@ -149,7 +150,7 @@ class JSONSource(BaseSource):
     name = "json"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:5469477a178de521"
+    source_file_hash: str | None = "sha256:5f671d26de3ed2f2"
     config_model = JSONSourceConfig
     # Override parent type - SourceDataConfig requires this to be set
     _on_validation_failure: str
@@ -592,7 +593,9 @@ class JSONSource(BaseSource):
             quarantined = self._record_validation_failure(
                 ctx=ctx,
                 row=normalized_row,
-                error_msg=str(e),
+                # Input-free text: str(e) echoes the offending Tier-3 value
+                # into audit surfaces (elspeth-a300402c58).
+                error_msg=safe_validation_error_text(e),
                 source_row_index=source_row_index,
             )
             if quarantined is not None:

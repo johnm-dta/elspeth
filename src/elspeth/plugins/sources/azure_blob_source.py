@@ -32,6 +32,7 @@ from elspeth.plugins.infrastructure.azure_auth import AzureAuthConfig
 from elspeth.plugins.infrastructure.base import BaseSource
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
+from elspeth.plugins.sources._safe_validation_errors import safe_validation_error_text
 from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
     FieldMappingCollisionError,
@@ -361,7 +362,7 @@ class AzureBlobSource(BaseSource):
     name = "azure_blob"
     determinism = Determinism.IO_READ
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:0a558e357081d314"
+    source_file_hash: str | None = "sha256:987dfc8be045c463"
     config_model = AzureBlobSourceConfig
 
     @classmethod
@@ -1153,10 +1154,13 @@ class AzureBlobSource(BaseSource):
                 )
         except ValidationError as e:
             # Record validation failure in audit trail
-            # This is a trust boundary: external data may be invalid
+            # This is a trust boundary: external data may be invalid.
+            # Input-free text: str(e) echoes the offending Tier-3 value
+            # into audit surfaces (elspeth-a300402c58).
+            error_text = safe_validation_error_text(e)
             ctx.record_validation_error(
                 row=row_to_validate,
-                error=str(e),
+                error=error_text,
                 schema_mode=self._schema_config.mode,
                 destination=self._on_validation_failure,
             )
@@ -1166,7 +1170,7 @@ class AzureBlobSource(BaseSource):
             if self._on_validation_failure != "discard":
                 yield SourceRow.quarantined(
                     row=row_to_validate,
-                    error=str(e),
+                    error=error_text,
                     destination=self._on_validation_failure,
                     source_row_index=source_row_index,
                 )

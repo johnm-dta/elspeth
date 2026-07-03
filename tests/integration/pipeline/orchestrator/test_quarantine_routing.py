@@ -785,3 +785,71 @@ class TestQuarantineNonCanonicalData:
         assert emitted_hash == stable_hash(sanitize_for_canonical(nan_row))
         # Explicitly NOT the divergent repr_hash of the raw (unsanitized) row.
         assert emitted_hash != repr_hash(nan_row)
+
+
+class TestQuarantineErrorLengthBound:
+    """Orchestrator backstop (elspeth-a300402c58): plugin-authored quarantine
+    error text is length-bounded before persisting, so an unbounded or
+    input-echoing plugin string cannot flood node_states.error_json and the
+    DIVERT routing reason. Plugins own input-free text (see
+    _safe_validation_errors); this cap is defense in depth, not a substitute.
+    """
+
+    def test_overlong_quarantine_error_is_truncated_on_audit_surfaces(self, payload_store) -> None:
+        from elspeth.engine.orchestrator.source_iteration import QUARANTINE_ERROR_MAX_CHARS
+
+        long_error = ("x" * (QUARANTINE_ERROR_MAX_CHARS + 5000)) + "TAIL-SENTINEL"
+        db = make_landscape_db()
+        source = QuarantineSource(
+            valid_rows=[],
+            quarantine_rows=[({"x": "bad"}, long_error)],
+            quarantine_destination="quarantine",
+            on_validation_failure="quarantine",
+        )
+        default_sink = CollectSink("default")
+        quarantine_sink = CollectSink("quarantine")
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[],
+            sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
+        assert result.rows_quarantined == 1
+
+        with db.engine.connect() as conn:
+            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == result.run_id)).fetchall()
+        failed_states = [s for s in states if s.status == NodeStateStatus.FAILED]
+        assert len(failed_states) == 1
+        error_json = failed_states[0].error_json
+        assert "TAIL-SENTINEL" not in error_json, "over-long quarantine error must be truncated before persisting"
+        assert "truncated" in error_json, "truncation must be marked, not silent"
+        # Bounded: cap + elision marker allowance, well under the raw length.
+        assert len(error_json) < QUARANTINE_ERROR_MAX_CHARS + 200
+
+    def test_short_quarantine_error_is_untouched(self, payload_store) -> None:
+        db = make_landscape_db()
+        source = QuarantineSource(
+            valid_rows=[],
+            quarantine_rows=[({"x": "bad"}, "field 'x' type mismatch")],
+            quarantine_destination="quarantine",
+            on_validation_failure="quarantine",
+        )
+        default_sink = CollectSink("default")
+        quarantine_sink = CollectSink("quarantine")
+        config = PipelineConfig(
+            sources={"primary": as_source(source)},
+            transforms=[],
+            sinks={"default": as_sink(default_sink), "quarantine": as_sink(quarantine_sink)},
+        )
+
+        orchestrator = Orchestrator(db)
+        result = orchestrator.run(config, graph=build_production_graph(config), payload_store=payload_store)
+
+        with db.engine.connect() as conn:
+            states = conn.execute(select(node_states_table).where(node_states_table.c.run_id == result.run_id)).fetchall()
+        failed_states = [s for s in states if s.status == NodeStateStatus.FAILED]
+        assert len(failed_states) == 1
+        assert "field 'x' type mismatch" in failed_states[0].error_json
+        assert "truncated" not in failed_states[0].error_json

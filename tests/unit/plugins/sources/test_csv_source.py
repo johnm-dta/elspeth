@@ -1473,3 +1473,33 @@ class TestCSVSourceSkipRowsAudit:
         call_kwargs = mock_landscape.record_validation_error.call_args[1]
         assert "skip_rows" in call_kwargs["error"] or "header" in call_kwargs["error"]
         assert call_kwargs["schema_mode"] == "parse"
+
+
+class TestCSVSourceQuarantineErrorRedaction:
+    """Quarantine error text must not echo Tier-3 input values (elspeth-a300402c58)."""
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        return make_source_context(plugin_name="csv")
+
+    def test_validation_error_text_excludes_input_value(self, tmp_path: Path, ctx: PluginContext) -> None:
+        from elspeth.plugins.sources.csv_source import CSVSource
+
+        csv_file = tmp_path / "data.csv"
+        csv_file.write_text("id\nSECRET-abc123\n")
+
+        source = CSVSource(
+            {
+                "path": str(csv_file),
+                "schema": {"mode": "fixed", "fields": ["id: int"]},
+                "on_validation_failure": "quarantine",
+            }
+        )
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 1
+        assert rows[0].is_quarantined is True
+        assert rows[0].quarantine_error is not None
+        assert "SECRET-abc123" not in rows[0].quarantine_error, "quarantine_error must not echo the offending input value"
+        assert "id" in rows[0].quarantine_error, "field loc must survive for triage"
+        assert rows[0].row == {"id": "SECRET-abc123"}

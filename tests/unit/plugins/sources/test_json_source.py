@@ -1873,3 +1873,39 @@ class TestJSONSourceKeyNormalization:
         assert contract.mode == "FIXED"
         # ContractBuilder should be None (not needed for FIXED)
         assert source._contract_builder is None
+
+
+class TestJSONSourceQuarantineErrorRedaction:
+    """Quarantine error text must not echo Tier-3 input values (elspeth-a300402c58).
+
+    The quarantine_error string lands verbatim in node_states.error_json,
+    the DIVERT routing reason, and audit exports — the raw offending value
+    belongs only on SourceRow.row (which routes to the quarantine sink).
+    """
+
+    @pytest.fixture
+    def ctx(self) -> PluginContext:
+        return make_source_context(plugin_name="json")
+
+    def test_validation_error_text_excludes_input_value(self, tmp_path: Path, ctx: PluginContext) -> None:
+        from elspeth.plugins.sources.json_source import JSONSource
+
+        json_file = tmp_path / "data.json"
+        json_file.write_text(json.dumps([{"id": "SECRET-abc123"}]))
+
+        source = JSONSource(
+            {
+                "path": str(json_file),
+                "schema": {"mode": "fixed", "fields": ["id: int"]},
+                "on_validation_failure": "quarantine",
+            }
+        )
+        rows = list(source.load(ctx))
+
+        assert len(rows) == 1
+        assert rows[0].is_quarantined is True
+        assert rows[0].quarantine_error is not None
+        assert "SECRET-abc123" not in rows[0].quarantine_error, "quarantine_error must not echo the offending input value"
+        assert "id" in rows[0].quarantine_error, "field loc must survive for triage"
+        # Full raw detail still travels to the quarantine sink on the row itself.
+        assert rows[0].row == {"id": "SECRET-abc123"}

@@ -36,6 +36,7 @@ from elspeth.plugins.infrastructure.clients.dataverse import (
 from elspeth.plugins.infrastructure.config_base import DataPluginConfig
 from elspeth.plugins.infrastructure.schema_factory import create_schema_from_config
 from elspeth.plugins.infrastructure.url_validation import validate_credential_safe_https_url
+from elspeth.plugins.sources._safe_validation_errors import safe_validation_error_text
 from elspeth.plugins.sources.field_normalization import (
     ExternalHeaderError,
     FieldResolution,
@@ -208,7 +209,7 @@ class DataverseSource(BaseSource):
 
     name = "dataverse"
     plugin_version = "1.0.0"
-    source_file_hash: str | None = "sha256:f25e3cc225815f82"
+    source_file_hash: str | None = "sha256:05fc9294a95a738c"
     determinism = Determinism.EXTERNAL_CALL  # Live REST API, not static file read
     config_model = DataverseSourceConfig
 
@@ -661,16 +662,19 @@ class DataverseSource(BaseSource):
                         validated_row = validated.to_row()
                     except ValidationError as e:
                         quarantine_count += 1
+                        # Input-free text: str(e) echoes the offending Tier-3
+                        # value into audit surfaces (elspeth-a300402c58).
+                        error_text = safe_validation_error_text(e)
                         ctx.record_validation_error(
                             row=normalized_row,
-                            error=str(e),
+                            error=error_text,
                             schema_mode="validation",
                             destination=self._on_validation_failure,
                         )
                         if self._on_validation_failure != "discard":
                             yield SourceRow.quarantined(
                                 row=normalized_row,
-                                error=str(e),
+                                error=error_text,
                                 destination=self._on_validation_failure,
                                 source_row_index=current_source_row_index,
                             )

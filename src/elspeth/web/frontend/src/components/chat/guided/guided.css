@@ -209,6 +209,19 @@
   min-height: 0;
   overflow-y: auto;
   padding: var(--space-lg) var(--space-md);
+  /* Chat-style bottom anchoring: when the conversation UNDERFLOWS the
+     region (early tutorial steps), content must hug the composer — not
+     float at the top with a viewport-sized void between the decision card
+     and the input (the operator-observed "misshapen" state on tall
+     monitors). flex column + margin-top:auto on the first child pushes
+     sparse content down; once content overflows, the auto margin resolves
+     to zero and scrolling is unchanged. */
+  display: flex;
+  flex-direction: column;
+}
+
+.guided-workspace-scroll > :first-child {
+  margin-top: auto;
 }
 
 /* Keyboard-focusable scroll region (tabIndex=0 in ChatPanel): the standard

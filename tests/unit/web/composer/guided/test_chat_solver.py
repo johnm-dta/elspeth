@@ -194,6 +194,25 @@ def test_parse_non_string_on_validation_failure_raises() -> None:
         _parse_step_1_source_tool_arguments(_source_tool_args(on_validation_failure=123), plugin_hint="json")
 
 
+def test_parse_rejects_tool_scaffolding_in_assistant_message() -> None:
+    """A model that leaks its agentic scratchpad into assistant_message is rejected.
+
+    Observed live 2026-07-03: a 2.8KB pseudo tool-call transcript
+    (``<tool_call>{"name": "list_sources"}...``) persisted verbatim into a
+    tutorial chat history and rendered as the learner-facing reply. The
+    register violation must route to MALFORMED_RESPONSE (retryable advisory),
+    never into chat_history.
+    """
+    scratchpad = 'Let me check.\n\n<tool_call>{"name": "list_sources"}</tool_call>\n<tool_response>[...]</tool_response>\nDone.'
+    with pytest.raises(ValueError, match="user-facing prose"):
+        _parse_step_1_source_tool_arguments(_source_tool_args(assistant_message=scratchpad), plugin_hint="json")
+
+
+def test_parse_rejects_tool_scaffolding_case_insensitively() -> None:
+    with pytest.raises(ValueError, match="user-facing prose"):
+        _parse_step_1_source_tool_arguments(_source_tool_args(assistant_message="<TOOL_CALL>{}</TOOL_CALL>"), plugin_hint="json")
+
+
 def test_step_1_revision_prompt_uses_llm_safe_source_context() -> None:
     current_source = SourceResolved(
         plugin="csv",

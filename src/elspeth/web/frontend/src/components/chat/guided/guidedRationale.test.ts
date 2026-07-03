@@ -34,4 +34,43 @@ describe("latestAssistantRationale", () => {
     });
     expect(latestAssistantRationale(s)).toBeNull();
   });
+
+  it("uses only the FIRST line of a multi-paragraph reply (the full reply lives in the bubble)", () => {
+    const s = session({
+      chat_history: [
+        {
+          role: "assistant",
+          content: "The source is built.\n\nHere's what was configured and why:\n| Decision | Reasoning |",
+          seq: 2,
+          step: "step_1_source",
+          ts_iso: "t",
+        },
+      ],
+    });
+    expect(latestAssistantRationale(s)).toBe("The source is built.");
+  });
+
+  it("rejects an over-long first line (falls back to the static step purpose)", () => {
+    const s = session({
+      chat_history: [
+        { role: "assistant", content: "x".repeat(300), seq: 2, step: "step_1_source", ts_iso: "t" },
+      ],
+    });
+    expect(latestAssistantRationale(s)).toBeNull();
+  });
+
+  it("rejects tool-call scaffolding leaked into the message (renders as a wall of raw markup otherwise)", () => {
+    const s = session({
+      chat_history: [
+        {
+          role: "assistant",
+          content: '<tool_call>{"name": "list_sources"}</tool_call> then some prose',
+          seq: 2,
+          step: "step_1_source",
+          ts_iso: "t",
+        },
+      ],
+    });
+    expect(latestAssistantRationale(s)).toBeNull();
+  });
 });

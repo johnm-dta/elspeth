@@ -55,6 +55,37 @@ from elspeth.web.interpretation_state import SOURCE_AUTHORING_KEY
 # ``composer/tools/_common.py`` (the commit-side stripper for prevalidation).
 _RESOLVER_FORBIDDEN_SOURCE_OPTION_KEYS: Final[frozenset[str]] = frozenset({"blob_ref", SOURCE_AUTHORING_KEY})
 
+# Register guard for the user-facing chat message. Models occasionally dump
+# their internal agentic scratchpad — pseudo tool-call transcripts in
+# ``<tool_call>``/``<tool_response>`` tags — INTO the assistant_message tool
+# argument (observed live 2026-07-03: a 2.8KB replay of an invented
+# list_sources/build_source loop persisted verbatim into a tutorial chat
+# history and rendered as the learner-facing reply). assistant_message is a
+# Tier-3 boundary: reject the register violation loudly (routes to
+# MALFORMED_RESPONSE → advisory; the user's Send is retryable) rather than
+# persisting scratchpad as conversation.
+_TOOL_SCAFFOLD_MARKERS: Final[tuple[str, ...]] = (
+    "<tool_call",
+    "</tool_call",
+    "<tool_response",
+    "</tool_response",
+)
+
+
+def _require_prose_assistant_message(value: object, *, tool: str) -> str:
+    """Validate an LLM-supplied assistant_message is user-facing prose."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{tool} assistant_message must be a non-empty string")
+    lowered = value.lower()
+    for marker in _TOOL_SCAFFOLD_MARKERS:
+        if marker in lowered:
+            raise ValueError(
+                f"{tool} assistant_message must be user-facing prose; it contains raw "
+                f"tool-call scaffolding ({marker!r}) — the model leaked its internal "
+                "transcript into the chat message"
+            )
+    return value
+
 
 @dataclass(frozen=True, slots=True)
 class Step1SourceChatResolution:
@@ -355,9 +386,7 @@ def _parse_step_1_source_tool_arguments(arguments: str, *, plugin_hint: str | No
             raise ValueError(f"resolve_source sample_rows[{idx}] must be an object; got {type(row).__name__}")
         sample_rows.append(dict(row))
 
-    assistant_message = data["assistant_message"]
-    if not isinstance(assistant_message, str) or not assistant_message.strip():
-        raise ValueError("resolve_source assistant_message must be a non-empty string")
+    assistant_message = _require_prose_assistant_message(data["assistant_message"], tool="resolve_source")
 
     # on_validation_failure is OPTIONAL (not in the required set / tool schema).
     # The composer sets it most of the time, but a passive walk must never stall,
@@ -657,9 +686,7 @@ def _parse_step_2_sink_tool_arguments(arguments: str) -> tuple[SinkResolved, str
                 schema_mode=schema_mode,
             )
         )
-    assistant_message = data["assistant_message"]
-    if not isinstance(assistant_message, str) or not assistant_message.strip():
-        raise ValueError("resolve_sink assistant_message must be a non-empty string")
+    assistant_message = _require_prose_assistant_message(data["assistant_message"], tool="resolve_sink")
     return SinkResolved(outputs=tuple(outputs)), assistant_message
 
 

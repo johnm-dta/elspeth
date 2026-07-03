@@ -8362,20 +8362,23 @@ class TestHandleTransformErrorStatusRoutedOnError:
 
 
 class TestReadyEmissionEnqueueParity:
-    """Pin: ``_ready_emission_from_work_item`` mirrors ``_enqueue_scheduler_work_item``.
+    """Pin: the READY emission mirrors ``_enqueue_scheduler_work_item``.
 
     The merged-coalesce READY emission (inserted atomically by
     ``complete_barrier`` via ``_insert_ready_emission``) and the drain loop's
     idempotent ``enqueue_ready`` for the SAME WorkItem must derive identical
     field values: the enqueue reconciles against the emission-inserted row by
     deterministic ``work_item_id`` + strict field equality, so any derivation
-    drift between the two processor builders fails in production at
-    reconciliation time. This pin makes that drift fail in CI instead.
+    drift fails in production at reconciliation time. This pin makes that
+    drift fail in CI instead.
 
-    The test lives processor-side because BOTH builders under comparison are
-    ``RowProcessor`` methods; the repository mapper
-    (``_ready_work_item_values``) is shared by construction and is used here
-    as the common projection onto the full journal-row column set.
+    Both lanes now derive from ONE ``SchedulerWorkCodec`` (the codec's own
+    round-trip invariants live in test_scheduler_work_codec.py); this test
+    pins the processor-side WIRING end-to-end — that the enqueue path passes
+    the codec bundle through unmodified — using the repository mapper
+    (``_ready_work_item_values``, shared by ``enqueue_ready`` AND
+    ``_insert_ready_emission``) as the common projection onto the full
+    journal-row column set.
     """
 
     @pytest.mark.parametrize(
@@ -8442,7 +8445,7 @@ class TestReadyEmissionEnqueueParity:
                 on_success_sink="merged_sink",
             )
 
-        emission = processor._ready_emission_from_work_item(item)
+        emission = processor._work_codec.ready_emission(item)
 
         captured: dict[str, Any] = {}
         real_enqueue = factory.scheduler.enqueue_ready

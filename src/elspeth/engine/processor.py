@@ -29,6 +29,7 @@ from elspeth.contracts.types import BranchName, CoalesceName, NodeID, SinkName, 
 from elspeth.engine._best_effort import best_effort
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.dag_navigator import DAGNavigator, WorkItem
+from elspeth.engine.scheduler_work_codec import SchedulerWorkCodec
 
 if TYPE_CHECKING:
     # TypeIs (PEP 742) lives in typing on 3.13 but only typing_extensions on
@@ -609,6 +610,21 @@ class RowProcessor:
         )
         self._telemetry_manager = telemetry_manager
         self._scheduler = scheduler
+        # One codec for the WorkItem <-> durable scheduler payload mapping
+        # (elspeth-6291c51766): ingest, enqueue, READY barrier emission, and
+        # rehydrate must derive byte-identical field bundles (deterministic
+        # work_item_id + strict field-equality reconciliation), so the
+        # derivation lives in one place instead of four hand-synced encoders.
+        self._work_codec = SchedulerWorkCodec(
+            serialize_row_payload=scheduler.serialize_row_payload,
+            deserialize_row_payload=scheduler.deserialize_row_payload,
+            resolve_node_cursor=self._scheduler_node_id,
+            resolve_step_index=self._scheduler_step_index,
+            resolve_ingest_sequence=data_flow.resolve_row_ingest_sequence,
+            queue_key_for_item=self._queue_key_for_blocked_item,
+            barrier_key_for_item=self._barrier_key_for_blocked_item,
+            create_work_item=self._nav.create_work_item,
+        )
         self._coordination_token = coordination_token
         self._run_coordination = run_coordination
         # ADR-030 §G (slice 5): _scheduler_lease_owner_registered is True when
@@ -2602,9 +2618,11 @@ class RowProcessor:
 
         Composes the rows+tokens inserts (via the data-flow repository's
         connection-accepting closure) with the initial enqueue-and-claim in
-        ONE epoch-fenced IMMEDIATE transaction. Field derivation mirrors
-        ``_enqueue_scheduler_work_item`` exactly (deterministic
-        work_item_id + strict field equality reconciliation downstream).
+        ONE epoch-fenced IMMEDIATE transaction. Scheduler fields come from
+        the shared work codec (deterministic work_item_id + strict field
+        equality reconciliation downstream); ``ingest_sequence`` is passed
+        explicitly because the row is inserted in this same transaction and
+        is not yet resolvable.
         """
         coordination_token = self._coordination_token
         if coordination_token is None:
@@ -2613,6 +2631,7 @@ class RowProcessor:
             )
         token = item.token
         now = self._clock.now_utc()
+        fields = self._work_codec.ready_fields(item, ingest_sequence=ingest_sequence)
 
         def insert_row_and_token(conn: Connection) -> tuple[AuditRow, AuditToken]:
             return self._data_flow.insert_row_with_token_on(
@@ -2631,23 +2650,23 @@ class RowProcessor:
             coordination_token=coordination_token,
             now=now,
             insert_row_and_token=insert_row_and_token,
-            token_id=token.token_id,
-            row_id=token.row_id,
-            node_id=self._scheduler_node_id(item.current_node_id),
-            step_index=self._scheduler_step_index(item.current_node_id),
-            ingest_sequence=ingest_sequence,
-            row_payload_json=self._scheduler.serialize_row_payload(token.row_data),
+            token_id=fields.token_id,
+            row_id=fields.row_id,
+            node_id=fields.node_id,
+            step_index=fields.step_index,
+            ingest_sequence=fields.ingest_sequence,
+            row_payload_json=fields.row_payload_json,
             lease_owner=self._scheduler_lease_owner,
             lease_seconds=self._scheduler_lease_seconds,
-            queue_key=self._queue_key_for_blocked_item(item),
-            barrier_key=self._barrier_key_for_blocked_item(item),
-            on_success_sink=item.on_success_sink,
-            branch_name=token.branch_name,
-            fork_group_id=token.fork_group_id,
-            join_group_id=token.join_group_id,
-            expand_group_id=token.expand_group_id,
-            coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
-            coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
+            queue_key=fields.queue_key,
+            barrier_key=fields.barrier_key,
+            on_success_sink=fields.on_success_sink,
+            branch_name=fields.branch_name,
+            fork_group_id=fields.fork_group_id,
+            join_group_id=fields.join_group_id,
+            expand_group_id=fields.expand_group_id,
+            coalesce_node_id=fields.coalesce_node_id,
+            coalesce_name=fields.coalesce_name,
         )
         return scheduled
 
@@ -3544,34 +3563,6 @@ class RowProcessor:
         )
         return tagged_results, pending_sink_token_ids
 
-    def _ready_emission_from_work_item(self, item: WorkItem) -> BarrierEmission:
-        """Build the READY continuation emission for a merged-coalesce work item.
-
-        Field derivation MUST mirror ``_enqueue_scheduler_work_item`` exactly:
-        the drain loop (or ``_drain_work_queue``'s initial claim) later runs
-        the idempotent enqueue for the same WorkItem, which reconciles against
-        the row inserted here by deterministic ``work_item_id`` and strict
-        field equality.
-        """
-        token = item.token
-        return BarrierEmission(
-            token_id=token.token_id,
-            row_payload_json=self._scheduler.serialize_row_payload(token.row_data),
-            row_id=token.row_id,
-            node_id=self._scheduler_node_id(item.current_node_id),
-            step_index=self._scheduler_step_index(item.current_node_id),
-            ingest_sequence=self._data_flow.resolve_row_ingest_sequence(token.row_id),
-            queue_key=self._queue_key_for_blocked_item(item),
-            barrier_key=self._barrier_key_for_blocked_item(item),
-            on_success_sink=item.on_success_sink,
-            branch_name=token.branch_name,
-            fork_group_id=token.fork_group_id,
-            join_group_id=token.join_group_id,
-            expand_group_id=token.expand_group_id,
-            coalesce_node_id=str(item.coalesce_node_id) if item.coalesce_node_id is not None else None,
-            coalesce_name=str(item.coalesce_name) if item.coalesce_name is not None else None,
-        )
-
     def _complete_coalesce_fire(
         self,
         *,
@@ -3614,7 +3605,12 @@ class RowProcessor:
             barrier_key=str(coalesce_name),
             consumed_token_ids=consumed_token_ids,
             emitted_pending_sink=() if merged_sink_result is None else (self._sink_emission_from_result(merged_sink_result),),
-            emitted_ready=() if merged_item is None else (self._ready_emission_from_work_item(merged_item),),
+            # READY continuation fields come from the shared work codec: the
+            # drain loop (or ``_drain_work_queue``'s initial claim) later runs
+            # the idempotent enqueue for the same WorkItem, which reconciles
+            # against the row inserted here by deterministic ``work_item_id``
+            # and strict field equality.
+            emitted_ready=() if merged_item is None else (self._work_codec.ready_emission(merged_item),),
             now=self._clock.now_utc(),
             # §E.3 per-firing-group snapshot: the fired group's adopted branches.
             intake_snapshot_token_ids=frozenset(consumed_token_ids),
@@ -4363,7 +4359,7 @@ class RowProcessor:
             if claimed.work_item_id in pending_items:
                 item = pending_items.pop(claimed.work_item_id)
             else:
-                item = self._work_item_from_scheduler(claimed)
+                item = self._work_codec.work_item_from_scheduler(claimed)
             claimed_lease_owner = self._claimed_scheduler_lease_owner(claimed)
             # Mark this claim active so ``_process_single_token``'s per-node
             # heartbeat refreshes the right lease (filigree elspeth-ddde8144b6).
@@ -4907,33 +4903,26 @@ class RowProcessor:
     ) -> TokenWorkItem:
         """Persist a READY scheduler item and retain the live token payload."""
         available_at = self._clock.now_utc()
-        node_id = self._scheduler_node_id(item.current_node_id)
-        step_index = self._scheduler_step_index(item.current_node_id)
-        ingest_sequence = self._data_flow.resolve_row_ingest_sequence(item.token.row_id)
-        row_payload_json = self._scheduler.serialize_row_payload(item.token.row_data)
-        queue_key = self._queue_key_for_blocked_item(item)
-        barrier_key = self._barrier_key_for_blocked_item(item)
-        coalesce_node_id = str(item.coalesce_node_id) if item.coalesce_node_id is not None else None
-        coalesce_name = str(item.coalesce_name) if item.coalesce_name is not None else None
+        fields = self._work_codec.ready_fields(item)
         if claim_immediately:
             scheduled = self._scheduler.enqueue_ready_claimed(
                 run_id=self._run_id,
-                token_id=item.token.token_id,
-                row_id=item.token.row_id,
-                node_id=node_id,
-                step_index=step_index,
-                ingest_sequence=ingest_sequence,
-                row_payload_json=row_payload_json,
+                token_id=fields.token_id,
+                row_id=fields.row_id,
+                node_id=fields.node_id,
+                step_index=fields.step_index,
+                ingest_sequence=fields.ingest_sequence,
+                row_payload_json=fields.row_payload_json,
                 available_at=available_at,
-                queue_key=queue_key,
-                barrier_key=barrier_key,
-                on_success_sink=item.on_success_sink,
-                branch_name=item.token.branch_name,
-                fork_group_id=item.token.fork_group_id,
-                join_group_id=item.token.join_group_id,
-                expand_group_id=item.token.expand_group_id,
-                coalesce_node_id=coalesce_node_id,
-                coalesce_name=coalesce_name,
+                queue_key=fields.queue_key,
+                barrier_key=fields.barrier_key,
+                on_success_sink=fields.on_success_sink,
+                branch_name=fields.branch_name,
+                fork_group_id=fields.fork_group_id,
+                join_group_id=fields.join_group_id,
+                expand_group_id=fields.expand_group_id,
+                coalesce_node_id=fields.coalesce_node_id,
+                coalesce_name=fields.coalesce_name,
                 lease_owner=self._scheduler_lease_owner,
                 lease_seconds=self._scheduler_lease_seconds,
                 now=available_at,
@@ -4941,22 +4930,22 @@ class RowProcessor:
         else:
             scheduled = self._scheduler.enqueue_ready(
                 run_id=self._run_id,
-                token_id=item.token.token_id,
-                row_id=item.token.row_id,
-                node_id=node_id,
-                step_index=step_index,
-                ingest_sequence=ingest_sequence,
-                row_payload_json=row_payload_json,
+                token_id=fields.token_id,
+                row_id=fields.row_id,
+                node_id=fields.node_id,
+                step_index=fields.step_index,
+                ingest_sequence=fields.ingest_sequence,
+                row_payload_json=fields.row_payload_json,
                 available_at=available_at,
-                queue_key=queue_key,
-                barrier_key=barrier_key,
-                on_success_sink=item.on_success_sink,
-                branch_name=item.token.branch_name,
-                fork_group_id=item.token.fork_group_id,
-                join_group_id=item.token.join_group_id,
-                expand_group_id=item.token.expand_group_id,
-                coalesce_node_id=coalesce_node_id,
-                coalesce_name=coalesce_name,
+                queue_key=fields.queue_key,
+                barrier_key=fields.barrier_key,
+                on_success_sink=fields.on_success_sink,
+                branch_name=fields.branch_name,
+                fork_group_id=fields.fork_group_id,
+                join_group_id=fields.join_group_id,
+                expand_group_id=fields.expand_group_id,
+                coalesce_node_id=fields.coalesce_node_id,
+                coalesce_name=fields.coalesce_name,
                 # Membership fence (ADR-030 §G, slice 5): thread the registered
                 # worker identity so an evicted RowProcessor cannot enqueue READY
                 # items that no active worker will claim. The fence is active only
@@ -4972,26 +4961,6 @@ class RowProcessor:
         ):
             pending_items[scheduled.work_item_id] = item
         return scheduled
-
-    def _work_item_from_scheduler(self, scheduled: TokenWorkItem) -> WorkItem:
-        """Rehydrate a scheduler work item from its durable payload snapshot."""
-        current_node_id = None if scheduled.node_id is None or scheduled.node_id == "__terminal__" else NodeID(scheduled.node_id)
-        token = TokenInfo(
-            row_id=scheduled.row_id,
-            token_id=scheduled.token_id,
-            row_data=self._scheduler.deserialize_row_payload(scheduled.row_payload_json),
-            branch_name=scheduled.branch_name,
-            fork_group_id=scheduled.fork_group_id,
-            join_group_id=scheduled.join_group_id,
-            expand_group_id=scheduled.expand_group_id,
-        )
-        return self._nav.create_work_item(
-            token=token,
-            current_node_id=current_node_id,
-            coalesce_node_id=NodeID(scheduled.coalesce_node_id) if scheduled.coalesce_node_id is not None else None,
-            coalesce_name=CoalesceName(scheduled.coalesce_name) if scheduled.coalesce_name is not None else None,
-            on_success_sink=scheduled.on_success_sink,
-        )
 
     def _scheduler_node_id(self, node_id: NodeID | None) -> str | None:
         """Return the persisted node cursor for a work item."""

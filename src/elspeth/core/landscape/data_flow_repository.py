@@ -103,11 +103,18 @@ class DataFlowRepository:
 
     # ── Token recording: private helpers ─────────────────────────────────
 
-    def _sanitize_node_config_for_audit(self, config: Mapping[str, object]) -> Mapping[str, object]:
-        """Return an audit-safe node config with secrets fingerprinted."""
+    def _sanitize_node_config_for_audit(self, config: Mapping[str, object], *, plugin_name: str | None) -> Mapping[str, object]:
+        """Return an audit-safe node config with secrets fingerprinted.
+
+        Database plugin configs additionally get placement-based DSN
+        sanitization: ``url`` is credential-bearing by placement, not by
+        name, so the generic secret-name heuristic misses it
+        (elspeth-6169a16809). Mirrors the full-config path's database-sink
+        gate in ``_fingerprint_config_for_audit``.
+        """
         import os
 
-        from elspeth.core.config import _fingerprint_secrets
+        from elspeth.core.config import _fingerprint_secrets, _sanitize_dsn_option_for_audit
 
         thawed = deep_thaw(config)
         if type(thawed) is not dict:
@@ -116,7 +123,17 @@ class DataFlowRepository:
         allow_raw = False
         if "ELSPETH_ALLOW_RAW_SECRETS" in os.environ:
             allow_raw = os.environ["ELSPETH_ALLOW_RAW_SECRETS"].lower() == "true"
-        return _fingerprint_secrets(thawed, fail_if_no_key=not allow_raw)
+        sanitized = _fingerprint_secrets(thawed, fail_if_no_key=not allow_raw)
+        if plugin_name == "database":
+            # Node config is flat: the DSN sits at top-level `url`.
+            _sanitize_dsn_option_for_audit(
+                sanitized,
+                option_name="url",
+                fingerprint_name="url_password_fingerprint",
+                redacted_name="url_password_redacted",
+                fail_if_no_key=not allow_raw,
+            )
+        return sanitized
 
     # ── Tier-3 external-data audit serialization (coerce-and-record) ──────
 
@@ -1559,7 +1576,7 @@ class DataFlowRepository:
             Node model
         """
         node_id = node_id or generate_id()
-        audit_safe_config = self._sanitize_node_config_for_audit(config)
+        audit_safe_config = self._sanitize_node_config_for_audit(config, plugin_name=plugin_name)
         config_json = canonical_json(audit_safe_config)
         config_hash = stable_hash(audit_safe_config)
         timestamp = now()

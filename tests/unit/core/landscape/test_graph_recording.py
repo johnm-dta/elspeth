@@ -49,6 +49,102 @@ def _make_field(
 
 
 # ---------------------------------------------------------------------------
+# register_node — DSN placement sanitization (elspeth-6169a16809)
+# ---------------------------------------------------------------------------
+
+
+class TestRegisterNodeDsnSanitization:
+    """Node-level parity with the full-config DSN redaction.
+
+    Regression (elspeth-6169a16809): database sink ``url`` is a
+    credential-bearing field by placement, not by name — the generic
+    secret-name heuristic missed it, so DSN passwords landed raw in
+    ``nodes.config_json`` and flowed out through the exporter.
+    """
+
+    _DSN = "postgresql://user:s3cr3t-pw@host/db"  # secret-scan: allow-this-line
+
+    def _register_database_node(self, factory: RecorderFactory, config: dict[str, object]) -> object:
+        return factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="database",
+            node_type=NodeType.SINK,
+            plugin_version="1.0.0",
+            config=config,
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+    def test_database_node_dsn_password_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+        _db, factory = _setup()
+
+        node = self._register_database_node(factory, {"url": self._DSN, "table": "results"})
+
+        assert "s3cr3t-pw" not in node.config_json
+        stored = json.loads(node.config_json)
+        assert "user" in stored["url"]  # username survives, password does not
+        assert len(stored["url_password_fingerprint"]) == 64
+        assert stored["table"] == "results"
+
+    def test_database_node_dsn_password_redacted_in_dev_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ELSPETH_FINGERPRINT_KEY", raising=False)
+        monkeypatch.setenv("ELSPETH_ALLOW_RAW_SECRETS", "true")
+        _db, factory = _setup()
+
+        node = self._register_database_node(factory, {"url": self._DSN})
+
+        assert "s3cr3t-pw" not in node.config_json
+        stored = json.loads(node.config_json)
+        assert stored["url_password_redacted"] is True
+        assert "url_password_fingerprint" not in stored
+
+    def test_database_node_url_without_password_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+        _db, factory = _setup()
+
+        node = self._register_database_node(factory, {"url": "sqlite:///out.db"})
+
+        stored = json.loads(node.config_json)
+        assert stored["url"] == "sqlite:///out.db"
+        assert "url_password_fingerprint" not in stored
+        assert "url_password_redacted" not in stored
+
+    def test_non_database_node_secret_named_field_still_fingerprinted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+        _db, factory = _setup()
+
+        node = factory.data_flow.register_node(
+            run_id="run-1",
+            plugin_name="csv",
+            node_type=NodeType.SOURCE,
+            plugin_version="1.0.0",
+            config={"api_key": "raw-api-key-value", "path": "in.csv"},
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+
+        assert "raw-api-key-value" not in node.config_json
+
+    def test_exported_node_config_carries_redacted_dsn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The exporter emits persisted config_json — the leak's egress path."""
+        from elspeth.core.landscape.exporter import LandscapeExporter
+
+        monkeypatch.setenv("ELSPETH_FINGERPRINT_KEY", "test-key")
+        monkeypatch.delenv("ELSPETH_ALLOW_RAW_SECRETS", raising=False)
+        db, factory = _setup()
+
+        self._register_database_node(factory, {"url": self._DSN})
+
+        records = list(LandscapeExporter(db).export_run("run-1"))
+        node_records = [r for r in records if r["record_type"] == "node"]
+        assert node_records, "expected the registered node in the export"
+        assert "s3cr3t-pw" not in json.dumps(node_records)
+        assert node_records[0]["config"]["url_password_fingerprint"]
+
+
+# ---------------------------------------------------------------------------
 # register_node
 # ---------------------------------------------------------------------------
 

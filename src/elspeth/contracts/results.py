@@ -532,6 +532,12 @@ class RowResult:
         error: For ON_ERROR_ROUTED, type-safe error details for audit
         scheduler_pending_sink: True only after the durable scheduler row for
             this exact token has been transitioned to PENDING_SINK.
+        authoritative_error_hash: For ON_ERROR_ROUTED results REBUILT from a
+            persisted pending sink (crash-recovery replay), the ORIGINAL
+            audited error hash. The outcome accumulator prefers this over
+            recomputing from the synthetic replay FailureInfo, so the replayed
+            audit record correlates with the pre-crash one
+            (filigree elspeth-d74d19f901). None for live results.
     """
 
     token: TokenInfo
@@ -541,12 +547,20 @@ class RowResult:
     sink_name: str | None = None
     error: FailureInfo | None = None
     scheduler_pending_sink: bool = False
+    authoritative_error_hash: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.scheduler_pending_sink) is not bool:
             raise OrchestrationInvariantError(
                 f"RowResult.scheduler_pending_sink must be bool, got {type(self.scheduler_pending_sink).__name__}"
             )
+        if self.authoritative_error_hash is not None:
+            if type(self.authoritative_error_hash) is not str or not self.authoritative_error_hash:
+                raise OrchestrationInvariantError("RowResult.authoritative_error_hash must be a non-empty string when set")
+            if self.path != TerminalPath.ON_ERROR_ROUTED:
+                raise OrchestrationInvariantError(
+                    f"RowResult.authoritative_error_hash is only valid for ON_ERROR_ROUTED results, got path={self.path!r}"
+                )
         if self.outcome is not None and (self.outcome, self.path) not in _LEGAL_TERMINAL_PAIRS:
             raise OrchestrationInvariantError(f"RowResult: illegal (outcome, path) pair: ({self.outcome!r}, {self.path!r})")
         if self.outcome is None and self.path != TerminalPath.BUFFERED:

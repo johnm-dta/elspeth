@@ -242,7 +242,14 @@ def accumulate_row_outcomes(
         if pair == (TerminalOutcome.FAILURE, TerminalPath.ON_ERROR_ROUTED):
             if result.error is None:
                 raise OrchestrationInvariantError(f"ON_ERROR_ROUTED result missing error (FailureInfo). Token: {result.token}")
-            error_hash = compute_error_hash(result.error.message, exception_type=result.error.exception_type)
+            # Crash-recovery replays carry the ORIGINAL persisted hash
+            # (elspeth-d74d19f901); recomputing from the synthetic
+            # ResumedPendingSink evidence diverges for empty-message errors.
+            error_hash = (
+                result.authoritative_error_hash
+                if result.authoritative_error_hash is not None
+                else compute_error_hash(result.error.message, exception_type=result.error.exception_type)
+            )
         elif pair == (TerminalOutcome.SUCCESS, TerminalPath.COALESCED) and result.token.join_group_id is None:
             raise OrchestrationInvariantError(f"(SUCCESS, COALESCED) result missing token.join_group_id. Token: {result.token}")
 

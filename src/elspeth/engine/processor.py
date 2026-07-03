@@ -4616,6 +4616,16 @@ class RowProcessor:
             resume_attempt_offset=attempt_offset,
             resume_checkpoint_id=self._resume_checkpoint_id if attempt_offset > 0 else None,
         )
+        is_on_error_routed = scheduled.pending_path == TerminalPath.ON_ERROR_ROUTED.value
+        if is_on_error_routed and not scheduled.pending_error_hash:
+            # The parking disposition always persists the originating error
+            # hash for routed failures, so its absence is audit corruption —
+            # refuse to replay with a recomputed (synthetic) hash
+            # (filigree elspeth-d74d19f901).
+            raise AuditIntegrityError(
+                f"Scheduler pending sink work_item_id={scheduled.work_item_id!r} is ON_ERROR_ROUTED but carries no "
+                "pending_error_hash; the replayed outcome cannot preserve the originally-audited error hash."
+            )
         return RowResult(
             token=token,
             final_data=token.row_data,
@@ -4623,9 +4633,10 @@ class RowProcessor:
             path=TerminalPath(scheduled.pending_path),
             sink_name=scheduled.pending_sink_name,
             error=FailureInfo(exception_type="ResumedPendingSink", message=scheduled.pending_error_message or "")
-            if scheduled.pending_path == TerminalPath.ON_ERROR_ROUTED.value
+            if is_on_error_routed
             else None,
             scheduler_pending_sink=True,
+            authoritative_error_hash=scheduled.pending_error_hash if is_on_error_routed else None,
         )
 
     def _mark_claimed_scheduler_work_blocked(

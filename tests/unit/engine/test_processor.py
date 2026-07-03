@@ -3751,6 +3751,103 @@ class TestDurableSchedulerResumeDrain:
             )
         assert statuses == ["pending_sink"]
 
+    def _seed_parked_on_error_pending_sink(self, *, error_hash: str | None) -> tuple[Any, Any, Any]:
+        """Seed a durable ON_ERROR_ROUTED PENDING_SINK row via production verbs.
+
+        Returns (db, factory, processor) where processor is a FRESH resume
+        processor ("resume-worker") that has not yet drained. Both identities
+        are registered run_workers (the factory's run already registers its
+        leader, so unregistered claimants would be membership-fenced).
+        """
+        db, factory = _make_factory()
+        transform_node = NodeID("transform-1")
+        factory.data_flow.register_node(
+            run_id="test-run",
+            plugin_name="resume-transform",
+            node_type=NodeType.TRANSFORM,
+            plugin_version="1.0",
+            config={},
+            node_id=str(transform_node),
+            schema_config=_DYNAMIC_SCHEMA,
+        )
+        source_payload = make_row({"value": 42})
+        row = factory.data_flow.create_row(
+            run_id="test-run",
+            source_node_id="source-0",
+            row_index=0,
+            source_row_index=0,
+            ingest_sequence=0,
+            data=source_payload.to_dict(),
+        )
+        token = factory.data_flow.create_token(row.row_id, token_id="token-parked")
+        factory.scheduler.enqueue_ready(
+            run_id="test-run",
+            token_id=token.token_id,
+            row_id=row.row_id,
+            node_id=str(transform_node),
+            step_index=1,
+            ingest_sequence=0,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            available_at=datetime.now(UTC),
+        )
+        _register_test_worker(factory, "crashed-worker")
+        claimed = factory.scheduler.claim_ready(run_id="test-run", lease_owner="crashed-worker", lease_seconds=300, now=datetime.now(UTC))
+        assert claimed is not None
+        factory.scheduler.mark_pending_sink(
+            work_item_id=claimed.work_item_id,
+            row_payload_json=factory.scheduler.serialize_row_payload(source_payload),
+            sink_name="error_sink",
+            outcome=TerminalOutcome.FAILURE.value,
+            path=TerminalPath.ON_ERROR_ROUTED.value,
+            error_hash=error_hash,
+            # EMPTY original message: the class where a recomputed replay
+            # hash diverges from the originally-audited one.
+            error_message="",
+            now=datetime.now(UTC),
+            expected_lease_owner="crashed-worker",
+        )
+        processor = _make_processor(
+            factory,
+            node_step_map={NodeID("source-0"): 0, transform_node: 1},
+            node_to_next={NodeID("source-0"): transform_node, transform_node: None},
+            scheduler=factory.scheduler,
+            scheduler_lease_owner="resume-worker",
+        )
+        return db, factory, processor
+
+    def test_pending_sink_replay_preserves_persisted_error_hash(self) -> None:
+        """ON_ERROR_ROUTED replay carries the PERSISTED pending_error_hash
+        (elspeth-d74d19f901) instead of letting the accumulator recompute one
+        from the synthetic ResumedPendingSink failure evidence."""
+        from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes
+        from elspeth.engine.orchestrator.types import ExecutionCounters
+
+        stored_hash = "deadbeefdeadbeef"
+        _db, _factory, processor = self._seed_parked_on_error_pending_sink(error_hash=stored_hash)
+        ctx = make_context(landscape=_factory.plugin_audit_writer())
+
+        results = processor.drain_scheduled_work(ctx)
+
+        assert len(results) == 1
+        assert results[0].authoritative_error_hash == stored_hash
+        # And the accumulator prefers it end-to-end: the audit PendingOutcome
+        # carries the stored hash, not a recompute of 'ResumedPendingSink'/''.
+        counters = ExecutionCounters()
+        pending: dict[str, list[Any]] = {"error_sink": []}
+        accumulate_row_outcomes(results, counters, pending)
+        pending_outcome = pending["error_sink"][0][1]
+        assert pending_outcome is not None
+        assert pending_outcome.error_hash == stored_hash
+
+    def test_pending_sink_replay_fails_closed_on_missing_error_hash(self) -> None:
+        """An ON_ERROR_ROUTED pending sink with no persisted error hash is
+        audit corruption — replay must refuse rather than fabricate a hash."""
+        _db, _factory, processor = self._seed_parked_on_error_pending_sink(error_hash=None)
+        ctx = make_context(landscape=_factory.plugin_audit_writer())
+
+        with pytest.raises(AuditIntegrityError, match="pending_error_hash"):
+            processor.drain_scheduled_work(ctx)
+
     def test_evicted_worker_disposition_is_refused_mid_drain(self) -> None:
         """ADR-030 §G parity (elspeth-ba7b2cc25d): a registered worker whose
         run_workers row is evicted MID-PROCESSING cannot commit the claimed

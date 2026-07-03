@@ -51,6 +51,7 @@ def _make_result(
     result.sink_name = sink_name
     result.error = None
     result.scheduler_pending_sink = False
+    result.authoritative_error_hash = None
     return result
 
 
@@ -201,6 +202,7 @@ class TestAccumulateTerminalPairsRoutedOnError:
             message="upstream transform raised",
         )
         result.scheduler_pending_sink = False
+        result.authoritative_error_hash = None
         return result
 
     def test_routed_on_error_increments_routed_failure_counter(self) -> None:
@@ -232,6 +234,58 @@ class TestAccumulateTerminalPairsRoutedOnError:
         assert counters.rows_routed_success == 1
         assert counters.rows_succeeded == 1
         assert counters.rows_routed_failure == 0
+
+
+class TestAccumulateAuthoritativeErrorHash:
+    """Replayed pending sinks carry the PERSISTED error hash (elspeth-d74d19f901).
+
+    Crash recovery rebuilds ON_ERROR_ROUTED results with a synthetic
+    ``FailureInfo('ResumedPendingSink', <message>)``; recomputing the hash from
+    that synthetic evidence diverges from the originally-audited hash whenever
+    the original message was EMPTY (compute_error_hash falls back to the
+    exception TYPE exactly then). The replay path therefore threads the stored
+    ``pending_error_hash`` through ``RowResult.authoritative_error_hash`` and
+    the accumulator must prefer it over recomputation.
+    """
+
+    def _routed_on_error_result(self, *, authoritative_error_hash: str | None, message: str, exception_type: str) -> Mock:
+        from elspeth.contracts.results import FailureInfo
+
+        result = Mock()
+        result.outcome = TerminalOutcome.FAILURE
+        result.path = TerminalPath.ON_ERROR_ROUTED
+        result.token = make_token_info()
+        result.sink_name = "error_sink"
+        result.error = FailureInfo(exception_type=exception_type, message=message)
+        result.scheduler_pending_sink = True
+        result.authoritative_error_hash = authoritative_error_hash
+        return result
+
+    def test_replayed_pending_sink_prefers_persisted_hash(self) -> None:
+        counters = _make_counters()
+        pending = _make_pending()
+        # Synthetic replay evidence with an EMPTY message — the exact class
+        # where a recomputed hash diverges from the original.
+        result = self._routed_on_error_result(authoritative_error_hash="deadbeefdeadbeef", message="", exception_type="ResumedPendingSink")
+
+        accumulate_row_outcomes([result], counters, pending)
+
+        pending_outcome = pending["error_sink"][0][1]
+        assert pending_outcome is not None
+        assert pending_outcome.error_hash == "deadbeefdeadbeef"
+
+    def test_live_result_recomputes_hash_when_no_authoritative_hash(self) -> None:
+        from elspeth.engine._error_hash import compute_error_hash
+
+        counters = _make_counters()
+        pending = _make_pending()
+        result = self._routed_on_error_result(authoritative_error_hash=None, message="boom", exception_type="ValueError")
+
+        accumulate_row_outcomes([result], counters, pending)
+
+        pending_outcome = pending["error_sink"][0][1]
+        assert pending_outcome is not None
+        assert pending_outcome.error_hash == compute_error_hash("boom", exception_type="ValueError")
 
 
 class TestAccumulateTerminalPairsTerminal:

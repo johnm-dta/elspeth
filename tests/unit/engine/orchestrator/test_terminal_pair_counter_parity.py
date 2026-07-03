@@ -130,6 +130,7 @@ def _row_result(
         sink_name=sink_name,
         error=error,
         scheduler_pending_sink=False,
+        authoritative_error_hash=None,
     )
 
 

@@ -760,15 +760,34 @@ allow_hits:
     exact code the judge inspected) could not be carried. The qname-level rationale
     above was re-verified against the current code at this site.
   expires: '2026-09-03'
-- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=8aae88666dc782aa
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=47b1de7366b1e4a8
   owner: john
   reason: |-
-    PRESCRIBED FORM — Tier-3 schema-validation quarantine, recorded not swallowed. This except block in AzureBlobSource._validate_and_yield catches pydantic ValidationError from self._schema_class.model_validate(row_to_validate) — the source-boundary schema validation of an external row whose values may be invalid (the canonical Tier-3 trust boundary: external data may not conform to the declared/inferred schema). It is not a silent swallow: it calls ctx.record_validation_error(...) UNCONDITIONALLY with the validation error string and schema_mode (writing a verr_* record into the Landscape audit trail), then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (explicit operator routing that suppresses only the quarantine yield, never the audit record). This is the CLAUDE.md source doctrine: a row that fails schema validation is recorded and quarantined, the pipeline keeps processing other rows. The caught type is the narrow, expected pydantic ValidationError (never bare Exception); a wrong-type bug in our own validation wiring would surface as a different exception and crash. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
+    In AzureBlobSource._validate_and_yield (azure_blob_source.py:1063), the except ExternalHeaderError catches Tier-3 data faults raised by _normalize_row_keys on an external JSON/JSONL row: a non-object row, an external-key normalization failure, or a row-created field-mapping collision reclassified by _resolve_json_field_names. Config/our-code faults — bad field_mapping keys/values or a normalization-algorithm bug — remain plain ValueError and are deliberately NOT caught (they crash), mirroring the CSV header path's ExternalHeaderError/ValueError split. The handler records the failure UNCONDITIONALLY via ctx.record_validation_error(schema_mode='field_normalization'), then yields SourceRow.quarantined unless on_validation_failure == 'discard', and returns. Narrow catch, audited quarantine, no fabricated field names — the unusable external key set is recorded as an audit fact, not papered over.
+  safety: |-
+    Pending cicd-judge justification: this catch has no prior ACCEPTED verdict to
+    carry (the ExternalHeaderError split landed with the multi-source ingestion
+    work). The rationale above was verified against the current code at this site.
+  expires: '2026-09-03'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=8f47644ffe3f99c7
+  owner: john
+  reason: |-
+    In AzureBlobSource._validate_and_yield (azure_blob_source.py:1140), the except ContractFieldLimitExceeded catches the contract builder's field-count cap firing during sparse-field contract inference (process_sparse_fields) on an external JSON/JSONL row. Sparse external rows can mint unbounded new keys — attacker-controllable input — and the cap is the Tier-3 defence against contract-inflation; exceeding it is a property of the external data, not of our code. The handler records the failure UNCONDITIONALLY via ctx.record_validation_error(schema_mode=self._schema_config.mode) and yields SourceRow.quarantined unless on_validation_failure == 'discard'. Narrow catch, audited quarantine; only the offending row is quarantined and the pipeline keeps processing.
+  safety: |-
+    Pending cicd-judge justification: this catch has no prior ACCEPTED verdict to
+    carry (the sparse-field contract cap landed with the multi-source ingestion
+    work). The rationale above was verified against the current code at this site.
+  expires: '2026-09-03'
+- key: plugins/sources/azure_blob_source.py:R6:AzureBlobSource:_validate_and_yield:fp=6446ea48324b6b04
+  owner: john
+  reason: |-
+    PRESCRIBED FORM — Tier-3 schema-validation quarantine, recorded not swallowed. This except block in AzureBlobSource._validate_and_yield (azure_blob_source.py:1154) catches pydantic ValidationError from self._schema_class.model_validate(row_to_validate) — the source-boundary schema validation of an external row whose values may be invalid (the canonical Tier-3 trust boundary: external data may not conform to the declared/inferred schema). It is not a silent swallow: it calls ctx.record_validation_error(...) UNCONDITIONALLY with the validation error string and schema_mode (writing a verr_* record into the Landscape audit trail), then conditionally yields SourceRow.quarantined(...) unless on_validation_failure == "discard" (explicit operator routing that suppresses only the quarantine yield, never the audit record). This is the CLAUDE.md source doctrine: a row that fails schema validation is recorded and quarantined, the pipeline keeps processing other rows. The caught type is the narrow, expected pydantic ValidationError (never bare Exception); a wrong-type bug in our own validation wiring would surface as a different exception and crash — the in-try raise ValueError sites for missing field_resolution are code faults and propagate. R6 is a syntactic detector that does not recognise record_validation_error + yield SourceRow.quarantined as explicit error handling. The method is a generator (yields rows, never raises), so the @trust_boundary decorator is infeasible (raising-test contract); per-line allowlist is the prescribed honest mechanism.
   safety: |-
     Pending cicd-judge re-justification: the enclosing function changed with the
     multi-source ingestion work, so the prior ACCEPTED verdict (which binds to the
-    exact code the judge inspected) could not be carried. The qname-level rationale
-    above was re-verified against the current code at this site.
+    exact code the judge inspected) could not be carried; the fingerprint rotated
+    from fp=8aae88666dc782aa (that stale entry is replaced by this one). The
+    rationale above was re-verified against the current code at this site.
   expires: '2026-09-03'
 - key: plugins/infrastructure/clients/http.py:R1:AuditedHTTPClient:_send_ssrf_safe_request:fp=bdc0a2470c42fe8d
   owner: john
@@ -1116,7 +1135,7 @@ allow_hits:
   owner: john
   reason: |-
     This is a source-plugin Tier-3 ingestion boundary, not a Tier-1 audit-data read. In `src/elspeth/plugins/sources/azure_blob_source.py:1039`, `_validate_and_yield(self, row: Any, ctx: SourceContext, *, source_row_index: int)` validates an externally supplied Azure blob row; the docstring says the input `row` "May be non-dict for malformed external data" at lines 1045-1047. The caught exception is raised while accepting sparse JSON/JSONL fields from that external row: lines 1108-1111 call `self._contract_builder.process_sparse_fields(validated_row, self._field_resolution.resolution_mapping)`, and `ContractBuilder.process_sparse_fields` enforces a cap on externally inferred fields. At the flagged site, lines 1134-1147 do not silently continue: `except ContractFieldLimitExceeded as e:` records the validation failure with `ctx.record_validation_error(... error=str(e) ...)` and, unless configured to discard invalid source data, yields `SourceRow.quarantined(...)`.
-    
+
     The future-drift-sensitive part is that this suppression is valid only while this catch remains limited to `ContractFieldLimitExceeded` from sparse external field inference and continues to record/quarantine the row. Nearby internal invariants still crash: line 1107 raises `ValueError("field_resolution must be established before sparse-field contract inference")` and is not caught by this handler. If this catch were broadened, stopped calling `ctx.record_validation_error`, or started covering internal corruption/config defects, it would become BLOCK.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -1289,7 +1308,7 @@ allow_hits:
   owner: john
   reason: |-
     This is a source-boundary validation path, not a Tier-1 audit-data read or internal invariant swallow. In `src/elspeth/plugins/sources/json_source.py:498-507`, `_validate_and_yield` receives `row: Any` where the docstring says the row "May be a non-dict JSON value from the external source boundary." The caught exception at `src/elspeth/plugins/sources/json_source.py:586` is raised while converting external JSON into a contract-owned `SourceRow`: the function normalizes Tier-3 JSON keys at `src/elspeth/plugins/sources/json_source.py:513`, validates/coerces with `self._schema_class.model_validate(normalized_row)` at `src/elspeth/plugins/sources/json_source.py:535`, updates sparse-field contract metadata at `src/elspeth/plugins/sources/json_source.py:560-564`, then emits `SourceRow.valid(...)` only after `contract.validate(...)` passes at `src/elspeth/plugins/sources/json_source.py:566-585`.
-    
+
     The `except ContractFieldLimitExceeded as e:` block is a prescribed source-boundary quarantine form: it calls `_record_validation_failure(... row=normalized_row, error_msg=str(e), source_row_index=source_row_index)` and yields the returned quarantined row if not in discard mode (`src/elspeth/plugins/sources/json_source.py:586-594`). That helper records the validation error to the source context and returns `SourceRow.quarantined(...)` with the same `source_row_index` (`src/elspeth/plugins/sources/json_source.py:638-650`). If this site stops recording `ctx.record_validation_error`, stops yielding `SourceRow.quarantined`, catches broader internal exceptions, or moves to Tier-1 persisted/audit data, this suppression should become stale and invalid.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.
@@ -1348,7 +1367,7 @@ allow_hits:
   owner: john
   reason: |-
     This is a source-ingestion Tier-3 boundary, not a Tier-1 defensive-programming defect. In `src/elspeth/plugins/sources/csv_source.py:252-257`, `_load_from_file` is explicitly the file-reading boundary: `"Load rows from an open CSV file handle"` and `"file-reading boundary (Tier 3 external data)"`. The `csv.Error` at `src/elspeth/plugins/sources/csv_source.py:491` is raised while parsing external CSV bytes via `next_nonblank_record()`.
-    
+
     The exception is not silently swallowed: the site reifies the parse failure into audit/validation state with `ctx.record_validation_error(...)` at `src/elspeth/plugins/sources/csv_source.py:510-515`, optionally emits a quarantined row carrying `error=error_msg` at `src/elspeth/plugins/sources/csv_source.py:517-523`, and then stops with `return  # Don't continue with corrupted parser state` at `src/elspeth/plugins/sources/csv_source.py:524`. That is the prescribed source-boundary pattern for malformed external data: record/quarantine or discard according to policy, then stop rather than trusting a corrupted CSV parser.
   safety: |-
     Suppression gated by cicd-judge; see judge_rationale below.

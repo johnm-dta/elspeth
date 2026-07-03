@@ -7,6 +7,7 @@ import {
   sendTutorialAbandonBeacon,
 } from "@/api/client";
 import { usePreferencesStore } from "@/stores/preferencesStore";
+import { useSessionStore } from "@/stores/sessionStore";
 import { TutorialTurn1Welcome } from "./TutorialTurn1Welcome";
 import { TutorialGuidedShell } from "./TutorialGuidedShell";
 import { TutorialTurn4Run } from "./TutorialTurn4Run";
@@ -69,10 +70,25 @@ export function HelloWorldTutorial(): JSX.Element {
   // Retry that can never succeed. Recovery: fall back to a fresh Welcome;
   // the stage-persist effect above then clears the stale server-side resume
   // fields (welcome maps to all-null in progressForTutorialState).
-  const onSessionMissing = useCallback((): void => {
+  // Idempotent per dead id: the mount-time membership check below and
+  // TutorialGuidedShell's guided/start 404 handler can BOTH detect the same
+  // dead resume (they race), and the recovery must run once — otherwise the
+  // warning double-logs and the reducer resets twice.
+  const recoveredSessionIdRef = useRef<string | null>(null);
+  const onSessionMissing = useCallback((deadSessionId: string): void => {
+    if (recoveredSessionIdRef.current === deadSessionId) {
+      return;
+    }
+    recoveredSessionIdRef.current = deadSessionId;
     console.warn(
       "[tutorial] persisted resume session no longer exists — restarting at Welcome",
     );
+    // Release the app-level binding too: resetForTutorialSession bound
+    // activeSessionId to the (dead) resume id before the server could 404
+    // it, and consumers keyed on activeSessionId (run list, composer
+    // progress) would otherwise keep polling the dead session while the
+    // user sits at Welcome.
+    useSessionStore.getState().unbindMissingSession(deadSessionId);
     setSessionId(null);
     dispatch({ type: "reset" });
   }, []);
@@ -95,7 +111,7 @@ export function HelloWorldTutorial(): JSX.Element {
           return;
         }
         if (!sessions.some((session) => session.id === resumedSessionId)) {
-          onSessionMissing();
+          onSessionMissing(resumedSessionId);
         }
       })
       .catch(() => undefined);

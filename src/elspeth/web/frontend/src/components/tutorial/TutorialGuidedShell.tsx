@@ -39,7 +39,7 @@ interface TutorialGuidedShellProps {
    * the learner is stranded on an empty page. The parent resets to a fresh
    * Welcome and clears the stale resume fields.
    */
-  onSessionMissing?: () => void;
+  onSessionMissing?: (deadSessionId: string) => void;
 }
 
 /** The start chain 404s when the persisted resume session was swept/archived. */
@@ -139,7 +139,7 @@ export function TutorialGuidedShell({
         await useInterpretationEventsStore.getState().refreshAll(sessionId);
       } catch (err) {
         if (isSessionMissingError(err) && onSessionMissing !== undefined) {
-          onSessionMissing();
+          onSessionMissing(sessionId);
           return;
         }
         setError(formatError(err));

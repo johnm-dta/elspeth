@@ -127,6 +127,9 @@ describe("TutorialGuidedShell", () => {
       />,
     );
     await waitFor(() => expect(onSessionMissing).toHaveBeenCalledTimes(1));
+    // The dead id is passed so the parent can key idempotency on it and
+    // release the store binding for exactly that session.
+    expect(onSessionMissing).toHaveBeenCalledWith("sess-gone");
     expect(screen.queryByRole("alert")).toBeNull();
   });
 

@@ -78,22 +78,44 @@ vi.mock("@/api/client", () => ({
 // Replace the embedded guided surface with a one-button stub that fires the
 // completion callback; the real ChatPanel guided behaviour is covered by
 // TutorialGuidedShell.test.tsx.
-vi.mock("./TutorialGuidedShell", () => ({
-  TutorialGuidedShell: ({
-    onCompleted,
-  }: {
-    onCompleted: (s: string) => void;
-  }) => (
-    <button type="button" onClick={() => onCompleted("sess-new")}>
-      finish-guided
-    </button>
-  ),
-}));
+// When set, the stub fires onSessionMissing TWICE on mount with its session
+// id — simulating the live race where the shell's guided/start 404 handler
+// and the mount-time membership check both detect the same dead resume.
+let stubShellReportsSessionMissing = false;
+vi.mock("./TutorialGuidedShell", async () => {
+  const { useEffect } = await import("react");
+  return {
+    TutorialGuidedShell: ({
+      sessionId,
+      onCompleted,
+      onSessionMissing,
+    }: {
+      sessionId: string;
+      onCompleted: (s: string) => void;
+      onSessionMissing?: (deadSessionId: string) => void;
+    }) => {
+      useEffect(() => {
+        if (stubShellReportsSessionMissing) {
+          onSessionMissing?.(sessionId);
+          onSessionMissing?.(sessionId);
+        }
+        // Mount-only, mirroring the real shell's start effect.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+      return (
+        <button type="button" onClick={() => onCompleted("sess-new")}>
+          finish-guided
+        </button>
+      );
+    },
+  };
+});
 
 describe("HelloWorldTutorial staged flow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetStore(usePreferencesStore);
+    stubShellReportsSessionMissing = false;
   });
 
   it("renders the welcome bookend first", () => {
@@ -405,6 +427,37 @@ describe("HelloWorldTutorial — server-persisted resume (elspeth-918f4434b3)", 
         ),
       ).toBe(true);
     });
+  });
+
+  it("recovery is idempotent per dead id and releases the app-level session binding", async () => {
+    // Live-observed residue of the dead-resume recovery: the shell's
+    // guided/start 404 handler and the mount-time membership check RACE and
+    // both detect the same dead session — the warning double-logged — and
+    // activeSessionId stayed bound to the corpse, so InlineRunResults kept
+    // polling /runs (404) while the user sat at Welcome.
+    const { useSessionStore } = await import("@/stores/sessionStore");
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    stubShellReportsSessionMissing = true;
+    useSessionStore.setState({ activeSessionId: "sess-resume" });
+    usePreferencesStore.setState({
+      loaded: true,
+      tutorialStage: "guided",
+      tutorialSessionId: "sess-resume",
+    });
+    render(<HelloWorldTutorial />);
+    expect(
+      await screen.findByRole("heading", { name: /welcome/i }),
+    ).toBeInTheDocument();
+    // The dead binding is released — pollers keyed on activeSessionId stop.
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    // Double detection of the same dead id recovers ONCE.
+    const recoveryWarns = warnSpy.mock.calls.filter(([msg]) =>
+      String(msg).includes("persisted resume session no longer exists"),
+    );
+    expect(recoveryWarns).toHaveLength(1);
+    warnSpy.mockRestore();
   });
 
   it("resumes a completed run at the audit step without re-executing", async () => {

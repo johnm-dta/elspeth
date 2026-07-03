@@ -273,6 +273,17 @@ interface SessionState {
    * Routing it through this one action means the field list lives here.
    */
   resetForTutorialSession: (sessionId: string) => void;
+  /**
+   * Release the active-session binding when `sessionId` turns out not to
+   * exist server-side (dead tutorial resume). Guarded: a no-op unless
+   * `activeSessionId` still equals `sessionId`, so a recovery that races a
+   * legitimate re-bind can never blank the new session. Without this, the
+   * tutorial's dead-resume recovery resets the tutorial machine but leaves
+   * the store bound to the dead id — and every consumer keyed on
+   * `activeSessionId` (InlineRunResults' run list, composer progress)
+   * keeps 404-ing against a session that will never come back.
+   */
+  unbindMissingSession: (sessionId: string) => void;
   renameSession: (id: string, title: string) => Promise<void>;
   archiveSession: (id: string) => Promise<void>;
   sendMessage: (content: string, signal?: AbortSignal) => Promise<void>;
@@ -597,6 +608,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   resetForTutorialSession(sessionId: string) {
     set({
       activeSessionId: sessionId,
+      messages: [],
+      compositionState: null,
+      compositionStateLoaded: false,
+      compositionProposals: [],
+      composerPreferences: null,
+      staleProposalIds: [],
+      proposalActionPendingIds: [],
+      composerProgress: null,
+      stateVersions: [],
+      isComposing: false,
+      error: null,
+      selectedNodeId: null,
+      ...clearedGuidedState(),
+      ...clearedRecoveryState(),
+    });
+  },
+
+  unbindMissingSession(sessionId: string) {
+    if (get().activeSessionId !== sessionId) {
+      return;
+    }
+    set({
+      activeSessionId: null,
       messages: [],
       compositionState: null,
       compositionStateLoaded: false,

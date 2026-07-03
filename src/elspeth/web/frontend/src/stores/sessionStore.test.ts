@@ -1674,6 +1674,42 @@ describe("sessionStore", () => {
     });
   });
 
+  describe("unbindMissingSession", () => {
+    it("releases the binding and session-scoped fields when the dead id is still active", () => {
+      // The dead-resume recovery path: resetForTutorialSession bound the
+      // (dead) resume id before the server 404'd it. Consumers keyed on
+      // activeSessionId (InlineRunResults' run list) would keep polling the
+      // corpse unless recovery releases the binding.
+      useSessionStore.setState({
+        activeSessionId: "dead-session",
+        messages: [{ id: "stale-message" } as unknown as ChatMessage],
+        isComposing: true,
+        error: "stale error",
+      });
+
+      useSessionStore.getState().unbindMissingSession("dead-session");
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBeNull();
+      expect(state.messages).toEqual([]);
+      expect(state.isComposing).toBe(false);
+      expect(state.error).toBeNull();
+    });
+
+    it("is a no-op when a different session has since been bound (recovery races a re-bind)", () => {
+      useSessionStore.setState({
+        activeSessionId: "fresh-session",
+        messages: [{ id: "fresh-message" } as unknown as ChatMessage],
+      });
+
+      useSessionStore.getState().unbindMissingSession("dead-session");
+
+      const state = useSessionStore.getState();
+      expect(state.activeSessionId).toBe("fresh-session");
+      expect(state.messages).toHaveLength(1);
+    });
+  });
+
   // ── Phase 1B: createSession honours composer default-mode preference ──
   describe("createSession honours default mode", () => {
     it("leaves guidedSession null when default mode is freeform", async () => {

@@ -23,6 +23,7 @@ import { SideRailValidationBanner } from "./components/sidebar/SideRailValidatio
 import { useAuthStore } from "./stores/authStore";
 import { initStoreSubscriptions, requestValidate } from "./stores/subscriptions";
 import { useSessionStore } from "./stores/sessionStore";
+import { isGuidedBuildActive } from "./components/chat/guided/guidedBuildActive";
 import { useExecutionStore } from "./stores/executionStore";
 import {
   selectTutorialCompleted,
@@ -97,6 +98,12 @@ function App() {
 
   const createSession = useSessionStore((s) => s.createSession);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  // Guided build on screen → ChatPanel renders the two-column workspace and
+  // this shell must drop the freeform SideRail (the workspace rail replaces
+  // it). Selector returns a primitive so zustand only re-renders on flips.
+  const guidedBuildActive = useSessionStore((s) =>
+    isGuidedBuildActive(s.guidedSession, s.guidedNextTurn),
+  );
   const compositionState = useSessionStore((s) => s.compositionState);
   const sessionsLoaded = useSessionStore((s) => s.sessionsLoaded);
   const hasLiveSessions = useSessionStore((s) =>
@@ -481,20 +488,30 @@ function App() {
                 <ChatPanel onOpenSecrets={openSecrets} />
               }
               siderail={
-                <SideRail
-                  auditReadinessSlot={<AuditReadinessPanel />}
-                  validationBannerSlot={<SideRailValidationBanner />}
-                  graphMiniSlot={<GraphMiniView />}
-                  catalogSlot={<CatalogButton />}
-                  // Phase 6B Task 9 / Task 10: the three-button CompletionBar
-                  // is the single mount surface for Save-for-review, Run,
-                  // and Copy-YAML. The standalone ExportYamlButton +
-                  // ExecuteButton primitives that previously occupied
-                  // dedicated slots are now rendered INSIDE CompletionBar;
-                  // Phase 5b interpretation-gating and YAML modal dispatch
-                  // are preserved untouched.
-                  completionBarSlot={<CompletionBar />}
-                />
+                // While a guided build is on screen the workspace inside
+                // ChatPanel carries its own pipeline rail — suppress the
+                // freeform SideRail or two rails render side by side. It
+                // returns the moment the session leaves the build (completed
+                // terminal, exit to freeform): Run / Save-for-review /
+                // Copy-YAML live in CompletionBar, so the completed surface
+                // must have it back. isGuidedBuildActive is the SAME
+                // predicate ChatPanel's workspace branch renders under.
+                guidedBuildActive ? null : (
+                  <SideRail
+                    auditReadinessSlot={<AuditReadinessPanel />}
+                    validationBannerSlot={<SideRailValidationBanner />}
+                    graphMiniSlot={<GraphMiniView />}
+                    catalogSlot={<CatalogButton />}
+                    // Phase 6B Task 9 / Task 10: the three-button CompletionBar
+                    // is the single mount surface for Save-for-review, Run,
+                    // and Copy-YAML. The standalone ExportYamlButton +
+                    // ExecuteButton primitives that previously occupied
+                    // dedicated slots are now rendered INSIDE CompletionBar;
+                    // Phase 5b interpretation-gating and YAML modal dispatch
+                    // are preserved untouched.
+                    completionBarSlot={<CompletionBar />}
+                  />
+                )
               }
             />
           </div>

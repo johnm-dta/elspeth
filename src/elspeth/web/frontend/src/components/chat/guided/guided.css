@@ -92,8 +92,7 @@
   line-height: 1.2;
 }
 
-.guided-current-decision,
-.guided-step-chat {
+.guided-current-decision {
   margin: var(--space-md);
   padding: var(--space-md);
   border: 1px solid var(--color-border-strong);
@@ -101,76 +100,31 @@
   background-color: var(--color-surface);
 }
 
-/* Operator request: cap the guided surface to a centred content "sheet" on wide
-   viewports instead of full-bleed. The stepper (a direct child) and the
-   scroll-region content are capped + centred; the full-width chrome — the
-   header (top) and the bottom-docked composer — is deliberately NOT capped, so
-   the surface reads like a normal chat window (full-width bars top/bottom, a
-   centred content column between). 64rem keeps the 5-step stepper above its
-   640px 2-column breakpoint. (Width is provisional — tune to taste.)
-   max-width caps the stretched flex item; margin-inline:auto centres it once
-   capped and collapses to a flush fill below the cap (narrow screens
-   unaffected). */
-.chat-panel--guided > .guided-workflow,
-.guided-scroll > * {
-  max-width: 64rem;
-  margin-inline: auto;
+/* The composer section itself is chrome-free — it docks as a plain input
+   strip under the conversation column (freeform's idiom; the inner
+   .chat-input carries the border-top seam + padding). The dashed "input
+   zone" card it used to be died with the pre-workspace flat layout. */
+
+/* Stepper: full-bleed band above the workspace (the tutorial's arrangement,
+   promoted with the workspace — a centred 64rem stepper over a full-bleed
+   two-column workspace read as misaligned). Overrides the base
+   .guided-workflow padding: --space-xs top is the header-band tightening
+   (D9); --space-lg inline aligns with the workspace gutters. */
+.chat-panel--guided > .guided-workflow {
+  max-width: none;
+  margin-inline: 0;
+  padding: var(--space-xs) var(--space-lg) 0;
 }
 
-/* Scrollable content region between the stepper and the docked composer
-   (mirrors the freeform body's `.chat-panel-messages`). flex:1 absorbs the
-   remaining height; min-height:0 lets it shrink below its content size so the
-   non-tutorial composer below stays pinned at the bottom — the classic
-   flex-column chat layout. */
-.guided-scroll {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-/* "Describe what you want" — a direct child of .chat-panel--guided. In LIVE
-   guided it DOCKS at the bottom (flex-shrink:0 against the full-height panel +
-   flex:1 scroll region — the classic chat layout). In the TUTORIAL the panel is
-   content-height single-document flow (see tutorial.css `.tutorial-shell--guided`),
-   so it simply flows LAST in the stack and flex-shrink:0 is inert there. Either
-   way: chrome-light (dashed surface + top divider, not a full card) and CAPPED +
-   centred to the same 64rem sheet as the decision + summary cards. */
-.chat-panel--guided > .guided-step-chat {
-  flex-shrink: 0;
-  /* width:100% is REQUIRED for a flex-column item: `margin-inline:auto` alone
-     makes a flex item shrink-to-content and centre narrow (it overrides the
-     default align-items:stretch). With an explicit width the item fills to the
-     64rem cap, then the auto margins centre it — matching the summary/decision
-     cards (which fill 64rem because they live in the block-flow .guided-scroll,
-     not in this flex column). */
-  width: 100%;
-  max-width: 64rem;
-  margin: 0 auto var(--space-md);
-  /* Card chrome (dashed border, elevated surface) inherited from the base
-     .guided-step-chat rule — the dashed "input zone" affordance sets the compose
-     box apart from the solid summary/decision cards while sharing their column. */
-}
-
-/* Operator request (revised): align the current decision with the pipeline
-   summary card above it — both share the centred 64rem sheet so their left edges
-   line up. (Earlier this went full-width edge-to-edge; the two-zone split read as
-   misaligned against the centred summary, so it's now a matching centred card.)
-   Only the cap + centred margin are set here; the card chrome (border / radius /
-   surface / padding) falls back to the base `.guided-current-decision` rule, so
-   it visually matches `.guided-graph-panel`. */
-.guided-scroll > .guided-current-decision {
-  max-width: 64rem;
-  margin: var(--space-md) auto;
-}
-
-/* ── WORKSPACE (tutorial; the future first-class hybrid layout) ───────────────
+/* ── THE WORKSPACE (the one guided layout; grew up inside the tutorial) ───────
    Freeform-congruent conversation column (internal scroll region over a docked
    composer) on the LEFT; a SideRail-width artifact rail flush RIGHT. Rendered
-   inside the height-bounded tutorial frame (tutorial.css
-   `.tutorial-shell--guided` — the COLUMN scrolls, not the page). Grid mirrors
-   the freeform `.app-layout` template (shared.css) so the rail reads as the
-   same chrome. Built with general `.guided-workspace*` classes (not
-   tutorial-only) so it can be promoted to a first-class mode later. */
+   inside a height-bounded frame — the app shell's .layout-chat → .chat-panel
+   chain, or tutorial.css `.tutorial-shell--guided` — so the COLUMN scrolls,
+   not the page. Grid mirrors the freeform `.app-layout` template (shared.css)
+   so the rail reads as the same chrome; while this layout is on screen the
+   App suppresses the freeform SideRail (Layout's null-siderail single-column
+   shell), so the two rails never render together. */
 .guided-workspace {
   display: grid;
   grid-template-columns: minmax(0, 1fr) var(--siderail-width);
@@ -322,7 +276,6 @@
   margin-bottom: var(--space-md);
 }
 
-.guided-step-chat-heading,
 .guided-history-heading {
   margin: 0 0 var(--space-xs) 0;
   font-size: var(--font-size-base);
@@ -567,40 +520,15 @@
   color: var(--color-text-secondary);
 }
 
-.guided-step-chat {
-  border-style: dashed;
-  background-color: var(--color-surface-elevated);
-}
-
-/* Tutorial workspace: the composer docks bare under the conversation column —
-   freeform's input-strip idiom, not a dashed card floating in the stream.
-   Kills the base card chrome (margin/padding/border/radius/surface + the
-   dashed restyle above); same-specificity later-source wins within this file.
-   The inner .chat-input carries the border-top seam + padding (chat.css), so
-   the section itself must stay flush or the seam doubles. Live guided keeps
-   the dashed card untouched. */
-.guided-step-chat--bare {
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: none;
-}
-
-/* Sent state swaps the ChatInput (and its .chat-input padding AND border-top
-   seam) for a static status line — give that line the input strip's FULL
-   chrome, not just an inset: without the border-top the docked band loses its
-   seam for the whole review-the-decision phase, and a --space-md inset would
-   shift the text 4px sideways every time the composer flips states. */
-.guided-step-chat--bare .guided-step-chat-sent {
-  padding: var(--space-sm) var(--space-lg);
-  border-top: 1px solid var(--color-border);
-}
-
 /* Tutorial: shown in place of the locked chat box once the step's prompt has
-   been Sent (the request is in the transcript above). */
+   been Sent (the request is in the transcript above). The sent line swaps
+   OUT the ChatInput (and its .chat-input padding AND border-top seam), so it
+   carries the input strip's FULL chrome itself: without the border-top the
+   docked band loses its seam for the whole review-the-decision phase. */
 .guided-step-chat-sent {
   margin: 0;
+  padding: var(--space-sm) var(--space-lg);
+  border-top: 1px solid var(--color-border);
   color: var(--color-text-secondary);
   font-size: var(--font-size-sm);
   line-height: 1.45;
@@ -1968,68 +1896,7 @@
 }
 
 /* ---------------------------------------------------------------------------
-   GuidedChatHistory — per-step transcript (You / Assistant turns).
-   These classes were undefined, so the role and step badges collapsed together
-   ("YouSource" / "AssistantSource") with no separation and the content ran flat.
-   Style the role+step as a muted header line above each turn's content.
-   --------------------------------------------------------------------------- */
-.guided-chat-history {
-  /* `auto` inline margins centre the transcript in the 64rem sheet it inherits
-     from `.guided-scroll > *`; a bare `margin` shorthand was clobbering
-     `margin-inline:auto` and pinning it hard left, misaligned with the centred
-     cards (the YOU/ASSISTANT transcript rendered in a far-left column). Same trap
-     as .guided-graph-panel / .guided-history; only surfaces once a turn has been
-     sent. */
-  margin: var(--space-md) auto;
-}
-
-.guided-chat-history-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-md);
-}
-
-.guided-chat-history-role {
-  font-size: var(--font-size-xs);
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-secondary);
-}
-
-/* Middot separator between the role badge and the step label so they never
-   read as one word. */
-.guided-chat-history-step {
-  margin-left: var(--space-xs);
-  font-size: var(--font-size-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-text-muted);
-}
-
-.guided-chat-history-step::before {
-  content: "·";
-  margin-right: var(--space-xs);
-  color: var(--color-text-muted);
-}
-
-.guided-chat-history-content {
-  margin: var(--space-2xs) 0 0;
-  /* Readable measure — the narration must not run the full ~1300px guided
-     column. ~70 characters keeps lines scannable; on mobile the viewport is
-     already narrower than 70ch so this never constrains the small screen. */
-  max-width: 70ch;
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-sm);
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-/* ---------------------------------------------------------------------------
-   Stage dividers — GuidedChatHistory bubbles variant (tutorial workspace).
+   Stage dividers — GuidedChatHistory bubble transcript.
    One centred divider per step-change boundary in the transcript. Rides
    freeform's .bubble-system centred full-width visual (chat.css); the base
    class is shared with freeform system notices, so divider-specific styling

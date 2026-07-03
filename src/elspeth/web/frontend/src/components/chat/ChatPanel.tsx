@@ -37,6 +37,7 @@ import { GUIDED_EXPLAIN_MESSAGE } from "./guided/explainPrompt";
 import { GuidedHistory } from "./guided/GuidedHistory";
 import { GUIDED_STEP_LABELS } from "./guided/stepLabels";
 import { GuidedTurn } from "./guided/GuidedTurn";
+import { isGuidedBuildActive } from "./guided/guidedBuildActive";
 import { latestAssistantRationale } from "./guided/guidedRationale";
 import { PipelineGloss } from "./guided/PipelineGloss";
 import {
@@ -711,10 +712,10 @@ export function ChatPanel({
       composerSectionRef.current?.focus({ preventScroll: true });
     }
   }, [guidedChatPending]);
-  // Tutorial workspace conversation column (.guided-workspace-scroll). Its own
+  // Guided workspace conversation column (.guided-workspace-scroll). Its own
   // ref + at-bottom tracking — NOT freeform's messagesEndRef/scrollContainerRef
   // machinery, which is keyed to sessionStore.messages and only mounted in the
-  // freeform body. Null on every non-tutorial branch, so the auto-scroll
+  // freeform body. Null on every non-guided branch, so the auto-scroll
   // effect below no-ops there. The at-bottom flag is a ref (not state): it is
   // only ever read inside the effect, and a scroll listener that set state
   // would re-render the whole panel on every wheel tick.
@@ -751,7 +752,7 @@ export function ChatPanel({
     setShowScrollButton(!atBottom);
   }
 
-  // Tutorial conversation column: record whether the user sits at the bottom
+  // Guided conversation column: record whether the user sits at the bottom
   // (freeform's 40px heuristic). Measured on scroll — BEFORE any append — so
   // the auto-scroll effect below reads the pre-append position; measuring
   // inside the effect would see the just-appended turn's height and misread
@@ -1272,7 +1273,7 @@ export function ChatPanel({
     [sendMessage],
   );
 
-  // Tutorial workspace auto-scroll: keep the conversation column pinned to the
+  // Guided workspace auto-scroll: keep the conversation column pinned to the
   // bottom as turns arrive (chat_history growth) and when a Send starts
   // (guidedChatPending flips true), but ONLY while the user already sits
   // within 40px of the bottom — a reader scrolled up into the transcript must
@@ -1462,15 +1463,15 @@ export function ChatPanel({
   // server turn yet. Render the guided surface — crucially the chat box — even
   // without a next turn so the operator can describe the transforms; otherwise
   // the panel falls through to the "Preparing…" flash and the build never starts.
-  const atStep3AwaitingTransforms =
-    guidedSession != null &&
-    !guidedSession.terminal &&
-    guidedNextTurn == null &&
-    guidedSession.step === "step_3_transforms";
+  //
+  // The predicate is shared with App (isGuidedBuildActive), which suppresses
+  // the freeform SideRail while this branch renders — the workspace rail
+  // replaces it. The inline null/terminal re-checks exist only so TypeScript
+  // narrows guidedSession inside the branch; they are implied by the helper.
   if (
     guidedSession &&
     !guidedSession.terminal &&
-    (guidedNextTurn || atStep3AwaitingTransforms)
+    isGuidedBuildActive(guidedSession, guidedNextTurn)
   ) {
     // Tutorial: the per-stage locked prompt has already been Sent once the
     // current step carries a user turn in the server-authoritative chat_history.
@@ -1510,17 +1511,13 @@ export function ChatPanel({
     // GUIDED_CHAT_PLACEHOLDERS.
     const stepComposer = (
       <section
-        // Tutorial: --bare strips the dashed card chrome so the composer docks
-        // as a plain input strip under the conversation column (freeform's
-        // border-top idiom). The section + role=region + aria-label survive in
-        // BOTH modes — the "Describe what you want" landmark is load-bearing
-        // for AT navigation and the staging e2e locators
-        // (tutorial-probe/tutorial-reliability .staging.spec.ts).
-        className={
-          isTutorial
-            ? "guided-step-chat guided-step-chat--bare"
-            : "guided-step-chat"
-        }
+        // The composer docks as a plain input strip under the conversation
+        // column (freeform's border-top idiom) — no card chrome; the inner
+        // .chat-input carries the seam. The section + role=region +
+        // aria-label survive in BOTH modes — the "Describe what you want"
+        // landmark is load-bearing for AT navigation and the staging e2e
+        // locators (tutorial-probe/tutorial-reliability .staging.spec.ts).
+        className="guided-step-chat"
         role="region"
         aria-label="Describe what you want"
         // Pending-swap focus contract plumbing (see the useLayoutEffect by
@@ -1544,11 +1541,10 @@ export function ChatPanel({
           }
         }}
       >
-        {/* Visible heading is live-guided card furniture; the bare tutorial
-            composer keeps only the aria-label for its accessible name. */}
-        {!isTutorial && (
-          <h2 className="guided-step-chat-heading">Describe what you want</h2>
-        )}
+        {/* No visible heading — the bare docked strip carries only the
+            aria-label for its accessible name (the old dashed-card heading
+            was live-guided furniture that died with the pre-workspace
+            layout). */}
         {tutorialStepBuilt ? (
           // Tutorial: the locked prompt was already Sent for this step (it is
           // in the transcript above) AND a forward affordance exists below.
@@ -1611,10 +1607,9 @@ export function ChatPanel({
     );
 
     // The "current decision" panel (eyebrow + per-step rationale + the turn
-    // widget). Extracted so it can be PLACED PER MODE: inside .guided-scroll
-    // for live guided, or LAST inside the tutorial's conversation-column
-    // scroll region (.guided-workspace-scroll) — the action zone between the
-    // reply and the composer. It is deliberately NOT docked with the composer:
+    // widget). Rendered LAST inside the conversation-column scroll region
+    // (.guided-workspace-scroll) — the action zone between the reply and the
+    // composer. It is deliberately NOT docked with the composer:
     // a tall schema/wire widget in a fixed dock crushes the transcript (the
     // recorded tutorial.css fill-viewport failure); inside the scroll region
     // the step-advance focus effect scrolls it into view after a Send instead.
@@ -1768,17 +1763,15 @@ export function ChatPanel({
         )}
         {/* "What just happened / what to do" surfaces.
 
-            Live guided keeps the classic chat layout: a single scroll region
-            (.guided-scroll) above a bottom-docked composer.
-
-            The TUTORIAL uses the WORKSPACE — a hybrid of the guided + freeform
-            modes, intended to graduate into a first-class interface: a
-            freeform-congruent conversation column (internal scroll: bubble
-            transcript → run results → acknowledgements → the current decision
-            as the action zone) over a docked composer, plus a SideRail-width
-            artifact rail (pipeline summary + decisions so far) flush right.
-            Both arrangements reuse the SAME content pieces, just composed
-            per branch. */}
+            THE WORKSPACE — promoted from the tutorial to the one guided
+            layout (operator directive 2026-07-03; the flat .guided-scroll
+            arrangement is gone): a freeform-congruent conversation column
+            (internal scroll: bubble transcript → run results →
+            acknowledgements → the current decision as the action zone) over
+            a docked composer, plus a SideRail-width artifact rail (pipeline
+            summary + decisions so far) flush right. While this surface is
+            active the App suppresses the freeform SideRail — the workspace
+            rail IS the rail (isGuidedBuildActive keeps the two in step). */}
         {(() => {
           // Shared pieces. aria-live rationale: each piece owns its OWN live
           // region — GuidedChatHistory (role=log), AcknowledgementLiveRegion
@@ -1796,10 +1789,7 @@ export function ChatPanel({
             />
           );
           const transcript = (
-            <GuidedChatHistory
-              chatHistory={guidedSession.chat_history}
-              variant={isTutorial ? "bubbles" : "flat"}
-            />
+            <GuidedChatHistory chatHistory={guidedSession.chat_history} />
           );
           // Persistent-mount contract (AcknowledgementStack.tsx): the stack
           // returns null when empty, so the count announcer must live outside
@@ -1819,89 +1809,69 @@ export function ChatPanel({
               }}
             />
           );
-          // The canonical "what I built" verification card (gloss + validation).
-          // The graph THUMBNAIL is tutorial-only — live guided shows it in the
-          // SideRail; both expand the SAME App-root GraphModal.
+          // The canonical "what I built" verification card (gloss + validation
+          // + graph thumbnail). The App SideRail is suppressed while this
+          // surface is active, so the thumbnail lives here for every guided
+          // session; it expands the App-root GraphModal.
           const summaryCard = (
             <section className="guided-graph-panel" aria-label="Pipeline so far">
               <PipelineGloss compositionState={compositionState} />
               <PipelineValidationSummary isTutorial={isTutorial} />
-              {isTutorial && <GraphMiniView />}
+              <GraphMiniView />
             </section>
           );
 
-          if (isTutorial) {
-            return (
-              <div className="guided-workspace">
-                {/* LEFT: the conversation column (the freeform half) — an
-                    internal scroll region over a docked composer. */}
-                <div className="guided-workspace-stream">
-                  {ackLiveRegion}
-                  {/* role="group" is REQUIRED for the aria-label to be exposed
-                      (a name on a role-less div is AT-invisible and an axe
-                      aria-prohibited-attr violation, elspeth-37293a3b7c).
-                      Deliberately NOT role=log / NOT a live region: the
-                      transcript log and the wizard log live INSIDE it and
-                      must not nest in an outer live region (double-announce).
-                      tabIndex=0 so keyboard users can arrow-scroll it
-                      (elspeth-5e43a0c8b2 — same contract as freeform's
-                      .chat-panel-messages). */}
-                  <div
-                    ref={guidedWorkspaceScrollRef}
-                    onScroll={handleGuidedWorkspaceScroll}
-                    className="guided-workspace-scroll"
-                    role="group"
-                    aria-label="Conversation"
-                    tabIndex={0}
-                  >
-                    {transcript}
-                    <InlineRunResults />
-                    {ackStack}
-                    {/* The decision rides LAST in the scroll region — the
-                        action zone between the reply and the composer. */}
-                    {decisionSection}
-                  </div>
-                  {stepComposer}
-                </div>
-                {/* RIGHT: the artifact rail (the guided half) — ambient
-                    pipeline state only; no decision/submit/composer
-                    affordances (GraphMiniView's expand button is the accepted
-                    exception, matching live's SideRail). */}
-                {/* tabIndex=0: the rail scrolls (overflow-y:auto, and the
-                    ≤900px strip caps at 30vh while hiding its only focusable
-                    furniture) — without a tab stop its overflow is
-                    keyboard-unreachable (WCAG 2.1.1). The complementary role
-                    carries the accessible name. */}
-                <aside
-                  className="guided-workspace-rail"
-                  aria-label="Pipeline summary"
+          return (
+            <div className="guided-workspace">
+              {/* LEFT: the conversation column (the freeform half) — an
+                  internal scroll region over a docked composer. */}
+              <div className="guided-workspace-stream">
+                {ackLiveRegion}
+                {/* role="group" is REQUIRED for the aria-label to be exposed
+                    (a name on a role-less div is AT-invisible and an axe
+                    aria-prohibited-attr violation, elspeth-37293a3b7c).
+                    Deliberately NOT role=log / NOT a live region: the
+                    transcript log and the wizard log live INSIDE it and
+                    must not nest in an outer live region (double-announce).
+                    tabIndex=0 so keyboard users can arrow-scroll it
+                    (elspeth-5e43a0c8b2 — same contract as freeform's
+                    .chat-panel-messages). */}
+                <div
+                  ref={guidedWorkspaceScrollRef}
+                  onScroll={handleGuidedWorkspaceScroll}
+                  className="guided-workspace-scroll"
+                  role="group"
+                  aria-label="Conversation"
                   tabIndex={0}
                 >
-                  {summaryCard}
-                  {decisionsSoFar}
-                </aside>
+                  {transcript}
+                  <InlineRunResults />
+                  {ackStack}
+                  {/* The decision rides LAST in the scroll region — the
+                      action zone between the reply and the composer. */}
+                  {decisionSection}
+                </div>
+                {stepComposer}
               </div>
-            );
-          }
-
-          // Live guided: single scroll region + bottom-docked composer. The
-          // decision renders INSIDE the scroll (it can be a tall interactive
-          // widget that must scroll with the log). Composition and order are
-          // pinned — this branch must render identically to the pre-workspace
-          // layout.
-          return (
-            <>
-              <div className="guided-scroll">
-                {decisionsSoFar}
-                {transcript}
-                {ackLiveRegion}
-                {ackStack}
+              {/* RIGHT: the artifact rail (the guided half) — ambient
+                  pipeline state only; no decision/submit/composer
+                  affordances (GraphMiniView's expand button is the accepted
+                  exception, matching the freeform SideRail it stands in
+                  for). */}
+              {/* tabIndex=0: the rail scrolls (overflow-y:auto, and the
+                  ≤900px strip caps at 30vh while hiding its only focusable
+                  furniture) — without a tab stop its overflow is
+                  keyboard-unreachable (WCAG 2.1.1). The complementary role
+                  carries the accessible name. */}
+              <aside
+                className="guided-workspace-rail"
+                aria-label="Pipeline summary"
+                tabIndex={0}
+              >
                 {summaryCard}
-                {decisionSection}
-                <InlineRunResults />
-              </div>
-              {stepComposer}
-            </>
+                {decisionsSoFar}
+              </aside>
+            </div>
           );
         })()}
       </div>

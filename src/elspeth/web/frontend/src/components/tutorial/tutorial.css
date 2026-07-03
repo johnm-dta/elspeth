@@ -155,15 +155,9 @@
   overflow-y: auto;
 }
 
-/* Stepper full-bleed alignment: (0,3,0) outranks guided.css's centred 64rem
-   sheet cap (`.chat-panel--guided > .guided-workflow`, (0,2,0)) — a centred
-   stepper over a full-bleed workspace reads as misaligned. Top padding drops
-   to --space-xs (header-band tightening, D9). */
-.tutorial-shell--guided .chat-panel--guided > .guided-workflow {
-  max-width: none;
-  margin-inline: 0;
-  padding: var(--space-xs) var(--space-lg) 0;
-}
+/* (Stepper full-bleed alignment now lives in guided.css — the workspace is
+   the one guided layout, so `.chat-panel--guided > .guided-workflow` carries
+   the full-bleed band for the tutorial and the app shell alike.) */
 
 .tutorial-sample-loading {
   color: var(--color-text-muted);

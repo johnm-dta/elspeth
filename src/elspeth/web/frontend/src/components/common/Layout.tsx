@@ -4,7 +4,14 @@ import { DefaultModeChangedBanner } from "./DefaultModeChangedBanner";
 
 interface LayoutProps {
   chat: ReactNode;
-  siderail: ReactNode;
+  /**
+   * The right-rail content, or `null` to omit the rail COLUMN entirely
+   * (single-column shell). App passes null while a guided build is active —
+   * the guided workspace inside the chat panel carries its own rail
+   * (.guided-workspace-rail), and rendering both puts two rails side by
+   * side (isGuidedBuildActive is the shared predicate).
+   */
+  siderail: ReactNode | null;
 }
 
 /**
@@ -25,7 +32,11 @@ export function Layout({
   siderail,
 }: LayoutProps): JSX.Element {
   return (
-    <div className="app-layout">
+    <div
+      className={
+        siderail == null ? "app-layout app-layout--chat-only" : "app-layout"
+      }
+    >
       <div className="layout-chat" data-testid="layout-chat">
         <DefaultModeChangedBanner />
         <ErrorBoundary label="Chat panel">
@@ -33,11 +44,13 @@ export function Layout({
         </ErrorBoundary>
       </div>
 
-      <div className="layout-siderail">
-        <ErrorBoundary label="Side rail">
-          {siderail}
-        </ErrorBoundary>
-      </div>
+      {siderail != null && (
+        <div className="layout-siderail">
+          <ErrorBoundary label="Side rail">
+            {siderail}
+          </ErrorBoundary>
+        </div>
+      )}
     </div>
   );
 }

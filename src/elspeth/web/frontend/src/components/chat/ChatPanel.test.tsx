@@ -698,7 +698,7 @@ describe("ChatPanel mode discriminator", () => {
     });
   }
 
-  it("mounts the guided verification panel (gloss + validation summary) and does NOT add a second graph thumbnail in live-guided", () => {
+  it("mounts the guided verification panel (gloss + validation + graph thumbnail) in the workspace rail for live guided", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -710,10 +710,11 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    // The verification panel leads the column.
-    expect(
-      screen.getByRole("region", { name: "Pipeline so far" }),
-    ).toBeInTheDocument();
+    // The verification panel anchors the artifact rail.
+    const rail = container.querySelector("aside.guided-workspace-rail");
+    expect(rail).not.toBeNull();
+    const panel = screen.getByRole("region", { name: "Pipeline so far" });
+    expect(rail!.contains(panel)).toBe(true);
     // Gloss renders a plain-language sentence from the composition.
     expect(screen.getByTestId("pipeline-gloss")).toHaveTextContent(
       /this pipeline will read your data, rate each row, and write a csv\./i,
@@ -722,15 +723,15 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.getByTestId("pipeline-validation-summary"),
     ).toBeInTheDocument();
-    // Live-guided: the column does NOT add a GraphMiniView (the SideRail owns
-    // the thumbnail); only the tutorial gets the in-column thumbnail.
+    // The graph thumbnail rides in the rail for EVERY guided session — the
+    // App suppresses the freeform SideRail (its old home) while the guided
+    // workspace is on screen.
     expect(
-      screen.queryByRole("button", {
+      screen.getByRole("button", {
         name: "Pipeline graph (click to expand)",
       }),
-    ).toBeNull();
-    expect(container.querySelector(".graph-mini")).toBeNull();
-    // No second GraphModal is mounted in the column (App-root one serves both).
+    ).toBeInTheDocument();
+    // No second GraphModal is mounted in the panel (App-root one serves all).
     expect(screen.queryByTestId("graph-modal-backdrop")).toBeNull();
     expect(container.querySelector(".graph-modal")).toBeNull();
   });
@@ -791,21 +792,26 @@ describe("ChatPanel mode discriminator", () => {
       compositionState: sourceLlmCsvComposition(),
     });
 
-    render(<ChatPanel />);
+    const { container } = render(<ChatPanel />);
 
-    // The rationale prose is RETAINED as the decision heading...
+    // The rationale prose is RETAINED as the decision heading, inside the
+    // conversation column's scroll region (the action zone)...
     const rationale = screen.getByRole("heading", {
       level: 2,
       name: /source created as a 3-row csv/i,
     });
     expect(rationale).toBeInTheDocument();
-    // ...but the verification panel now LEADS it (the graph/summary is the
-    // canonical "what I built"; the prose is supporting context below).
+    expect(
+      container
+        .querySelector(".guided-workspace-scroll")!
+        .contains(rationale),
+    ).toBe(true);
+    // ...while the verification panel (the canonical "what I built") holds
+    // its own ambient surface in the artifact rail.
     const panel = screen.getByRole("region", { name: "Pipeline so far" });
     expect(
-      panel.compareDocumentPosition(rationale) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+      container.querySelector("aside.guided-workspace-rail")!.contains(panel),
+    ).toBe(true);
   });
 
   // Shared validation-readiness stub (PipelineValidationSummary ignores it).
@@ -1528,9 +1534,10 @@ describe("ChatPanel mode discriminator", () => {
       name: "Describe what you want",
     });
     expect(region).toContainElement(screen.getByTestId("chat-input"));
-    // ...but the visible card heading and chrome are tutorial-suppressed.
+    // ...and the composer is a bare docked strip — no visible card heading
+    // (the dashed card + heading died with the pre-workspace flat layout).
     expect(container.querySelector(".guided-step-chat-heading")).toBeNull();
-    expect(region.classList.contains("guided-step-chat--bare")).toBe(true);
+    expect(region.classList.contains("guided-step-chat")).toBe(true);
     // The locked-prompt contract: prefilled with the CURRENT stage's prompt,
     // read-only (the learner Sends, never types).
     const input = screen.getByTestId("chat-input");
@@ -1538,7 +1545,7 @@ describe("ChatPanel mode discriminator", () => {
     expect(input.dataset.readOnly).toBe("true");
   });
 
-  it("live guided: layout net — no workspace, dashed composer card with its heading, decision inside .guided-scroll", () => {
+  it("live guided: layout net — the SAME workspace as the tutorial, with an EDITABLE composer (no locked prompt)", () => {
     useSessionStore.setState({
       activeSessionId: "session-guided",
       sessions: [guidedSessionFixture],
@@ -1549,19 +1556,32 @@ describe("ChatPanel mode discriminator", () => {
 
     const { container } = render(<ChatPanel />);
 
-    // The workspace is tutorial-only — live guided keeps the classic
-    // .guided-scroll + bottom-docked composer arrangement, byte-identical.
-    expect(container.querySelector(".guided-workspace")).toBeNull();
-    expect(container.querySelector(".guided-workspace-scroll")).toBeNull();
-    expect(container.querySelector(".guided-workspace-rail")).toBeNull();
+    // The workspace is THE guided layout (promoted from the tutorial,
+    // operator directive 2026-07-03) — the old .guided-scroll flat
+    // arrangement is gone for good.
+    expect(container.querySelector(".guided-workspace")).not.toBeNull();
+    expect(container.querySelector(".guided-scroll")).toBeNull();
+    // Decision = the action zone at the end of the conversation column.
     expect(
-      container.querySelector(".guided-scroll .guided-current-decision"),
+      container.querySelector(".guided-workspace-scroll .guided-current-decision"),
     ).not.toBeNull();
-    // The composer keeps its card heading and never gains the --bare modifier.
-    expect(container.querySelector(".guided-step-chat-heading")).not.toBeNull();
-    expect(container.querySelector(".guided-step-chat--bare")).toBeNull();
-    // Live input is editable (no tutorial lock).
-    expect(screen.getByTestId("chat-input").dataset.readOnly).toBe("false");
+    // Artifact rail present (the App suppresses the freeform SideRail while
+    // this surface renders — the rail here replaces it).
+    expect(container.querySelector("aside.guided-workspace-rail")).not.toBeNull();
+    // Bare docked composer: no card heading in ANY mode...
+    expect(container.querySelector(".guided-step-chat-heading")).toBeNull();
+    // ...but live input stays EDITABLE — the tutorial's locked prompt is the
+    // one delta the promotion kept tutorial-only.
+    const input = screen.getByTestId("chat-input");
+    expect(input.dataset.readOnly).toBe("false");
+    // The mock coalesces the value prop (undefined → ""): live passes NO
+    // controlled value, so the box starts empty and editable.
+    expect(input.dataset.value).toBe("");
+    // Live guided keeps its interactive decision widget (the tutorial
+    // suppresses the rival chips; live does not).
+    expect(
+      screen.getByText("Which source plugin should we use?"),
+    ).toBeInTheDocument();
   });
 
   it("tutorial: the workflow stepper renders above the workspace", () => {

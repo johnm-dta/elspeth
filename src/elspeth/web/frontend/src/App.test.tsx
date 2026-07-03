@@ -301,6 +301,63 @@ describe("App banner roles", () => {
     expect(screen.queryByTestId("inspector-panel-stub")).toBeNull();
   });
 
+  it("suppresses the SideRail while a guided build is active — the workspace rail inside ChatPanel replaces it", async () => {
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      // Non-terminal guided session at step_3 with no server turn — the
+      // cold-start arm of isGuidedBuildActive, the same predicate ChatPanel's
+      // workspace branch renders under. Rendering the SideRail alongside it
+      // would put two rails side by side.
+      guidedSession: {
+        step: "step_3_transforms",
+        history: [],
+        terminal: null,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      } as unknown as import("./types/guided").GuidedSession,
+      guidedNextTurn: null,
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    // The composer shell is still mounted...
+    expect(screen.getByTestId("chat-panel-stub")).toBeInTheDocument();
+    // ...but App passed siderail={null}: no rail slots render.
+    expect(screen.queryByTestId("audit-readiness-stub")).toBeNull();
+    expect(screen.queryByTestId("side-rail-validation-banner-stub")).toBeNull();
+  });
+
+  it("restores the SideRail when the guided session reaches a terminal (Run/Export live in the rail post-completion)", async () => {
+    useSessionStore.setState({
+      activeSessionId: "session-1",
+      guidedSession: {
+        step: "step_4_wire",
+        history: [],
+        terminal: {
+          kind: "completed",
+          reason: null,
+          pipeline_yaml: "pipeline: {}",
+        },
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      } as unknown as import("./types/guided").GuidedSession,
+      guidedNextTurn: null,
+    });
+    render(<App />);
+
+    await waitFor(() => {
+      expect(api.fetchSystemStatus).toHaveBeenCalled();
+    });
+    expect(screen.getByTestId("audit-readiness-stub")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("side-rail-validation-banner-stub"),
+    ).toBeInTheDocument();
+  });
+
   it("loads sessions on startup after SessionSidebar removal", async () => {
     const session: Session = {
       id: "session-loaded",

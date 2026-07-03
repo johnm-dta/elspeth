@@ -480,6 +480,17 @@
   overflow: hidden;
 }
 
+/* Single-column shell: Layout renders no .layout-siderail column when its
+   siderail prop is null (a guided build is active — the workspace inside the
+   chat panel carries its own rail at --siderail-width, so the chat column
+   takes the full width and the geometry matches the two-column freeform
+   shell). Also declared inside the ≤960px collapse below so the stacked
+   template can't resurrect a phantom second row. */
+.app-layout--chat-only {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "chat";
+}
+
 /* Responsive collapse (elspeth-49dd290c7a, WCAG 1.4.10 Reflow). Below 960px
    (640px chat minimum + 320px rail) the two-column shell cannot fit, and with
    body{overflow:hidden} the rail was clipped with no scroll path. Collapse to
@@ -507,6 +518,13 @@
        child owning the scroll, which no longer applies when stacked). */
     max-height: 45vh;
     overflow-y: auto;
+  }
+
+  /* Chat-only shell has no rail row to stack — keep the single bounded row
+     or the auto second row leaves a dead band under the composer. */
+  .app-layout--chat-only {
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-areas: "chat";
   }
 }
 

@@ -110,10 +110,10 @@ describe("ComposerPreferencesForm", () => {
   });
 
   it("shows Reset tutorial while a tutorial is IN PROGRESS (the wedged-resume escape hatch)", () => {
-    // Gating this on completion hid the escape hatch from exactly the users
-    // who needed it: a wedged mid-tutorial resume (persisted session swept
-    // out from under it) left NO affordance anywhere — the tutorial
-    // suppresses skip/exit past Welcome.
+    // Completion-gating hid the escape hatch from exactly the users who
+    // needed it: a wedged mid-tutorial resume (persisted session swept out
+    // from under it) left NO affordance anywhere — the tutorial suppresses
+    // skip/exit past Welcome.
     usePreferencesStore.setState({
       tutorialCompletedAt: null,
       tutorialCompleted: false,
@@ -126,11 +126,11 @@ describe("ComposerPreferencesForm", () => {
     ).toBeInTheDocument();
   });
 
-  it("hides Reset tutorial for a fresh user (nothing to reset)", () => {
+  it("shows Reset tutorial for a fresh user too — the affordance is unconditional (operator requirement)", () => {
     render(<ComposerPreferencesForm />);
     expect(
-      screen.queryByRole("button", { name: /reset tutorial/i }),
-    ).toBeNull();
+      screen.getByRole("button", { name: /reset tutorial/i }),
+    ).toBeInTheDocument();
   });
 });
 

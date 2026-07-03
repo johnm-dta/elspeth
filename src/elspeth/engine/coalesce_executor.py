@@ -386,6 +386,18 @@ class CoalesceExecutor:
                     f"{resume_checkpoint_id!r}) has no branch_name — only forked branch "
                     "tokens block at a coalesce barrier; journal corruption."
                 )
+            if item.branch_name not in self._settings[item.coalesce_name].branches:
+                # The live accept() path rejects unknown branches; restore must
+                # apply the same allowlist (elspeth-a840cb774a) — a rogue branch
+                # inflates quorum/best_effort arrival counts while contributing
+                # no merge data.
+                raise AuditIntegrityError(
+                    f"BLOCKED journal row for token {item.token_id!r} at coalesce "
+                    f"{item.coalesce_name!r} (run {self._run_id!r}, resume checkpoint "
+                    f"{resume_checkpoint_id!r}) claims branch '{item.branch_name}' which is "
+                    f"not in the configured branches {sorted(self._settings[item.coalesce_name].branches)} — "
+                    "journal corruption."
+                )
             if item.token_id in blocked_at_by_token:
                 raise AuditIntegrityError(
                     f"Duplicate BLOCKED journal rows for token {item.token_id!r} at "
@@ -448,10 +460,29 @@ class CoalesceExecutor:
                 )
 
             key_scalars = scalars.get(key)
+            lost_branches = dict(key_scalars.lost_branches) if key_scalars is not None else {}
+            allowed_branches = self._settings[key[0]].branches
+            unknown_lost = set(lost_branches) - set(allowed_branches)
+            if unknown_lost:
+                raise AuditIntegrityError(
+                    f"Checkpoint lost_branches for coalesce {key[0]!r} row {key[1]!r} "
+                    f"(run {self._run_id!r}, resume checkpoint {resume_checkpoint_id!r}) "
+                    f"name branches {sorted(unknown_lost)} outside the configured branches "
+                    f"{sorted(allowed_branches)} — checkpoint corruption."
+                )
+            both = set(branches) & set(lost_branches)
+            if both:
+                # Mirrors the live notify_branch_lost invariant: a branch
+                # cannot both arrive and be lost for the same pending key.
+                raise AuditIntegrityError(
+                    f"Branches {sorted(both)} at coalesce {key[0]!r} row {key[1]!r} "
+                    f"(run {self._run_id!r}, resume checkpoint {resume_checkpoint_id!r}) "
+                    "are recorded as both arrived and lost — journal/checkpoint corruption."
+                )
             new_pending[key] = _PendingCoalesce(
                 branches=branches,
                 first_arrival=first_arrival,
-                lost_branches=dict(key_scalars.lost_branches) if key_scalars is not None else {},
+                lost_branches=lost_branches,
             )
 
         # Reconstruct completed keys from Landscape (source of truth) into the
@@ -473,6 +504,17 @@ class CoalesceExecutor:
             key_scalars = scalars[scalar_key]
             lost_branches = dict(key_scalars.lost_branches)
             if coalesce_name in self._settings and lost_branches and scalar_key not in completed_key_set:
+                unknown_lost = set(lost_branches) - set(self._settings[coalesce_name].branches)
+                if unknown_lost:
+                    # An unknown BRANCH inside a configured, non-completed
+                    # coalesce's scalars is corruption, not staleness — only
+                    # unknown-coalesce / completed / empty keys drop-and-log.
+                    raise AuditIntegrityError(
+                        f"Checkpoint lost_branches for coalesce {coalesce_name!r} row {row_id!r} "
+                        f"(run {self._run_id!r}, resume checkpoint {resume_checkpoint_id!r}) "
+                        f"name branches {sorted(unknown_lost)} outside the configured branches "
+                        f"{sorted(self._settings[coalesce_name].branches)} — checkpoint corruption."
+                    )
                 new_pending[scalar_key] = _PendingCoalesce(
                     branches={},
                     first_arrival=monotonic_now,

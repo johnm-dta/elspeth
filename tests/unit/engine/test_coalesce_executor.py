@@ -3195,6 +3195,77 @@ class TestRestoreFromJournal:
                 now=_JOURNAL_T0,
             )
 
+    def test_restore_from_journal_unknown_branch_is_corruption(self) -> None:
+        """A journal branch outside the coalesce's configured allowlist = corruption.
+
+        The live accept() path rejects unknown branches; restore must apply
+        the same allowlist (elspeth-a840cb774a) — a rogue branch inflates
+        quorum/best_effort arrival counts while contributing no merge data.
+        """
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="branch 'rogue'"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="rogue", blocked_at=_JOURNAL_T0)],
+                scalars={},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+        assert executor._pending == {}
+
+    def test_restore_from_journal_unknown_lost_branch_on_journal_key_is_corruption(self) -> None:
+        """lost_branches scalars for a journal-arrival key must be configured branches."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="lost_branches"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+                scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"rogue": "error_routed"})},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+        assert executor._pending == {}
+
+    def test_restore_from_journal_unknown_lost_branch_scalar_only_is_corruption(self) -> None:
+        """A scalar-only lost_branches key outside the allowlist on a configured,
+        non-completed coalesce is corruption, not staleness."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="lost_branches"):
+            executor.restore_from_journal(
+                items=[],
+                scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"rogue": "error_routed"})},
+                state_ids={},
+                attempt_offsets={},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+        assert executor._pending == {}
+
+    def test_restore_from_journal_branch_both_arrived_and_lost_is_corruption(self) -> None:
+        """A branch cannot both arrive (journal row) and be lost (scalars) —
+        mirrors the live notify_branch_lost invariant."""
+        executor, *_ = _make_executor()
+        executor.register_coalesce(_settings(branches=["a", "b"]), NodeID("co-1"))
+
+        with pytest.raises(AuditIntegrityError, match="both arrived and lost"):
+            executor.restore_from_journal(
+                items=[_blocked_item(token_id="t1", row_id="row_1", branch_name="a", blocked_at=_JOURNAL_T0)],
+                scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"a": "error_routed"})},
+                state_ids={"t1": "s1"},
+                attempt_offsets={"t1": 1},
+                resume_checkpoint_id="cp-0",
+                now=_JOURNAL_T0,
+            )
+        assert executor._pending == {}
+
     def test_restore_from_journal_missing_attempt_offset_is_corruption(self) -> None:
         """Every journal item must have an audit-derived attempt offset."""
         executor, *_ = _make_executor()

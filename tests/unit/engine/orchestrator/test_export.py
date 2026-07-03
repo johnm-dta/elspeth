@@ -63,11 +63,12 @@ def _mock_recorder_factory():
 class TestExportLandscapeJSON:
     """Tests for export_landscape with JSON format."""
 
-    def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output") -> Mock:
+    def _make_settings(self, *, fmt: str = "json", sign: bool = False, sink: str = "output", include_raw_error_rows: bool = False) -> Mock:
         settings = Mock()
         settings.landscape.export.format = fmt
         settings.landscape.export.sign = sign
         settings.landscape.export.sink = sink
+        settings.landscape.export.include_raw_error_rows = include_raw_error_rows
         return settings
 
     def test_json_export_writes_records_to_sink(self) -> None:
@@ -144,7 +145,26 @@ class TestExportLandscapeJSON:
 
             export_landscape(db, "run-1", settings, factory)
 
-        MockExporter.assert_called_once_with(db, signing_key=b"test-key-123")
+        MockExporter.assert_called_once_with(db, signing_key=b"test-key-123", include_raw_error_rows=False)
+
+    def test_raw_error_rows_opt_in_threads_to_exporter(self) -> None:
+        """The export-config classification flag reaches the exporter
+        (elspeth-384184c6ab): default False redacts raw failing rows from
+        error records; the explicit opt-in restores them."""
+        db = Mock()
+        settings = self._make_settings(include_raw_error_rows=True)
+        _sink, factory = _make_sink_and_factory()
+
+        with (
+            patch("elspeth.core.landscape.exporter.LandscapeExporter") as MockExporter,
+            patch("elspeth.engine.orchestrator.export.track_operation", _noop_track_operation),
+        ):
+            exporter = MockExporter.return_value
+            exporter.export_run.return_value = []
+
+            export_landscape(db, "run-1", settings, factory)
+
+        MockExporter.assert_called_once_with(db, signing_key=None, include_raw_error_rows=True)
 
     def test_signing_without_env_key_raises(self) -> None:
         """Signing enabled without ELSPETH_SIGNING_KEY raises ValueError."""

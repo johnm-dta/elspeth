@@ -1101,6 +1101,13 @@ class LandscapeExportSettings(BaseModel):
         default=False,
         description="HMAC sign each record for integrity verification",
     )
+    include_raw_error_rows: bool = Field(
+        default=False,
+        description="Include raw failing-row payloads (row_data_json) in exported "
+        "validation_error/transform_error records. Default False: error records "
+        "export row_hash only and the raw row stays in the audit database "
+        "(raw-payload minimization for the external export artifact).",
+    )
 
 
 class LandscapeSettings(BaseModel):

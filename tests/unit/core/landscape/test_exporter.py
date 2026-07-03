@@ -379,6 +379,7 @@ def _make_exporter(
     batches: list[Any] | None = None,
     batch_members: list[Any] | None = None,
     artifacts: list[Any] | None = None,
+    include_raw_error_rows: bool = False,
 ) -> LandscapeExporter:
     """Create an exporter with mocked database and factory."""
     mock_db = Mock()
@@ -386,6 +387,7 @@ def _make_exporter(
     exporter._db = mock_db
     exporter._factory = Mock()
     exporter._signing_key = signing_key
+    exporter._include_raw_error_rows = include_raw_error_rows
 
     # Mock all factory sub-repository methods used by _iter_records
     factory = exporter._factory
@@ -1088,7 +1090,16 @@ class TestArtifactRecords:
 
 
 class TestErrorRecords:
-    """Tests for source validation and transform error audit records."""
+    """Tests for source validation and transform error audit records.
+
+    Raw-row minimization (elspeth-384184c6ab): the export is an EXTERNAL,
+    optionally-signed artifact, and every other record type already exports
+    hashes/refs instead of raw payloads (rows: source_data_hash+ref, node
+    states: input/output hashes, routing reasons: reason_ref). The two error
+    records were the lone exception — by default they now export row_hash
+    only, with raw ``row_data_json`` gated behind the explicit
+    ``include_raw_error_rows`` opt-in.
+    """
 
     def test_validation_error_fields(self) -> None:
         exporter = _make_exporter(validation_errors=[_VALIDATION_ERROR])
@@ -1102,7 +1113,7 @@ class TestErrorRecords:
         assert err["node_id"] == "node-1"
         assert err["row_id"] == "row-1"
         assert err["row_hash"] == "validation-row-hash"
-        assert err["row_data_json"] == '{"amount": "oops"}'
+        assert err["row_data_json"] is None, "default export must not egress the raw failing row"
         assert err["error"] == "Missing required field amount"
         assert err["schema_mode"] == "fixed"
         assert err["destination"] == "quarantine"
@@ -1125,10 +1136,30 @@ class TestErrorRecords:
         assert err["token_id"] == "tok-1"
         assert err["transform_id"] == "node-2"
         assert err["row_hash"] == "transform-row-hash"
-        assert err["row_data_json"] == '{"amount": "oops"}'
+        assert err["row_data_json"] is None, "default export must not egress the raw failing row"
         assert err["error_details_json"] == '{"reason": "test_error", "message": "boom"}'
         assert err["destination"] == "discard"
         assert err["created_at"] == _DT2.isoformat()
+
+    def test_opt_in_restores_raw_error_rows(self) -> None:
+        """include_raw_error_rows=True is the explicit operator opt-in for
+        raw failing-row triage detail in the export artifact."""
+        exporter = _make_exporter(
+            validation_errors=[_VALIDATION_ERROR],
+            transform_errors=[_TRANSFORM_ERROR],
+            include_raw_error_rows=True,
+        )
+        records = list(exporter.export_run("run-1"))
+        validation = next(r for r in records if r["record_type"] == "validation_error")
+        transform = next(r for r in records if r["record_type"] == "transform_error")
+        assert validation["row_data_json"] == '{"amount": "oops"}'
+        assert transform["row_data_json"] == '{"amount": "oops"}'
+
+    def test_constructor_defaults_to_redacted_error_rows(self) -> None:
+        db = Mock()
+        with patch("elspeth.core.landscape.exporter.RecorderFactory", return_value=Mock()):
+            exporter = LandscapeExporter(db)
+        assert exporter._include_raw_error_rows is False
 
 
 # ===========================================================================

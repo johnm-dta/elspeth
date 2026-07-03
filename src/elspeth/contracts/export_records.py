@@ -84,6 +84,13 @@ class OperationExportRecord(TypedDict):
 
 
 class ValidationErrorExportRecord(TypedDict):
+    """Source validation failure evidence.
+
+    ``row_data_json`` is None unless the export was configured with the
+    explicit ``include_raw_error_rows`` opt-in (elspeth-384184c6ab) —
+    ``row_hash`` correlates back to the raw row in the audit database.
+    """
+
     record_type: Literal["validation_error"]
     run_id: str
     error_id: str
@@ -103,6 +110,13 @@ class ValidationErrorExportRecord(TypedDict):
 
 
 class TransformErrorExportRecord(TypedDict):
+    """Transform processing failure evidence.
+
+    ``row_data_json`` is None unless the export was configured with the
+    explicit ``include_raw_error_rows`` opt-in (elspeth-384184c6ab) —
+    ``row_hash`` correlates back to the raw row in the audit database.
+    """
+
     record_type: Literal["transform_error"]
     run_id: str
     error_id: str

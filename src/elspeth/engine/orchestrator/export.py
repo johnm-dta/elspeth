@@ -80,7 +80,11 @@ def export_landscape(
         signing_key = key_str.encode("utf-8")
 
     # Create exporter
-    exporter = LandscapeExporter(db, signing_key=signing_key)
+    exporter = LandscapeExporter(
+        db,
+        signing_key=signing_key,
+        include_raw_error_rows=export_config.include_raw_error_rows,
+    )
 
     sink_name = export_config.sink
     if sink_name is None:

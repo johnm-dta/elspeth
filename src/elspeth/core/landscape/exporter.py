@@ -102,6 +102,8 @@ class LandscapeExporter:
         self,
         db: LandscapeDB,
         signing_key: bytes | None = None,
+        *,
+        include_raw_error_rows: bool = False,
     ) -> None:
         """Initialize exporter with database connection.
 
@@ -109,10 +111,18 @@ class LandscapeExporter:
             db: LandscapeDB instance to export from
             signing_key: Optional HMAC key for signing exported records.
                         Required if sign=True is passed to export_run().
+            include_raw_error_rows: Include raw failing-row payloads
+                (``row_data_json``) in validation_error / transform_error
+                records. Default False (elspeth-384184c6ab): the export is
+                an external artifact and every other record type already
+                exports hashes/refs instead of raw payloads; error records
+                default to ``row_hash``-only correlation, with the raw row
+                remaining in the audit database.
         """
         self._db = db
         self._factory = RecorderFactory(db)
         self._signing_key = signing_key
+        self._include_raw_error_rows = include_raw_error_rows
 
     @staticmethod
     def _parse_tier1_json(raw_json: str, field_name: str, context: str) -> Any:
@@ -349,6 +359,10 @@ class LandscapeExporter:
 
         # Source validation and transform error audit evidence.
         # Repository getters provide deterministic created_at ordering.
+        # Raw-row minimization (elspeth-384184c6ab): row_data_json is
+        # redacted to None unless the operator opted in — row_hash remains
+        # for correlation back to the audit DB, matching the hash/ref
+        # discipline every other exported record type already follows.
         for validation_error in self._factory.data_flow.get_validation_errors_for_run(run_id):
             validation_error_record: ValidationErrorExportRecord = {
                 "record_type": "validation_error",
@@ -357,7 +371,7 @@ class LandscapeExporter:
                 "node_id": validation_error.node_id,
                 "row_id": validation_error.row_id,
                 "row_hash": validation_error.row_hash,
-                "row_data_json": validation_error.row_data_json,
+                "row_data_json": validation_error.row_data_json if self._include_raw_error_rows else None,
                 "error": validation_error.error,
                 "schema_mode": validation_error.schema_mode,
                 "destination": validation_error.destination,
@@ -378,7 +392,7 @@ class LandscapeExporter:
                 "token_id": transform_error.token_id,
                 "transform_id": transform_error.transform_id,
                 "row_hash": transform_error.row_hash,
-                "row_data_json": transform_error.row_data_json,
+                "row_data_json": transform_error.row_data_json if self._include_raw_error_rows else None,
                 "error_details_json": transform_error.error_details_json,
                 "destination": transform_error.destination,
                 "created_at": transform_error.created_at.isoformat(),

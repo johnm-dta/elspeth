@@ -130,6 +130,38 @@ describe("GuidedChatHistory with chat turns", () => {
     ).toBeInTheDocument();
   });
 
+  it("flat variant renders assistant markdown, not raw markup (Explain replies carry headings/tables)", () => {
+    const { container } = render(
+      <GuidedChatHistory
+        chatHistory={[
+          {
+            role: "user",
+            content: "**not markdown** for user turns",
+            seq: 1,
+            step: "step_1_source",
+            ts_iso: "2026-07-03T00:00:00Z",
+          },
+          {
+            role: "assistant",
+            content: "Settings **explained** here.",
+            seq: 2,
+            step: "step_1_source",
+            ts_iso: "2026-07-03T00:00:01Z",
+          },
+        ]}
+      />,
+    );
+
+    // Assistant: markdown rendered (strong element, no literal asterisks).
+    const strong = container.querySelector(".guided-chat-history-item--assistant strong");
+    expect(strong).not.toBeNull();
+    expect(strong!.textContent).toBe("explained");
+    // User: plain text preserved verbatim (never markdown-ised).
+    expect(
+      screen.getByText("**not markdown** for user turns"),
+    ).toBeInTheDocument();
+  });
+
   it("keeps the flat list markup when no variant prop is given (live parity)", () => {
     const { container } = render(<GuidedChatHistory chatHistory={TWO_TURNS} />);
 

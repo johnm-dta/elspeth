@@ -169,7 +169,14 @@ export function GuidedChatHistory({
             <span className="guided-chat-history-step" aria-hidden="true">
               {GUIDED_STEP_LABELS[turn.step]}
             </span>
-            <p className="guided-chat-history-content">
+            {/* Assistant replies are markdown (the Explain button's grounded
+                answers arrive with headings and tables); rendering them as
+                plain text showed literal hash/asterisk/pipe markup soup.
+                Same split as the bubbles variant: user turns stay plain text
+                (pre-wrap preserves authored newlines), assistant turns render
+                through MarkdownRenderer. A <div> container — markdown emits
+                block elements that must not nest inside <p>. */}
+            <div className="guided-chat-history-content">
               {/* Screen-reader prefix that makes the role explicit even
                   though the visual badge is aria-hidden.  Without this
                   the SR would announce just the content; with it, the
@@ -178,8 +185,12 @@ export function GuidedChatHistory({
               <span className="visually-hidden">
                 {turn.role === "user" ? "You said: " : "Assistant said: "}
               </span>
-              {turn.content}
-            </p>
+              {turn.role === "user" ? (
+                turn.content
+              ) : (
+                <MarkdownRenderer content={turn.content} />
+              )}
+            </div>
           </li>
         ))}
       </ol>

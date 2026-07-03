@@ -2003,6 +2003,13 @@
   border-radius: var(--radius-md);
 }
 
+/* Keyboard-focusable scroll region (tabIndex=0 in CompletionSummary) — inset
+   ring so the container's own border/radius doesn't clip it. */
+.guided-completion-yaml-container:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
 /* <pre> block produced by prism-react-renderer.
    Reset browser default pre margins; monospace font family to match YamlView. */
 .guided-completion-pre {

@@ -94,8 +94,19 @@ function CompletionSummaryInner({ yaml, isTutorial }: CompletionSummaryInnerProp
 
       {/* YAML preview -- syntax-highlighted via prism-react-renderer.
           Theme-aware: dark/light resolved via useTheme() to match YamlView.
-          The pre id is used for distinctness testing across instances. */}
-      <div className="guided-completion-yaml-container">
+          The pre id is used for distinctness testing across instances.
+          role=region + tabIndex: the container scrolls (max-height 400px,
+          overflow:auto) and holds no focusable content, so without a tab stop
+          its overflow is keyboard-unreachable (WCAG 2.1.1; axe
+          scrollable-region-focusable, caught live — jsdom never lays out, so
+          the a11y suite cannot see scrollability). A role is required for the
+          accessible name to be exposed (elspeth-37293a3b7c). */}
+      <div
+        className="guided-completion-yaml-container"
+        role="region"
+        aria-label="Pipeline YAML"
+        tabIndex={0}
+      >
         <Highlight theme={highlightTheme} code={yaml} language="yaml">
           {({ tokens, getLineProps, getTokenProps }) => (
             <pre id={preId} className="guided-completion-pre">

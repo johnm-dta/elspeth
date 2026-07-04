@@ -37,6 +37,8 @@ from elspeth.engine.journal_restore import (
     RestoredAggregationState,
     RestoredCoalesceState,
 )
+from elspeth.engine.spans import SpanFactory
+from elspeth.engine.tokens import TokenManager
 
 # Reference instant for journal-restore tests (tz-aware, like barrier_blocked_at).
 _JOURNAL_T0 = datetime(2026, 6, 10, 12, 0, 0, tzinfo=UTC)
@@ -352,19 +354,20 @@ class TestCoalesceJournalRestorer:
 class TestCoalesceFacadeValidateBeforeMutate:
     """The extraction seam must preserve all-or-nothing restore on the executor."""
 
-    def _make_executor(self) -> CoalesceExecutor:
+    def _make_executor(self, settings: CoalesceSettings | None = None) -> CoalesceExecutor:
         execution = MagicMock(spec=ExecutionRepository)
         execution.get_completed_row_ids_for_nodes.return_value = set()
+        execution.has_completed_row_for_node.return_value = False
         executor = CoalesceExecutor(
             execution=execution,
-            span_factory=MagicMock(),
-            token_manager=MagicMock(),
+            span_factory=MagicMock(spec=SpanFactory),
+            token_manager=MagicMock(spec=TokenManager),
             run_id="run_1",
             step_resolver=lambda node_id: 1,
             data_flow=MagicMock(spec=DataFlowRepository),
             clock=MockClock(start=100.0),
         )
-        executor.register_coalesce(_coalesce_settings(), NodeID("co-1"))
+        executor.register_coalesce(settings if settings is not None else _coalesce_settings(), NodeID("co-1"))
         return executor
 
     def test_failed_restore_leaves_prior_executor_state_intact(self) -> None:
@@ -409,6 +412,35 @@ class TestCoalesceFacadeValidateBeforeMutate:
         assert list(executor._pending[("merge", "row_1")].branches) == ["a"]
         assert executor._pending[("merge", "row_9")].branches == {}
         assert executor._pending[("merge", "row_9")].lost_branches == {"b": "error_routed"}
+
+    def test_restored_lost_branches_stay_mutable_for_live_loss_notifications(self) -> None:
+        """The facade must thaw the frozen DTO's lost_branches into a mutable dict.
+
+        notify_branch_lost mutates pending.lost_branches in place; if the
+        apply step ever hands the executor the restorer's MappingProxyType
+        directly, the first post-resume branch loss on a restored key crashes
+        with TypeError instead of recording the loss.
+        """
+        executor = self._make_executor(_coalesce_settings(branches=["a", "b", "c"]))
+        executor.restore_from_journal(
+            items=[_blocked_item(token_id="t_a", row_id="row_1", branch_name="a", coalesce_name="merge", blocked_at=_JOURNAL_T0)],
+            scalars={("merge", "row_1"): CoalescePendingScalars(lost_branches={"b": "error_routed"})},
+            state_ids={"t_a": "s_a"},
+            attempt_offsets={"t_a": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        # In-place mutation of the restored loss record must succeed; under
+        # require_all the second loss makes the merge impossible, so the key
+        # fails with BOTH losses recorded in the audit metadata.
+        outcome = executor.notify_branch_lost("merge", "row_1", "c", "error_routed")
+
+        assert outcome is not None
+        assert outcome.held is False
+        assert outcome.failure_reason is not None
+        assert outcome.coalesce_metadata is not None
+        assert dict(outcome.coalesce_metadata.branches_lost) == {"b": "error_routed", "c": "error_routed"}
 
 
 def _agg_settings() -> AggregationSettings:
@@ -549,7 +581,7 @@ class TestAggregationFacadeValidateBeforeMutate:
         execution = MagicMock(spec=ExecutionRepository)
         executor = AggregationExecutor(
             execution,
-            MagicMock(),
+            MagicMock(spec=SpanFactory),
             lambda nid: 1,
             run_id="run_1",
             aggregation_settings={node_id: _agg_settings()},

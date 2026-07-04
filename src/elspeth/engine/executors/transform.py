@@ -266,6 +266,7 @@ class TransformExecutor:
         token: TokenInfo,
         input_dict: dict[str, Any],
         ctx: PluginContext,
+        node_id: str,
     ) -> tuple[frozenset[str], frozenset[str]]:
         """Run pre-invocation checks before the transform executes.
 
@@ -318,17 +319,13 @@ class TransformExecutor:
         # generic validation error when the schema requires the same field.
         # It also runs BEFORE transform.process() so a missing-field crash in
         # the plugin body cannot steal attribution from the declaration surface.
-        #
-        # effective_input_fields is derived once here and reused by the
-        # post-emission call site (panel F1 resolution: contracts use the
-        # caller-derived set, not their own re-derivation).
         effective_input_fields = derive_effective_input_fields(token.row_data)
         static_contract = transform.effective_static_contract()
         try:
             run_pre_emission_checks(
                 inputs=PreEmissionInputs(
                     plugin=transform,
-                    node_id=transform.node_id or "",
+                    node_id=node_id,
                     run_id=ctx.run_id,
                     row_id=token.row_id,
                     token_id=token.token_id,
@@ -636,11 +633,11 @@ class TransformExecutor:
         """
         if transform.node_id is None:
             raise OrchestrationInvariantError(f"Transform '{transform.name}' executed without node_id - orchestrator bug")
-        # Narrowed once here for phase helpers that require a non-None node id.
+        # Narrowed once; all downstream node-id plumbing uses this local.
         node_id = transform.node_id
 
         # Resolve step position from node_id (injected StepResolver)
-        step = self._step_resolver(NodeID(transform.node_id))
+        step = self._step_resolver(NodeID(node_id))
 
         # Extract dict from PipelineRow for hashing and Landscape recording
         # Landscape stores raw dicts, not PipelineRow objects
@@ -661,7 +658,7 @@ class TransformExecutor:
         with NodeStateGuard(
             self._execution,
             token_id=token.token_id,
-            node_id=transform.node_id,
+            node_id=node_id,
             run_id=ctx.run_id,
             step_index=step,
             input_data=input_dict,
@@ -679,11 +676,12 @@ class TransformExecutor:
                 token=token,
                 input_dict=input_dict,
                 ctx=ctx,
+                node_id=node_id,
             )
 
             # Set state_id and node_id on context for external call recording.
             ctx.state_id = guard.state_id
-            ctx.node_id = transform.node_id
+            ctx.node_id = node_id
             # Note: call_index allocation is handled by ExecutionRepository.allocate_call_index()
             # which automatically starts at 0 for each new state_id
 
@@ -702,7 +700,7 @@ class TransformExecutor:
             # Pass node_id for disambiguation when multiple plugin instances exist
             with self._spans.transform_span(
                 transform.name,
-                node_id=transform.node_id,
+                node_id=node_id,
                 input_hash=input_hash,
                 token_id=token.token_id,
             ):

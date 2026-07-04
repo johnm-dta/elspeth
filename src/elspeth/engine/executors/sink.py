@@ -675,6 +675,371 @@ class SinkExecutor:
 
         return artifact
 
+    def _handle_failsink_diversions(
+        self,
+        *,
+        failsink: SinkProtocol,
+        failsink_name: str | None,
+        failsink_edge_id: str | None,
+        primary_divert_states: list[tuple[TokenInfo, int, NodeStateOpen]],
+        diversion_by_index: dict[int, RowDiversion],
+        sink_name: str,
+        step_in_pipeline: int,
+        ctx: PluginContext,
+        on_token_written: Callable[[TokenInfo], None] | None,
+    ) -> int:
+        """PHASE 3 (failsink mode): route diverted tokens to the failsink.
+
+        Opens failsink node_states BEFORE the failsink I/O (open-before-I/O,
+        elspeth-adaca19c75), writes the enriched rows, then records the primary
+        divert anchors FAILED + failsink states COMPLETED with a routing_event,
+        registers the failsink artifact, records SINK_FALLBACK_TO_FAILSINK
+        outcomes, and checkpoints. The divert_states_closed flag lives entirely
+        here so an inner cleanup arm suppresses the outer one. Returns the
+        number of tokens routed to the failsink.
+        """
+        failsink_count = 0
+        primary_divert_pairs = [(t, s) for t, _, s in primary_divert_states]
+        diverted_only_tokens = [token for token, _idx, _state in primary_divert_states]
+        # True once BOTH the primary divert anchors and any opened
+        # failsink states have been completed by an inner handler —
+        # the outer handlers below must not double-complete them.
+        divert_states_closed = False
+        failsink_states: list[tuple[TokenInfo, NodeStateOpen]] = []
+
+        # Failsink mode: write enriched rows to failsink
+        try:
+            if failsink.node_id is None:
+                raise OrchestrationInvariantError(f"Failsink '{failsink.name}' executed without node_id - orchestrator bug")
+            if failsink_edge_id is None:
+                raise OrchestrationInvariantError("failsink_edge_id is None but failsink is not None — orchestrator bug")
+            if failsink_name is None:
+                raise OrchestrationInvariantError("failsink_name is None but failsink is not None — orchestrator bug")
+            failsink_node_id: str = failsink.node_id
+
+            # Build enriched rows — keyed by token_id so failsink node states
+            # can record the enriched payload (what was actually written), not
+            # the original row data.
+            iso_ts = datetime.now(UTC).isoformat()
+            enriched_rows: list[dict[str, object]] = []
+            enriched_by_token: dict[str, dict[str, object]] = {}
+            for token, idx, _state in primary_divert_states:
+                diversion = diversion_by_index[idx]
+                enriched_row = {
+                    **diversion.row_data,
+                    "__diversion_reason": diversion.reason,
+                    "__diverted_from": sink_name,
+                    "__diversion_timestamp": iso_ts,
+                }
+                enriched_rows.append(enriched_row)
+                enriched_by_token[token.token_id] = enriched_row
+
+            # Open node_states at the failsink node (destination) BEFORE
+            # the external failsink I/O, mirroring the primary pre-phase
+            # (elspeth-adaca19c75): a durable failsink write must never
+            # exist without a failsink node_state — a crash between
+            # flush and audit recording would otherwise leave a durable
+            # artifact with no state/routing_event/outcome/checkpoint.
+            # Use the enriched payload (what will be written), not the
+            # original row data — the audit trail must reflect the
+            # persisted data.
+            try:
+                for token, _idx, _primary_state in primary_divert_states:
+                    input_dict = enriched_by_token[token.token_id]
+                    state = self._execution.begin_node_state(
+                        token_id=token.token_id,
+                        node_id=failsink_node_id,
+                        run_id=ctx.run_id,
+                        # Failsink handling is a second sink visit for the
+                        # same token. Record it at the next path position
+                        # so it cannot collide with the primary sink
+                        # node_state's (token_id, step_index, attempt).
+                        step_index=step_in_pipeline + 1,
+                        input_data=input_dict,
+                        attempt=token.resume_attempt_offset,
+                        resume_checkpoint_id=token.resume_checkpoint_id,
+                    )
+                    failsink_states.append((token, state))
+            except contract_errors.TIER_1_ERRORS as e:
+                # Best-effort: close partially-opened failsink states +
+                # primary divert states before the crash propagates.
+                all_open = failsink_states + primary_divert_pairs
+                if all_open:
+                    self._best_effort_cleanup(all_open, e, "begin_node_state_failsink")
+                divert_states_closed = True
+                raise
+            except Exception as e:
+                begin_error = ExecutionError(
+                    exception=str(e),
+                    exception_type=type(e).__name__,
+                    phase="begin_node_state_failsink",
+                )
+                # Close any partially-opened failsink states
+                if failsink_states:
+                    self._complete_states_failed(
+                        states=failsink_states,
+                        duration_ms=0.0,
+                        error=begin_error,
+                    )
+                # Also close the already-open primary divert states.
+                self._complete_states_failed(
+                    states=primary_divert_pairs,
+                    duration_ms=0.0,
+                    error=begin_error,
+                )
+                divert_states_closed = True
+                raise
+
+            with track_operation(
+                recorder=self._execution,
+                run_id=self._run_id,
+                node_id=failsink_node_id,
+                operation_type="sink_write",
+                ctx=ctx,
+                input_data={
+                    "sink_plugin": failsink.name,
+                    "row_count": len(primary_divert_states),
+                    "diverted_from": sink_name,
+                },
+            ) as failsink_handle:
+                with self._spans.sink_span(
+                    failsink.name,
+                    node_id=failsink_node_id,
+                    token_ids=[token.token_id for token in diverted_only_tokens],
+                ):
+                    failsink._reset_diversion_log()
+                    try:
+                        self._run_sink_boundary_checks(
+                            sink=failsink,
+                            rows=enriched_rows,
+                            tokens=diverted_only_tokens,
+                            run_id=ctx.run_id,
+                            node_id=failsink_node_id,
+                            row_contracts=None,
+                        )
+                        # Validate enriched rows against failsink required fields.
+                        # skip_schema=True because the executor injects __diversion_*
+                        # fields that are outside the failsink's declared schema —
+                        # a fixed-schema failsink (extra="forbid") would reject them.
+                        # Required-field checking still catches missing upstream fields.
+                        # Don't pass primary-path contracts here: the failsink's
+                        # declared_required_fields are diagnostic-shaped (e.g.,
+                        # __diversion_reason) and have no relationship to the
+                        # primary contract's field optionality. Annotating with
+                        # "optional in coalesce merge" would be misdirection —
+                        # the operator is debugging a failsink write, not a
+                        # missing primary field.
+                        self._validate_sink_input(failsink, enriched_rows, skip_schema=True)
+                    except (
+                        DeclarationContractViolation,
+                        AggregateDeclarationContractViolation,
+                        SinkTransactionalInvariantError,
+                    ) as boundary_violation:
+                        self._complete_states_failed(
+                            states=primary_divert_pairs + failsink_states,
+                            duration_ms=0.0,
+                            error=self._build_boundary_error(exc=boundary_violation, phase="failsink_write"),
+                        )
+                        self._record_boundary_failure_outcomes(
+                            tokens=diverted_only_tokens,
+                            sink_name=failsink.name,
+                            phase="failsink_write",
+                            violation=boundary_violation,
+                        )
+                        divert_states_closed = True
+                        raise
+
+                    failsink_write_result = failsink.write(enriched_rows, ctx)
+                    # First-party plugin-contract guard: SinkWriteResult is
+                    # this system-owned failsink's typed return contract (see
+                    # Plugin Ownership), so a wrong type is a plugin bug we
+                    # crash on. The isinstance->raise is offensive programming
+                    # (a maximally informative crash), not coercion and not
+                    # silent recovery — i.e. the prescribed CRASH response,
+                    # not the defensive isinstance-to-suppress that R5 targets.
+                    if not isinstance(failsink_write_result, SinkWriteResult):
+                        raise PluginContractViolation(
+                            f"Failsink '{failsink_name}' returned {type(failsink_write_result).__name__}, "
+                            f"expected SinkWriteResult. This is a failsink plugin bug."
+                        )
+                    failsink_artifact_info = failsink_write_result.artifact
+                    # First-party plugin-contract guard:
+                    # SinkWriteResult.artifact must be an ArtifactDescriptor
+                    # under this system-owned failsink's typed contract (see
+                    # Plugin Ownership), so a wrong type is a plugin bug we
+                    # crash on. The isinstance->raise is offensive programming
+                    # (a maximally informative crash), not coercion and not
+                    # silent recovery — i.e. the prescribed CRASH response,
+                    # not the defensive isinstance-to-suppress that R5 targets.
+                    if not isinstance(failsink_artifact_info, ArtifactDescriptor):
+                        raise PluginContractViolation(
+                            f"Failsink '{failsink_name}' returned SinkWriteResult with artifact of type "
+                            f"{type(failsink_artifact_info).__name__}, expected ArtifactDescriptor. "
+                            f"This is a failsink plugin bug."
+                        )
+                    if failsink_write_result.diversions:
+                        raise FrameworkBugError(
+                            f"Failsink '{failsink_name}' produced {len(failsink_write_result.diversions)} "
+                            f"diversions during failsink write — failsinks must not divert rows."
+                        )
+
+                failsink.flush()
+                failsink_handle.output_data = {
+                    "artifact_path": failsink_artifact_info.path_or_uri,
+                    "content_hash": failsink_artifact_info.content_hash,
+                }
+        except contract_errors.TIER_1_ERRORS as e:
+            if not divert_states_closed:
+                self._best_effort_cleanup(primary_divert_pairs + failsink_states, e, "failsink_write")
+            raise
+        except Exception as e:
+            if not divert_states_closed:
+                fs_write_error = ExecutionError(
+                    exception=str(e),
+                    exception_type=type(e).__name__,
+                    phase="failsink_write",
+                )
+                self._complete_states_failed(
+                    states=primary_divert_pairs + failsink_states,
+                    duration_ms=0.0,
+                    error=fs_write_error,
+                )
+            raise
+
+        # Record routing_event anchored to PRIMARY sink state (the routing node),
+        # complete primary state as FAILED, then complete failsink state.
+        # This matches the quarantine pattern: routing_event lives at the
+        # node that made the routing decision.
+        #
+        # Wrapped in try/except to clean up any remaining OPEN states
+        # if a recorder call fails mid-loop (F3 fix from review).
+        completed_primary_indices: set[int] = set()
+        completed_failsink_indices: set[int] = set()
+        try:
+            for loop_idx, ((token, idx, primary_state), (_, fs_state)) in enumerate(
+                zip(primary_divert_states, failsink_states, strict=True)
+            ):
+                diversion = diversion_by_index[idx]
+                reason: SinkDiversionReason = {"diversion_reason": diversion.reason}
+
+                # Routing event anchored to primary sink state
+                self._execution.record_routing_event(
+                    state_id=primary_state.state_id,
+                    edge_id=failsink_edge_id,
+                    mode=RoutingMode.DIVERT,
+                    reason=reason,
+                )
+
+                # Complete primary state as FAILED — the row didn't get where
+                # it was going. FAILED is a row state, not a system state:
+                # the pipeline is healthy, the row failed at this stop.
+                # Matches the quarantine pattern (core.py:1835).
+                divert_error = ExecutionError(
+                    exception=diversion.reason,
+                    exception_type="SinkDiversion",
+                    phase="write",
+                )
+                self._execution.complete_node_state(
+                    state_id=primary_state.state_id,
+                    status=NodeStateStatus.FAILED,
+                    output_data={"diverted_to": failsink_name, "reason": diversion.reason},
+                    duration_ms=0.0,
+                    error=divert_error,
+                )
+                completed_primary_indices.add(loop_idx)
+
+                # Complete failsink state (token written to failsink).
+                # Use enriched row — that's what was actually persisted.
+                failsink_output = {
+                    "row": enriched_by_token[token.token_id],
+                    "artifact_path": failsink_artifact_info.path_or_uri,
+                    "content_hash": failsink_artifact_info.content_hash,
+                }
+                self._execution.complete_node_state(
+                    state_id=fs_state.state_id,
+                    status=NodeStateStatus.COMPLETED,
+                    output_data=failsink_output,
+                    duration_ms=0.0,
+                )
+                completed_failsink_indices.add(loop_idx)
+        except contract_errors.TIER_1_ERRORS as e:
+            # Best-effort: close remaining OPEN states before crash.
+            remaining = [(t, s) for i, (t, _, s) in enumerate(primary_divert_states) if i not in completed_primary_indices] + [
+                (t, s) for i, (t, s) in enumerate(failsink_states) if i not in completed_failsink_indices
+            ]
+            if remaining:
+                self._best_effort_cleanup(remaining, e, "failsink_audit_recording")
+            raise
+        except Exception as e:
+            # Close any remaining OPEN states from tokens not yet processed.
+            loop_error = ExecutionError(
+                exception=str(e),
+                exception_type=type(e).__name__,
+                phase="failsink_audit_recording",
+            )
+            remaining_primary = [(t, s) for i, (t, _, s) in enumerate(primary_divert_states) if i not in completed_primary_indices]
+            remaining_failsink = [(t, s) for i, (t, s) in enumerate(failsink_states) if i not in completed_failsink_indices]
+            if remaining_primary:
+                self._complete_states_failed(
+                    states=remaining_primary,
+                    duration_ms=0.0,
+                    error=loop_error,
+                )
+            if remaining_failsink:
+                self._complete_states_failed(
+                    states=remaining_failsink,
+                    duration_ms=0.0,
+                    error=loop_error,
+                )
+            raise
+
+        # Register failsink artifact
+        first_fs_state = failsink_states[0][1]
+        failsink_artifact = self._execution.register_artifact(
+            run_id=self._run_id,
+            state_id=first_fs_state.state_id,
+            sink_node_id=failsink_node_id,
+            artifact_type=failsink_artifact_info.artifact_type,
+            path=failsink_artifact_info.path_or_uri,
+            content_hash=failsink_artifact_info.content_hash,
+            size_bytes=failsink_artifact_info.size_bytes,
+        )
+
+        # Record DIVERTED outcomes
+        for token, idx, _primary_state in primary_divert_states:
+            diversion = diversion_by_index[idx]
+            error_hash = compute_error_hash(diversion.reason)
+            self._data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                outcome=TerminalOutcome.TRANSIENT,
+                path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
+                error_hash=error_hash,
+                sink_name=failsink_name,
+                sink_node_id=failsink_node_id,
+                artifact_id=failsink_artifact.artifact_id,
+            )
+            failsink_count += 1
+
+        # Checkpoint diverted tokens — failsink write is now durable.
+        # Without this, a crash after failsink write but before the next
+        # primary checkpoint leaves diverted tokens uncheckpointed,
+        # causing duplicate failsink writes on resume.
+        if on_token_written is not None:
+            for token, _idx, _state in primary_divert_states:
+                try:
+                    on_token_written(token)
+                except contract_errors.TIER_1_ERRORS:
+                    raise
+                except Exception as exc:
+                    raise AuditIntegrityError(
+                        f"Checkpoint failed after durable failsink write for diverted token {token.token_id}. "
+                        f"Failsink artifact exists but no checkpoint record created — "
+                        f"audit trail is inconsistent. "
+                        f"Original error: {type(exc).__name__}: {exc}"
+                    ) from exc
+
+        return failsink_count
+
     def write(
         self,
         sink: SinkProtocol,
@@ -815,345 +1180,17 @@ class SinkExecutor:
             ]
 
             if failsink is not None:
-                primary_divert_pairs = [(t, s) for t, _, s in primary_divert_states]
-                diverted_only_tokens = [token for token, _idx, _state in primary_divert_states]
-                # True once BOTH the primary divert anchors and any opened
-                # failsink states have been completed by an inner handler —
-                # the outer handlers below must not double-complete them.
-                divert_states_closed = False
-                failsink_states: list[tuple[TokenInfo, NodeStateOpen]] = []
-
-                # Failsink mode: write enriched rows to failsink
-                try:
-                    if failsink.node_id is None:
-                        raise OrchestrationInvariantError(f"Failsink '{failsink.name}' executed without node_id - orchestrator bug")
-                    if failsink_edge_id is None:
-                        raise OrchestrationInvariantError("failsink_edge_id is None but failsink is not None — orchestrator bug")
-                    if failsink_name is None:
-                        raise OrchestrationInvariantError("failsink_name is None but failsink is not None — orchestrator bug")
-                    failsink_node_id: str = failsink.node_id
-
-                    # Build enriched rows — keyed by token_id so failsink node states
-                    # can record the enriched payload (what was actually written), not
-                    # the original row data.
-                    iso_ts = datetime.now(UTC).isoformat()
-                    enriched_rows: list[dict[str, object]] = []
-                    enriched_by_token: dict[str, dict[str, object]] = {}
-                    for token, idx, _state in primary_divert_states:
-                        diversion = diversion_by_index[idx]
-                        enriched_row = {
-                            **diversion.row_data,
-                            "__diversion_reason": diversion.reason,
-                            "__diverted_from": sink_name,
-                            "__diversion_timestamp": iso_ts,
-                        }
-                        enriched_rows.append(enriched_row)
-                        enriched_by_token[token.token_id] = enriched_row
-
-                    # Open node_states at the failsink node (destination) BEFORE
-                    # the external failsink I/O, mirroring the primary pre-phase
-                    # (elspeth-adaca19c75): a durable failsink write must never
-                    # exist without a failsink node_state — a crash between
-                    # flush and audit recording would otherwise leave a durable
-                    # artifact with no state/routing_event/outcome/checkpoint.
-                    # Use the enriched payload (what will be written), not the
-                    # original row data — the audit trail must reflect the
-                    # persisted data.
-                    try:
-                        for token, _idx, _primary_state in primary_divert_states:
-                            input_dict = enriched_by_token[token.token_id]
-                            state = self._execution.begin_node_state(
-                                token_id=token.token_id,
-                                node_id=failsink_node_id,
-                                run_id=ctx.run_id,
-                                # Failsink handling is a second sink visit for the
-                                # same token. Record it at the next path position
-                                # so it cannot collide with the primary sink
-                                # node_state's (token_id, step_index, attempt).
-                                step_index=step_in_pipeline + 1,
-                                input_data=input_dict,
-                                attempt=token.resume_attempt_offset,
-                                resume_checkpoint_id=token.resume_checkpoint_id,
-                            )
-                            failsink_states.append((token, state))
-                    except contract_errors.TIER_1_ERRORS as e:
-                        # Best-effort: close partially-opened failsink states +
-                        # primary divert states before the crash propagates.
-                        all_open = failsink_states + primary_divert_pairs
-                        if all_open:
-                            self._best_effort_cleanup(all_open, e, "begin_node_state_failsink")
-                        divert_states_closed = True
-                        raise
-                    except Exception as e:
-                        begin_error = ExecutionError(
-                            exception=str(e),
-                            exception_type=type(e).__name__,
-                            phase="begin_node_state_failsink",
-                        )
-                        # Close any partially-opened failsink states
-                        if failsink_states:
-                            self._complete_states_failed(
-                                states=failsink_states,
-                                duration_ms=0.0,
-                                error=begin_error,
-                            )
-                        # Also close the already-open primary divert states.
-                        self._complete_states_failed(
-                            states=primary_divert_pairs,
-                            duration_ms=0.0,
-                            error=begin_error,
-                        )
-                        divert_states_closed = True
-                        raise
-
-                    with track_operation(
-                        recorder=self._execution,
-                        run_id=self._run_id,
-                        node_id=failsink_node_id,
-                        operation_type="sink_write",
-                        ctx=ctx,
-                        input_data={
-                            "sink_plugin": failsink.name,
-                            "row_count": len(primary_divert_states),
-                            "diverted_from": sink_name,
-                        },
-                    ) as failsink_handle:
-                        with self._spans.sink_span(
-                            failsink.name,
-                            node_id=failsink_node_id,
-                            token_ids=[token.token_id for token in diverted_only_tokens],
-                        ):
-                            failsink._reset_diversion_log()
-                            try:
-                                self._run_sink_boundary_checks(
-                                    sink=failsink,
-                                    rows=enriched_rows,
-                                    tokens=diverted_only_tokens,
-                                    run_id=ctx.run_id,
-                                    node_id=failsink_node_id,
-                                    row_contracts=None,
-                                )
-                                # Validate enriched rows against failsink required fields.
-                                # skip_schema=True because the executor injects __diversion_*
-                                # fields that are outside the failsink's declared schema —
-                                # a fixed-schema failsink (extra="forbid") would reject them.
-                                # Required-field checking still catches missing upstream fields.
-                                # Don't pass primary-path contracts here: the failsink's
-                                # declared_required_fields are diagnostic-shaped (e.g.,
-                                # __diversion_reason) and have no relationship to the
-                                # primary contract's field optionality. Annotating with
-                                # "optional in coalesce merge" would be misdirection —
-                                # the operator is debugging a failsink write, not a
-                                # missing primary field.
-                                self._validate_sink_input(failsink, enriched_rows, skip_schema=True)
-                            except (
-                                DeclarationContractViolation,
-                                AggregateDeclarationContractViolation,
-                                SinkTransactionalInvariantError,
-                            ) as boundary_violation:
-                                self._complete_states_failed(
-                                    states=primary_divert_pairs + failsink_states,
-                                    duration_ms=0.0,
-                                    error=self._build_boundary_error(exc=boundary_violation, phase="failsink_write"),
-                                )
-                                self._record_boundary_failure_outcomes(
-                                    tokens=diverted_only_tokens,
-                                    sink_name=failsink.name,
-                                    phase="failsink_write",
-                                    violation=boundary_violation,
-                                )
-                                divert_states_closed = True
-                                raise
-
-                            failsink_write_result = failsink.write(enriched_rows, ctx)
-                            # First-party plugin-contract guard: SinkWriteResult is
-                            # this system-owned failsink's typed return contract (see
-                            # Plugin Ownership), so a wrong type is a plugin bug we
-                            # crash on. The isinstance->raise is offensive programming
-                            # (a maximally informative crash), not coercion and not
-                            # silent recovery — i.e. the prescribed CRASH response,
-                            # not the defensive isinstance-to-suppress that R5 targets.
-                            if not isinstance(failsink_write_result, SinkWriteResult):
-                                raise PluginContractViolation(
-                                    f"Failsink '{failsink_name}' returned {type(failsink_write_result).__name__}, "
-                                    f"expected SinkWriteResult. This is a failsink plugin bug."
-                                )
-                            failsink_artifact_info = failsink_write_result.artifact
-                            # First-party plugin-contract guard:
-                            # SinkWriteResult.artifact must be an ArtifactDescriptor
-                            # under this system-owned failsink's typed contract (see
-                            # Plugin Ownership), so a wrong type is a plugin bug we
-                            # crash on. The isinstance->raise is offensive programming
-                            # (a maximally informative crash), not coercion and not
-                            # silent recovery — i.e. the prescribed CRASH response,
-                            # not the defensive isinstance-to-suppress that R5 targets.
-                            if not isinstance(failsink_artifact_info, ArtifactDescriptor):
-                                raise PluginContractViolation(
-                                    f"Failsink '{failsink_name}' returned SinkWriteResult with artifact of type "
-                                    f"{type(failsink_artifact_info).__name__}, expected ArtifactDescriptor. "
-                                    f"This is a failsink plugin bug."
-                                )
-                            if failsink_write_result.diversions:
-                                raise FrameworkBugError(
-                                    f"Failsink '{failsink_name}' produced {len(failsink_write_result.diversions)} "
-                                    f"diversions during failsink write — failsinks must not divert rows."
-                                )
-
-                        failsink.flush()
-                        failsink_handle.output_data = {
-                            "artifact_path": failsink_artifact_info.path_or_uri,
-                            "content_hash": failsink_artifact_info.content_hash,
-                        }
-                except contract_errors.TIER_1_ERRORS as e:
-                    if not divert_states_closed:
-                        self._best_effort_cleanup(primary_divert_pairs + failsink_states, e, "failsink_write")
-                    raise
-                except Exception as e:
-                    if not divert_states_closed:
-                        fs_write_error = ExecutionError(
-                            exception=str(e),
-                            exception_type=type(e).__name__,
-                            phase="failsink_write",
-                        )
-                        self._complete_states_failed(
-                            states=primary_divert_pairs + failsink_states,
-                            duration_ms=0.0,
-                            error=fs_write_error,
-                        )
-                    raise
-
-                # Record routing_event anchored to PRIMARY sink state (the routing node),
-                # complete primary state as FAILED, then complete failsink state.
-                # This matches the quarantine pattern: routing_event lives at the
-                # node that made the routing decision.
-                #
-                # Wrapped in try/except to clean up any remaining OPEN states
-                # if a recorder call fails mid-loop (F3 fix from review).
-                completed_primary_indices: set[int] = set()
-                completed_failsink_indices: set[int] = set()
-                try:
-                    for loop_idx, ((token, idx, primary_state), (_, fs_state)) in enumerate(
-                        zip(primary_divert_states, failsink_states, strict=True)
-                    ):
-                        diversion = diversion_by_index[idx]
-                        reason: SinkDiversionReason = {"diversion_reason": diversion.reason}
-
-                        # Routing event anchored to primary sink state
-                        self._execution.record_routing_event(
-                            state_id=primary_state.state_id,
-                            edge_id=failsink_edge_id,
-                            mode=RoutingMode.DIVERT,
-                            reason=reason,
-                        )
-
-                        # Complete primary state as FAILED — the row didn't get where
-                        # it was going. FAILED is a row state, not a system state:
-                        # the pipeline is healthy, the row failed at this stop.
-                        # Matches the quarantine pattern (core.py:1835).
-                        divert_error = ExecutionError(
-                            exception=diversion.reason,
-                            exception_type="SinkDiversion",
-                            phase="write",
-                        )
-                        self._execution.complete_node_state(
-                            state_id=primary_state.state_id,
-                            status=NodeStateStatus.FAILED,
-                            output_data={"diverted_to": failsink_name, "reason": diversion.reason},
-                            duration_ms=0.0,
-                            error=divert_error,
-                        )
-                        completed_primary_indices.add(loop_idx)
-
-                        # Complete failsink state (token written to failsink).
-                        # Use enriched row — that's what was actually persisted.
-                        failsink_output = {
-                            "row": enriched_by_token[token.token_id],
-                            "artifact_path": failsink_artifact_info.path_or_uri,
-                            "content_hash": failsink_artifact_info.content_hash,
-                        }
-                        self._execution.complete_node_state(
-                            state_id=fs_state.state_id,
-                            status=NodeStateStatus.COMPLETED,
-                            output_data=failsink_output,
-                            duration_ms=0.0,
-                        )
-                        completed_failsink_indices.add(loop_idx)
-                except contract_errors.TIER_1_ERRORS as e:
-                    # Best-effort: close remaining OPEN states before crash.
-                    remaining = [(t, s) for i, (t, _, s) in enumerate(primary_divert_states) if i not in completed_primary_indices] + [
-                        (t, s) for i, (t, s) in enumerate(failsink_states) if i not in completed_failsink_indices
-                    ]
-                    if remaining:
-                        self._best_effort_cleanup(remaining, e, "failsink_audit_recording")
-                    raise
-                except Exception as e:
-                    # Close any remaining OPEN states from tokens not yet processed.
-                    loop_error = ExecutionError(
-                        exception=str(e),
-                        exception_type=type(e).__name__,
-                        phase="failsink_audit_recording",
-                    )
-                    remaining_primary = [(t, s) for i, (t, _, s) in enumerate(primary_divert_states) if i not in completed_primary_indices]
-                    remaining_failsink = [(t, s) for i, (t, s) in enumerate(failsink_states) if i not in completed_failsink_indices]
-                    if remaining_primary:
-                        self._complete_states_failed(
-                            states=remaining_primary,
-                            duration_ms=0.0,
-                            error=loop_error,
-                        )
-                    if remaining_failsink:
-                        self._complete_states_failed(
-                            states=remaining_failsink,
-                            duration_ms=0.0,
-                            error=loop_error,
-                        )
-                    raise
-
-                # Register failsink artifact
-                first_fs_state = failsink_states[0][1]
-                failsink_artifact = self._execution.register_artifact(
-                    run_id=self._run_id,
-                    state_id=first_fs_state.state_id,
-                    sink_node_id=failsink_node_id,
-                    artifact_type=failsink_artifact_info.artifact_type,
-                    path=failsink_artifact_info.path_or_uri,
-                    content_hash=failsink_artifact_info.content_hash,
-                    size_bytes=failsink_artifact_info.size_bytes,
+                failsink_count = self._handle_failsink_diversions(
+                    failsink=failsink,
+                    failsink_name=failsink_name,
+                    failsink_edge_id=failsink_edge_id,
+                    primary_divert_states=primary_divert_states,
+                    diversion_by_index=diversion_by_index,
+                    sink_name=sink_name,
+                    step_in_pipeline=step_in_pipeline,
+                    ctx=ctx,
+                    on_token_written=on_token_written,
                 )
-
-                # Record DIVERTED outcomes
-                for token, idx, _primary_state in primary_divert_states:
-                    diversion = diversion_by_index[idx]
-                    error_hash = compute_error_hash(diversion.reason)
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=TerminalOutcome.TRANSIENT,
-                        path=TerminalPath.SINK_FALLBACK_TO_FAILSINK,
-                        error_hash=error_hash,
-                        sink_name=failsink_name,
-                        sink_node_id=failsink_node_id,
-                        artifact_id=failsink_artifact.artifact_id,
-                    )
-                    failsink_count += 1
-
-                # Checkpoint diverted tokens — failsink write is now durable.
-                # Without this, a crash after failsink write but before the next
-                # primary checkpoint leaves diverted tokens uncheckpointed,
-                # causing duplicate failsink writes on resume.
-                if on_token_written is not None:
-                    for token, _idx, _state in primary_divert_states:
-                        try:
-                            on_token_written(token)
-                        except contract_errors.TIER_1_ERRORS:
-                            raise
-                        except Exception as exc:
-                            raise AuditIntegrityError(
-                                f"Checkpoint failed after durable failsink write for diverted token {token.token_id}. "
-                                f"Failsink artifact exists but no checkpoint record created — "
-                                f"audit trail is inconsistent. "
-                                f"Original error: {type(exc).__name__}: {exc}"
-                            ) from exc
-
             else:
                 # Discard mode: complete primary states and record DIVERTED outcomes.
                 # No routing_event (no DAG edge for discard), no failsink write.

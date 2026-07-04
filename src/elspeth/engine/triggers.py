@@ -16,6 +16,7 @@ Trigger types:
 
 from __future__ import annotations
 
+import bisect
 import math
 from typing import TYPE_CHECKING, Literal
 
@@ -67,6 +68,21 @@ class TriggerEvaluator:
         # Per plugin-protocol.md:1211: "Multiple triggers can be combined (first one to fire wins)"
         self._count_fire_time: float | None = None
         self._condition_fire_time: float | None = None
+        # Sorted durable arrival instants of every member fed through
+        # record_accept (elspeth-eed319ed3d). ADR-030 §E.2 intake adopts rows
+        # in (barrier_key, ingest_sequence, work_item_id) order — NOT
+        # blocked-at order — so a later accept may carry an EARLIER durable
+        # arrival. The count/condition latches recompute over this set so
+        # they are pure functions of durable state, invariant under adoption
+        # order (§H doctrine), matching the timeout's min-anchor. Empty (and
+        # deliberately incomplete) for checkpoint-restored batches — the
+        # recompute is guarded on len == batch_count.
+        self._member_accept_times: list[float] = []
+        # Provenance of the condition latch: True when should_trigger()
+        # latched at OBSERVATION time (sampled-at-evaluation,
+        # elspeth-06df383e4a) or the latch was checkpoint-restored. The
+        # durable replay only governs latches record_accept itself derived.
+        self._condition_fire_observed = False
 
         # Pre-parse condition expression if applicable
         self._condition_parser: ExpressionParser | None = None
@@ -109,15 +125,27 @@ class TriggerEvaluator:
         ``accept_time`` (ADR-030 §E.2 backdated accept timing): an explicit
         monotonic anchor for this accept — the journal-first intake passes the
         row's durable ``barrier_blocked_at`` arrival converted onto this
-        clock's monotonic scale, so the first-accept, count-fire and
-        condition-fire latches anchor at durable arrival rather than at
-        adoption. A batch's timeout fire time is therefore a pure function of
-        durable state + config (``barrier_blocked_at(oldest member) +
-        timeout_seconds``) — invariant under leader takeover (§H pinned
-        doctrine). ``None`` preserves the live-clock anchor.
+        clock's monotonic scale. Because intake adoption iterates in
+        (barrier_key, ingest_sequence, work_item_id) order — NOT blocked-at
+        order — a later accept may carry an EARLIER durable arrival: the
+        first-accept anchor min-rewinds, the count latch recomputes as the
+        N-th smallest durable arrival, and the condition latch replays over
+        the members in durable order (elspeth-eed319ed3d). All three latches
+        are therefore pure functions of durable state + config, invariant
+        under adoption order and leader takeover (§H pinned doctrine).
+        Checkpoint-restored batches carry no member arrival times, so their
+        restored latches are preserved and post-restore accepts fall back to
+        latch-once semantics. ``None`` preserves the live-clock anchor.
         """
         current_time = accept_time if accept_time is not None else self._clock.monotonic()
         self._batch_count += 1
+        insert_index = bisect.bisect_left(self._member_accept_times, current_time)
+        self._member_accept_times.insert(insert_index, current_time)
+        # A checkpoint-restored batch has fewer member times than members;
+        # recomputes are forbidden there (they would derive latches from a
+        # partial member set and corrupt the restored instants).
+        members_complete = len(self._member_accept_times) == self._batch_count
+        appended_in_order = insert_index == len(self._member_accept_times) - 1
 
         if self._first_accept_time is None or current_time < self._first_accept_time:
             # min-anchor: §H doctrine pins the timeout fire time to the OLDEST
@@ -125,26 +153,66 @@ class TriggerEvaluator:
             # blocked-at order must still rewind the anchor.
             self._first_accept_time = current_time
 
-        # Track when count threshold was first reached
-        if self._count_fire_time is None and self._config.count is not None and self._batch_count >= self._config.count:
-            self._count_fire_time = current_time
+        # Count latch: the N-th smallest durable arrival — recomputed on every
+        # accept so a backdated adoption lands the same latch as in-order
+        # adoption. (For in-order feeds this equals the historical latch-once
+        # instant.)
+        if self._config.count is not None and self._batch_count >= self._config.count:
+            if members_complete:
+                self._count_fire_time = self._member_accept_times[self._config.count - 1]
+            elif self._count_fire_time is None:
+                self._count_fire_time = current_time
 
-        # Track when condition first became true
-        if self._condition_fire_time is None and self._condition_parser is not None:
+        # Condition latch (durable provenance only — observation latches from
+        # should_trigger() are sampled-at-evaluation and never rewritten here).
+        if self._condition_parser is not None and not self._condition_fire_observed:
+            if members_complete and not appended_in_order:
+                # The inserted member changed earlier prefix contexts (count
+                # and, on an anchor rewind, ages): replay the whole member
+                # sequence in durable order and latch the first true instant.
+                self._condition_fire_time = self._replay_condition_over_members(self._condition_parser)
+            elif self._condition_fire_time is None:
+                context = {
+                    "batch_count": self._batch_count,
+                    "batch_age_seconds": current_time - self._first_accept_time,
+                }
+                result = self._condition_parser.evaluate(context)
+                # Defense-in-depth: reject non-boolean at runtime
+                # Per CLAUDE.md: "if bool(result)" coercion is forbidden for our data
+                if not isinstance(result, bool):
+                    raise TypeError(
+                        f"Trigger condition must return bool, got {type(result).__name__}: {result!r}. "
+                        f"Expression: {self._condition_parser.expression!r}"
+                    )
+                if result:
+                    self._condition_fire_time = current_time
+
+    def _replay_condition_over_members(self, parser: ExpressionParser) -> float | None:
+        """First durable instant the condition is true over the member sequence.
+
+        A pure function of the sorted member arrival times: evaluates the
+        condition at each prefix (batch_count = k, age = arrival_k - arrival_1)
+        and returns the k-th arrival of the first true prefix, or None when no
+        prefix satisfies it (a window condition can genuinely UNLATCH when an
+        anchor rewind grows every age past its window — the durable latch
+        follows the durable state).
+        """
+        times = self._member_accept_times
+        for member_count, instant in enumerate(times, start=1):
             context = {
-                "batch_count": self._batch_count,
-                "batch_age_seconds": current_time - self._first_accept_time,
+                "batch_count": member_count,
+                "batch_age_seconds": instant - times[0],
             }
-            result = self._condition_parser.evaluate(context)
+            result = parser.evaluate(context)
             # Defense-in-depth: reject non-boolean at runtime
             # Per CLAUDE.md: "if bool(result)" coercion is forbidden for our data
             if not isinstance(result, bool):
                 raise TypeError(
-                    f"Trigger condition must return bool, got {type(result).__name__}: {result!r}. "
-                    f"Expression: {self._condition_parser.expression!r}"
+                    f"Trigger condition must return bool, got {type(result).__name__}: {result!r}. Expression: {parser.expression!r}"
                 )
             if result:
-                self._condition_fire_time = current_time
+                return instant
+        return None
 
     def should_trigger(self) -> bool:
         """Evaluate whether ANY trigger condition is met (OR logic).
@@ -215,6 +283,9 @@ class TriggerEvaluator:
                     # could steal a win from a timeout that genuinely fired
                     # first and corrupt the TriggerType audit value.
                     self._condition_fire_time = current_time
+                    # Observation provenance: record_accept's durable replay
+                    # must never rewrite a sampled-at-evaluation latch.
+                    self._condition_fire_observed = True
                     candidates.append((self._condition_fire_time, "condition"))
 
         if not candidates:
@@ -312,6 +383,13 @@ class TriggerEvaluator:
         # Restore batch count
         self._batch_count = batch_count
 
+        # Restored members carry NO durable arrival times (the checkpoint
+        # persists only scalars), so the member list stays empty: the
+        # incomplete-member guard in record_accept keeps every restored latch
+        # as-is and post-restore accepts use latch-once semantics.
+        self._member_accept_times = []
+        self._condition_fire_observed = False
+
         # Restore first_accept_time by rewinding from current time
         # This preserves the batch_age_seconds for timeout calculation
         self._first_accept_time = current_time - elapsed_age_seconds
@@ -329,6 +407,9 @@ class TriggerEvaluator:
 
         if condition_fire_offset is not None:
             self._condition_fire_time = self._first_accept_time + condition_fire_offset
+            # A restored latch is not record_accept-derived; the durable
+            # replay must never rewrite it.
+            self._condition_fire_observed = True
         else:
             # Not yet fired at checkpoint time. On resume, the first
             # should_trigger() that observes the condition true latches the
@@ -346,3 +427,5 @@ class TriggerEvaluator:
         self._last_triggered = None
         self._count_fire_time = None
         self._condition_fire_time = None
+        self._member_accept_times = []
+        self._condition_fire_observed = False

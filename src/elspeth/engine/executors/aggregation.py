@@ -832,9 +832,11 @@ class AggregationExecutor:
             # valid resumes). Drop them (logged) and leave the trigger fully
             # unlatched via reset(): calling restore_from_checkpoint here
             # would plant a phantom first-accept anchor at restore time that
-            # survives into the NEXT genuine batch (record_accept only sets
-            # first_accept_time when it is None) → wrong timeout age and, with
-            # latched offsets, a pre-fired count/condition latch.
+            # survives into the NEXT genuine batch (record_accept min-rewinds
+            # first_accept_time but never clears it, so a phantom anchor
+            # lingers whenever the genuine arrivals come later) → wrong
+            # timeout age and, with latched offsets, a pre-fired
+            # count/condition latch.
             elapsed_age_seconds = 0.0
             if scalars.count_fire_offset is not None or scalars.condition_fire_offset is not None:
                 slog.info(

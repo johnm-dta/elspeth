@@ -49,9 +49,23 @@ per_file_rules:
     to distinguish audit-evidence exceptions from framework/orchestration failures without fabricating
     context. Budget dropped 13->10 after the scheduler-drain extraction
     (elspeth-c49f33d6e4 component 3) moved the drain-loop and pending-sink
-    handoff isinstance sites to engine/scheduler_drain.py.
+    handoff isinstance sites to engine/scheduler_drain.py, then 10->6 after the
+    TokenTraversalEngine extraction (elspeth-c49f33d6e4 component 4) moved the
+    per-token traversal loop's plugin dispatch (TransformProtocol vs GateSettings)
+    and _Transform*/_Gate* outcome-union narrowing to engine/token_traversal.py.
   expires: null
-  max_hits: 10
+  max_hits: 6
+- pattern: engine/token_traversal.py
+  rules:
+  - R5
+  reason: 'Per-token DAG traversal plugin dispatch and outcome-union narrowing:
+    isinstance(plugin, TransformProtocol) / isinstance(plugin, GateSettings) select
+    the node handler in process_single_token, and isinstance(outcome, _TransformTerminal)
+    / isinstance(outcome, _GateTerminal) discriminate the continue-vs-terminal handler
+    results. Repointed from engine/processor.py (its R5 budget drops 10->6) after the
+    TokenTraversalEngine extraction (elspeth-c49f33d6e4 component 4).'
+  expires: null
+  max_hits: 4
 - pattern: engine/scheduler_drain.py
   rules:
   - R5

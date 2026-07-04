@@ -259,6 +259,108 @@ class TransformExecutor:
 
         return self._batch_adapters[node_id]
 
+    def _run_preflight(
+        self,
+        *,
+        transform: TransformProtocol,
+        token: TokenInfo,
+        input_dict: dict[str, Any],
+        ctx: PluginContext,
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """Run pre-invocation checks before the transform executes.
+
+        Owns the preflight phase: lifecycle guard, field-collision policy,
+        pre-emission declaration-contract dispatch (with terminal outcome
+        recording), and input-schema validation. Violations raise; the
+        caller's NodeStateGuard auto-fails the node state, so this helper
+        never touches the guard.
+
+        Returns:
+            Tuple of (effective_input_fields, static_contract), derived once
+            here and reused by the post-emission call site (panel F1
+            resolution: contracts use the caller-derived set, not their own
+            re-derivation).
+        """
+        # --- LIFECYCLE GUARD (pre-execution) ---
+        # Centralized check: ensure on_start() was called before process().
+        # All transforms are system-owned and must inherit BaseTransform.
+        # AttributeError here means a transform violates the interface contract.
+        if not transform._on_start_called:
+            raise PluginContractViolation(
+                f"Transform '{transform.name}' was called before on_start(). "
+                f"This is an engine lifecycle bug — on_start() must be called "
+                f"before any process() invocation."
+            )
+
+        # --- FIELD COLLISION ENFORCEMENT (pre-execution) ---
+        # Centralized check: if this transform declares output fields,
+        # verify none collide with input fields BEFORE running the transform.
+        # This prevents wasted API calls AND makes collision detection mandatory
+        # (not opt-in per plugin).
+        if transform.declared_output_fields:
+            from elspeth.contracts.field_collision import detect_field_collisions
+
+            collisions = detect_field_collisions(
+                set(input_dict.keys()),
+                transform.declared_output_fields,
+            )
+            if collisions is not None:
+                raise PluginContractViolation(
+                    f"Transform '{transform.name}' would overwrite existing input fields "
+                    f"{collisions}. This is a pipeline configuration error — the transform's "
+                    f"output fields collide with fields already present in the row."
+                )
+
+        # --- PRE-EMISSION DECLARATION-CONTRACT DISPATCH (ADR-010 §Decision 3 + F2) ---
+        # Fires BEFORE generic input_schema validation so the current
+        # pre-emission adopter (DeclaredRequiredFieldsContract) can attribute missing
+        # declared input fields to ADR-013 rather than collapsing them into a
+        # generic validation error when the schema requires the same field.
+        # It also runs BEFORE transform.process() so a missing-field crash in
+        # the plugin body cannot steal attribution from the declaration surface.
+        #
+        # effective_input_fields is derived once here and reused by the
+        # post-emission call site (panel F1 resolution: contracts use the
+        # caller-derived set, not their own re-derivation).
+        effective_input_fields = derive_effective_input_fields(token.row_data)
+        static_contract = transform.effective_static_contract()
+        try:
+            run_pre_emission_checks(
+                inputs=PreEmissionInputs(
+                    plugin=transform,
+                    node_id=transform.node_id or "",
+                    run_id=ctx.run_id,
+                    row_id=token.row_id,
+                    token_id=token.token_id,
+                    input_row=token.row_data,
+                    static_contract=static_contract,
+                    effective_input_fields=effective_input_fields,
+                ),
+            )
+        except (DeclarationContractViolation, AggregateDeclarationContractViolation) as violation:
+            self._record_terminal_contract_failure(
+                transform=transform,
+                token=token,
+                run_id=ctx.run_id,
+                violation=violation,
+            )
+            raise
+
+        # --- INPUT VALIDATION (pre-execution) ---
+        # Validate input against input_schema before calling process().
+        # Wrong types at a transform boundary are upstream plugin bugs (Tier 2).
+        # ADR-013 declaration checks run first so missing declared fields stay
+        # on the declaration-contract audit surface instead of being diluted
+        # into ordinary schema validation failures.
+        try:
+            transform.input_schema.model_validate(input_dict, strict=True)
+        except ValidationError as e:
+            raise PluginContractViolation(
+                f"Transform '{transform.name}' input validation failed: {e}. This indicates an upstream transform/source schema bug."
+            ) from e
+
+        return effective_input_fields, static_contract
+
     def execute_transform(
         self,
         transform: TransformProtocol,
@@ -344,83 +446,16 @@ class TransformExecutor:
             attempt=token.resume_attempt_offset + attempt,
             resume_checkpoint_id=token.resume_checkpoint_id,
         ) as guard:
-            # --- LIFECYCLE GUARD (pre-execution) ---
-            # Centralized check: ensure on_start() was called before process().
-            # All transforms are system-owned and must inherit BaseTransform.
-            # AttributeError here means a transform violates the interface contract.
-            if not transform._on_start_called:
-                raise PluginContractViolation(
-                    f"Transform '{transform.name}' was called before on_start(). "
-                    f"This is an engine lifecycle bug — on_start() must be called "
-                    f"before any process() invocation."
-                )
-
-            # --- FIELD COLLISION ENFORCEMENT (pre-execution) ---
-            # Centralized check: if this transform declares output fields,
-            # verify none collide with input fields BEFORE running the transform.
-            # This prevents wasted API calls AND makes collision detection mandatory
-            # (not opt-in per plugin).
-            if transform.declared_output_fields:
-                from elspeth.contracts.field_collision import detect_field_collisions
-
-                collisions = detect_field_collisions(
-                    set(input_dict.keys()),
-                    transform.declared_output_fields,
-                )
-                if collisions is not None:
-                    raise PluginContractViolation(
-                        f"Transform '{transform.name}' would overwrite existing input fields "
-                        f"{collisions}. This is a pipeline configuration error — the transform's "
-                        f"output fields collide with fields already present in the row."
-                    )
-
-            # --- PRE-EMISSION DECLARATION-CONTRACT DISPATCH (ADR-010 §Decision 3 + F2) ---
-            # Fires BEFORE generic input_schema validation so the current
-            # pre-emission adopter (DeclaredRequiredFieldsContract) can attribute missing
-            # declared input fields to ADR-013 rather than collapsing them into a
-            # generic validation error when the schema requires the same field.
-            # It also runs BEFORE transform.process() so a missing-field crash in
-            # the plugin body cannot steal attribution from the declaration surface.
-            #
-            # effective_input_fields is derived once here and reused by the
-            # post-emission call site (panel F1 resolution: contracts use the
-            # caller-derived set, not their own re-derivation).
-            effective_input_fields = derive_effective_input_fields(token.row_data)
-            static_contract = transform.effective_static_contract()
-            try:
-                run_pre_emission_checks(
-                    inputs=PreEmissionInputs(
-                        plugin=transform,
-                        node_id=transform.node_id or "",
-                        run_id=ctx.run_id,
-                        row_id=token.row_id,
-                        token_id=token.token_id,
-                        input_row=token.row_data,
-                        static_contract=static_contract,
-                        effective_input_fields=effective_input_fields,
-                    ),
-                )
-            except (DeclarationContractViolation, AggregateDeclarationContractViolation) as violation:
-                self._record_terminal_contract_failure(
-                    transform=transform,
-                    token=token,
-                    run_id=ctx.run_id,
-                    violation=violation,
-                )
-                raise
-
-            # --- INPUT VALIDATION (pre-execution) ---
-            # Validate input against input_schema before calling process().
-            # Wrong types at a transform boundary are upstream plugin bugs (Tier 2).
-            # ADR-013 declaration checks run first so missing declared fields stay
-            # on the declaration-contract audit surface instead of being diluted
-            # into ordinary schema validation failures.
-            try:
-                transform.input_schema.model_validate(input_dict, strict=True)
-            except ValidationError as e:
-                raise PluginContractViolation(
-                    f"Transform '{transform.name}' input validation failed: {e}. This indicates an upstream transform/source schema bug."
-                ) from e
+            # --- PREFLIGHT (pre-invocation checks) ---
+            # Lifecycle guard, field-collision enforcement, pre-emission
+            # declaration-contract dispatch (ADR-010/ADR-013), and input-schema
+            # validation. Violations raise and the guard auto-fails the state.
+            effective_input_fields, static_contract = self._run_preflight(
+                transform=transform,
+                token=token,
+                input_dict=input_dict,
+                ctx=ctx,
+            )
 
             # Set state_id and node_id on context for external call recording.
             ctx.state_id = guard.state_id

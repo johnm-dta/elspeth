@@ -259,6 +259,327 @@ class TransformExecutor:
 
         return self._batch_adapters[node_id]
 
+    def _run_preflight(
+        self,
+        *,
+        transform: TransformProtocol,
+        token: TokenInfo,
+        input_dict: dict[str, Any],
+        run_id: str,
+        node_id: str,
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """Run pre-invocation checks before the transform executes.
+
+        Owns the preflight phase: lifecycle guard, field-collision policy,
+        pre-emission declaration-contract dispatch (with terminal outcome
+        recording), and input-schema validation. Violations raise; the
+        caller's NodeStateGuard auto-fails the node state, so this helper
+        never touches the guard.
+
+        Returns:
+            Tuple of (effective_input_fields, static_contract), derived once
+            here and reused by the post-emission call site (panel F1
+            resolution: contracts use the caller-derived set, not their own
+            re-derivation).
+        """
+        # --- LIFECYCLE GUARD (pre-execution) ---
+        # Centralized check: ensure on_start() was called before process().
+        # All transforms are system-owned and must inherit BaseTransform.
+        # AttributeError here means a transform violates the interface contract.
+        if not transform._on_start_called:
+            raise PluginContractViolation(
+                f"Transform '{transform.name}' was called before on_start(). "
+                f"This is an engine lifecycle bug — on_start() must be called "
+                f"before any process() invocation."
+            )
+
+        # --- FIELD COLLISION ENFORCEMENT (pre-execution) ---
+        # Centralized check: if this transform declares output fields,
+        # verify none collide with input fields BEFORE running the transform.
+        # This prevents wasted API calls AND makes collision detection mandatory
+        # (not opt-in per plugin).
+        if transform.declared_output_fields:
+            from elspeth.contracts.field_collision import detect_field_collisions
+
+            collisions = detect_field_collisions(
+                set(input_dict.keys()),
+                transform.declared_output_fields,
+            )
+            if collisions is not None:
+                raise PluginContractViolation(
+                    f"Transform '{transform.name}' would overwrite existing input fields "
+                    f"{collisions}. This is a pipeline configuration error — the transform's "
+                    f"output fields collide with fields already present in the row."
+                )
+
+        # --- PRE-EMISSION DECLARATION-CONTRACT DISPATCH (ADR-010 §Decision 3 + F2) ---
+        # Fires BEFORE generic input_schema validation so the current
+        # pre-emission adopter (DeclaredRequiredFieldsContract) can attribute missing
+        # declared input fields to ADR-013 rather than collapsing them into a
+        # generic validation error when the schema requires the same field.
+        # It also runs BEFORE transform.process() so a missing-field crash in
+        # the plugin body cannot steal attribution from the declaration surface.
+        effective_input_fields = derive_effective_input_fields(token.row_data)
+        static_contract = transform.effective_static_contract()
+        try:
+            run_pre_emission_checks(
+                inputs=PreEmissionInputs(
+                    plugin=transform,
+                    node_id=node_id,
+                    run_id=run_id,
+                    row_id=token.row_id,
+                    token_id=token.token_id,
+                    input_row=token.row_data,
+                    static_contract=static_contract,
+                    effective_input_fields=effective_input_fields,
+                ),
+            )
+        except (DeclarationContractViolation, AggregateDeclarationContractViolation) as violation:
+            self._record_terminal_contract_failure(
+                transform=transform,
+                token=token,
+                run_id=run_id,
+                violation=violation,
+            )
+            raise
+
+        # --- INPUT VALIDATION (pre-execution) ---
+        # Validate input against input_schema before calling process().
+        # Wrong types at a transform boundary are upstream plugin bugs (Tier 2).
+        # ADR-013 declaration checks run first so missing declared fields stay
+        # on the declaration-contract audit surface instead of being diluted
+        # into ordinary schema validation failures.
+        try:
+            transform.input_schema.model_validate(input_dict, strict=True)
+        except ValidationError as e:
+            raise PluginContractViolation(
+                f"Transform '{transform.name}' input validation failed: {e}. This indicates an upstream transform/source schema bug."
+            ) from e
+
+        return effective_input_fields, static_contract
+
+    def _invoke_transform(
+        self,
+        *,
+        transform: TransformProtocol,
+        batch_runtime: BatchTransformRuntimeProtocol | None,
+        token: TokenInfo,
+        ctx: PluginContext,
+        state_id: str,
+    ) -> TransformResult:
+        """Invoke the transform and return its result (invocation phase).
+
+        Owns invocation-mode selection: synchronous ``transform.process()``
+        vs the row-pipelined batch runtime (``accept()`` + waiter). Exceptions
+        propagate unhandled — the caller owns timing, span, FAILED completion,
+        and timeout eviction, because those bracket ``guard.complete()`` and
+        must stay with the guard.
+        """
+        if batch_runtime is not None:
+            # Batch transform: use accept() with SharedBatchAdapter
+            # One adapter per transform, multiple waiters per adapter
+            adapter = self._get_batch_adapter(batch_runtime)
+
+            # Register waiter for THIS token AND attempt (before accept!)
+            # Using (token_id, state_id) ensures retry safety: if a timeout
+            # occurs and retry happens, the new attempt's waiter won't receive
+            # stale results from the previous attempt.
+            waiter = adapter.register(token.token_id, state_id)
+
+            # Submit work - this returns immediately
+            batch_runtime.accept(token.row_data, ctx)
+
+            # Block until THIS row's result arrives.
+            #
+            # DESIGN DECISION: Sequential row processing
+            # The orchestrator processes rows one at a time, blocking here
+            # until each row completes. This is intentional:
+            # - Concurrency happens WITHIN each row (multi-query transforms
+            #   make 10+ LLM calls concurrently for a single row)
+            # - Across rows, processing is sequential for:
+            #   1. Simpler audit ordering (deterministic state progression)
+            #   2. Natural backpressure (no unbounded queue growth)
+            #   3. Single-threaded orchestrator (easier to reason about)
+            #
+            # For true cross-row parallelism, the orchestrator would need
+            # to be async/await or multi-threaded, which adds complexity.
+            #
+            # Timeout is derived from transform's batch_wait_timeout config
+            # (default 3600s = 1 hour) to allow for sustained rate limiting
+            # and AIMD backoff during capacity errors.
+            result = waiter.wait(timeout=batch_runtime.batch_wait_timeout, shutdown_event=ctx.shutdown_event)
+        else:
+            # Regular transform: synchronous process()
+            result = transform.process(token.row_data, ctx)
+        return result
+
+    def _verify_success_emissions(
+        self,
+        *,
+        result: TransformResult,
+        transform: TransformProtocol,
+        token: TokenInfo,
+        run_id: str,
+        node_id: str,
+        static_contract: frozenset[str],
+        effective_input_fields: frozenset[str],
+    ) -> None:
+        """Verify a success result's emitted rows (success-audit phase, part 1).
+
+        Owns the zero-emission declaration path, post-emission
+        declaration-contract dispatch (ADR-010 §Decision 3 + §Semantics
+        amendment 2026-04-20, audit-complete collect-then-raise dispatcher)
+        with terminal-failure recording, and per-row output-schema validation.
+        Violations raise; the caller's NodeStateGuard auto-fails the state.
+
+        ``static_contract`` + ``effective_input_fields`` are the
+        preflight-derived values, reused here (panel F1 resolution — single
+        caller-side derivation).
+        """
+        if result.row is not None:
+            emitted_rows: tuple[Any, ...] = (result.row,)
+        elif result.rows is not None:
+            emitted_rows = tuple(result.rows)
+        else:
+            emitted_rows = ()
+        try:
+            verify_zero_emission_declaration_path(
+                plugin=transform,
+                plugin_name=transform.name,
+                node_id=node_id,
+                run_id=run_id,
+                row_id=token.row_id,
+                token_id=token.token_id,
+                emitted_count=len(emitted_rows),
+                used_success_empty=result.rows is not None and len(result.rows) == 0,
+            )
+            run_post_emission_checks(
+                inputs=PostEmissionInputs(
+                    plugin=transform,
+                    node_id=node_id,
+                    run_id=run_id,
+                    row_id=token.row_id,
+                    token_id=token.token_id,
+                    input_row=token.row_data,
+                    static_contract=static_contract,
+                    effective_input_fields=effective_input_fields,
+                ),
+                outputs=PostEmissionOutputs(emitted_rows=emitted_rows),
+            )
+        except (
+            DeclarationContractViolation,
+            AggregateDeclarationContractViolation,
+            PassThroughContractViolation,
+            ZeroEmissionSuccessContractViolation,
+        ) as violation:
+            self._record_terminal_contract_failure(
+                transform=transform,
+                token=token,
+                run_id=run_id,
+                violation=violation,
+            )
+            raise
+
+        for idx, emitted_row in enumerate(emitted_rows):
+            try:
+                transform.output_schema.model_validate(emitted_row.to_dict(), strict=True)
+            except ValidationError as e:
+                raise PluginContractViolation(
+                    f"Transform '{transform.name}' output validation failed for emitted row {idx}: {e}. "
+                    "This indicates a transform schema bug."
+                ) from e
+
+    def _populate_result_audit_fields(
+        self,
+        *,
+        result: TransformResult,
+        transform: TransformProtocol,
+        input_hash: str,
+        duration_ms: float,
+    ) -> None:
+        """Populate audit fields on the result (both success and error results).
+
+        Wraps stable_hash calls to convert canonicalization errors to
+        PluginContractViolation: stable_hash calls canonical_json, which
+        rejects NaN, Infinity, and non-serializable types. Per CLAUDE.md:
+        plugin bugs must crash with clear error messages.
+        """
+        result.input_hash = input_hash
+        try:
+            if result.row is not None:
+                result.output_hash = stable_hash(result.row)
+            elif result.rows is not None:
+                result.output_hash = stable_hash(result.rows)
+            else:
+                result.output_hash = None
+        except (TypeError, ValueError) as e:
+            raise PluginContractViolation(
+                f"Transform '{transform.name}' emitted non-canonical data: {e}. "
+                f"Ensure output contains only JSON-serializable types. "
+                f"Use None instead of NaN for missing values."
+            ) from e
+        result.duration_ms = duration_ms
+
+    def _prepare_success_completion(
+        self,
+        *,
+        result: TransformResult,
+        transform: TransformProtocol,
+        token: TokenInfo,
+        run_id: str,
+        node_id: str,
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        """Extract output data + record contract evolution (success-audit phase, part 2).
+
+        Runs immediately before the shell completes the state as COMPLETED.
+        Owns the has-output-data invariant, output-data extraction for the
+        audit trail, and output-contract evolution recording. Recording
+        happens BEFORE guard.complete() in the shell so a recording failure
+        auto-fails the state (no "completed-then-crash" window — B1
+        terminality doctrine).
+
+        Returns:
+            Output data (single row dict, or list of row dicts for
+            multi-row results) for the COMPLETED node-state record.
+        """
+        # TransformResult.success() or success_multi() always sets output data
+        if not result.has_output_data:
+            raise RuntimeError(f"Transform '{transform.name}' returned success but has no output data")
+
+        # Extract dicts for audit trail (Tier 1: full trust - store plain dicts)
+        # Transforms return PipelineRow — extract underlying dicts for storage
+        output_data: dict[str, Any] | list[dict[str, Any]]
+        if result.row is not None:
+            output_data = result.row.to_dict()
+        else:
+            if result.rows is None:
+                raise OrchestrationInvariantError("has_output_data guarantees rows when row is None")
+            output_data = [r.to_dict() for r in result.rows]
+
+        # Record the transform's output contract BEFORE completing the state.
+        # This ensures that if contract recording fails, the state is
+        # auto-completed as FAILED by the guard (no "completed-then-crash"
+        # window).  Fix for B1 terminality bug.
+        #
+        # Use the contract from the result directly — the plugin emitted
+        # it and success_multi() guarantees all rows share the same instance.
+        output_contract = None
+        if result.row is not None:
+            output_contract = result.row.contract
+        elif result.rows is not None and result.rows:
+            output_contract = result.rows[0].contract
+
+        if output_contract is not None and output_contract is not token.row_data.contract:
+            if self._data_flow is None:
+                raise OrchestrationInvariantError("TransformExecutor.data_flow is None but contract evolution requires DataFlowRepository")
+            self._data_flow.update_node_output_contract(
+                run_id=run_id,
+                node_id=node_id,
+                contract=output_contract,
+            )
+
+        return output_data
+
     def execute_transform(
         self,
         transform: TransformProtocol,
@@ -312,9 +633,11 @@ class TransformExecutor:
         """
         if transform.node_id is None:
             raise OrchestrationInvariantError(f"Transform '{transform.name}' executed without node_id - orchestrator bug")
+        # Narrowed once; all downstream node-id plumbing uses this local.
+        node_id = transform.node_id
 
         # Resolve step position from node_id (injected StepResolver)
-        step = self._step_resolver(NodeID(transform.node_id))
+        step = self._step_resolver(NodeID(node_id))
 
         # Extract dict from PipelineRow for hashing and Landscape recording
         # Landscape stores raw dicts, not PipelineRow objects
@@ -335,7 +658,7 @@ class TransformExecutor:
         with NodeStateGuard(
             self._execution,
             token_id=token.token_id,
-            node_id=transform.node_id,
+            node_id=node_id,
             run_id=ctx.run_id,
             step_index=step,
             input_data=input_dict,
@@ -344,87 +667,21 @@ class TransformExecutor:
             attempt=token.resume_attempt_offset + attempt,
             resume_checkpoint_id=token.resume_checkpoint_id,
         ) as guard:
-            # --- LIFECYCLE GUARD (pre-execution) ---
-            # Centralized check: ensure on_start() was called before process().
-            # All transforms are system-owned and must inherit BaseTransform.
-            # AttributeError here means a transform violates the interface contract.
-            if not transform._on_start_called:
-                raise PluginContractViolation(
-                    f"Transform '{transform.name}' was called before on_start(). "
-                    f"This is an engine lifecycle bug — on_start() must be called "
-                    f"before any process() invocation."
-                )
-
-            # --- FIELD COLLISION ENFORCEMENT (pre-execution) ---
-            # Centralized check: if this transform declares output fields,
-            # verify none collide with input fields BEFORE running the transform.
-            # This prevents wasted API calls AND makes collision detection mandatory
-            # (not opt-in per plugin).
-            if transform.declared_output_fields:
-                from elspeth.contracts.field_collision import detect_field_collisions
-
-                collisions = detect_field_collisions(
-                    set(input_dict.keys()),
-                    transform.declared_output_fields,
-                )
-                if collisions is not None:
-                    raise PluginContractViolation(
-                        f"Transform '{transform.name}' would overwrite existing input fields "
-                        f"{collisions}. This is a pipeline configuration error — the transform's "
-                        f"output fields collide with fields already present in the row."
-                    )
-
-            # --- PRE-EMISSION DECLARATION-CONTRACT DISPATCH (ADR-010 §Decision 3 + F2) ---
-            # Fires BEFORE generic input_schema validation so the current
-            # pre-emission adopter (DeclaredRequiredFieldsContract) can attribute missing
-            # declared input fields to ADR-013 rather than collapsing them into a
-            # generic validation error when the schema requires the same field.
-            # It also runs BEFORE transform.process() so a missing-field crash in
-            # the plugin body cannot steal attribution from the declaration surface.
-            #
-            # effective_input_fields is derived once here and reused by the
-            # post-emission call site (panel F1 resolution: contracts use the
-            # caller-derived set, not their own re-derivation).
-            effective_input_fields = derive_effective_input_fields(token.row_data)
-            static_contract = transform.effective_static_contract()
-            try:
-                run_pre_emission_checks(
-                    inputs=PreEmissionInputs(
-                        plugin=transform,
-                        node_id=transform.node_id or "",
-                        run_id=ctx.run_id,
-                        row_id=token.row_id,
-                        token_id=token.token_id,
-                        input_row=token.row_data,
-                        static_contract=static_contract,
-                        effective_input_fields=effective_input_fields,
-                    ),
-                )
-            except (DeclarationContractViolation, AggregateDeclarationContractViolation) as violation:
-                self._record_terminal_contract_failure(
-                    transform=transform,
-                    token=token,
-                    run_id=ctx.run_id,
-                    violation=violation,
-                )
-                raise
-
-            # --- INPUT VALIDATION (pre-execution) ---
-            # Validate input against input_schema before calling process().
-            # Wrong types at a transform boundary are upstream plugin bugs (Tier 2).
-            # ADR-013 declaration checks run first so missing declared fields stay
-            # on the declaration-contract audit surface instead of being diluted
-            # into ordinary schema validation failures.
-            try:
-                transform.input_schema.model_validate(input_dict, strict=True)
-            except ValidationError as e:
-                raise PluginContractViolation(
-                    f"Transform '{transform.name}' input validation failed: {e}. This indicates an upstream transform/source schema bug."
-                ) from e
+            # --- PREFLIGHT (pre-invocation checks) ---
+            # Lifecycle guard, field-collision enforcement, pre-emission
+            # declaration-contract dispatch (ADR-010/ADR-013), and input-schema
+            # validation. Violations raise and the guard auto-fails the state.
+            effective_input_fields, static_contract = self._run_preflight(
+                transform=transform,
+                token=token,
+                input_dict=input_dict,
+                run_id=ctx.run_id,
+                node_id=node_id,
+            )
 
             # Set state_id and node_id on context for external call recording.
             ctx.state_id = guard.state_id
-            ctx.node_id = transform.node_id
+            ctx.node_id = node_id
             # Note: call_index allocation is handled by ExecutionRepository.allocate_call_index()
             # which automatically starts at 0 for each new state_id
 
@@ -443,49 +700,22 @@ class TransformExecutor:
             # Pass node_id for disambiguation when multiple plugin instances exist
             with self._spans.transform_span(
                 transform.name,
-                node_id=transform.node_id,
+                node_id=node_id,
                 input_hash=input_hash,
                 token_id=token.token_id,
             ):
                 start = time.perf_counter()
                 try:
-                    if batch_runtime is not None:
-                        # Batch transform: use accept() with SharedBatchAdapter
-                        # One adapter per transform, multiple waiters per adapter
-                        adapter = self._get_batch_adapter(batch_runtime)
-
-                        # Register waiter for THIS token AND attempt (before accept!)
-                        # Using (token_id, state_id) ensures retry safety: if a timeout
-                        # occurs and retry happens, the new attempt's waiter won't receive
-                        # stale results from the previous attempt.
-                        waiter = adapter.register(token.token_id, guard.state_id)
-
-                        # Submit work - this returns immediately
-                        batch_runtime.accept(token.row_data, ctx)
-
-                        # Block until THIS row's result arrives.
-                        #
-                        # DESIGN DECISION: Sequential row processing
-                        # The orchestrator processes rows one at a time, blocking here
-                        # until each row completes. This is intentional:
-                        # - Concurrency happens WITHIN each row (multi-query transforms
-                        #   make 10+ LLM calls concurrently for a single row)
-                        # - Across rows, processing is sequential for:
-                        #   1. Simpler audit ordering (deterministic state progression)
-                        #   2. Natural backpressure (no unbounded queue growth)
-                        #   3. Single-threaded orchestrator (easier to reason about)
-                        #
-                        # For true cross-row parallelism, the orchestrator would need
-                        # to be async/await or multi-threaded, which adds complexity.
-                        #
-                        # Timeout is derived from transform's batch_wait_timeout config
-                        # (default 3600s = 1 hour) to allow for sustained rate limiting
-                        # and AIMD backoff during capacity errors.
-                        result = waiter.wait(timeout=batch_runtime.batch_wait_timeout, shutdown_event=ctx.shutdown_event)
-                    else:
-                        # Regular transform: synchronous process()
-                        result = transform.process(token.row_data, ctx)
-
+                    # Invocation-mode selection (sync process() vs batch-runtime
+                    # accept()+wait) lives in _invoke_transform; timing, FAILED
+                    # completion, and timeout eviction stay here with the guard.
+                    result = self._invoke_transform(
+                        transform=transform,
+                        batch_runtime=batch_runtime,
+                        token=token,
+                        ctx=ctx,
+                        state_id=guard.state_id,
+                    )
                     duration_ms = (time.perf_counter() - start) * 1000
                 except contract_errors.TIER_1_ERRORS:
                     raise  # Tier 1 errors must crash — never record as row FAILED
@@ -522,128 +752,44 @@ class TransformExecutor:
             # If any of the following steps raise before guard.complete() is
             # called, the guard auto-completes the state as FAILED in __exit__.
 
-            # Post-emission declaration-contract runtime dispatch
-            # (ADR-010 §Decision 3 + §Semantics amendment 2026-04-20).
-            # Uses the audit-complete collect-then-raise dispatcher.
-            # static_contract + effective_input_fields were derived above
-            # for the pre-emission call; reused here (panel F1 resolution —
-            # single caller-side derivation).
+            # Post-emission declaration-contract dispatch + output-schema
+            # validation. Runs BEFORE output hashing below so declaration
+            # violations keep attribution over canonicalization failures.
             if result.status == "success":
-                if result.row is not None:
-                    emitted_rows: tuple[Any, ...] = (result.row,)
-                elif result.rows is not None:
-                    emitted_rows = tuple(result.rows)
-                else:
-                    emitted_rows = ()
-                try:
-                    verify_zero_emission_declaration_path(
-                        plugin=transform,
-                        plugin_name=transform.name,
-                        node_id=transform.node_id,
-                        run_id=ctx.run_id,
-                        row_id=token.row_id,
-                        token_id=token.token_id,
-                        emitted_count=len(emitted_rows),
-                        used_success_empty=result.rows is not None and len(result.rows) == 0,
-                    )
-                    run_post_emission_checks(
-                        inputs=PostEmissionInputs(
-                            plugin=transform,
-                            node_id=transform.node_id or "",
-                            run_id=ctx.run_id,
-                            row_id=token.row_id,
-                            token_id=token.token_id,
-                            input_row=token.row_data,
-                            static_contract=static_contract,
-                            effective_input_fields=effective_input_fields,
-                        ),
-                        outputs=PostEmissionOutputs(emitted_rows=emitted_rows),
-                    )
-                except (
-                    DeclarationContractViolation,
-                    AggregateDeclarationContractViolation,
-                    PassThroughContractViolation,
-                    ZeroEmissionSuccessContractViolation,
-                ) as violation:
-                    self._record_terminal_contract_failure(
-                        transform=transform,
-                        token=token,
-                        run_id=ctx.run_id,
-                        violation=violation,
-                    )
-                    raise
+                self._verify_success_emissions(
+                    result=result,
+                    transform=transform,
+                    token=token,
+                    run_id=ctx.run_id,
+                    node_id=node_id,
+                    static_contract=static_contract,
+                    effective_input_fields=effective_input_fields,
+                )
 
-                for idx, emitted_row in enumerate(emitted_rows):
-                    try:
-                        transform.output_schema.model_validate(emitted_row.to_dict(), strict=True)
-                    except ValidationError as e:
-                        raise PluginContractViolation(
-                            f"Transform '{transform.name}' output validation failed for emitted row {idx}: {e}. "
-                            "This indicates a transform schema bug."
-                        ) from e
-
-            # Populate audit fields
-            # Wrap stable_hash calls to convert canonicalization errors to PluginContractViolation.
-            # stable_hash calls canonical_json which rejects NaN, Infinity, non-serializable types.
-            # Per CLAUDE.md: plugin bugs must crash with clear error messages.
-            result.input_hash = input_hash
-            try:
-                if result.row is not None:
-                    result.output_hash = stable_hash(result.row)
-                elif result.rows is not None:
-                    result.output_hash = stable_hash(result.rows)
-                else:
-                    result.output_hash = None
-            except (TypeError, ValueError) as e:
-                raise PluginContractViolation(
-                    f"Transform '{transform.name}' emitted non-canonical data: {e}. "
-                    f"Ensure output contains only JSON-serializable types. "
-                    f"Use None instead of NaN for missing values."
-                ) from e
-            result.duration_ms = duration_ms
+            # Populate audit fields (success and error results alike); a
+            # canonicalization failure raises PluginContractViolation.
+            self._populate_result_audit_fields(
+                result=result,
+                transform=transform,
+                input_hash=input_hash,
+                duration_ms=duration_ms,
+            )
 
             # Initialize error_sink - will be set if transform errors with on_error configured
             error_sink: str | None = None
 
             # Complete node state
             if result.status == "success":
-                # TransformResult.success() or success_multi() always sets output data
-                if not result.has_output_data:
-                    raise RuntimeError(f"Transform '{transform.name}' returned success but has no output data")
-
-                # Extract dicts for audit trail (Tier 1: full trust - store plain dicts)
-                # Transforms return PipelineRow — extract underlying dicts for storage
-                output_data: dict[str, Any] | list[dict[str, Any]]
-                if result.row is not None:
-                    output_data = result.row.to_dict()
-                else:
-                    if result.rows is None:
-                        raise OrchestrationInvariantError("has_output_data guarantees rows when row is None")
-                    output_data = [r.to_dict() for r in result.rows]
-
-                # Record the transform's output contract BEFORE completing the state.
-                # This ensures that if contract recording fails, the state is
-                # auto-completed as FAILED by the guard (no "completed-then-crash"
-                # window).  Fix for B1 terminality bug.
-                #
-                # Use the contract from the result directly — the plugin emitted
-                # it and success_multi() guarantees all rows share the same instance.
-                output_contract = None
-                if result.row is not None:
-                    output_contract = result.row.contract
-                elif result.rows is not None and result.rows:
-                    output_contract = result.rows[0].contract
-
-                if output_contract is not None and output_contract is not token.row_data.contract:
-                    if self._data_flow is None:
-                        raise OrchestrationInvariantError(
-                            "TransformExecutor.data_flow is None but contract evolution requires DataFlowRepository"
-                        )
-                    self._data_flow.update_node_output_contract(
-                        run_id=ctx.run_id,
-                        node_id=transform.node_id,
-                        contract=output_contract,
-                    )
+                # Output-data extraction + contract-evolution recording
+                # (record-before-complete — B1 terminality doctrine: a
+                # recording failure must auto-fail the state via the guard).
+                output_data = self._prepare_success_completion(
+                    result=result,
+                    transform=transform,
+                    token=token,
+                    run_id=ctx.run_id,
+                    node_id=node_id,
+                )
 
                 # NOW complete as COMPLETED — all validation has succeeded
                 guard.complete(

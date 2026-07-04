@@ -58,7 +58,8 @@ if TYPE_CHECKING:
     from elspeth.core.events import EventBusProtocol
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
-    from elspeth.engine.orchestrator.run_core import RunExecutionCore
+    from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
+    from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
     from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
     from elspeth.engine.orchestrator.types import (
         GraphArtifacts,
@@ -80,12 +81,14 @@ class LeaderDrainCoordinator:
         *,
         events: EventBusProtocol,
         checkpoints: CheckpointCoordinator,
-        run_core: RunExecutionCore,
+        context_factory: RunContextFactory,
+        sink_flush: SinkFlushCoordinator,
         source_driver: SourceIterationDriver,
     ) -> None:
         self._events = events
         self._checkpoints = checkpoints
-        self._run_core = run_core
+        self._context_factory = context_factory
+        self._sink_flush = sink_flush
         self._source_driver = source_driver
 
     def execute_run(
@@ -138,7 +141,7 @@ class LeaderDrainCoordinator:
         artifacts = register_graph_nodes_and_edges(factory, run_id, config, graph)
 
         # 2. Initialize context + processor
-        run_ctx = self._run_core.initialize_run_context(
+        run_ctx = self._context_factory.initialize_run_context(
             factory,
             run_id,
             config,
@@ -276,7 +279,7 @@ class LeaderDrainCoordinator:
 
             # 4. Sink writes — outside source_load track_operation context.
             # Each sink write has its own track_operation (sink_write) in SinkExecutor.
-            self._run_core.flush_and_write_sinks(
+            self._sink_flush.flush_and_write_sinks(
                 factory,
                 run_id,
                 loop_ctx,
@@ -319,7 +322,7 @@ class LeaderDrainCoordinator:
                     for _sink_list in loop_ctx.pending_tokens.values():
                         _sink_list.clear()
                     accumulate_row_outcomes(follower_results, loop_ctx.counters, loop_ctx.pending_tokens)
-                    self._run_core.flush_and_write_sinks(
+                    self._sink_flush.flush_and_write_sinks(
                         factory,
                         run_id,
                         loop_ctx,
@@ -349,7 +352,7 @@ class LeaderDrainCoordinator:
 
             # 5. Final progress + PROCESS phase completion — AFTER sink writes
             # so these events reflect concrete, durable results. On shutdown,
-            # _flush_and_write_sinks raises GracefulShutdownError before we
+            # flush_and_write_sinks raises GracefulShutdownError before we
             # reach here — matching the pre-extraction behavior where the
             # shutdown raise prevented progress/PhaseCompleted emission.
             progress_interval = 100

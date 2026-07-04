@@ -107,7 +107,8 @@ def _coordinator(db: LandscapeDB) -> tuple[ResumeCoordinator, _RecordingCheckpoi
         events=cast(Any, object()),
         ceremony=cast(Any, object()),
         checkpoints=cast(Any, checkpoints),
-        run_core=cast(Any, object()),
+        context_factory=cast(Any, object()),
+        sink_flush=cast(Any, object()),
         # None is the post-guard tripwire: an ADMITTED resume raises
         # OrchestrationInvariantError("CheckpointManager is required...")
         # inside reconstruct_resume_state, proving it got past the guard.
@@ -153,7 +154,8 @@ def _currency_coordinator(db: LandscapeDB, latest: Any) -> tuple[ResumeCoordinat
         events=cast(Any, object()),
         ceremony=cast(Any, object()),
         checkpoints=cast(Any, checkpoints),
-        run_core=cast(Any, object()),
+        context_factory=cast(Any, object()),
+        sink_flush=cast(Any, object()),
         checkpoint_manager=cast(Any, _StubCheckpointManager(latest)),
     )
     return coordinator, checkpoints

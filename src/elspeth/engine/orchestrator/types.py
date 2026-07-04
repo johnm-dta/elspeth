@@ -552,7 +552,7 @@ class AggNodeEntry:
 
 @dataclass(frozen=True, slots=True)
 class RunContext:
-    """Return type for _initialize_run_context().
+    """Return type for RunContextFactory.initialize_run_context().
 
     Bundles the five objects created during run initialization that are
     consumed by subsequent phases. Short-lived: consumed immediately to
@@ -572,7 +572,7 @@ class RunContext:
 
 @dataclass(slots=True)
 class LoopContext:
-    """Parameter bundle for _run_main_processing_loop() and _flush_and_write_sinks().
+    """Parameter bundle for the main processing loop and SinkFlushCoordinator.flush_and_write_sinks().
 
     Reduces 10+ parameter signatures to (self, loop_ctx, ...) and prevents
     parameter-list growth as the loop acquires new concerns.
@@ -778,7 +778,7 @@ class _CheckpointFactory(Protocol):
     The returned callback records checkpoint progress after each token is
     durably written to a sink. Scheduler terminalization is a SEPARATE lifecycle
     composed at the sink-write call site (see
-    :meth:`RunExecutionCore.flush_and_write_sinks`), not this factory's concern
+    :meth:`SinkFlushCoordinator.flush_and_write_sinks`), not this factory's concern
     (elspeth-107a29d02e).
     """
 

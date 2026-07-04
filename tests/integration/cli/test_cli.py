@@ -588,7 +588,7 @@ class TestJoinCommand:
         # drain loop exits immediately.  This tests: admission → worker_id minted
         # → follower built → run() called → clean departure path → exit 0.
         # build_follower_processor would otherwise fail because the seeded run
-        # has no registered edges (the full run_core.py pipeline is not invoked).
+        # has no registered edges (the full processor_factory.py pipeline is not invoked).
         from unittest.mock import create_autospec
 
         from elspeth.engine.orchestrator.follower import FollowerProcessor

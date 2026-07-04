@@ -38,9 +38,11 @@ from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 from elspeth.engine.orchestrator.graph_registration import GraphRegistrationService
 from elspeth.engine.orchestrator.join_admission import JoinAdmissionService
 from elspeth.engine.orchestrator.leader_drain import LeaderDrainCoordinator
+from elspeth.engine.orchestrator.processor_factory import ProcessorFactory
 from elspeth.engine.orchestrator.resume import ResumeCoordinator
-from elspeth.engine.orchestrator.run_core import RunExecutionCore
+from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
 from elspeth.engine.orchestrator.run_lifecycle import RunLifecycleCoordinator
+from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
 from elspeth.engine.orchestrator.source_iteration import SourceIterationDriver
 from elspeth.engine.orchestrator.types import (
     _RunFailedWithPartialResultError as _RunFailedWithPartialResultError,
@@ -122,22 +124,30 @@ class Orchestrator:
         self._ceremony = RunCeremony(events=self._events, telemetry=self._telemetry)
         self._checkpoints = CheckpointCoordinator(checkpoint_manager=checkpoint_manager, checkpoint_config=checkpoint_config)
         self._source_driver = SourceIterationDriver(events=self._events, span_factory=self._span_factory, ceremony=self._ceremony)
-        self._run_core = RunExecutionCore(
-            ceremony=self._ceremony,
-            checkpoints=self._checkpoints,
+        self._processor_factory = ProcessorFactory(
             span_factory=self._span_factory,
             clock=self._clock,
             concurrency_config=self._concurrency_config,
-            rate_limit_registry=self._rate_limit_registry,
-            coalesce_completed_keys_limit=self._coalesce_completed_keys_limit,
             telemetry=self._telemetry,
+            coalesce_completed_keys_limit=self._coalesce_completed_keys_limit,
+        )
+        self._context_factory = RunContextFactory(
+            ceremony=self._ceremony,
+            rate_limit_registry=self._rate_limit_registry,
+            concurrency_config=self._concurrency_config,
+            processor_factory=self._processor_factory,
+        )
+        self._sink_flush = SinkFlushCoordinator(
+            span_factory=self._span_factory,
+            checkpoints=self._checkpoints,
         )
         self._resume_coordinator = ResumeCoordinator(
             db=self._db,
             events=self._events,
             ceremony=self._ceremony,
             checkpoints=self._checkpoints,
-            run_core=self._run_core,
+            context_factory=self._context_factory,
+            sink_flush=self._sink_flush,
             checkpoint_manager=self._checkpoint_manager,
         )
         self._graph_registration = GraphRegistrationService(
@@ -147,7 +157,8 @@ class Orchestrator:
         self._leader_drain = LeaderDrainCoordinator(
             events=self._events,
             checkpoints=self._checkpoints,
-            run_core=self._run_core,
+            context_factory=self._context_factory,
+            sink_flush=self._sink_flush,
             source_driver=self._source_driver,
         )
         self._run_lifecycle = RunLifecycleCoordinator(

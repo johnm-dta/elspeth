@@ -351,7 +351,7 @@ def _fast_retry_settings() -> ElspethSettings:
     """Minimal settings whose ONLY runtime contribution is the retry policy.
 
     ``Orchestrator.run`` builds its RetryManager exclusively from
-    ``settings.retry`` (run_core.build_row_processor); the rest of the run is
+    ``settings.retry`` (processor_factory.build_row_processor); the rest of the run is
     driven by the explicit config/graph arguments. The stub source/sink decls
     exist purely to satisfy settings-model validation and are never
     instantiated. max_delay_seconds caps tenacity's jittered backoff, keeping

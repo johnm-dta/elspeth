@@ -449,7 +449,7 @@ def build_follower_processor(
     """Assemble a follower-mode :class:`FollowerProcessor`.
 
     The inner :class:`RowProcessor` is constructed through the SHARED builder
-    (``run_core.build_row_processor``) with ``mode=ProcessorMode.FOLLOWER``
+    (``processor_factory.build_row_processor``) with ``mode=ProcessorMode.FOLLOWER``
     (elspeth-577179bba1, absorbing elspeth-07b2031e41 part (b)) — previously a
     hand-assembled argument list that could drift from the leader/resume path.
     The builder's FOLLOWER gates own the follower-specific wiring:
@@ -495,14 +495,14 @@ def build_follower_processor(
         build_source_id_map,
         load_edge_map,
     )
-    from elspeth.engine.orchestrator.run_core import build_row_processor
+    from elspeth.engine.orchestrator.processor_factory import build_row_processor
     from elspeth.engine.scheduler_drain import ProcessorMode
     from elspeth.engine.spans import SpanFactory
 
     # Assign node_id to all plugin instances before building the traversal
     # context.  build_dag_traversal_context (inside build_row_processor)
     # requires transform.node_id to be set on every transform; the leader does
-    # this via run_core.py's assign_plugin_node_ids call, but the follower
+    # this via run_context_factory.py's assign_plugin_node_ids call, but the follower
     # path omitted it (slice 5 bug: build_follower_processor never called
     # assign_plugin_node_ids).
     #

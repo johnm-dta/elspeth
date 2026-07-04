@@ -222,6 +222,91 @@ class TestCoalesceJournalRestorer:
         assert group.first_arrival == pytest.approx(100.0)
         assert restored.token_count == 0
 
+    def test_journal_groups_and_loss_only_scalars_coexist(self) -> None:
+        """A loss-only scalar for key B must AUGMENT journal-backed groups for key A, not replace them.
+
+        Guards the accumulation seam: a refactor that rebinds or clears the
+        pending collection in the scalar-only loop silently discards the
+        rehydrated arrived-branch tokens on a real crash-resume where both
+        populations coexist.
+        """
+        restorer = _coalesce_restorer(clock=MockClock(start=100.0))
+
+        restored = restorer.restore(
+            items=[
+                _blocked_item(token_id="t_a", row_id="row_1", branch_name="a", coalesce_name="merge", blocked_at=_JOURNAL_T0),
+            ],
+            scalars={("merge", "row_9"): CoalescePendingScalars(lost_branches={"b": "error_routed"})},
+            state_ids={"t_a": "s_a"},
+            attempt_offsets={"t_a": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        by_key = {group.key: group for group in restored.pending}
+        assert set(by_key) == {("merge", "row_1"), ("merge", "row_9")}
+        assert [b.branch_name for b in by_key[("merge", "row_1")].branches] == ["a"]
+        assert by_key[("merge", "row_9")].branches == ()
+        assert dict(by_key[("merge", "row_9")].lost_branches) == {"b": "error_routed"}
+        assert restored.token_count == 1
+
+    def test_branches_preserve_journal_item_order(self) -> None:
+        """DTO branches keep journal grouping order so the executor's rebuilt dict iterates identically."""
+        restorer = _coalesce_restorer(settings={"merge": _coalesce_settings(branches=["a", "b", "c"])})
+
+        restored = restorer.restore(
+            items=[
+                _blocked_item(token_id="t_c", row_id="row_1", branch_name="c", coalesce_name="merge", blocked_at=_JOURNAL_T0),
+                _blocked_item(token_id="t_a", row_id="row_1", branch_name="a", coalesce_name="merge", blocked_at=_JOURNAL_T0),
+            ],
+            scalars={},
+            state_ids={"t_c": "s_c", "t_a": "s_a"},
+            attempt_offsets={"t_c": 1, "t_a": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        (group,) = restored.pending
+        # Journal order (c before a), NOT alphabetical or settings order.
+        assert [b.branch_name for b in group.branches] == ["c", "a"]
+
+    def test_backward_skew_clamps_anchor_but_preserves_branch_offsets(self) -> None:
+        """Multi-branch group under backward wall-clock skew: anchor clamps at monotonic_now, deltas survive."""
+        restorer = _coalesce_restorer(clock=MockClock(start=100.0))
+
+        restored = restorer.restore(
+            items=[
+                _blocked_item(
+                    token_id="t_a",
+                    row_id="row_1",
+                    branch_name="a",
+                    coalesce_name="merge",
+                    blocked_at=_JOURNAL_T0 + timedelta(seconds=40),  # blocked AFTER "now"
+                ),
+                _blocked_item(
+                    token_id="t_b",
+                    row_id="row_1",
+                    branch_name="b",
+                    coalesce_name="merge",
+                    blocked_at=_JOURNAL_T0 + timedelta(seconds=50),
+                ),
+            ],
+            scalars={},
+            state_ids={"t_a": "s_a", "t_b": "s_b"},
+            attempt_offsets={"t_a": 1, "t_b": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,  # wall clock stepped backward past both stamps
+        )
+
+        (group,) = restored.pending
+        # Clamp: the oldest stamp is in the monotonic future, so the anchor
+        # pins to monotonic_now rather than rewinding into the future...
+        assert group.first_arrival == pytest.approx(100.0)
+        by_branch = {b.branch_name: b for b in group.branches}
+        assert by_branch["a"].arrival_time == pytest.approx(100.0)
+        # ...while the 10s blocked-at delta between branches is preserved.
+        assert by_branch["b"].arrival_time == pytest.approx(110.0)
+
     def test_completed_keys_map_landscape_node_ids_to_coalesce_names(self) -> None:
         """Landscape (node_id, row_id) pairs come back as (coalesce_name, row_id); foreign nodes drop."""
         restorer = _coalesce_restorer(
@@ -307,6 +392,23 @@ class TestCoalesceFacadeValidateBeforeMutate:
 
         # The failed second restore must not have cleared the first.
         assert ("merge", "row_1") in executor._pending
+
+    def test_facade_applies_journal_groups_and_loss_only_scalars_together(self) -> None:
+        """Both populations land in executor._pending from one restore call."""
+        executor = self._make_executor()
+        executor.restore_from_journal(
+            items=[_blocked_item(token_id="t_a", row_id="row_1", branch_name="a", coalesce_name="merge", blocked_at=_JOURNAL_T0)],
+            scalars={("merge", "row_9"): CoalescePendingScalars(lost_branches={"b": "error_routed"})},
+            state_ids={"t_a": "s_a"},
+            attempt_offsets={"t_a": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+
+        assert set(executor._pending) == {("merge", "row_1"), ("merge", "row_9")}
+        assert list(executor._pending[("merge", "row_1")].branches) == ["a"]
+        assert executor._pending[("merge", "row_9")].branches == {}
+        assert executor._pending[("merge", "row_9")].lost_branches == {"b": "error_routed"}
 
 
 def _agg_settings() -> AggregationSettings:
@@ -490,3 +592,49 @@ class TestAggregationFacadeValidateBeforeMutate:
         # The failed second restore must not have touched the applied state.
         assert executor.get_buffer_count(node_id) == 1
         assert executor.get_batch_id(node_id) == "batch-1"
+
+    def test_facade_wires_buffered_count_not_accepted_total_into_trigger(self) -> None:
+        """The trigger's restored batch_count is the BUFFERED row count, never the cumulative accept counter.
+
+        accepted_count_total deliberately diverges from len(tokens) here
+        (7 vs 2): with a count=3 trigger, wiring the cumulative counter into
+        restore_from_checkpoint would latch a phantom flush (7 >= 3) for a
+        batch that only has 2 buffered rows.
+        """
+        executor, node_id = self._make_executor()  # trigger count=3
+        executor.restore_from_journal(
+            node_id=node_id,
+            items=[
+                _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", blocked_at=_JOURNAL_T0),
+                _blocked_item(token_id="t2", row_id="r2", node_id="agg-1", blocked_at=_JOURNAL_T0),
+            ],
+            member_order=["t1", "t2"],
+            batch_id="batch-1",
+            accepted_count_total=7,
+            completed_flush_count=2,
+            scalars=AggregationNodeScalars(count_fire_offset=None, condition_fire_offset=None),
+            attempt_offsets={"t1": 1, "t2": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+        assert executor.should_flush(node_id) is False
+
+        # Control: three buffered rows genuinely meet the count trigger.
+        executor2, node_id2 = self._make_executor()
+        executor2.restore_from_journal(
+            node_id=node_id2,
+            items=[
+                _blocked_item(token_id="t1", row_id="r1", node_id="agg-1", blocked_at=_JOURNAL_T0),
+                _blocked_item(token_id="t2", row_id="r2", node_id="agg-1", blocked_at=_JOURNAL_T0),
+                _blocked_item(token_id="t3", row_id="r3", node_id="agg-1", blocked_at=_JOURNAL_T0),
+            ],
+            member_order=["t1", "t2", "t3"],
+            batch_id="batch-1",
+            accepted_count_total=3,
+            completed_flush_count=0,
+            scalars=AggregationNodeScalars(count_fire_offset=None, condition_fire_offset=None),
+            attempt_offsets={"t1": 1, "t2": 1, "t3": 1},
+            resume_checkpoint_id="cp-0",
+            now=_JOURNAL_T0,
+        )
+        assert executor2.should_flush(node_id2) is True

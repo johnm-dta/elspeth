@@ -9,7 +9,8 @@ import pytest
 
 from elspeth.contracts.schema_contract import SchemaContract
 from elspeth.contracts.types import NodeID
-from elspeth.core.checkpoint.recovery import IncompleteTokenSpec
+from elspeth.core.checkpoint.recovery import IncompleteTokenSpec, RecoveryManager
+from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.engine.orchestrator.resume import _ResumeAuditSnapshot
 
 
@@ -41,8 +42,8 @@ def test_resume_audit_snapshot_deep_freezes_container_fields() -> None:
     source_schema_classes = {source_id: dict}
 
     snapshot = _ResumeAuditSnapshot(
-        factory=Mock(),
-        recovery=Mock(),
+        factory=Mock(spec=RecorderFactory),
+        recovery=Mock(spec=RecoveryManager),
         run_id="run-1",
         worker_id="worker-1",
         incomplete_by_row=incomplete_by_row,

@@ -410,7 +410,7 @@ class TestResumePathCharacterization:
         """Assert ctx.contract is set to the resume schema_contract BEFORE transforms execute.
 
         The resume path sets run_ctx.ctx.contract = schema_contract between
-        _initialize_run_context() and LoopContext construction. If a future
+        initialize_run_context() and LoopContext construction. If a future
         refactor reorders these steps, transforms would see contract=None.
 
         Strategy: Run the original pipeline to populate DB with rows, then

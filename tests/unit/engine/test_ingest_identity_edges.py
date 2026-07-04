@@ -20,7 +20,7 @@ semantics of the source iteration loop (source_iteration.py):
    in a 2-source fan-in run, zero rows originating from source #2's data
    attribute to source #1's node — neither in the rows table nor in any
    step-0 (source) node_state. This guards the RowProcessor run-level
-   "first source" legacy default (run_core.py RowProcessor construction;
+   "first source" legacy default (processor_factory.py RowProcessor construction;
    ``record_source_node_state``'s ``source_node_id or self._source_node_id``
    fallback) against silent misattribution. Strengthens
    tests/integration/test_multisource_provenance_proof.py::

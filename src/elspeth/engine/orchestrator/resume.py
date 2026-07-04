@@ -110,7 +110,8 @@ if TYPE_CHECKING:
     from elspeth.core.landscape import LandscapeDB
     from elspeth.engine.orchestrator.ceremony import RunCeremony
     from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
-    from elspeth.engine.orchestrator.run_core import RunExecutionCore
+    from elspeth.engine.orchestrator.run_context_factory import RunContextFactory
+    from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
     from elspeth.engine.orchestrator.types import PipelineConfig, RunResult
 
 
@@ -544,14 +545,16 @@ class ResumeCoordinator:
         events: EventBusProtocol,
         ceremony: RunCeremony,
         checkpoints: CheckpointCoordinator,
-        run_core: RunExecutionCore,
+        context_factory: RunContextFactory,
+        sink_flush: SinkFlushCoordinator,
         checkpoint_manager: CheckpointManager | None,
     ) -> None:
         self._db = db
         self._events = events
         self._ceremony = ceremony
         self._checkpoints = checkpoints
-        self._run_core = run_core
+        self._context_factory = context_factory
+        self._sink_flush = sink_flush
         self._checkpoint_manager = checkpoint_manager
 
     def reconstruct_resume_state(
@@ -1071,7 +1074,7 @@ class ResumeCoordinator:
             #
             # ORDERING: this runs AFTER _process_resumed_rows returned, i.e.
             # after run_resume_processing_loop's end-of-source aggregation /
-            # coalesce flushes, after _flush_and_write_sinks recorded sink
+            # coalesce flushes, after flush_and_write_sinks recorded sink
             # diversions, and after sweep_deferred_invariants_or_crash — so every
             # outcome this resume wrote is committed and visible to the derive
             # query.  Deriving before those flushes commit would undercount.
@@ -1238,7 +1241,7 @@ class ResumeCoordinator:
         artifacts = setup_resume_context(factory, run_id, config, graph)
 
         # 2. Initialize context + processor (source on_start skipped)
-        run_ctx = self._run_core.initialize_run_context(
+        run_ctx = self._context_factory.initialize_run_context(
             factory,
             run_id,
             config,
@@ -1310,7 +1313,7 @@ class ResumeCoordinator:
             )
 
             # 4. Flush + write sinks with checkpoint advancement
-            self._run_core.flush_and_write_sinks(
+            self._sink_flush.flush_and_write_sinks(
                 factory,
                 run_id,
                 loop_ctx,

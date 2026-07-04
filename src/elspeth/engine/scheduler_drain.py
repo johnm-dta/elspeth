@@ -1018,7 +1018,7 @@ class SchedulerDrainCoordinator:
                 # worker identity so an evicted RowProcessor cannot enqueue READY
                 # items that no active worker will claim. The fence is active only
                 # when scheduler_lease_owner was explicitly registered in run_workers
-                # (production multi-worker path: leaders via run_core.py, followers
+                # (production multi-worker path: leaders via processor_factory.py, followers
                 # via follower.py). Legacy / single-worker / test-fixture builds
                 # pass scheduler_lease_owner=None → auto-generate an unregistered
                 # identity → _scheduler_lease_owner_registered=False → fence skipped.

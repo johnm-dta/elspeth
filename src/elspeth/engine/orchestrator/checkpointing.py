@@ -213,7 +213,7 @@ class CheckpointCoordinator:
         invoked after each token is durably written to that sink. The callback
         records checkpoint progress ONLY — scheduler terminalization used to
         share this callback but is now a separate lifecycle composed at the
-        sink-write call site (``RunExecutionCore.flush_and_write_sinks``,
+        sink-write call site (``SinkFlushCoordinator.flush_and_write_sinks``,
         elspeth-107a29d02e). Used by both the normal execution path and resume.
 
         Depends on the narrow :class:`BarrierScalarsSource` slice of the
@@ -227,7 +227,7 @@ class CheckpointCoordinator:
 
             One of the two lifecycles that used to share the post-sink callback
             (elspeth-107a29d02e); the scheduler-terminalization sibling lives in
-            run_core.py. Progress checkpoints are created eagerly per call, so
+            sink_flush.py. Progress checkpoints are created eagerly per call, so
             ``flush`` is a no-op — the explicit flush boundary exists only to
             satisfy the :class:`CheckpointAfterSinkCallback` protocol shared with
             the batched terminalization callback.

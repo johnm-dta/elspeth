@@ -264,7 +264,7 @@ class TestCheckpointInterruptedProgress:
         The progress callback reads barrier_scalars_source.get_barrier_scalars()
         (single composed accessor, F1 Task 2.4) and passes the BarrierScalars
         verbatim to create_checkpoint — including coalesce lost-branch records.
-        Scheduler terminalization is a SEPARATE callback composed in run_core
+        Scheduler terminalization is a SEPARATE callback composed in sink_flush
         (elspeth-107a29d02e); this progress callback must NOT terminalize. That
         split is covered by
         test_pending_sink_terminalization_uses_per_token_scheduler_handoff.
@@ -378,7 +378,7 @@ class TestCheckpointInterruptedProgress:
             with patch("elspeth.engine.executors.sink.SinkExecutor") as sink_executor_cls:
                 sink_executor_cls.return_value.write.side_effect = write_side_effect
 
-                orchestrator._run_core.write_pending_to_sinks(
+                orchestrator._sink_flush.write_pending_to_sinks(
                     factory=Mock(),
                     run_id="run-x",
                     config=config,

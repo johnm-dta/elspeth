@@ -540,9 +540,9 @@ class TestResumeFinalizesAsFailed:
 
         with (
             patch("elspeth.engine.orchestrator.resume.setup_resume_context", return_value=artifacts),
-            patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
+            patch.object(orch._context_factory, "initialize_run_context", return_value=run_ctx),
             patch("elspeth.engine.orchestrator.resume.run_transform_runtime_preflights"),
-            patch.object(orch._run_core, "flush_and_write_sinks") as flush_sinks,
+            patch.object(orch._sink_flush, "flush_and_write_sinks") as flush_sinks,
             pytest.raises(Exception, match="left non-terminal scheduler work after end-of-source flush") as exc_info,
         ):
             orch._resume_coordinator.process_resumed_rows(
@@ -601,12 +601,12 @@ class TestResumeFinalizesAsFailed:
 
         with (
             patch("elspeth.engine.orchestrator.resume.setup_resume_context", return_value=artifacts),
-            patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
+            patch.object(orch._context_factory, "initialize_run_context", return_value=run_ctx),
             patch(
                 "elspeth.engine.orchestrator.resume.run_transform_runtime_preflights",
                 side_effect=RuntimeError("resume runtime preflight exploded"),
             ),
-            patch.object(orch._run_core, "flush_and_write_sinks") as flush_sinks,
+            patch.object(orch._sink_flush, "flush_and_write_sinks") as flush_sinks,
             pytest.raises(RuntimeError, match="resume runtime preflight exploded"),
         ):
             orch._resume_coordinator.process_resumed_rows(
@@ -990,14 +990,14 @@ class TestResumeFinalizesAsFailed:
 
         with (
             patch.object(orch, "_register_graph_nodes_and_edges", return_value=artifacts),
-            patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
+            patch.object(orch._context_factory, "initialize_run_context", return_value=run_ctx),
             patch("elspeth.engine.orchestrator.leader_drain.run_transform_runtime_preflights"),
             patch.object(
                 orch._source_driver,
                 "run_main_processing_loop",
                 return_value=LoopResult(interrupted=False, start_time=0.0, phase_start=0.0, last_progress_time=0.0),
             ),
-            patch.object(orch._run_core, "flush_and_write_sinks") as flush_sinks,
+            patch.object(orch._sink_flush, "flush_and_write_sinks") as flush_sinks,
             pytest.raises(Exception, match="left non-terminal scheduler work after final source flush") as exc_info,
         ):
             orch._execute_run(
@@ -1550,12 +1550,13 @@ class TestBuildProcessorCallsCleanupOnFailure:
         primary_source.close.assert_called_once()
 
     def test_build_processor_failure_path_cleans_up_with_source(self) -> None:
-        """When _build_processor raises inside _initialize_run_context,
-        _cleanup_plugins must be called with include_source matching the
+        """When build_processor raises inside initialize_run_context,
+        cleanup_plugins must be called with include_source matching the
         run path.
 
-        This test exercises the actual except handler in _initialize_run_context
-        (line 1665-1667), not just _cleanup_plugins in isolation. The original
+        This test exercises the actual except handler in
+        RunContextFactory.initialize_run_context, not just cleanup_plugins
+        in isolation. The original
         bug leaked already-started plugins — especially the source — because
         the except block didn't exist. A regression to include_source=False
         or removal of the except block will cause this test to fail.
@@ -1595,13 +1596,14 @@ class TestBuildProcessorCallsCleanupOnFailure:
 
         # build_processor fails after on_start has been called on all plugins
         with (
-            patch.object(orch._run_core, "build_processor", side_effect=RuntimeError("processor build failed")),
-            # cleanup_plugins is now a module function; patch it where run_core.py looks
-            # it up (the imported name in run_core's namespace), not on the instance.
-            patch("elspeth.engine.orchestrator.run_core.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
+            patch.object(orch._processor_factory, "build_processor", side_effect=RuntimeError("processor build failed")),
+            # cleanup_plugins is now a module function; patch it where
+            # run_context_factory.py looks it up (the imported name in that
+            # module's namespace), not on the instance.
+            patch("elspeth.engine.orchestrator.run_context_factory.cleanup_plugins", wraps=cleanup_plugins) as spy_cleanup,
             pytest.raises(RuntimeError, match="processor build failed"),
         ):
-            orch._run_core.initialize_run_context(
+            orch._context_factory.initialize_run_context(
                 mock_factory,
                 "test-run",
                 config,

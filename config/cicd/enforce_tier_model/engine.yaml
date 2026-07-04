@@ -29,14 +29,14 @@ per_file_rules:
   reason: TransformProtocol dispatch on config.transforms
   expires: null
   max_hits: 1
-- pattern: engine/orchestrator/run_core.py
+- pattern: engine/orchestrator/run_context_factory.py
   rules:
   - R5
   reason: 'TransformProtocol dispatch for batch-aware aggregation lookup: isinstance(t,
     TransformProtocol) on first-party @runtime_checkable plugin contract values from
-    config.transforms (run_core.py:491). Repointed from engine/orchestrator/core.py
-    after the orchestrator decomposition moved RunCore.build_run_context here; core.py
-    now carries zero R5 hits.'
+    config.transforms (RunContextFactory.initialize_run_context). Repointed from
+    engine/orchestrator/run_core.py after the lifecycle-boundary split
+    (elspeth-b53a093321) moved initialize_run_context here; run_core.py is deleted.'
   expires: null
   max_hits: 1
 - pattern: engine/processor.py

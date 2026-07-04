@@ -1,5 +1,5 @@
 # tests/unit/engine/orchestrator/test_pending_sink_grouping.py
-"""Tests for _write_pending_to_sinks grouping logic.
+"""Tests for SinkFlushCoordinator.write_pending_to_sinks grouping logic.
 
 Bug: elspeth-1569caa900 — The grouping logic uses sort+groupby to separate
 tokens by PendingOutcome. If pending_sort_key produces wrong grouping,
@@ -26,12 +26,12 @@ from elspeth.engine.orchestrator.types import ExecutionCounters
 from elspeth.testing import make_token_info
 
 # =============================================================================
-# Helpers — replicate the sort key from core.py for isolated testing
+# Helpers — replicate the sort key from sink_flush.py for isolated testing
 # =============================================================================
 
 
 def _pending_sort_key(pair: tuple[TokenInfo, PendingOutcome | None]) -> tuple[bool, str, str, str, bool]:
-    """Replica of the pending_sort_key closure from _write_pending_to_sinks.
+    """Replica of the pending_sort_key closure from write_pending_to_sinks.
 
     This must stay in sync with the production code. If the production sort key
     changes, these tests should break, signalling a need to update.
@@ -363,14 +363,14 @@ class TestSinkNameValidation:
     """Tests for the OrchestrationInvariantError when sink_name is missing from config."""
 
     def _make_orchestrator(self) -> Mock:
-        """Build a minimal mock RunExecutionCore with write_pending_to_sinks accessible."""
+        """Build a minimal mock SinkFlushCoordinator with write_pending_to_sinks accessible."""
         # Import the actual method to test it directly
-        from elspeth.engine.orchestrator.run_core import RunExecutionCore
+        from elspeth.engine.orchestrator.sink_flush import SinkFlushCoordinator
 
-        orchestrator = Mock(spec=RunExecutionCore)
+        orchestrator = Mock(spec=SinkFlushCoordinator)
         orchestrator._span_factory = Mock()
         # Bind the real method
-        orchestrator.write_pending_to_sinks = RunExecutionCore.write_pending_to_sinks.__get__(orchestrator)
+        orchestrator.write_pending_to_sinks = SinkFlushCoordinator.write_pending_to_sinks.__get__(orchestrator)
         return orchestrator
 
     def test_missing_sink_name_raises_orchestration_invariant_error(self) -> None:

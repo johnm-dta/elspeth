@@ -1,6 +1,6 @@
 """Tests for accumulate_row_outcomes DIVERTED invariant.
 
-DIVERTED outcomes are counted in SinkExecutor (via _write_pending_to_sinks
+DIVERTED outcomes are counted in SinkExecutor (via write_pending_to_sinks
 return value), NOT in the processing loop. If a DIVERTED outcome appears
 in processing results, that's an orchestration bug.
 """

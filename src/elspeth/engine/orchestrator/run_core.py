@@ -86,10 +86,63 @@ if TYPE_CHECKING:
         LoopContext,
         PendingTokenMap,
         PipelineConfig,
+        SchedulerTerminalizer,
         TelemetryManagerProtocol,
         _CheckpointFactory,
     )
     from elspeth.engine.spans import SpanFactory
+
+
+class _SchedulerTerminalizationCallback:
+    """Terminalize durable scheduler sink-handoffs in batches after sink writes.
+
+    The scheduler-handoff half of what used to be a single dual-purpose
+    post-sink callback (elspeth-107a29d02e): accumulate sink-written token ids
+    and mark them terminal in batches of 64, with an explicit end-of-write
+    flush. Owned here next to run-core rather than in checkpointing.py, because
+    scheduler terminalization is a run-execution concern, not a checkpoint
+    concern; it depends only on the narrow :class:`SchedulerTerminalizer` slice
+    of the processor.
+    """
+
+    def __init__(self, terminalizer: SchedulerTerminalizer) -> None:
+        self._terminalizer = terminalizer
+        self._pending_terminal_tokens: list[str] = []
+
+    def __call__(self, token: TokenInfo) -> None:
+        self._pending_terminal_tokens.append(token.token_id)
+        if len(self._pending_terminal_tokens) >= 64:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._pending_terminal_tokens:
+            return
+        token_ids = tuple(self._pending_terminal_tokens)
+        self._pending_terminal_tokens.clear()
+        self._terminalizer.mark_sink_bound_scheduler_terminal_many(token_ids)
+
+
+class _CompositeAfterSinkCallback:
+    """Fan a post-sink token event out to several ``CheckpointAfterSinkCallback``s.
+
+    Composes the independent post-sink lifecycles (checkpoint progress +
+    scheduler terminalization) at the sink-write call site while keeping each
+    behind its own flush boundary (elspeth-107a29d02e). Per-token ``__call__``
+    runs the callbacks in list order (checkpoint-progress before
+    terminalization, matching the pre-split single callback); ``flush`` runs
+    them in the same order after the write completes.
+    """
+
+    def __init__(self, callbacks: tuple[CheckpointAfterSinkCallback, ...]) -> None:
+        self._callbacks = callbacks
+
+    def __call__(self, token: TokenInfo) -> None:
+        for callback in self._callbacks:
+            callback(token)
+
+    def flush(self) -> None:
+        for callback in self._callbacks:
+            callback.flush()
 
 
 class RunExecutionCore:
@@ -135,6 +188,7 @@ class RunExecutionCore:
         sink_step: int,
         *,
         on_token_written_factory: _CheckpointFactory | None = None,
+        scheduler_terminalizer: SchedulerTerminalizer | None = None,
     ) -> DiversionCounts:
         """Write pending tokens to sinks using SinkExecutor.
 
@@ -150,8 +204,13 @@ class RunExecutionCore:
             sink_id_map: Maps SinkName -> NodeID for checkpoint callbacks
             sink_step: Audit step index for sink writes (from processor.resolve_sink_step())
             on_token_written_factory: Optional factory that creates per-sink checkpoint
-                callbacks. Takes sink_node_id, returns callback(TokenInfo) -> None.
-                When None (resume path), no checkpoint callbacks are used.
+                PROGRESS callbacks. Takes sink_node_id, returns callback(TokenInfo) -> None.
+                When None, no checkpoint-progress callbacks are used.
+            scheduler_terminalizer: Optional narrow processor surface used to build a
+                batched scheduler-terminalization callback, composed alongside the
+                checkpoint-progress callback for grouped batches whose pending outcome
+                carries a durable scheduler PENDING_SINK handoff (elspeth-107a29d02e).
+                When None, no scheduler terminalization is performed.
         """
         from itertools import groupby
 
@@ -222,9 +281,20 @@ class RunExecutionCore:
                 # coalesce merges and source-quarantine rows still need
                 # checkpoints but have no scheduler row to close.
                 terminalize_scheduler = bool(pending_outcome is not None and pending_outcome.scheduler_pending_sink)
-                on_token_written: CheckpointAfterSinkCallback | None = None
+                # Compose the two independent post-sink lifecycles here
+                # (elspeth-107a29d02e): checkpoint progress (from the factory) and,
+                # only when this grouped batch carries a durable scheduler
+                # PENDING_SINK handoff, batched scheduler terminalization. Each keeps
+                # its own flush boundary; the composite preserves the pre-split order
+                # (checkpoint-progress before terminalization).
+                after_sink_callbacks: list[CheckpointAfterSinkCallback] = []
                 if on_token_written_factory is not None:
-                    on_token_written = on_token_written_factory(sink_node_id, terminalize_scheduler=terminalize_scheduler)
+                    after_sink_callbacks.append(on_token_written_factory(sink_node_id))
+                if terminalize_scheduler and scheduler_terminalizer is not None:
+                    after_sink_callbacks.append(_SchedulerTerminalizationCallback(scheduler_terminalizer))
+                on_token_written: CheckpointAfterSinkCallback | None = (
+                    _CompositeAfterSinkCallback(tuple(after_sink_callbacks)) if after_sink_callbacks else None
+                )
                 _, diversion_counts = sink_executor.write(
                     sink=sink,
                     tokens=group_tokens,
@@ -546,6 +616,7 @@ class RunExecutionCore:
         interrupted_by_shutdown: bool,
         *,
         on_token_written_factory: _CheckpointFactory | None = None,
+        scheduler_terminalizer: SchedulerTerminalizer | None = None,
     ) -> None:
         """Write all pending tokens to sinks and handle post-loop bookkeeping.
 
@@ -570,6 +641,7 @@ class RunExecutionCore:
             edge_map=edge_map,
             sink_step=loop_ctx.processor.resolve_sink_step(),
             on_token_written_factory=on_token_written_factory,
+            scheduler_terminalizer=scheduler_terminalizer,
         )
         # ADR-019: failsink-mode diversions are TRANSIENT structural evidence;
         # discard-mode diversions are FAILURE predicate inputs as well.

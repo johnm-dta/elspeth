@@ -1219,6 +1219,7 @@ class Orchestrator:
                 artifacts.edge_map,
                 loop_result.interrupted,
                 on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
+                scheduler_terminalizer=run_ctx.processor,
             )
 
             # 4b. ADR-030 multi-worker: after the leader's own sink writes are done
@@ -1261,6 +1262,7 @@ class Orchestrator:
                         artifacts.edge_map,
                         interrupted_by_shutdown=False,
                         on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
+                        scheduler_terminalizer=run_ctx.processor,
                     )
                     return True
 

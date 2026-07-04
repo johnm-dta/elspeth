@@ -259,11 +259,15 @@ class TestCheckpointInterruptedProgress:
             setup.db.close()
 
     def test_sink_factory_passes_live_barrier_scalars(self) -> None:
-        """The post-sink checkpoint callback hands live executor scalars through.
+        """The checkpoint-PROGRESS callback hands live executor scalars through.
 
-        The callback reads processor.get_barrier_scalars() (single composed
-        accessor, F1 Task 2.4) and passes the BarrierScalars verbatim to
-        create_checkpoint — including coalesce lost-branch records.
+        The progress callback reads barrier_scalars_source.get_barrier_scalars()
+        (single composed accessor, F1 Task 2.4) and passes the BarrierScalars
+        verbatim to create_checkpoint — including coalesce lost-branch records.
+        Scheduler terminalization is a SEPARATE callback composed in run_core
+        (elspeth-107a29d02e); this progress callback must NOT terminalize. That
+        split is covered by
+        test_pending_sink_terminalization_uses_per_token_scheduler_handoff.
         """
         from elspeth.contracts.barrier_scalars import BarrierScalars, CoalescePendingScalars
         from elspeth.contracts.identity import TokenInfo
@@ -302,7 +306,9 @@ class TestCheckpointInterruptedProgress:
             orchestrator._checkpoints._checkpoint_manager.create_checkpoint.assert_called_once()
             call_kwargs = orchestrator._checkpoints._checkpoint_manager.create_checkpoint.call_args.kwargs
             assert call_kwargs["barrier_scalars"] is scalars
-            mock_processor.mark_sink_bound_scheduler_terminal_many.assert_called_once_with(("tok-1",))
+            # Scheduler terminalization is no longer this callback's concern
+            # (elspeth-107a29d02e): the progress callback only checkpoints.
+            mock_processor.mark_sink_bound_scheduler_terminal_many.assert_not_called()
         finally:
             db.close()
 
@@ -311,7 +317,11 @@ class TestCheckpointInterruptedProgress:
 
         A sink batch may mix scheduler-backed tokens with tokens generated after
         a scheduler barrier. Only tokens with a recorded PENDING_SINK handoff
-        should be closed by the post-sink callback.
+        should be closed by the post-sink callback. Post-split
+        (elspeth-107a29d02e) this discrimination lives in write_pending_to_sinks,
+        which composes a scheduler-terminalization callback only for groups whose
+        pending outcome carries scheduler_pending_sink — so the caller must supply
+        the scheduler_terminalizer for terminalization to occur at all.
         """
         from elspeth.contracts import PendingOutcome, TokenInfo
         from elspeth.contracts.barrier_scalars import BarrierScalars
@@ -379,6 +389,7 @@ class TestCheckpointInterruptedProgress:
                     edge_map={},
                     sink_step=1,
                     on_token_written_factory=on_token_written_factory,
+                    scheduler_terminalizer=processor,
                 )
 
             processor.mark_sink_bound_scheduler_terminal_many.assert_called_once_with(("tok-scheduler",))

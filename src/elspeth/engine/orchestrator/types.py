@@ -716,6 +716,33 @@ class ResumeState:
             )
 
 
+class BarrierScalarsSource(Protocol):
+    """Narrow processor surface the checkpoint-progress callback needs.
+
+    A deliberately minimal slice of :class:`RowProcessorHandle`: the post-sink
+    checkpoint callback only reads the composed barrier scalars, so it depends
+    on this instead of the broad processor contract (elspeth-107a29d02e).
+    """
+
+    def get_barrier_scalars(self) -> BarrierScalars:
+        """Compose the underivable barrier scalars from the live executors (F1)."""
+        ...
+
+
+class SchedulerTerminalizer(Protocol):
+    """Narrow processor surface the scheduler-terminalization callback needs.
+
+    A deliberately minimal slice of :class:`RowProcessorHandle`: the post-sink
+    terminalization callback only marks durable batch sink-handoffs terminal, so
+    it depends on this instead of the broad processor contract
+    (elspeth-107a29d02e).
+    """
+
+    def mark_sink_bound_scheduler_terminal_many(self, token_ids: tuple[str, ...]) -> None:
+        """Mark scheduler sink handoffs complete after durable batch sink outcomes."""
+        ...
+
+
 class CheckpointAfterSinkCallback(Protocol):
     """Post-sink callback with an explicit batch flush boundary."""
 
@@ -729,13 +756,15 @@ class CheckpointAfterSinkCallback(Protocol):
 
 
 class _CheckpointFactory(Protocol):
-    """Factory that creates per-sink checkpoint callbacks.
+    """Factory that creates per-sink checkpoint-PROGRESS callbacks.
 
-    ``terminalize_scheduler`` is enabled only for sink writes whose pending
-    outcome carries a durable scheduler PENDING_SINK handoff for every token in
-    the grouped batch.
+    The returned callback records checkpoint progress after each token is
+    durably written to a sink. Scheduler terminalization is a SEPARATE lifecycle
+    composed at the sink-write call site (see
+    :meth:`RunExecutionCore.flush_and_write_sinks`), not this factory's concern
+    (elspeth-107a29d02e).
     """
 
-    def __call__(self, sink_node_id: str, *, terminalize_scheduler: bool = True) -> CheckpointAfterSinkCallback:
+    def __call__(self, sink_node_id: str) -> CheckpointAfterSinkCallback:
         """Return a callback invoked after each token is written to a sink."""
         ...

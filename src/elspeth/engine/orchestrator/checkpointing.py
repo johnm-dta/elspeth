@@ -20,7 +20,12 @@ if TYPE_CHECKING:
     from elspeth.contracts.identity import TokenInfo
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.dag import ExecutionGraph
-    from elspeth.engine.orchestrator.types import CheckpointAfterSinkCallback, LoopContext, RowProcessorHandle, _CheckpointFactory
+    from elspeth.engine.orchestrator.types import (
+        BarrierScalarsSource,
+        CheckpointAfterSinkCallback,
+        LoopContext,
+        _CheckpointFactory,
+    )
 
 
 class CheckpointCoordinator:
@@ -200,46 +205,53 @@ class CheckpointCoordinator:
     def make_checkpoint_after_sink_factory(
         self,
         run_id: str,
-        processor: RowProcessorHandle,
+        barrier_scalars_source: BarrierScalarsSource,
     ) -> _CheckpointFactory:
-        """Create a per-sink checkpoint callback factory.
+        """Create a per-sink checkpoint-PROGRESS callback factory.
 
         Returns a factory that, given a sink_node_id, produces a callback
-        invoked after each token is durably written to that sink.  Used by
-        both the normal execution path and the resume path.
+        invoked after each token is durably written to that sink. The callback
+        records checkpoint progress ONLY — scheduler terminalization used to
+        share this callback but is now a separate lifecycle composed at the
+        sink-write call site (``RunExecutionCore.flush_and_write_sinks``,
+        elspeth-107a29d02e). Used by both the normal execution path and resume.
+
+        Depends on the narrow :class:`BarrierScalarsSource` slice of the
+        processor rather than the broad ``RowProcessorHandle``.
         """
 
         coordinator = self
 
-        class BatchCheckpointCallback:
-            """Checkpoint tokens immediately and terminalize scheduler work in batches."""
+        class CheckpointProgressCallback:
+            """Record checkpoint progress after each durable sink write.
 
-            def __init__(self, *, terminalize_scheduler: bool) -> None:
-                self._terminalize_scheduler = terminalize_scheduler
-                self._pending_terminal_tokens: list[str] = []
+            One of the two lifecycles that used to share the post-sink callback
+            (elspeth-107a29d02e); the scheduler-terminalization sibling lives in
+            run_core.py. Progress checkpoints are created eagerly per call, so
+            ``flush`` is a no-op — the explicit flush boundary exists only to
+            satisfy the :class:`CheckpointAfterSinkCallback` protocol shared with
+            the batched terminalization callback.
+            """
 
             def __call__(self, token: TokenInfo) -> None:
+                # token identity is not needed for checkpoint progress (it was
+                # only consumed by the terminalization lifecycle, now split out).
+                del token
                 coordinator.maybe_checkpoint(
                     run_id=run_id,
-                    barrier_scalars=processor.get_barrier_scalars(),
+                    barrier_scalars=barrier_scalars_source.get_barrier_scalars(),
                 )
-                if self._terminalize_scheduler:
-                    self._pending_terminal_tokens.append(token.token_id)
-                if len(self._pending_terminal_tokens) >= 64:
-                    self.flush()
 
             def flush(self) -> None:
-                if not self._pending_terminal_tokens:
-                    return
-                token_ids = tuple(self._pending_terminal_tokens)
-                self._pending_terminal_tokens.clear()
-                processor.mark_sink_bound_scheduler_terminal_many(token_ids)
+                # Progress checkpoints are written eagerly per call; nothing is
+                # batched, so there is no deferred work to flush.
+                return
 
-        def factory(sink_node_id: str, *, terminalize_scheduler: bool = True) -> CheckpointAfterSinkCallback:
+        def factory(sink_node_id: str) -> CheckpointAfterSinkCallback:
             # sink_node_id is the factory's per-sink discriminator; the callback
             # itself no longer persists a per-sink anchor (F2).
             del sink_node_id
-            return BatchCheckpointCallback(terminalize_scheduler=terminalize_scheduler)
+            return CheckpointProgressCallback()
 
         return factory
 

@@ -29,7 +29,10 @@ import pytest
 from elspeth.contracts.audit import TokenOutcome
 from elspeth.contracts.enums import TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import OrchestrationInvariantError
-from elspeth.engine.orchestrator.run_status import derive_resume_terminal_status_from_audit
+from elspeth.engine.orchestrator.run_status import (
+    derive_resume_terminal_status_from_audit,
+    is_counted_coalesced_output,
+)
 
 _RECORDED_AT = datetime(2026, 5, 29, 12, 0, 0, tzinfo=UTC)
 
@@ -112,3 +115,67 @@ def test_routed_outcome_tallies_destination(path: TerminalPath, outcome: Termina
     factory = _FakeFactory(query=_FakeQuery([_routed_outcome(path, outcome, sink_name=destination)]))
     _status, counters = derive_resume_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
     assert counters.routed_destinations[destination] == 1
+
+
+def _coalesced_outcome(token_id: str, *, sink_name: str | None) -> TokenOutcome:
+    """A ``(SUCCESS, COALESCED)`` record. ``sink_name=None`` is a CONSUMED branch
+    input (must NOT be counted); ``sink_name`` set is the MERGED output (counted
+    once). The CoalesceExecutor hard-codes ``sink_name=None`` on consumed inputs
+    and the merged token carries its terminal sink name — see
+    ``is_counted_coalesced_output``."""
+    return TokenOutcome(
+        outcome_id=f"oc-{token_id}",
+        run_id="run-1",
+        token_id=token_id,
+        outcome=TerminalOutcome.SUCCESS,
+        path=TerminalPath.COALESCED,
+        completed=True,
+        recorded_at=_RECORDED_AT,
+        sink_name=sink_name,
+    )
+
+
+def test_is_counted_coalesced_output_discriminates_on_sink_name() -> None:
+    """The helper names the invariant: merged output (sink_name set) is counted;
+    consumed branch input (sink_name None) is not."""
+    assert is_counted_coalesced_output(_coalesced_outcome("merged", sink_name="out_sink")) is True
+    assert is_counted_coalesced_output(_coalesced_outcome("consumed", sink_name=None)) is False
+
+
+def test_flat_coalesce_success_counts_merged_output_once() -> None:
+    """A 2-branch coalesce-success writes two consumed inputs (sink_name=None)
+    plus one merged output (sink_name set). The derive must count the merged
+    output ONCE — counting every COALESCED record would report 3."""
+    factory = _FakeFactory(
+        query=_FakeQuery(
+            [
+                _coalesced_outcome("branch-1", sink_name=None),
+                _coalesced_outcome("branch-2", sink_name=None),
+                _coalesced_outcome("merged", sink_name="out_sink"),
+            ]
+        )
+    )
+    _status, counters = derive_resume_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
+    assert counters.rows_coalesced == 1
+    assert counters.rows_succeeded == 1
+
+
+def test_nested_coalesce_counts_only_final_merged_output() -> None:
+    """An inner merged token consumed by an outer coalesce is itself recorded as
+    a consumed input (sink_name=None), so it is NOT counted at the inner level.
+    Only the OUTER merged output (which reaches the final sink) is counted."""
+    factory = _FakeFactory(
+        query=_FakeQuery(
+            [
+                _coalesced_outcome("inner-branch-1", sink_name=None),
+                _coalesced_outcome("inner-branch-2", sink_name=None),
+                # inner merged token, absorbed by the outer coalesce -> sink_name None
+                _coalesced_outcome("inner-merged", sink_name=None),
+                # outer merged token reaches the final sink -> the only counted record
+                _coalesced_outcome("outer-merged", sink_name="final_sink"),
+            ]
+        )
+    )
+    _status, counters = derive_resume_terminal_status_from_audit(factory, "run-1")  # type: ignore[arg-type]
+    assert counters.rows_coalesced == 1
+    assert counters.rows_succeeded == 1

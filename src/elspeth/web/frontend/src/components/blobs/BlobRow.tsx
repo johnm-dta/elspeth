@@ -1,7 +1,8 @@
 // src/components/blobs/BlobRow.tsx
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { previewBlobContentSnippet } from "@/api/client";
 import type { BlobMetadata } from "@/types/api";
+import { describeStructuralSummary, summarizeContentStructure } from "@/utils/contentStructure";
 
 const PREVIEWABLE_MIME_TYPES = new Set([
   "text/plain",
@@ -103,6 +104,18 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
       ? previewContent.slice(0, MAX_PREVIEW_CHARS)
       : previewContent;
 
+  // Structural self-disclosure (T-3): static introspection of the preview
+  // content already fetched above — no additional network call. Honest by
+  // design: a truncated/ragged/oversized/unparseable body surfaces a plain
+  // caveat instead of a guessed row count (see contentStructure.ts).
+  const structuralSummary = useMemo(() => {
+    if (previewContent === null) return null;
+    return summarizeContentStructure(blob.mime_type, previewContent, { truncated });
+  }, [previewContent, truncated, blob.mime_type]);
+  const structuralSummaryLine = structuralSummary
+    ? describeStructuralSummary(structuralSummary)
+    : null;
+
   return (
     <div>
       <div
@@ -199,6 +212,19 @@ export function BlobRow({ blob, sessionId, onDownload, onDelete, onUseAsInput }:
               {previewError}
             </div>
           )}
+          {structuralSummary &&
+            structuralSummary.format !== "unsupported" &&
+            !previewLoading &&
+            !previewError && (
+              <div className="blob-row-structure" data-testid="blob-row-structure">
+                {structuralSummary.caveat && (
+                  <p className="blob-row-structure-caveat">{structuralSummary.caveat}</p>
+                )}
+                {structuralSummaryLine && (
+                  <p className="blob-row-structure-summary">{structuralSummaryLine}</p>
+                )}
+              </div>
+            )}
           {displayContent !== null && !previewLoading && (
             <pre className="blob-row-preview-pre">
               {displayContent}

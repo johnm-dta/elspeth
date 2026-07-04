@@ -104,6 +104,32 @@
   font-style: italic;
 }
 
+/* Structural self-disclosure (T-3): row count/columns/keys derived from
+   already-fetched preview content, or an honest caveat when the content
+   couldn't be confidently parsed. */
+.blob-row-structure {
+  margin-bottom: var(--space-xs);
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  font-size: var(--font-size-xs);
+}
+
+.blob-row-structure-summary {
+  margin: 0;
+  color: var(--color-text-secondary);
+}
+
+.blob-row-structure-caveat {
+  margin: 0;
+  color: var(--color-warning);
+}
+
+.blob-row-structure-caveat + .blob-row-structure-summary {
+  margin-top: var(--space-2xs);
+}
+
 /* ---------------------------------------------------------------------------
    BlobManager
    --------------------------------------------------------------------------- */

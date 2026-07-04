@@ -36,6 +36,7 @@
 
 import { useState } from "react";
 import type { InlineSourceSummary, InlineSourceProvenance } from "@/types/api";
+import { describeRowCount } from "@/utils/contentStructure";
 
 /**
  * Provenances where the "Edit the list" affordance is surfaced.
@@ -59,12 +60,6 @@ function clipPreview(text: string): string {
     return text;
   }
   return text.slice(0, PREVIEW_MAX_LENGTH - 1) + PREVIEW_ELLIPSIS;
-}
-
-function describeRowCount(rowCount: number | null): string {
-  if (rowCount === null) return "unknown row count";
-  if (rowCount === 1) return "1 row";
-  return `${rowCount} rows`;
 }
 
 export interface InlineSourceCreatedTurnProps {

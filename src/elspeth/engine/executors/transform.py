@@ -416,6 +416,81 @@ class TransformExecutor:
             result = transform.process(token.row_data, ctx)
         return result
 
+    def _verify_success_emissions(
+        self,
+        *,
+        result: TransformResult,
+        transform: TransformProtocol,
+        token: TokenInfo,
+        ctx: PluginContext,
+        static_contract: frozenset[str],
+        effective_input_fields: frozenset[str],
+    ) -> None:
+        """Verify a success result's emitted rows (success-audit phase, part 1).
+
+        Owns the zero-emission declaration path, post-emission
+        declaration-contract dispatch (ADR-010 §Decision 3 + §Semantics
+        amendment 2026-04-20, audit-complete collect-then-raise dispatcher)
+        with terminal-failure recording, and per-row output-schema validation.
+        Violations raise; the caller's NodeStateGuard auto-fails the state.
+
+        ``static_contract`` + ``effective_input_fields`` are the
+        preflight-derived values, reused here (panel F1 resolution — single
+        caller-side derivation).
+        """
+        if result.row is not None:
+            emitted_rows: tuple[Any, ...] = (result.row,)
+        elif result.rows is not None:
+            emitted_rows = tuple(result.rows)
+        else:
+            emitted_rows = ()
+        try:
+            verify_zero_emission_declaration_path(
+                plugin=transform,
+                plugin_name=transform.name,
+                node_id=transform.node_id,
+                run_id=ctx.run_id,
+                row_id=token.row_id,
+                token_id=token.token_id,
+                emitted_count=len(emitted_rows),
+                used_success_empty=result.rows is not None and len(result.rows) == 0,
+            )
+            run_post_emission_checks(
+                inputs=PostEmissionInputs(
+                    plugin=transform,
+                    node_id=transform.node_id or "",
+                    run_id=ctx.run_id,
+                    row_id=token.row_id,
+                    token_id=token.token_id,
+                    input_row=token.row_data,
+                    static_contract=static_contract,
+                    effective_input_fields=effective_input_fields,
+                ),
+                outputs=PostEmissionOutputs(emitted_rows=emitted_rows),
+            )
+        except (
+            DeclarationContractViolation,
+            AggregateDeclarationContractViolation,
+            PassThroughContractViolation,
+            ZeroEmissionSuccessContractViolation,
+        ) as violation:
+            self._record_terminal_contract_failure(
+                transform=transform,
+                token=token,
+                run_id=ctx.run_id,
+                violation=violation,
+            )
+            raise
+
+        for idx, emitted_row in enumerate(emitted_rows):
+            try:
+                transform.output_schema.model_validate(emitted_row.to_dict(), strict=True)
+            except ValidationError as e:
+                raise PluginContractViolation(
+                    f"Transform '{transform.name}' output validation failed for emitted row {idx}: {e}. "
+                    "This indicates a transform schema bug."
+                ) from e
+
     def execute_transform(
         self,
         transform: TransformProtocol,
@@ -585,65 +660,18 @@ class TransformExecutor:
             # If any of the following steps raise before guard.complete() is
             # called, the guard auto-completes the state as FAILED in __exit__.
 
-            # Post-emission declaration-contract runtime dispatch
-            # (ADR-010 §Decision 3 + §Semantics amendment 2026-04-20).
-            # Uses the audit-complete collect-then-raise dispatcher.
-            # static_contract + effective_input_fields were derived above
-            # for the pre-emission call; reused here (panel F1 resolution —
-            # single caller-side derivation).
+            # Post-emission declaration-contract dispatch + output-schema
+            # validation. Runs BEFORE output hashing below so declaration
+            # violations keep attribution over canonicalization failures.
             if result.status == "success":
-                if result.row is not None:
-                    emitted_rows: tuple[Any, ...] = (result.row,)
-                elif result.rows is not None:
-                    emitted_rows = tuple(result.rows)
-                else:
-                    emitted_rows = ()
-                try:
-                    verify_zero_emission_declaration_path(
-                        plugin=transform,
-                        plugin_name=transform.name,
-                        node_id=transform.node_id,
-                        run_id=ctx.run_id,
-                        row_id=token.row_id,
-                        token_id=token.token_id,
-                        emitted_count=len(emitted_rows),
-                        used_success_empty=result.rows is not None and len(result.rows) == 0,
-                    )
-                    run_post_emission_checks(
-                        inputs=PostEmissionInputs(
-                            plugin=transform,
-                            node_id=transform.node_id or "",
-                            run_id=ctx.run_id,
-                            row_id=token.row_id,
-                            token_id=token.token_id,
-                            input_row=token.row_data,
-                            static_contract=static_contract,
-                            effective_input_fields=effective_input_fields,
-                        ),
-                        outputs=PostEmissionOutputs(emitted_rows=emitted_rows),
-                    )
-                except (
-                    DeclarationContractViolation,
-                    AggregateDeclarationContractViolation,
-                    PassThroughContractViolation,
-                    ZeroEmissionSuccessContractViolation,
-                ) as violation:
-                    self._record_terminal_contract_failure(
-                        transform=transform,
-                        token=token,
-                        run_id=ctx.run_id,
-                        violation=violation,
-                    )
-                    raise
-
-                for idx, emitted_row in enumerate(emitted_rows):
-                    try:
-                        transform.output_schema.model_validate(emitted_row.to_dict(), strict=True)
-                    except ValidationError as e:
-                        raise PluginContractViolation(
-                            f"Transform '{transform.name}' output validation failed for emitted row {idx}: {e}. "
-                            "This indicates a transform schema bug."
-                        ) from e
+                self._verify_success_emissions(
+                    result=result,
+                    transform=transform,
+                    token=token,
+                    ctx=ctx,
+                    static_contract=static_contract,
+                    effective_input_fields=effective_input_fields,
+                )
 
             # Populate audit fields
             # Wrap stable_hash calls to convert canonicalization errors to PluginContractViolation.

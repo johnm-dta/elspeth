@@ -8,7 +8,7 @@ leader's ``has_peer_active_leases()`` / ``has_scheduled_work()`` observe a real
 multi-worker image at finalize time.
 
 To keep the bounded wait fast and deterministic, the loop's ``time.monotonic``
-and ``time.sleep`` are patched in ``elspeth.engine.orchestrator.core``: sleep is
+and ``time.sleep`` are patched in ``elspeth.engine.orchestrator.leader_drain``: sleep is
 a no-op and monotonic returns a scripted, advancing clock so the lease-aware
 deadline is reached in a handful of iterations without any real wall-clock wait.
 
@@ -157,7 +157,7 @@ def _build(rows: list[dict[str, Any]], seed_cb: Any) -> tuple[PipelineConfig, Ex
 class _FastMonotonic:
     """Scripted monotonic clock: every call advances by ``step`` seconds.
 
-    Patched over ``core.time.monotonic`` so the 3x liveness deadline is crossed
+    Patched over ``leader_drain.time.monotonic`` so the 3x liveness deadline is crossed
     after a few iterations — no real wall-clock wait. ``step`` defaults to a
     fraction of the liveness window so a handful of iterations exhausts the
     240s budget.

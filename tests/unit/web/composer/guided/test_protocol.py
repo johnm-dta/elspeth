@@ -138,6 +138,7 @@ class TestTurnResponse:
             "request_advisor",
             "reject",
             "back",
+            "passthrough",
         }
 
     def test_turn_response_minimal(self) -> None:

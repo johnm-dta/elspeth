@@ -75,7 +75,8 @@ async def test_step_1_source_resolution_sends_configured_sampling(monkeypatch: p
         seed=42,
     )
 
-    assert result is None
+    assert result.resolution is None
+    assert result.prose_reply == "advice"
     assert captured["temperature"] == 0.0
     assert captured["seed"] == 42
 
@@ -101,8 +102,10 @@ async def test_solve_step_chat_marks_system_message_for_anthropic(monkeypatch: p
 
     assert captured["messages"][0]["role"] == "system"
     assert captured["messages"][0]["cache_control"] == {"type": "ephemeral"}
-    # The user message must NOT be marked.
+    # The no-tools addendum (messages[1]) and the user message (messages[2])
+    # must NOT be marked.
     assert "cache_control" not in captured["messages"][1]
+    assert "cache_control" not in captured["messages"][2]
 
 
 @pytest.mark.asyncio

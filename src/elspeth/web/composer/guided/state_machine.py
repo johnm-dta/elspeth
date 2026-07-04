@@ -93,12 +93,28 @@ def _chat_turn_from_guided_dict(entry: Any) -> ChatTurn:
         raise InvariantError("GuidedSession.from_dict: chat_history.content must be str")
     if type(ts_iso_raw) is not str:
         raise InvariantError("GuidedSession.from_dict: chat_history.ts_iso must be str")
+    # assistant_message_kind / synthetic_failure_reason (fp-review C-2
+    # persisted-history closure): genuinely OPTIONAL, unlike every field
+    # above — a turn persisted before this field existed has no key at all.
+    # ``.get()`` (not direct indexing) is the correct read here precisely
+    # because absence is a valid, non-fabricated state, not missing required
+    # data; ChatTurn's own __post_init__ enforces the closed value sets and
+    # the cross-field/role invariants (surfacing as ValueError, caught by the
+    # broad except below like every other malformed-record case).
+    assistant_message_kind_raw = entry.get("assistant_message_kind")
+    if assistant_message_kind_raw is not None and type(assistant_message_kind_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.assistant_message_kind must be str or None")
+    synthetic_failure_reason_raw = entry.get("synthetic_failure_reason")
+    if synthetic_failure_reason_raw is not None and type(synthetic_failure_reason_raw) is not str:
+        raise InvariantError("GuidedSession.from_dict: chat_history.synthetic_failure_reason must be str or None")
     return ChatTurn(
         role=ChatRole(role_raw),
         content=content_raw,
         seq=_require_guided_non_negative_int(seq_raw, "chat_history.seq"),
         step=GuidedStep(step_raw),
         ts_iso=ts_iso_raw,
+        assistant_message_kind=cast(Any, assistant_message_kind_raw),
+        synthetic_failure_reason=cast(Any, synthetic_failure_reason_raw),
     )
 
 
@@ -438,6 +454,8 @@ class GuidedSession:
                     "seq": t.seq,
                     "step": t.step.value,
                     "ts_iso": t.ts_iso,
+                    "assistant_message_kind": t.assistant_message_kind,
+                    "synthetic_failure_reason": t.synthetic_failure_reason,
                 }
                 for t in self.chat_history
             ],
@@ -617,68 +635,36 @@ def _advance_step_1(
     response: TurnResponse,
     turn_type: TurnType,
 ) -> _StepAdvanceResult:
-    """Handle a Step 1 (source) response.
+    """Handle a Step 1 (source) response. Pure self-loop for every Step 1 turn type.
 
-    Only ``INSPECT_AND_CONFIRM`` causes a step transition; all other Step 1
-    turn types (``SINGLE_SELECT`` for plugin selection, ``SCHEMA_FORM`` for
-    options) are intra-step turns that do not advance the wizard. Those
-    branches emit the next intra-step turn and are out of scope here.
+    Step 1 advancement (the INSPECT_AND_CONFIRM -> STEP_2_SINK transition) is
+    owned entirely by the dispatcher/handler path
+    (``_dispatch_guided_respond``'s STEP_1_SOURCE -> STEP_2_SINK
+    INSPECT_AND_CONFIRM branch in ``sessions/routes/_helpers.py``) — mirroring
+    ``_advance_step_2`` (elspeth-948eb9c0b8 C-3(b)) and how Step 3/Step 4
+    already work: the resolve (``step_1_source_intent`` +
+    ``edited_values["columns"]`` -> ``SourceResolved``) and the source commit
+    via ``handle_step_1_source`` both happen in the dispatcher, and
+    ``step``/``step_1_result`` are only ever set after the commit is known to
+    have succeeded.
 
-    The inspection state (plugin, options, sample_rows) is held in
-    ``session.step_1_source_intent`` — set by the INSPECT_AND_CONFIRM emit site
-    before the turn is returned to the client.  The wire response carries only
-    ``edited_values = {"columns": list[str]}``, since that is the only field
-    the widget can authoritatively edit.  plugin/options/sample_rows are recovered
-    from intent; columns come from the response.
+    Previously this function unconditionally pre-set ``step_1_result`` and
+    advanced ``step`` to STEP_2_SINK for INSPECT_AND_CONFIRM *before* the
+    source was ever committed via ``handle_step_1_source`` — the same
+    eager-pre-set shape that caused the Step 2 divergence — and even coerced
+    a malformed (non-list) ``columns`` payload silently (iterating a scalar
+    string's characters) before the dispatcher's type guard ever ran. This
+    turn type has no live production emitter today (``_build_get_guided_turn``
+    always passes ``blob_inspection=None``; only the integration test suite's
+    ``_seed_inspect_and_confirm_history`` reaches it), so the defect was
+    latent, not observed — fixed here for the same reason Step 2 was: the
+    commit-then-advance discipline must hold for every step this state
+    machine owns, reachable today or not.
 
-    All values from the response are Tier-3 external data and are coerced
-    (str, tuple) before being stored in the audit-tier ``SourceResolved``.
+    All other Step 1 turn types (``SINGLE_SELECT``, ``SCHEMA_FORM``) were
+    already pure self-loops here.
     """
-    if turn_type is not TurnType.INSPECT_AND_CONFIRM:
-        # Intra-step turns (plugin select, options form) — do not advance.
-        # Tasks 2.2+ wire these when the full intra-step flow is added.
-        return (session, None, None, [])
-
-    intent = session.step_1_source_intent
-    if intent is None:
-        raise InvariantError(
-            "_advance_step_1: step_1_source_intent is None when INSPECT_AND_CONFIRM "
-            "was received — the INSPECT_AND_CONFIRM emit site must set it before "
-            "emitting the turn. This is a state-machine invariant violation."
-        )
-
-    edited = response["edited_values"]
-    if edited is None:
-        raise ValueError("inspect_and_confirm response must carry edited_values; got None")
-
-    # columns is the only field the widget edits; it is Tier-3: coerce to tuple[str, ...].
-    columns_raw = edited["columns"]  # KeyError propagates as protocol violation
-    columns = tuple(str(c) for c in columns_raw)
-
-    source = SourceResolved(
-        plugin=intent.plugin,
-        options=dict(intent.options),
-        observed_columns=columns,
-        sample_rows=tuple(dict(r) for r in intent.sample_rows),
-    )
-    directives: list[GuidedAuditDirective] = [
-        GuidedAuditDirective(
-            tool_name="guided_step_advanced",
-            arguments={
-                "prev_step": GuidedStep.STEP_1_SOURCE.value,
-                "next_step": GuidedStep.STEP_2_SINK.value,
-                "reason": "user_advanced",
-            },
-        ),
-    ]
-    new_sess = replace(
-        session,
-        step=GuidedStep.STEP_2_SINK,
-        step_1_result=source,
-        step_1_source_intent=None,  # consumed; clear to prevent misread by later steps
-        step_1_chosen_plugin=None,
-    )
-    return (new_sess, None, None, directives)
+    return (session, None, None, [])
 
 
 def _advance_step_2(
@@ -686,69 +672,29 @@ def _advance_step_2(
     response: TurnResponse,
     turn_type: TurnType,
 ) -> _StepAdvanceResult:
-    """Handle a Step 2 (sink) response.
+    """Handle a Step 2 (sink) response. Pure self-loop for every Step 2 turn type.
 
-    Only ``MULTI_SELECT_WITH_CUSTOM`` causes a step transition; all other Step 2
-    turn types are intra-step turns that do not advance the wizard.
+    Step 2 advancement (the MULTI_SELECT_WITH_CUSTOM -> STEP_3_TRANSFORMS
+    transition) is owned entirely by the dispatcher/handler path
+    (``_dispatch_guided_respond``'s STEP_2_SINK intra-step MULTI_SELECT_WITH_CUSTOM
+    branch in ``sessions/routes/_helpers.py``) — mirroring how Step 3/Step 4
+    already work (``_advance_step_3``/``_advance_step_4`` are pure self-loops;
+    ``handle_step_3_chain_accept`` sets the step pointer itself, atomically
+    with the state mutation).
 
-    The MULTI_SELECT_WITH_CUSTOM response carries:
-    - ``chosen``: the list of required field names the user selected
-    - ``custom_inputs``: any additional field names the user typed in
-
-    The sink plugin name and options were persisted in
-    ``session.step_2_sink_intent`` by the preceding SCHEMA_FORM dispatcher.
-    ``_advance_step_2`` reads them here, combines with ``chosen`` +
-    ``custom_inputs`` to construct a single ``SinkOutputResolved``, and
-    clears ``step_2_sink_intent`` in the same atomic replace() so it cannot
-    be misread by a later step.
-
-    All values from the response are Tier-3 external data and are coerced
-    (str, tuple) before being stored in the audit-tier ``SinkOutputResolved``.
+    Previously this function unconditionally pre-set ``step_2_result`` and
+    advanced ``step`` to STEP_3_TRANSFORMS for MULTI_SELECT_WITH_CUSTOM
+    *before* the sink was ever committed via ``handle_step_2_sink`` — a
+    downstream commit failure then left ``guided_session.step_2_result``
+    (and ``step``) advanced while ``composition_state.outputs`` stayed
+    unchanged, a persisted state-integrity divergence (elspeth-948eb9c0b8
+    C-3(b)). Resolving the sink from ``step_2_sink_intent`` + the response,
+    validating it, and setting ``step``/``step_2_result`` now all happen in
+    the dispatcher, gated on ``handle_step_2_sink`` reporting success — so a
+    failure leaves this pure function's return value (and therefore the
+    persisted session) untouched.
     """
-    if turn_type is not TurnType.MULTI_SELECT_WITH_CUSTOM:
-        return (session, None, None, [])
-
-    intent = session.step_2_sink_intent
-    if intent is None:
-        raise InvariantError(
-            "_advance_step_2: step_2_sink_intent is None when MULTI_SELECT_WITH_CUSTOM "
-            "was received — the SCHEMA_FORM dispatcher must set it before emitting "
-            "the MULTI_SELECT_WITH_CUSTOM turn. This is a state-machine invariant "
-            "violation."
-        )
-
-    # chosen and custom_inputs are Tier-3: coerce to tuple[str, ...].
-    chosen_raw = response["chosen"] or []
-    custom_inputs_raw = response["custom_inputs"] or []
-    required_fields = tuple(str(f) for f in chosen_raw) + tuple(str(f) for f in custom_inputs_raw)
-
-    output = SinkOutputResolved(
-        plugin=intent.plugin,
-        options=dict(deep_thaw(intent.options)),
-        required_fields=required_fields,
-        schema_mode="observed",
-    )
-    sink = SinkResolved(outputs=(output,))
-    directives = [
-        GuidedAuditDirective(
-            tool_name="guided_step_advanced",
-            arguments={
-                "prev_step": GuidedStep.STEP_2_SINK.value,
-                "next_step": GuidedStep.STEP_3_TRANSFORMS.value,
-                "reason": "user_advanced",
-            },
-        ),
-    ]
-    # The sink commit advances straight to the transform build. The composer
-    # builds the chain from the user's originating request (mirror freeform);
-    # there is no STEP_2_5 recipe-match interstitial.
-    new_sess = replace(
-        session,
-        step=GuidedStep.STEP_3_TRANSFORMS,
-        step_2_result=sink,
-        step_2_sink_intent=None,  # consumed; clear to prevent misread by later steps
-    )
-    return (new_sess, None, None, directives)
+    return (session, None, None, [])
 
 
 def _advance_step_3(

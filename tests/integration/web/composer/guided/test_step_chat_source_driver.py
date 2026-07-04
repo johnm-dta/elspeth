@@ -62,7 +62,7 @@ async def test_source_driver_includes_current_source_in_prompt() -> None:
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
         new=AsyncMock(side_effect=_capture),
     ):
-        result = await maybe_resolve_step_1_source_chat(
+        outcome = await maybe_resolve_step_1_source_chat(
             model="anthropic/claude-sonnet-4.6",
             user_message="add a second url",
             plugin_hint="json",
@@ -71,6 +71,7 @@ async def test_source_driver_includes_current_source_in_prompt() -> None:
             seed=None,
         )
 
+    result = outcome.resolution
     assert result is not None
     assert result.plugin == "json"
     # The system prompt is SPLIT: messages[0] is the stable skill head (the
@@ -141,7 +142,7 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
         new=AsyncMock(side_effect=_echo_server_owned_keys),
     ):
-        result = await maybe_resolve_step_1_source_chat(
+        outcome = await maybe_resolve_step_1_source_chat(
             model="anthropic/claude-sonnet-4.6",
             user_message="add a second url",
             plugin_hint="json",
@@ -150,6 +151,7 @@ async def test_source_driver_strips_echoed_server_owned_keys() -> None:
             seed=None,
         )
 
+    result = outcome.resolution
     assert result is not None
     # Drop-direction: both keys are server-owned; neither may survive an LLM source
     # resolution (set_source rejects caller-supplied blob_ref / source_authoring,
@@ -179,13 +181,18 @@ def test_resolver_forbidden_keys_stay_in_lockstep_with_commit_side_class() -> No
 
 
 @pytest.mark.asyncio
-async def test_source_driver_returns_none_on_prose() -> None:
+async def test_source_driver_captures_prose_reply_on_decline() -> None:
+    """No resolve_source call: the outcome carries the model's own prose reply.
+
+    Captured directly rather than discarded — the caller (the guided-chat
+    route) uses this to answer without a second, tool-less call (C-1 fix).
+    """
     prose = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Here is some advice.", tool_calls=None))])
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
         new=AsyncMock(return_value=prose),
     ):
-        result = await maybe_resolve_step_1_source_chat(
+        outcome = await maybe_resolve_step_1_source_chat(
             model="anthropic/claude-sonnet-4.6",
             user_message="what is a source?",
             plugin_hint="json",
@@ -193,4 +200,103 @@ async def test_source_driver_returns_none_on_prose() -> None:
             temperature=None,
             seed=None,
         )
-    assert result is None
+    assert outcome.resolution is None
+    assert outcome.prose_reply == "Here is some advice."
+
+
+@pytest.mark.asyncio
+async def test_source_driver_rejects_scaffold_leak_in_declined_prose() -> None:
+    """A scaffold leak in the DECLINED-PROSE branch, not the tool argument.
+
+    Same register guard (``_require_prose_assistant_message``), a different
+    call site: this is the new salvage path added alongside the C-1 fix, so
+    it needs its own coverage that a leak here raises loudly too, exactly
+    like a leak in ``resolve_source``'s own ``assistant_message`` argument.
+    """
+    from elspeth.web.composer.guided.chat_solver import AssistantScaffoldLeakError
+
+    scaffold_reply = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='Let me check. <tool_call>{"name": "list_sources"}</tool_call> csv fits.',
+                    tool_calls=None,
+                )
+            )
+        ]
+    )
+    with (
+        patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=scaffold_reply),
+        ),
+        pytest.raises(AssistantScaffoldLeakError, match="user-facing prose"),
+    ):
+        await maybe_resolve_step_1_source_chat(
+            model="anthropic/claude-sonnet-4.6",
+            user_message="what is a source?",
+            plugin_hint="json",
+            current_source=None,
+            temperature=None,
+            seed=None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_source_driver_declines_prose_beside_hallucinated_tool_call() -> None:
+    """Prose that arrives ALONGSIDE a hallucinated (non-resolve_source) tool
+    call must NOT be salvaged: the narration describes an action that never
+    ran. This mirrors the step-2 sink salvage's ``not tool_calls`` gate — the
+    outcome is both-None so the route falls back to the tool-less advisory
+    call (grounded by the no-tools addendum) rather than showing the user a
+    dangling "Let me look up the sources…" reply. Regression for the fp-review
+    step-1/step-2 salvage-asymmetry finding.
+    """
+    hallucinated = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content="Let me look up the available source types for you...",
+                    tool_calls=[
+                        SimpleNamespace(function=SimpleNamespace(name="list_sources", arguments="{}")),
+                    ],
+                )
+            )
+        ]
+    )
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=AsyncMock(return_value=hallucinated),
+    ):
+        outcome = await maybe_resolve_step_1_source_chat(
+            model="anthropic/claude-sonnet-4.6",
+            user_message="what sources can I use?",
+            plugin_hint="json",
+            current_source=None,
+            temperature=None,
+            seed=None,
+        )
+    assert outcome.resolution is None
+    assert outcome.prose_reply is None
+
+
+@pytest.mark.asyncio
+async def test_source_driver_returns_both_none_on_empty_response() -> None:
+    """No tool call AND no content: both fields None — the genuinely defective
+    case, unchanged from before the salvage — the caller falls back to the
+    advisory chat path (which raises InvariantError on this)."""
+    empty = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=None))])
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=AsyncMock(return_value=empty),
+    ):
+        outcome = await maybe_resolve_step_1_source_chat(
+            model="anthropic/claude-sonnet-4.6",
+            user_message="what is a source?",
+            plugin_hint="json",
+            current_source=None,
+            temperature=None,
+            seed=None,
+        )
+    assert outcome.resolution is None
+    assert outcome.prose_reply is None

@@ -11,7 +11,7 @@ import pytest
 from elspeth.contracts.composer_llm_audit import ComposerChatTurnStatus
 from elspeth.web.catalog.protocol import CatalogService
 from elspeth.web.catalog.schemas import PluginSummary
-from elspeth.web.composer.guided.chat_solver import maybe_resolve_step_2_sink_chat
+from elspeth.web.composer.guided.chat_solver import Step2SinkChatOutcome, maybe_resolve_step_2_sink_chat
 from elspeth.web.composer.guided.resolved import SinkOutputResolved, SinkResolved
 from elspeth.web.composer.state import CompositionState, PipelineMetadata
 from elspeth.web.sessions._guided_step_chat import (
@@ -60,37 +60,110 @@ async def test_sink_driver_resolves_json_output() -> None:
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
         new=AsyncMock(return_value=_fake_resolve_sink_response(_JSON_SINK_ARGS)),
     ):
-        result = await maybe_resolve_step_2_sink_chat(
+        outcome = await maybe_resolve_step_2_sink_chat(
             model="anthropic/claude-sonnet-4.6",
             user_message="write the results to a jsonl file",
             current_sink=None,
             temperature=None,
             seed=None,
         )
-    assert result is not None
-    sink, assistant_message = result
+    sink = outcome.sink
+    assert sink is not None
     assert isinstance(sink, SinkResolved)
     assert len(sink.outputs) == 1
     assert sink.outputs[0].plugin == "json"
     assert sink.outputs[0].options["path"] == "out.jsonl"
-    assert assistant_message == "I set the output to a JSON Lines file."
+    assert outcome.assistant_message == "I set the output to a JSON Lines file."
 
 
 @pytest.mark.asyncio
-async def test_sink_driver_returns_none_on_prose() -> None:
+async def test_sink_driver_captures_prose_reply_on_decline() -> None:
+    """No resolve_sink call: the outcome carries the model's own prose reply.
+
+    Captured directly rather than discarded — the caller (the guided-chat
+    route) uses this to answer without a second, tool-less call (C-1 fix).
+    """
     prose = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="A sink writes rows out.", tool_calls=None))])
     with patch(
         "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
         new=AsyncMock(return_value=prose),
     ):
-        result = await maybe_resolve_step_2_sink_chat(
+        outcome = await maybe_resolve_step_2_sink_chat(
             model="anthropic/claude-sonnet-4.6",
             user_message="what is a sink?",
             current_sink=None,
             temperature=None,
             seed=None,
         )
-    assert result is None
+    assert outcome.sink is None
+    assert outcome.assistant_message == "A sink writes rows out."
+
+
+@pytest.mark.asyncio
+async def test_sink_driver_returns_both_none_on_hallucinated_tool_call() -> None:
+    """A non-discovery, non-resolve_sink tool call: both fields None — prose is
+    NOT trusted here even if present, since the response shape is more
+    suspicious than a clean prose decline (unchanged from before the salvage)."""
+    hallucinated = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content="I'll check something first.",
+                    tool_calls=[SimpleNamespace(function=SimpleNamespace(name="delete_everything", arguments="{}"))],
+                )
+            )
+        ]
+    )
+    with patch(
+        "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+        new=AsyncMock(return_value=hallucinated),
+    ):
+        outcome = await maybe_resolve_step_2_sink_chat(
+            model="anthropic/claude-sonnet-4.6",
+            user_message="what is a sink?",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+        )
+    assert outcome.sink is None
+    assert outcome.assistant_message is None
+
+
+@pytest.mark.asyncio
+async def test_sink_driver_rejects_scaffold_leak_in_declined_prose() -> None:
+    """A scaffold leak in the DECLINED-PROSE branch, not the tool argument.
+
+    Same register guard (``_require_prose_assistant_message``), a different
+    call site: this is the new salvage path added alongside the C-1 fix, so
+    it needs its own coverage that a leak here raises loudly too, exactly
+    like a leak in ``resolve_sink``'s own ``assistant_message`` argument.
+    """
+    from elspeth.web.composer.guided.chat_solver import AssistantScaffoldLeakError
+
+    scaffold_reply = SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content='Let me check. <tool_call>{"name": "list_sinks"}</tool_call> json fits.',
+                    tool_calls=None,
+                )
+            )
+        ]
+    )
+    with (
+        patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=scaffold_reply),
+        ),
+        pytest.raises(AssistantScaffoldLeakError, match="user-facing prose"),
+    ):
+        await maybe_resolve_step_2_sink_chat(
+            model="anthropic/claude-sonnet-4.6",
+            user_message="what is a sink?",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+        )
 
 
 @pytest.mark.asyncio
@@ -127,6 +200,41 @@ async def test_sink_driver_revise_threads_current_sink() -> None:
     assert '"schema_mode": "observed"' in system_prompt
     assert '"option_count": 1' in system_prompt
     assert "old.jsonl" not in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_sink_wrapper_carries_declined_prose_as_prose_chat() -> None:
+    """The step-2 single-LLM-call salvage seam: when the driver declines the
+    tool and replies in prose, the wrapper must surface that reply on
+    ``prose_chat`` (a SUCCESS turn), NOT ``fallback_chat``. The route consumes
+    ``fallback_chat or prose_chat`` so this is what makes the step-2 answer a
+    single call instead of a second, tool-less one — mirrors the step-1
+    single-call guarantee. Without this coverage a refactor that stopped
+    populating ``prose_chat`` (it defaults to None for construction-site
+    compatibility) would silently revert step 2 to double-call, all tests
+    green. Regression for the fp-review step-2-salvage-untested finding.
+    """
+    declined = Step2SinkChatOutcome(sink=None, assistant_message="A sink writes your rows out to a file or table.")
+    with patch(
+        "elspeth.web.sessions._guided_step_chat.maybe_resolve_step_2_sink_chat",
+        new=AsyncMock(return_value=declined),
+    ):
+        result = await resolve_step_2_sink_chat_with_auto_drop(
+            site="test",
+            session_id="s1",
+            user_id="u1",
+            model="anthropic/claude-sonnet-4.6",
+            user_message="what is a sink?",
+            current_sink=None,
+            temperature=None,
+            seed=None,
+        )
+    assert isinstance(result, Step2SinkChatResult)
+    assert result.sink_resolution is None
+    assert result.fallback_chat is None
+    assert result.prose_chat is not None
+    assert result.prose_chat.assistant_message == "A sink writes your rows out to a file or table."
+    assert result.prose_chat.status == ComposerChatTurnStatus.SUCCESS
 
 
 @pytest.mark.asyncio

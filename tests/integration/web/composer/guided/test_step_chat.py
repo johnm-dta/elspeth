@@ -627,6 +627,96 @@ class TestStep1SourceResolution:
         assert len(body["guided_session"]["chat_history"]) == 2
         assert body["guided_session"]["history"] == history_before
 
+    def test_step_1_typed_description_salvages_declined_prose_without_second_call(self, composer_test_client) -> None:
+        """A typed, data-less step-1 description: ONE tool-capable call, its own prose is the answer.
+
+        C-1 (2026-07-04 review): "I have a CSV, columns are name/email" cannot
+        satisfy ``resolve_source``'s required ``content`` (no actual rows), so
+        the tool-capable resolve call correctly declines and replies in prose.
+        Before the fix, that prose was discarded and the route fired a
+        SECOND, tool-less call reusing a system prompt that still described
+        tool-calling capability with zero tools attached — the mismatch that
+        made the model hallucinate ``<tool_call>`` scaffolding live. The fix
+        salvages the first call's own prose directly: only ONE LLM call
+        happens, and its reply IS the assistant_message.
+        """
+        session_id = _create_session(composer_test_client)
+        # A persisted composition_state row must exist BEFORE the GET so the
+        # GET call itself persists the SINGLE_SELECT TurnRecord into history
+        # (see ``get_guided``'s docstring) — the chat route does not auto-seed
+        # history the way ``post_guided_respond`` does, so without this the
+        # STEP_1_SOURCE resolve branch's ``existing_record_for_chat is not
+        # None`` guard would never pass and the call would go advisory only.
+        _seed_persisted_step1(composer_test_client, session_id)
+        _seed_guided_session(composer_test_client, session_id)
+
+        calls: list[dict] = []
+
+        async def fake_acompletion(**kwargs):
+            calls.append(kwargs)
+            # Resolve call: declines the tool (no rows to embed) and replies
+            # in prose, per its own instructions.
+            return _fake_llm_reply("I don't have your file's contents yet — please paste the rows or upload the file.")
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=fake_acompletion),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="I have a CSV, columns are name and email",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        # Exactly ONE LLM call — the salvage means no second, tool-less call.
+        assert len(calls) == 1
+        assert any(tool["function"]["name"] == "resolve_source" for tool in calls[0]["tools"])
+        # The user sees the resolve call's OWN prose — no scaffold leak, no
+        # synthetic-unavailable fallback, no second round-trip.
+        assert body["assistant_message"] == "I don't have your file's contents yet — please paste the rows or upload the file."
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["guided_session"]["terminal"] is None
+
+    def test_step_1_advisory_call_carries_no_tools_addendum_as_belt_and_braces(self, composer_test_client) -> None:
+        """Belt-and-braces: when the resolve call itself is genuinely unusable
+        (empty response — no tool call, no content), the route still falls
+        back to a second, tool-less call, and THAT call carries the no-tools
+        addendum so a real provider hiccup on this rare path still can't
+        prime the model to hallucinate tool-call scaffolding.
+        """
+        session_id = _create_session(composer_test_client)
+        _seed_persisted_step1(composer_test_client, session_id)
+        _seed_guided_session(composer_test_client, session_id)
+
+        empty_reply = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None, tool_calls=None))])
+        calls: list[dict] = []
+
+        async def fake_acompletion(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return empty_reply
+            return _fake_llm_reply("Here is what I can tell you.")
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=fake_acompletion),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="I have a CSV, columns are name and email",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert len(calls) == 2
+        assert "tools" not in calls[1]
+        advisory_system_messages = [m["content"] for m in calls[1]["messages"] if m["role"] == "system"]
+        assert any("No tools in this reply" in content for content in advisory_system_messages)
+        assert body["assistant_message"] == "Here is what I can tell you."
+
 
 class TestStepChatRejections:
     def test_step_mismatch_returns_409(self, composer_test_client: TestClient) -> None:
@@ -846,8 +936,8 @@ class TestStepChatTransientFailure:
         assert chat_history[0]["content"] == "anything"
         assert chat_history[1]["content"] == "I'm unavailable right now; you can still use the wizard controls."
 
-    def test_scaffold_leak_in_advisory_reply_returns_synthetic_message(self, composer_test_client: TestClient) -> None:
-        """A model reply carrying raw <tool_call> scaffolding → 200 synthetic message.
+    def test_scaffold_leak_in_advisory_reply_returns_honest_retryable_message(self, composer_test_client: TestClient) -> None:
+        """A model reply carrying raw <tool_call> scaffolding → 200 honest, retryable message.
 
         Observed live 2026-07-03 (guided step_1): the model answered the
         advisory chat path with a full pseudo tool-call transcript as literal
@@ -856,6 +946,12 @@ class TestStepChatTransientFailure:
         guards already reject. The advisory reply is now guarded too:
         AssistantScaffoldLeakError is absorbed by the auto-drop wrapper, the
         session is untouched, and the user's Send stays retryable.
+
+        C-1 (2026-07-04 review): the guard rejection must NOT claim
+        unavailability — the service is fine, a quality check rejected this
+        one reply — so the message is DISTINCT from
+        ``test_litellm_timeout_returns_synthetic_message``'s genuine-outage
+        copy above.
         """
         session_id = _create_session(composer_test_client)
         _seed_guided_session(composer_test_client, session_id)
@@ -877,13 +973,68 @@ class TestStepChatTransientFailure:
             )
 
         assert status == 200, body
-        assert body["assistant_message"] == "I'm unavailable right now; you can still use the wizard controls."
+        assert body["assistant_message"] != "I'm unavailable right now; you can still use the wizard controls."
+        assert "unavailable" not in body["assistant_message"].lower()
+        assert "quality check" in body["assistant_message"]
         # The scaffolding never lands in chat_history — only the user turn and
-        # the synthetic reply.
+        # the honest reply.
         chat_history = body["guided_session"]["chat_history"]
         assert len(chat_history) == 2
         assert "<tool_call" not in chat_history[1]["content"]
+        assert chat_history[1]["content"] == body["assistant_message"]
         # Session unharmed: still at step_1, no terminal.
+        assert body["guided_session"]["step"] == "step_1_source"
+        assert body["guided_session"]["terminal"] is None
+
+    def test_scaffold_leak_in_resolve_source_assistant_message_returns_honest_retryable_message(
+        self, composer_test_client: TestClient
+    ) -> None:
+        """A scaffold leak INSIDE ``resolve_source``'s own ``assistant_message`` argument.
+
+        Distinct from the advisory-path leak above: this one happens in the
+        FIRST, tool-equipped call's tool-call arguments (observed live,
+        tutorial ``resolve_source`` path), not the second, tool-less fallback.
+        ``resolve_step_1_source_chat_with_auto_drop`` must route it through
+        its own dedicated ``AssistantScaffoldLeakError`` branch, not the
+        generic transient-failure catch — which would mislabel it
+        "unavailable" and lose the distinction entirely.
+        """
+        session_id = _create_session(composer_test_client)
+        # A persisted composition_state row must exist BEFORE the GET so the
+        # GET call persists the SINGLE_SELECT TurnRecord — see the routing
+        # test above for the same precondition.
+        _seed_persisted_step1(composer_test_client, session_id)
+        _seed_guided_session(composer_test_client, session_id)
+
+        scaffold_args = {
+            "resolution": "source",
+            "plugin": "csv",
+            "filename": "data.csv",
+            "mime_type": "text/csv",
+            "content": "name,email\nalice,a@x.test\n",
+            "options": {"schema": {"mode": "observed"}},
+            "observed_columns": ["name", "email"],
+            "sample_rows": [{"name": "alice", "email": "a@x.test"}],
+            "assistant_message": 'Let me check. <tool_call>{"name": "list_sources"}</tool_call> csv fits.',
+        }
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_source_resolution_tool_call(scaffold_args)),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="Here is my CSV: name,email\nalice,a@x.test",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message"] != "I'm unavailable right now; you can still use the wizard controls."
+        assert "unavailable" not in body["assistant_message"].lower()
+        assert "quality check" in body["assistant_message"]
+        # The scaffold leak aborts before commit — no source lands in state.
+        source_slot = (body["composition_state"]["sources"] or {}).get("source")
+        assert source_slot is None, f"expected no committed source, got {source_slot!r}"
         assert body["guided_session"]["step"] == "step_1_source"
         assert body["guided_session"]["terminal"] is None
 
@@ -1332,3 +1483,222 @@ class TestStepChatCrossStep:
             ("assistant", "step_2_sink", 3, "step-2 advice"),
         ]
         assert final["guided_session"]["chat_turn_seq"] == 4
+
+
+class TestGuidedChatWireDiscriminator:
+    """fp-review C-2: ``assistant_message_kind``.
+
+    The wire payload must carry a machine-readable discriminator so the
+    frontend can tell a real assistant reply apart from a server-generated
+    fallback. Deliberately kind-only, no companion reason: the two
+    synthetic-failure causes (a quality-guard rejection vs genuine provider
+    unavailability) already render distinct message copy, and both surface
+    the same recovery affordance — a reason enum would be wire surface with
+    no behavioural consumer.
+    """
+
+    def test_real_assistant_reply_is_kind_assistant(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("Here's some advice.")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="what should I do?",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message_kind"] == "assistant"
+        assert "synthetic_failure_reason" not in body
+
+    def test_committed_source_reply_is_kind_assistant(self, composer_test_client: TestClient) -> None:
+        """A resolve-and-commit apply response (``_build_guided_chat_apply_response``)
+        is unconditionally a real reply — the other response-construction site
+        Task 3 had to cover, not just the advisory tail."""
+        session_id = _create_session(composer_test_client)
+        _seed_persisted_step1(composer_test_client, session_id)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(
+                return_value=_fake_source_resolution_tool_call(
+                    {
+                        "resolution": "source",
+                        "plugin": "csv",
+                        "filename": "data.csv",
+                        "mime_type": "text/csv",
+                        "content": "name,email\nalice,a@x.test\n",
+                        "options": {"schema": {"mode": "observed"}},
+                        "observed_columns": ["name", "email"],
+                        "sample_rows": [{"name": "alice", "email": "a@x.test"}],
+                        "assistant_message": "I built the source.",
+                    }
+                )
+            ),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="here is my CSV: name,email\nalice,a@x.test",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message_kind"] == "assistant"
+
+    def test_scaffold_leak_rejection_is_kind_synthetic_failure(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        scaffold_reply = 'Let me check. <tool_call>{"name": "list_sources"}</tool_call> csv fits.'
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply(scaffold_reply)),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="Read my CSV and count rows per category.",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message_kind"] == "synthetic_failure"
+
+    def test_provider_timeout_is_kind_synthetic_failure(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(side_effect=TimeoutError("upstream LLM timed out")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="anything",
+                step_index="step_1_source",
+            )
+
+        assert status == 200, body
+        assert body["assistant_message_kind"] == "synthetic_failure"
+        # The two synthetic-failure causes stay distinguishable via message
+        # copy alone (no wire reason field) — pin that the copy still differs.
+        assert "quality check" not in body["assistant_message"]
+        # The two causes are distinct on both the copy AND the wire.
+        assert "quality check" not in body["assistant_message"]
+
+
+class TestChatHistoryDiscriminatorPersistence:
+    """fp-review C-2 persisted-history closure.
+
+    The discriminator must survive into the persisted ``chat_history`` a GET
+    /guided reload serves — not just the live POST /chat response — and a
+    turn persisted before the field existed must still serialise cleanly
+    (both new fields ``None``, never a fabricated value).
+    """
+
+    def test_synthetic_failure_turn_persists_kind_across_get(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        scaffold_reply = 'Let me check. <tool_call>{"name": "list_sources"}</tool_call> csv fits.'
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply(scaffold_reply)),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="Read my CSV and count rows per category.",
+                step_index="step_1_source",
+            )
+        assert status == 200, body
+        assert body["assistant_message_kind"] == "synthetic_failure"
+
+        # Not just the live response — a fresh GET must show the same thing
+        # from the persisted chat_history.
+        get_resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
+        assert get_resp.status_code == 200, get_resp.json()
+        chat_history = get_resp.json()["guided_session"]["chat_history"]
+        assert len(chat_history) == 2
+        assert chat_history[0]["assistant_message_kind"] is None  # user turn: not applicable
+        assert chat_history[1]["assistant_message_kind"] == "synthetic_failure"
+        assert chat_history[1]["synthetic_failure_reason"] == "quality_guard"
+
+    def test_real_reply_turn_persists_kind_across_get(self, composer_test_client: TestClient) -> None:
+        session_id = _create_session(composer_test_client)
+        _seed_guided_session(composer_test_client, session_id)
+
+        with patch(
+            "elspeth.web.composer.guided.chat_solver._litellm_acompletion",
+            new=AsyncMock(return_value=_fake_llm_reply("Here's some advice.")),
+        ):
+            status, body = _post_chat(
+                composer_test_client,
+                session_id,
+                message="what should I do?",
+                step_index="step_1_source",
+            )
+        assert status == 200, body
+        assert body["assistant_message_kind"] == "assistant"
+
+        get_resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
+        assert get_resp.status_code == 200, get_resp.json()
+        chat_history = get_resp.json()["guided_session"]["chat_history"]
+        assert len(chat_history) == 2
+        assert chat_history[1]["assistant_message_kind"] == "assistant"
+
+    def test_legacy_chat_turn_without_kind_field_serializes_cleanly_on_get(self, composer_test_client: TestClient) -> None:
+        """A turn persisted BEFORE this field existed has no key at all.
+
+        GET /guided must serve it with both new fields None, not crash and
+        not fabricate a value — same discipline as the state_machine.py-level
+        round-trip test, exercised through the HTTP surface this time.
+        """
+        from elspeth.web.sessions.protocol import CompositionStateData
+        from elspeth.web.sessions.routes import _initial_composition_state_with_guided_session
+
+        session_id = _create_session(composer_test_client)
+        service = composer_test_client.app.state.session_service
+        session_uuid = UUID(session_id)
+
+        state = _initial_composition_state_with_guided_session()
+        guided_dict = state.guided_session.to_dict()
+        guided_dict["chat_history"] = [
+            {
+                "role": "assistant",
+                "content": "a pre-migration reply",
+                "seq": 0,
+                "step": "step_1_source",
+                "ts_iso": "2026-05-13T12:00:00+00:00",
+                # No "assistant_message_kind" / "synthetic_failure_reason" keys.
+            }
+        ]
+        guided_dict["chat_turn_seq"] = 1
+        state_d = state.to_dict()
+        state_data = CompositionStateData(
+            sources=state_d["sources"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=False,
+            validation_errors=None,
+            composer_meta={"guided_session": guided_dict},
+        )
+        asyncio.run(service.save_composition_state(session_uuid, state_data, provenance="session_seed"))
+
+        get_resp = composer_test_client.get(f"/api/sessions/{session_id}/guided")
+        assert get_resp.status_code == 200, get_resp.json()
+        chat_history = get_resp.json()["guided_session"]["chat_history"]
+        assert len(chat_history) == 1
+        assert chat_history[0]["content"] == "a pre-migration reply"
+        assert chat_history[0]["assistant_message_kind"] is None
+        assert chat_history[0]["synthetic_failure_reason"] is None

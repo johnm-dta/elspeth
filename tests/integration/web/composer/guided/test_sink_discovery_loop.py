@@ -98,8 +98,8 @@ async def test_sink_loop_lists_sinks_then_resolves() -> None:
             user_id="u1",
         )
 
-    assert result is not None
-    sink, assistant = result
+    sink, assistant = result.sink, result.assistant_message
+    assert sink is not None
     assert isinstance(sink, SinkResolved)
     assert sink.outputs[0].plugin == "json"
     assert assistant == "Saved the results as a JSON Lines file."
@@ -150,7 +150,8 @@ async def test_sink_loop_refuses_to_dispatch_mutation_tool() -> None:
             user_id="u1",
         )
 
-    assert result is None
+    assert result.sink is None
+    assert result.assistant_message is None
     spy.assert_not_called()
 
 
@@ -191,7 +192,7 @@ async def test_sink_loop_threads_parallel_tool_calls() -> None:
             user_id="u1",
         )
 
-    assert result is not None
+    assert result.sink is not None
     # The second round must answer BOTH tool_call ids.
     second = captured_messages[1]
     tool_ids = {m.get("tool_call_id") for m in second if m.get("role") == "tool"}
@@ -227,7 +228,8 @@ async def test_sink_loop_returns_none_at_iteration_cap() -> None:
             max_discovery_iters=3,
         )
 
-    assert result is None
+    assert result.sink is None
+    assert result.assistant_message is None
     assert len(recorder.llm_calls) == 3
 
 
@@ -291,7 +293,7 @@ async def test_sink_loop_single_shot_when_no_catalog() -> None:
             seed=None,
         )
 
-    assert result is not None
+    assert result.sink is not None
     # Only the resolve_sink tool is offered — no discovery tools.
     offered_names = {t["function"]["name"] for t in captured[0]}
     assert offered_names == {"resolve_sink"}

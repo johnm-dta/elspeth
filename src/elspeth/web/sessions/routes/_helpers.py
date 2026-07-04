@@ -88,6 +88,8 @@ from elspeth.web.composer.guided.state_machine import (
     ChainProposal,
     GuidedSession,
     SinkIntent,
+    SinkOutputResolved,
+    SinkResolved,
     SourceResolved,
     TerminalKind,
     TerminalReason,
@@ -417,7 +419,10 @@ def _run_accounting_integrity_http(
     """Return the structured 500 used for public run-accounting contract failures."""
     detail: dict[str, object] = {
         "code": "run_integrity_error",
-        "message": message,
+        # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+        # reads nestedDetail.detail as the human-readable string, with no
+        # "message" fallback, for ANY non-2xx response (not just 400s).
+        "detail": message,
     }
     if run_id is not None:
         detail["run_id"] = str(run_id)
@@ -2591,7 +2596,11 @@ def _reject_hidden_field_submissions(
                     "code": "hidden_field_submitted",
                     "field": opt_name,
                     "predicate": dict(predicate),
-                    "message": f"Visibility discriminator {predicate['field']!r} is missing from submitted options.",
+                    # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+                    # reads nestedDetail.detail as the human-readable string, with no
+                    # "message" fallback — a "message" key here silently renders as
+                    # bare "Bad Request" in the UI.
+                    "detail": f"Visibility discriminator {predicate['field']!r} is missing from submitted options.",
                 },
             )
         raise HTTPException(
@@ -2601,7 +2610,7 @@ def _reject_hidden_field_submissions(
                 "field": opt_name,
                 "predicate": dict(predicate),
                 "actual_state": actual_state,
-                "message": (
+                "detail": (
                     f"Field {opt_name!r} is hidden under current form state "
                     f"({predicate['field']}={actual_state[predicate['field']]!r}, predicate expects "
                     f"{predicate['field']}={predicate['equals']!r}). Hidden fields must not appear in edited_values.options."
@@ -2621,7 +2630,10 @@ def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, 
             detail={
                 "code": "invalid_blob_ref",
                 "field": field_name,
-                "message": f"Field {field_name!r} must be a UUID string when provided.",
+                # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+                # reads nestedDetail.detail as the human-readable string, with no
+                # "message" fallback.
+                "detail": f"Field {field_name!r} must be a UUID string when provided.",
             },
         )
     try:
@@ -2632,7 +2644,7 @@ def _validate_blob_ref_submission(fields: Sequence[KnobField], field_name: str, 
             detail={
                 "code": "invalid_blob_ref",
                 "field": field_name,
-                "message": f"Field {field_name!r} must be a UUID string when provided.",
+                "detail": f"Field {field_name!r} must be a UUID string when provided.",
             },
         ) from exc
 
@@ -2765,30 +2777,37 @@ async def _dispatch_guided_respond(
     | current_step      | guided.step (after adv.)  | action                    |
     +-------------------+---------------------------+---------------------------+
     | STEP_1_SOURCE     | STEP_1_SOURCE             | intra-step; turn_type     |
-    |   (intra)         | (no advance fired)        | decides next turn:        |
-    |                   |                           | SINGLE_SELECT →           |
-    |                   |                           |   emit SCHEMA_FORM        |
-    |                   |                           | SCHEMA_FORM →             |
+    |   (intra)         | (_advance_step_1 is a     | decides next turn:        |
+    |                   |   pure self-loop for all  | SINGLE_SELECT →           |
+    |                   |   Step 1 turn types —     |   emit SCHEMA_FORM        |
+    |                   |   never advances)         | SCHEMA_FORM →             |
     |                   |                           |   handle_step_1_source;   |
     |                   |                           |   advance to STEP_2;      |
     |                   |                           |   emit SINGLE_SELECT      |
-    | STEP_1_SOURCE     | STEP_2_SINK               | INSPECT_AND_CONFIRM path; |
-    |   (advancing)     | (step_advance fired)      | handle_step_1_source;     |
-    |                   |                           | emit SINGLE_SELECT (sink) |
+    |                   |                           | INSPECT_AND_CONFIRM →     |
+    |                   |                           |   resolve step_1_source_  |
+    |                   |                           |   intent + edited_values  |
+    |                   |                           |   ["columns"];            |
+    |                   |                           |   handle_step_1_source;   |
+    |                   |                           |   only on success: advance|
+    |                   |                           |   to STEP_2, set          |
+    |                   |                           |   step_1_result (C-3(b))  |
     | STEP_2_SINK       | STEP_2_SINK               | intra-step; turn_type     |
-    |   (intra)         | (no advance fired)        | decides next turn:        |
-    |                   |                           | SINGLE_SELECT →           |
-    |                   |                           |   emit SCHEMA_FORM        |
-    |                   |                           | SCHEMA_FORM →             |
+    |   (intra)         | (_advance_step_2 is a     | decides next turn:        |
+    |                   |   pure self-loop for all  | SINGLE_SELECT →           |
+    |                   |   Step 2 turn types —     |   emit SCHEMA_FORM        |
+    |                   |   never advances)         | SCHEMA_FORM →             |
     |                   |                           |   emit MULTI_SELECT       |
-    |                   |                           | MULTI_SELECT →            |
-    |                   |                           |   unreachable here        |
-    |                   |                           |   (_advance_step_2 always |
-    |                   |                           |   fires for this type)    |
-    | STEP_2_SINK       | STEP_2_5_RECIPE_MATCH     | MULTI_SELECT path;        |
-    |   (advancing)     | (step_advance fired)      | handle_step_2_sink;       |
-    |                   |                           | match_recipe;             |
-    |                   |                           | emit RECIPE_OFFER or None |
+    |                   |                           | MULTI_SELECT_WITH_CUSTOM →|
+    |                   |                           |   resolve chosen +        |
+    |                   |                           |   custom_inputs +         |
+    |                   |                           |   step_2_sink_intent;     |
+    |                   |                           |   fail-closed passthrough |
+    |                   |                           |   validation (C-3(a));    |
+    |                   |                           |   handle_step_2_sink;     |
+    |                   |                           |   only on success: advance|
+    |                   |                           |   to STEP_3, set          |
+    |                   |                           |   step_2_result (C-3(b))  |
     | STEP_2_5_RECIPE   | STEP_2_5_RECIPE_MATCH     | RECIPE_OFFER chosen=      |
     |   (intra/wire)    | (accept: no advance)      | accept → recipe apply;    |
     |                   |                           | emit CONFIRM_WIRING       |
@@ -2994,111 +3013,137 @@ async def _dispatch_guided_respond(
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
 
-        # INSPECT_AND_CONFIRM at STEP_1: step_advance already advanced to STEP_2.
-        # But in this branch guided.step is still STEP_1 — step_advance
-        # must have already advanced it.  This case is unreachable (step_advance
-        # advances for INSPECT_AND_CONFIRM → guided.step becomes STEP_2).
-        # Fall through to the post-advance branch below.
+        if current_turn_type is TurnType.INSPECT_AND_CONFIRM:
+            # step_advance is a pure self-loop for this turn type
+            # (elspeth-948eb9c0b8 C-3(b), same shape as Step 2's
+            # MULTI_SELECT_WITH_CUSTOM fix): the resolve
+            # (step_1_source_intent + edited_values["columns"] ->
+            # SourceResolved) and the source commit via handle_step_1_source
+            # both happen here, and guided.step / step_1_result are only ever
+            # set after the commit is known to have succeeded. A failure at
+            # any point below leaves `state` and `guided` exactly as they
+            # entered this branch.
+            #
+            # The wire contract for INSPECT_AND_CONFIRM edited_values is
+            # narrow: ``{"columns": list[str]}``. Plugin, options,
+            # observed_columns (samples), and warnings are server-side
+            # knowledge held in step_1_source_intent before the turn is
+            # emitted; the widget never sees them in the response body.
+            #
+            # EMIT-SITE NOTE: step_1_source_intent must be set before emitting
+            # the INSPECT_AND_CONFIRM turn. Today no production code path
+            # emits this turn (``_build_get_guided_turn`` always passes
+            # blob_inspection=None); the only emitter is
+            # _seed_inspect_and_confirm_history in the integration test suite.
+            # When a real emitter is added, it must
+            #   ``replace(session, step_1_source_intent=SourceIntent(...))``
+            # before returning.
+            source_intent = guided.step_1_source_intent
+            if source_intent is None:
+                raise InvariantError(
+                    "STEP_1_SOURCE INSPECT_AND_CONFIRM dispatch: step_1_source_intent "
+                    "is None — the INSPECT_AND_CONFIRM emit site must set it before this "
+                    "turn can be emitted. State-machine invariant violation."
+                )
+            edited = turn_response["edited_values"]
+            if edited is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="inspect_and_confirm response at step 1 requires edited_values; received null.",
+                )
+            if "columns" not in edited:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"inspect_and_confirm response at step 1 edited_values missing required key: 'columns'; got keys: {sorted(edited.keys())}"
+                    ),
+                )
+            columns_raw = edited["columns"]
+            if type(columns_raw) is not list:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"inspect_and_confirm response at step 1 edited_values['columns'] must be a list; got {type(columns_raw).__name__}"
+                    ),
+                )
+            # columns is the only field the widget edits; it is Tier-3: coerce to tuple[str, ...].
+            columns = tuple(str(c) for c in columns_raw)
+            resolved = SourceResolved(
+                plugin=source_intent.plugin,
+                options=dict(source_intent.options),
+                observed_columns=columns,
+                sample_rows=tuple(dict(r) for r in source_intent.sample_rows),
+            )
+            handler_result = handle_step_1_source(
+                state=state,
+                session=guided,
+                resolved=resolved,
+                catalog=catalog,
+                data_dir=data_dir,
+                session_engine=session_engine,
+                session_id=session_id,
+            )
+            if not handler_result.tool_result.success:
+                # Egress control (see the step_1 source commit above): never
+                # interpolate the tool_result repr (dumps Tier-3-bearing
+                # CompositionState) into the body.
+                raise HTTPException(
+                    status_code=400,
+                    detail="Step 1 source commit failed",
+                )
+            state = handler_result.state
+            guided = handler_result.session
+            emit_step_advanced(
+                recorder,
+                prev=GuidedStep.STEP_1_SOURCE,
+                next_=GuidedStep.STEP_2_SINK,
+                reason="user_advanced",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(
+                guided,
+                step=GuidedStep.STEP_2_SINK,
+                step_1_source_intent=None,
+                step_1_chosen_plugin=None,
+            )
+            next_turn = build_step_2_single_select_turn(catalog)
+            new_record = TurnRecord(
+                step=GuidedStep.STEP_2_SINK,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                response_hash=None,
+                emitter="server",
+            )
+            emit_turn_emitted(
+                recorder,
+                step=GuidedStep.STEP_2_SINK,
+                turn_type=TurnType(next_turn["type"]),
+                payload_hash=stable_hash(next_turn["payload"]),
+                payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
+                emitter="server",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(guided, history=(*guided.history, new_record))
+            return state, guided, next_turn
 
-    # --- STEP_1_SOURCE → STEP_2_SINK (step_advance fired for INSPECT_AND_CONFIRM)
+    # --- STEP_1_SOURCE → STEP_2_SINK : now unreachable ---------------------
+    # _advance_step_1 is a pure self-loop (state_machine.py) — it never
+    # advances guided.step away from STEP_1_SOURCE on its own. The
+    # INSPECT_AND_CONFIRM resolve, validation, handle_step_1_source commit,
+    # and step advance all happen together in the STEP_1_SOURCE intra-step
+    # branch above (elspeth-948eb9c0b8 C-3(b)). If this branch is ever
+    # reached, something upstream reintroduced the eager pre-set that
+    # originally caused guided_session and composition_state to diverge on a
+    # commit failure — fail loudly rather than silently repeat it.
     if current_step is GuidedStep.STEP_1_SOURCE and guided.step is GuidedStep.STEP_2_SINK:
-        # step_advance already ran and advanced the step.  _advance_step_1 built
-        # SourceResolved from step_1_source_intent (plugin/options/samples) +
-        # edited_values["columns"] (the only field the widget can edit) and stored
-        # the result in guided.step_1_result.  It also cleared step_1_source_intent.
-        #
-        # The new wire contract for INSPECT_AND_CONFIRM edited_values is narrow:
-        #   ``{"columns": list[str]}``
-        # Plugin, options, observed_columns (samples), and warnings are now
-        # server-side knowledge held in step_1_source_intent before the turn is
-        # emitted; the widget never sees them in the response body.
-        #
-        # Shadowing note: ``_advance_step_1`` raises ValueError (client-fault)
-        # on null ``edited_values`` and KeyError on missing ``columns`` — those
-        # propagate as HTTP 500 before reaching here. The null guard and missing-key guard
-        # below are defense-in-depth (locally complete; unreachable as 400 in
-        # normal flow). The isinstance(columns_raw, list) guard IS HTTP-reachable
-        # as 400: _advance_step_1's ``tuple(str(c) for c in columns_raw)`` coercion
-        # silently accepts a scalar string (iterating its characters), so the
-        # dispatcher catches non-list here before that coercion runs.
-        #
-        # EMIT-SITE NOTE: step_1_source_intent must be set before emitting the
-        # INSPECT_AND_CONFIRM turn.  Today no production code path emits this turn
-        # (``_build_get_guided_turn`` always passes blob_inspection=None); the only
-        # emitter is _seed_inspect_and_confirm_history in the integration test suite.
-        # When a real emitter is added, it must
-        #   ``replace(session, step_1_source_intent=SourceIntent(...))``
-        # before returning.
-        edited = turn_response["edited_values"]
-        if edited is None:
-            raise HTTPException(
-                status_code=400,
-                detail="inspect_and_confirm response at step 1 requires edited_values; received null.",
-            )
-        if "columns" not in edited:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"inspect_and_confirm response at step 1 edited_values missing required key: 'columns'; got keys: {sorted(edited.keys())}"
-                ),
-            )
-        columns_raw = edited["columns"]
-        if type(columns_raw) is not list:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"inspect_and_confirm response at step 1 edited_values['columns'] must be a list; got {type(columns_raw).__name__}"
-                ),
-            )
-        # SourceResolved was built by _advance_step_1 and stored in guided.step_1_result.
-        # Unreachable None: _advance_step_1 always sets step_1_result on advance (the
-        # branch is only reached when guided.step is STEP_2_SINK, which only happens
-        # after _advance_step_1 sets step_1_result).  Assert to keep mypy happy and
-        # provide a clear crash message if this invariant is ever violated.
-        if guided.step_1_result is None:
-            raise InvariantError(
-                "inspect_and_confirm post-advance: guided.step_1_result is None after "
-                "_advance_step_1 ran — this is an invariant violation in the state machine."
-            )
-        resolved = guided.step_1_result
-        handler_result = handle_step_1_source(
-            state=state,
-            session=guided,
-            resolved=resolved,
-            catalog=catalog,
-            data_dir=data_dir,
-            session_engine=session_engine,
-            session_id=session_id,
+        raise InvariantError(
+            "STEP_1_SOURCE -> STEP_2_SINK dispatch reached with no pending source "
+            "commit to process — the commit-then-advance step now lives entirely in "
+            "the STEP_1_SOURCE intra-step INSPECT_AND_CONFIRM branch. "
+            "_advance_step_1 must remain a pure self-loop."
         )
-        if not handler_result.tool_result.success:
-            # Egress control (see the step_1 source commit above): never interpolate
-            # the tool_result repr (dumps Tier-3-bearing CompositionState) into the body.
-            raise HTTPException(
-                status_code=400,
-                detail="Step 1 source commit failed",
-            )
-        state = handler_result.state
-        guided = handler_result.session
-        next_turn = build_step_2_single_select_turn(catalog)
-        new_record = TurnRecord(
-            step=GuidedStep.STEP_2_SINK,
-            turn_type=TurnType(next_turn["type"]),
-            payload_hash=stable_hash(next_turn["payload"]),
-            response_hash=None,
-            emitter="server",
-        )
-        emit_turn_emitted(
-            recorder,
-            step=GuidedStep.STEP_2_SINK,
-            turn_type=TurnType(next_turn["type"]),
-            payload_hash=stable_hash(next_turn["payload"]),
-            payload_payload_id=_store_guided_audit_payload(payload_store, next_turn["payload"]),
-            emitter="server",
-            composition_version=state.version,
-            actor=user_id,
-        )
-        guided = _replace(guided, history=(*guided.history, new_record))
-        return state, guided, next_turn
 
     # --- STEP_2_SINK intra-step turns ------------------------------------
     if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_2_SINK:
@@ -3231,56 +3276,137 @@ async def _dispatch_guided_respond(
             guided = _replace(guided, history=(*guided.history, new_record))
             return state, guided, next_turn
 
-    # --- STEP_2_SINK → STEP_3 (step_advance fired for MULTI_SELECT_WITH_CUSTOM)
-    # step_advance sets guided.step=STEP_3_TRANSFORMS and populates
-    # guided.step_2_result for every MULTI_SELECT_WITH_CUSTOM response, so the
-    # intra-step branch (current_step==guided.step==STEP_2_SINK) for this turn
-    # type is structurally unreachable — _advance_step_2 always fires.
-    # This is the ONLY reachable MULTI_SELECT_WITH_CUSTOM dispatch point.
+        if current_turn_type is TurnType.MULTI_SELECT_WITH_CUSTOM:
+            # User declared required output fields, or chose the "Let source
+            # decide" escape hatch. _advance_step_2 is a pure self-loop for this
+            # turn type (elspeth-948eb9c0b8 C-3(b)): the resolve (chosen +
+            # custom_inputs + step_2_sink_intent -> SinkResolved), the
+            # fail-closed passthrough validation (C-3(a)), and the sink commit
+            # via handle_step_2_sink all happen here, and guided.step /
+            # step_2_result are only ever set after the commit is known to have
+            # succeeded. A failure at any point below leaves `state` and
+            # `guided` exactly as they entered this branch — a rejected commit
+            # can no longer diverge guided_session from composition_state.
+            intent = guided.step_2_sink_intent
+            if intent is None:
+                raise InvariantError(
+                    "STEP_2_SINK MULTI_SELECT_WITH_CUSTOM dispatch: step_2_sink_intent "
+                    "is None — the SCHEMA_FORM branch above must set it before this turn "
+                    "can be emitted. State-machine invariant violation."
+                )
+            # chosen and custom_inputs are Tier-3: coerce to tuple[str, ...].
+            chosen = tuple(str(f) for f in (turn_response["chosen"] or []))
+            custom_inputs = tuple(str(f) for f in (turn_response["custom_inputs"] or []))
+            passthrough = turn_response["control_signal"] is ControlSignal.PASSTHROUGH
+
+            # Fail-closed contract (C-3(a)): an empty chosen+custom_inputs pair is
+            # ambiguous on the wire — indistinguishable between "the user
+            # explicitly asked for pass-all-fields-through" and "a stale or
+            # buggy client submitted nothing". ControlSignal.PASSTHROUGH is the
+            # one explicit, unmistakable signal for the former; every other
+            # empty submission is rejected with a structured, plain-language
+            # reason instead of a bare "commit failed".
+            # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+            # reads nestedDetail.detail as the human-readable string, with no
+            # "message" fallback — a "message" key here silently renders as bare
+            # "Bad Request" in the UI. Mirrors the "hidden_field_submitted" envelope
+            # shape above.
+            if passthrough and (chosen or custom_inputs):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "guided_step2_passthrough_conflict",
+                        "detail": (
+                            "The pass-all-fields-through option cannot be combined with "
+                            "specific fields. Submit either chosen fields or the "
+                            "pass-all-fields-through option, not both."
+                        ),
+                    },
+                )
+            if not passthrough and not chosen and not custom_inputs:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "guided_step2_no_fields_selected",
+                        "detail": ('Select at least one output field, or choose "Let source decide" to pass all fields through.'),
+                    },
+                )
+
+            output = SinkOutputResolved(
+                plugin=intent.plugin,
+                options=dict(deep_thaw(intent.options)),
+                required_fields=chosen + custom_inputs,
+                schema_mode="observed",
+            )
+            sink = SinkResolved(outputs=(output,))
+
+            # Commit the sink to CompositionState.outputs via handle_step_2_sink.
+            sink_handler_result = handle_step_2_sink(
+                state=state,
+                session=guided,
+                resolved=sink,
+                catalog=catalog,
+                data_dir=data_dir,
+            )
+            if not sink_handler_result.tool_result.success:
+                # Egress control (see the step_1 source commits above): never
+                # interpolate the tool_result repr (dumps Tier-3-bearing
+                # CompositionState) into the body.
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "guided_step2_sink_commit_failed",
+                        "detail": (
+                            "The output configuration could not be applied. Review the options entered for this output and try again."
+                        ),
+                    },
+                )
+            state = sink_handler_result.state
+            guided = sink_handler_result.session
+
+            # Step-2 sink committed. PER-STAGE design: do NOT auto-build the
+            # transform chain here. STEP_3 is driven by its OWN prompt — the operator
+            # describes the transforms at STEP_3 and the /guided/chat cold-start path
+            # (``intent = body.message``, guided.py post_guided_chat) builds the chain.
+            # The previous auto-build fed solve_chain the FIRST user chat turn, which
+            # in the staged flow is the SOURCE-phase send ("create a source of
+            # url-rows"), never the transforms intent — so it built a blind chain that
+            # exhausted (solver_exhausted -> exited_to_freeform). (The reject/repair
+            # re-solves now use ``_transforms_intent_from_chat_history`` — the LAST user
+            # turn — for the same reason.)
+            # STEP_3 now starts with NO proposal; the frontend renders the chat box at
+            # step_3-no-proposal so the per-stage transforms prompt drives the build.
+            emit_step_advanced(
+                recorder,
+                prev=GuidedStep.STEP_2_SINK,
+                next_=GuidedStep.STEP_3_TRANSFORMS,
+                reason="user_advanced",
+                composition_version=state.version,
+                actor=user_id,
+            )
+            guided = _replace(
+                guided,
+                step=GuidedStep.STEP_3_TRANSFORMS,
+                step_2_sink_intent=None,
+            )
+            return state, guided, None
+
+    # --- STEP_2_SINK → STEP_3 : now unreachable ---------------------------
+    # _advance_step_2 is a pure self-loop (state_machine.py) — it never
+    # advances guided.step away from STEP_2_SINK on its own. The
+    # MULTI_SELECT_WITH_CUSTOM resolve, fail-closed validation,
+    # handle_step_2_sink commit, and step advance all happen together in the
+    # STEP_2_SINK intra-step branch above (elspeth-948eb9c0b8 C-3(a)/(b)). If
+    # this branch is ever reached, something upstream reintroduced the eager
+    # pre-set that originally caused guided_session and composition_state to
+    # diverge on a commit failure — fail loudly rather than silently repeat it.
     if current_step is GuidedStep.STEP_2_SINK and guided.step is GuidedStep.STEP_3_TRANSFORMS:
-        # step_advance already set guided.step_2_result and advanced to STEP_3.
-        if guided.step_1_result is None or guided.step_2_result is None:
-            raise HTTPException(
-                status_code=500,
-                detail="Dispatcher invariant: step_1_result and step_2_result must be set.",
-            )
-        sink = guided.step_2_result
-
-        # Commit the sink to CompositionState.outputs via handle_step_2_sink.
-        # step_advance (pure) encoded the sink in guided.step_2_result but did
-        # NOT call _execute_set_output — that side-effect is our responsibility.
-        sink_handler_result = handle_step_2_sink(
-            state=state,
-            session=guided,
-            resolved=sink,
-            catalog=catalog,
-            data_dir=data_dir,
+        raise InvariantError(
+            "STEP_2_SINK -> STEP_3_TRANSFORMS dispatch reached with no pending sink "
+            "commit to process — the commit-then-advance step now lives entirely in "
+            "the STEP_2_SINK intra-step MULTI_SELECT_WITH_CUSTOM branch. "
+            "_advance_step_2 must remain a pure self-loop."
         )
-        if not sink_handler_result.tool_result.success:
-            # Egress control (see the step_1 source commits above): never interpolate
-            # the tool_result repr (dumps Tier-3-bearing CompositionState) into the body.
-            raise HTTPException(
-                status_code=400,
-                detail="Step 2 sink commit failed",
-            )
-        state = sink_handler_result.state
-        guided = sink_handler_result.session
-
-        # Step-2 sink committed. PER-STAGE design: do NOT auto-build the
-        # transform chain here. STEP_3 is driven by its OWN prompt — the operator
-        # describes the transforms at STEP_3 and the /guided/chat cold-start path
-        # (``intent = body.message``, guided.py post_guided_chat) builds the chain.
-        # The previous auto-build fed solve_chain the FIRST user chat turn, which
-        # in the staged flow is the SOURCE-phase send ("create a source of
-        # url-rows"), never the transforms intent — so it built a blind chain that
-        # exhausted (solver_exhausted -> exited_to_freeform). (The reject/repair
-        # re-solves now use ``_transforms_intent_from_chat_history`` — the LAST user
-        # turn — for the same reason.)
-        # STEP_3 now starts with NO proposal; the frontend renders the chat box at
-        # step_3-no-proposal so the per-stage transforms prompt drives the build.
-        # ``guided.step`` is already STEP_3_TRANSFORMS (step_advance set it; the sink
-        # commit preserves it). Returning a None turn is an existing, handled shape.
-        return state, guided, None
 
     # --- STEP_3_TRANSFORMS turns ----------------------------------------
     # The only response shape handled here is ACCEPT on a propose_chain

@@ -93,9 +93,12 @@ async def test_solver_sends_step_scoped_system_prompt(monkeypatch: pytest.Monkey
 
     assert reply == "here's some advice"
     messages = captured["messages"]
-    assert len(messages) == 2
+    assert len(messages) == 3
     assert messages[0]["role"] == "system"
-    assert messages[1] == {"role": "user", "content": "hi"}
+    # messages[1] is the no-tools addendum (solve_step_chat never attaches
+    # tools) — a fixed second system message, not step-scoped.
+    assert messages[1]["role"] == "system"
+    assert messages[2] == {"role": "user", "content": "hi"}
 
     from elspeth.web.composer.guided.prompts import load_step_chat_skill
 
@@ -211,11 +214,12 @@ def test_build_step_chat_context_block_is_honest_when_nothing_is_built() -> None
 
 
 @pytest.mark.asyncio
-async def test_solve_step_chat_threads_context_block_as_second_system_message(
+async def test_solve_step_chat_threads_context_block_as_third_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The context block rides in messages[1] — the per-step skill stays the
-    byte-stable, cache-markable head (same split as the step-1 resolve path)."""
+    """The context block rides in messages[2] — the per-step skill stays the
+    byte-stable, cache-markable head (same split as the step-1 resolve path);
+    the no-tools addendum is the fixed messages[1]."""
     captured: dict[str, Any] = {}
 
     async def fake_acompletion(**kwargs: Any) -> _FakeLLMResponse:
@@ -235,10 +239,11 @@ async def test_solve_step_chat_threads_context_block_as_second_system_message(
 
     assert reply == "here's what you're seeing"
     messages = captured["messages"]
-    assert len(messages) == 3
+    assert len(messages) == 4
     assert messages[1]["role"] == "system"
-    assert messages[1]["content"].startswith("## Current build")
-    assert messages[2] == {"role": "user", "content": "explain this"}
+    assert messages[2]["role"] == "system"
+    assert messages[2]["content"].startswith("## Current build")
+    assert messages[3] == {"role": "user", "content": "explain this"}
 
 
 @pytest.mark.asyncio

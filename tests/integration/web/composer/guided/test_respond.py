@@ -67,6 +67,16 @@ def _respond(client: TestClient, session_id: str, **kwargs) -> dict:
     return resp.json()
 
 
+def _full_guided_session(body: dict) -> dict:
+    """The top-level ``guided_session`` wire projection (``GuidedSessionResponse``)
+    deliberately omits ``step_1_result``/``step_2_result`` (Tier-3-bearing sink/source
+    options). The full snapshot — including ``step_2_result`` — is nested under
+    ``composition_state.composer_meta.guided_session`` on both GET /guided and
+    POST /guided/respond responses.
+    """
+    return body["composition_state"]["composer_meta"]["guided_session"]
+
+
 def _confirm_wiring(client: TestClient, session_id: str) -> dict:
     return _respond(
         client,
@@ -442,6 +452,206 @@ class TestStep2IntraStep:
         outputs = cs.get("outputs", {})
         assert outputs, "composition_state.outputs is empty after MULTI_SELECT advance — handle_step_2_sink was not called"
 
+        # Both authoritative surfaces agree on success (elspeth-948eb9c0b8 C-3(b)):
+        # the decisions-ledger side (guided_session.step_2_result) and the
+        # validator side (composition_state.outputs) both reflect the commit.
+        full_guided = _full_guided_session(body)
+        assert full_guided["step_2_result"] is not None
+        assert full_guided["step_2_result"]["outputs"]
+
+    def test_multi_select_passthrough_signal_commits_with_no_required_fields(self, composer_test_client: TestClient) -> None:
+        """control_signal='passthrough' is the explicit escape-hatch contract (C-3(a)):
+        an empty chosen + custom_inputs pair commits successfully when paired with
+        the passthrough signal, and composition_state gains the sink.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        output_path = _outputs_path(composer_test_client, "out_passthrough.jsonl")
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
+            },
+        )
+
+        with patch(
+            "elspeth.web.composer.guided.chain_solver._litellm_acompletion",
+            new_callable=AsyncMock,
+            return_value=_fake_llm_passthrough_for_step_index_tests(),
+        ):
+            resp = composer_test_client.post(
+                f"/api/sessions/{session_id}/guided/respond",
+                json={
+                    "chosen": [],
+                    "edited_values": None,
+                    "custom_inputs": [],
+                    "accepted_step_index": None,
+                    "edit_step_index": None,
+                    "control_signal": "passthrough",
+                },
+            )
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+
+        assert body["guided_session"]["step"] == "step_3_transforms"
+        output = _full_guided_session(body)["step_2_result"]["outputs"][0]
+        assert output["required_fields"] == []
+        assert output["schema_mode"] == "observed"
+
+        cs = body["composition_state"]
+        assert cs is not None, "composition_state missing from response"
+        assert cs.get("outputs"), "composition_state.outputs is empty — passthrough commit did not reach handle_step_2_sink"
+
+    def test_multi_select_bare_empty_chosen_returns_structured_400(self, composer_test_client: TestClient) -> None:
+        """Fail-closed contract (C-3(a)): an empty chosen + custom_inputs pair
+        WITHOUT the passthrough signal is ambiguous and must be rejected — with a
+        structured, plain-language reason, not the old reasonless
+        "Step 2 sink commit failed" string.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        output_path = _outputs_path(composer_test_client, "out_bare_empty.jsonl")
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
+            },
+        )
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": [],
+                "edited_values": None,
+                "custom_inputs": [],
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert detail["code"] == "guided_step2_no_fields_selected"
+        # "detail" (not "message"): parseResponse (frontend/src/api/client.ts) reads
+        # nestedDetail.detail as the human-readable string, with no "message" fallback.
+        assert "pass all fields through" in detail["detail"].lower() or "let source decide" in detail["detail"].lower()
+
+    def test_multi_select_passthrough_with_chosen_fields_is_contradictory_400(self, composer_test_client: TestClient) -> None:
+        """control_signal='passthrough' combined with explicit chosen fields is a
+        contradictory payload — rejected with a structured reason rather than
+        silently preferring one signal over the other.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        output_path = _outputs_path(composer_test_client, "out_contradiction.jsonl")
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": output_path,
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
+            },
+        )
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["text"],
+                "edited_values": None,
+                "custom_inputs": [],
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": "passthrough",
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert detail["code"] == "guided_step2_passthrough_conflict"
+
+    def test_multi_select_commit_failure_does_not_diverge_guided_session_from_state(self, composer_test_client: TestClient) -> None:
+        """State-integrity test (elspeth-948eb9c0b8 C-3(b)): a Step-2 sink commit
+        failure must NOT leave guided_session.step_2_result / step advanced while
+        composition_state.outputs stays behind. Force a genuine commit failure
+        (a sink path outside the allowed {data_dir}/outputs/ and {data_dir}/blobs/
+        directories — a real handle_step_2_sink rejection, not the ambiguous-empty
+        case) and assert neither store moved.
+        """
+        session_id = _create_session(composer_test_client)
+        self._drive_to_step_2_single_select(composer_test_client, session_id)
+        _respond(composer_test_client, session_id, chosen=["json"])
+        _respond(
+            composer_test_client,
+            session_id,
+            edited_values={
+                "plugin": "json",
+                "options": {
+                    "path": "/tmp/definitely-not-an-allowed-sink-directory/out.jsonl",
+                    "schema": {"mode": "observed"},
+                    "mode": "write",
+                    "collision_policy": "auto_increment",
+                },
+                "observed_columns": [],
+                "sample_rows": [],
+            },
+        )
+
+        before = _get_guided(composer_test_client, session_id)
+        assert before["guided_session"]["step"] == "step_2_sink"
+        assert _full_guided_session(before)["step_2_result"] is None
+        before_outputs = before["composition_state"]["outputs"]
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={
+                "chosen": ["text", "label"],
+                "edited_values": None,
+                "custom_inputs": [],
+                "accepted_step_index": None,
+                "edit_step_index": None,
+                "control_signal": None,
+            },
+        )
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert detail["code"] == "guided_step2_sink_commit_failed"
+
+        after = _get_guided(composer_test_client, session_id)
+        # step_2_result and outputs must both stay exactly where they were —
+        # not just "guided" as a whole (history[-1].response_hash IS expected to
+        # get stamped on the rejected turn; that's the audit trail, not the
+        # commit-relevant surfaces this test guards).
+        assert after["guided_session"]["step"] == "step_2_sink"
+        assert _full_guided_session(after)["step_2_result"] is None
+        assert after["composition_state"]["outputs"] == before_outputs
+
 
 # ---------------------------------------------------------------------------
 # Step 1 SCHEMA_FORM — contract-violation negative tests (Pair 4)
@@ -808,15 +1018,15 @@ class TestStep2SchemaFormAccept:
 # shape is gone; tests for the removed plugin/options/observed_columns guards
 # are removed.
 #
-# Shadowing note:
-#   ``_advance_step_1`` runs BEFORE the dispatcher and raises ValueError on
-#   null ``edited_values`` and KeyError on missing ``columns``.  Those errors
-#   propagate as HTTP 500, not the dispatcher's HTTP 400.  The dispatcher's
-#   null guard and missing-key guard remain as defense-in-depth.  The guard
-#   that IS HTTP-reachable as 400 is the ``isinstance(columns_raw, list)``
-#   check: ``_advance_step_1``'s ``tuple(str(c) for c in columns_raw)``
-#   silently accepts a scalar string (iterating its characters), so the
-#   dispatcher catches non-list here before that coercion runs.
+# elspeth-948eb9c0b8 C-3(b) mirror fix: ``_advance_step_1`` is now a pure
+# self-loop for INSPECT_AND_CONFIRM too (mirroring the Step 2 fix) — the
+# resolve (step_1_source_intent + edited_values["columns"] -> SourceResolved),
+# validation, and handle_step_1_source commit all happen in the dispatcher,
+# and guided.step / step_1_result are only ever set after the commit is known
+# to have succeeded. The former "shadowing" architecture (_advance_step_1
+# running BEFORE the dispatcher, its own ValueError/KeyError propagating as
+# a distinct HTTP 500 before the dispatcher's guards could even run) no
+# longer exists: every guard below is now the single, live validation path.
 
 
 class TestStep1InspectAndConfirmAccept:
@@ -824,6 +1034,8 @@ class TestStep1InspectAndConfirmAccept:
         self,
         client: TestClient,
         session_id: str,
+        *,
+        path: str = "/data/input.csv",
     ) -> None:
         """Seed an INSPECT_AND_CONFIRM TurnRecord + step_1_source_intent into the session.
 
@@ -833,10 +1045,14 @@ class TestStep1InspectAndConfirmAccept:
         save_composition_state — the same pattern used by
         test_progressive_disclosure._seed_terminal_state (line 170).
 
-        step_1_source_intent is populated so that _advance_step_1 can recover
-        plugin/options/sample_rows when the POST /respond fires — without it
-        _advance_step_1 raises ValueError before the dispatcher can validate
-        edited_values.
+        step_1_source_intent is populated so the dispatcher can recover
+        plugin/options/sample_rows when the POST /respond fires.
+
+        ``path`` defaults to "/data/input.csv" — outside any allowed source
+        directory under the test's data_dir, so a commit against the default
+        genuinely fails handle_step_1_source's path validation (used by the
+        state-integrity test below). Pass a real storage_path (e.g. from
+        _seed_blob) for tests that need the commit to succeed.
         """
         from dataclasses import replace
 
@@ -865,8 +1081,8 @@ class TestStep1InspectAndConfirmAccept:
 
         # Build the GuidedSession with an INSPECT_AND_CONFIRM TurnRecord
         # at STEP_1_SOURCE so the dispatcher's current_turn_type read picks
-        # it up on POST /respond.  Also seed step_1_source_intent so that
-        # _advance_step_1 can build SourceResolved from it.
+        # it up on POST /respond.  Also seed step_1_source_intent so the
+        # dispatcher can build SourceResolved from it.
         guided = state.guided_session if state.guided_session is not None else GuidedSession.initial()
         record = TurnRecord(
             step=GuidedStep.STEP_1_SOURCE,
@@ -877,7 +1093,7 @@ class TestStep1InspectAndConfirmAccept:
         )
         intent = SourceIntent(
             plugin="csv",
-            options={"path": "/data/input.csv"},
+            options={"path": path, "schema": {"mode": "observed"}},
             observed_columns=("id", "name", "score"),
             sample_rows=({"id": 1, "name": "Alice", "score": 99},),
         )
@@ -902,10 +1118,10 @@ class TestStep1InspectAndConfirmAccept:
         """Non-list ``columns`` at post-advance INSPECT_AND_CONFIRM is a protocol violation (HTTP 400).
 
         The dispatcher's ``isinstance(columns_raw, list)`` guard fires the 400
-        on the raw scalar value.  This guard IS HTTP-reachable as 400 because
-        ``_advance_step_1``'s ``tuple(str(c) for c in columns_raw)`` coercion
-        would silently accept a scalar string (iterating its characters),
-        so the dispatcher must catch it before that coercion runs.
+        on the raw scalar value.  This guard must catch a non-list value before
+        the dispatcher's own ``tuple(str(c) for c in columns_raw)`` coercion
+        runs — that coercion would otherwise silently accept a scalar string
+        by iterating its characters.
         """
         session_id = _create_session(composer_test_client)
         self._seed_inspect_and_confirm_history(composer_test_client, session_id)
@@ -923,6 +1139,103 @@ class TestStep1InspectAndConfirmAccept:
         assert "inspect_and_confirm response at step 1" in detail
         assert "must be a list" in detail
         assert "str" in detail  # offending type is named
+
+    def test_inspect_and_confirm_null_edited_values_returns_400(self, composer_test_client: TestClient) -> None:
+        """edited_values=None on an INSPECT_AND_CONFIRM response returns a live HTTP 400.
+
+        Before elspeth-948eb9c0b8's mirror fix this exact condition was
+        raised as a ValueError inside ``_advance_step_1`` (which ran BEFORE
+        the dispatcher) and shadowed the dispatcher's own null-guard,
+        surfacing as a 400 via a different code path. Now the dispatcher's
+        guard is the only one that exists.
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_inspect_and_confirm_history(composer_test_client, session_id)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": None},
+        )
+        assert resp.status_code == 400, resp.json()
+        assert "requires edited_values" in resp.json()["detail"]
+
+    def test_inspect_and_confirm_commits_source_and_advances_to_step_2(self, composer_test_client: TestClient) -> None:
+        """Success path: a valid INSPECT_AND_CONFIRM commits the source and
+        advances to STEP_2_SINK, with both authoritative surfaces agreeing
+        (elspeth-948eb9c0b8 C-3(b), Step-1 mirror of the Step-2 fix).
+        """
+        session_id = _create_session(composer_test_client)
+        _blob_id, storage_path = _seed_blob(composer_test_client, session_id)
+        self._seed_inspect_and_confirm_history(composer_test_client, session_id, path=storage_path)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"columns": ["id", "name", "score"]}},
+        )
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+
+        assert body["guided_session"]["step"] == "step_2_sink"
+        full_guided = _full_guided_session(body)
+        assert full_guided["step_1_result"] is not None
+        assert full_guided["step_1_result"]["plugin"] == "csv"
+        assert full_guided["step_1_source_intent"] is None  # consumed
+
+        cs = body["composition_state"]
+        assert cs is not None, "composition_state missing from response"
+        assert cs.get("sources"), "composition_state.sources is empty — handle_step_1_source was not called"
+
+    def test_inspect_and_confirm_coerces_numeric_columns_to_str(self, composer_test_client: TestClient) -> None:
+        """The dispatcher's ``tuple(str(c) for c in columns_raw)`` Tier-3
+        coercion: a widget submitting non-string column labels must land as
+        strings in the committed source's observed_columns, never as raw
+        ints/bools. This coverage moved out of the unit suite when
+        _advance_step_1 became a pure self-loop; without it, dropping the
+        str() coercion would land ints in persisted composition state with the
+        full suite still green. Regression for the fp-review test-adequacy gap.
+        """
+        session_id = _create_session(composer_test_client)
+        _blob_id, storage_path = _seed_blob(composer_test_client, session_id)
+        self._seed_inspect_and_confirm_history(composer_test_client, session_id, path=storage_path)
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"columns": [42, "name", True]}},
+        )
+        assert resp.status_code == 200, resp.json()
+        body = resp.json()
+
+        step_1_result = _full_guided_session(body)["step_1_result"]
+        assert step_1_result is not None
+        assert step_1_result["observed_columns"] == ["42", "name", "True"]
+
+    def test_inspect_and_confirm_commit_failure_does_not_diverge_guided_session_from_state(self, composer_test_client: TestClient) -> None:
+        """State-integrity test (elspeth-948eb9c0b8 C-3(b), Step-1 mirror of the Step-2
+        test): a Step-1 source commit failure must NOT leave guided_session.step_1_result
+        / step advanced while composition_state.sources stays behind. The default seed
+        path ("/data/input.csv") is outside the test's allowed source directories, so
+        handle_step_1_source genuinely rejects it — not the ambiguous-empty case, a real
+        commit rejection.
+        """
+        session_id = _create_session(composer_test_client)
+        self._seed_inspect_and_confirm_history(composer_test_client, session_id)
+
+        before = _get_guided(composer_test_client, session_id)
+        assert before["guided_session"]["step"] == "step_1_source"
+        assert _full_guided_session(before)["step_1_result"] is None
+        before_sources = before["composition_state"]["sources"]
+
+        resp = composer_test_client.post(
+            f"/api/sessions/{session_id}/guided/respond",
+            json={"edited_values": {"columns": ["id", "name", "score"]}},
+        )
+        assert resp.status_code == 400, resp.json()
+        assert resp.json()["detail"] == "Step 1 source commit failed"
+
+        after = _get_guided(composer_test_client, session_id)
+        assert after["guided_session"]["step"] == "step_1_source"
+        assert _full_guided_session(after)["step_1_result"] is None
+        assert after["composition_state"]["sources"] == before_sources
 
 
 # ---------------------------------------------------------------------------

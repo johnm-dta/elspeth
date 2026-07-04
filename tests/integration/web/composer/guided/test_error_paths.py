@@ -1045,3 +1045,79 @@ class TestOrphanedStep2_5Recovery:
         assert body["terminal"]["kind"] == "exited_to_freeform"
         assert body["terminal"]["reason"] == "user_pressed_exit"
         assert body["next_turn"] is None
+
+    def _seed_step_2_5_session_without_turn_record(self, client: TestClient, session_id: str) -> None:
+        """Persist a session parked at STEP_2_5_RECIPE_MATCH with NO TurnRecord for it.
+
+        Same shape as ``_seed_step_2_5_session`` but deliberately omits the
+        seeded ``TurnRecord`` — reproducing the gap the C-3(c) turn-desync 400
+        guards: no persisted answer for the current step AND no rebuildable
+        turn (``_build_get_guided_turn`` returns ``None`` for
+        STEP_2_5_RECIPE_MATCH), which is exactly the ``existing_record is
+        None`` / ``turn is None`` combination that used to surface the raw
+        protocol string.
+        """
+        import asyncio
+        from dataclasses import replace
+        from uuid import UUID
+
+        from elspeth.contracts.freeze import deep_thaw
+        from elspeth.web.composer.guided.state_machine import GuidedSession, GuidedStep
+        from elspeth.web.sessions.converters import state_from_record
+        from elspeth.web.sessions.protocol import CompositionStateData
+        from elspeth.web.sessions.routes import _initial_composition_state_with_guided_session
+
+        service = client.app.state.session_service
+        session_uuid = UUID(session_id)
+        state_record = asyncio.run(service.get_current_state(session_uuid))
+
+        if state_record is None:
+            state = _initial_composition_state_with_guided_session()
+            existing_meta: dict = {}
+        else:
+            state = state_from_record(state_record)
+            existing_meta = dict(deep_thaw(state_record.composer_meta)) if state_record.composer_meta else {}
+
+        guided = state.guided_session if state.guided_session is not None else GuidedSession.initial()
+        guided = replace(guided, step=GuidedStep.STEP_2_5_RECIPE_MATCH)
+        state = replace(state, guided_session=guided)
+
+        new_composer_meta = {**existing_meta, "guided_session": guided.to_dict()}
+        state_d = state.to_dict()
+        state_data = CompositionStateData(
+            sources=state_d["sources"],
+            nodes=state_d["nodes"],
+            edges=state_d["edges"],
+            outputs=state_d["outputs"],
+            metadata_=state_d["metadata"],
+            is_valid=False,
+            validation_errors=None,
+            composer_meta=new_composer_meta,
+        )
+        asyncio.run(service.save_composition_state(session_uuid, state_data, provenance="session_seed"))
+
+    def test_exit_to_freeform_without_turn_record_returns_structured_turn_not_emitted(self, composer_test_client: TestClient) -> None:
+        """No TurnRecord for the current step: a structured 400, not the raw protocol string.
+
+        Before the fix this was ``{"detail": "No turn has been emitted for the
+        current step. Fetch GET /api/sessions/{id}/guided first."}`` — the
+        exact raw string the frontend rendered verbatim in the user's alert
+        banner (C-3(c)). It must now be a machine-readable object the client
+        can key off without string-matching, and it must not repeat the old
+        instruction-to-call-an-API phrasing.
+        """
+
+        session_id = _create_session(composer_test_client)
+        self._seed_step_2_5_session_without_turn_record(composer_test_client, session_id)
+
+        resp = _respond_raw(composer_test_client, session_id, control_signal="exit_to_freeform")
+        assert resp.status_code == 400, resp.json()
+        detail = resp.json()["detail"]
+        assert isinstance(detail, dict), detail
+        assert detail["code"] == "turn_not_emitted"
+        assert detail["step"] == "step_2_5_recipe_match"
+        # Human text is the nested "detail" key — same envelope shape as the
+        # existing ``wire_confirm_rejected`` 409 (guided.py:~1568), which the
+        # frontend's ``parseResponse`` reads via ``nestedDetail.detail``.
+        assert "Fetch GET" not in detail["detail"]
+        assert "api/sessions" not in detail["detail"]

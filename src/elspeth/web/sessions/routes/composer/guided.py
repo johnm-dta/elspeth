@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from typing import Literal
 
 from elspeth.web.composer.guided.chat_solver import build_step_chat_context_block
 from elspeth.web.composer.guided.errors import WireConfirmRejectedError
@@ -124,6 +125,33 @@ def _resolve_shield_available(request: Request, user_id: str) -> bool:
             user_id=user_id,
         )
     )
+
+
+def _guided_chat_wire_kind(status: ComposerChatTurnStatus) -> Literal["assistant", "synthetic_failure"]:
+    """Map a ``StepChatResult``'s status to the wire discriminator (fp-review C-2)."""
+    return "assistant" if status is ComposerChatTurnStatus.SUCCESS else "synthetic_failure"
+
+
+def _chat_turn_synthetic_failure_reason(
+    status: ComposerChatTurnStatus,
+    error_class: str | None,
+) -> Literal["quality_guard", "unavailable"] | None:
+    """Classify a persisted ``ChatTurn``'s synthetic-failure cause (fp-review C-2).
+
+    ``None`` on success. Otherwise ``"quality_guard"`` when a scaffold-leak
+    guard rejected the reply, or ``"unavailable"`` for everything else —
+    transient provider failures AND the STEP_1/STEP_2 commit-seam rejection
+    branches (``error_class="StepHandlerRejected"``), which currently reuse
+    the unavailability copy too (a known, separate miscalibration outside
+    this fix's scope). ``error_class`` is compared by the literal class name
+    string (``_guided_step_chat.py`` sets it via ``type(exc).__name__``);
+    ``"AssistantScaffoldLeakError"`` is the ONLY class the dedicated
+    scaffold-leak branches ever record. Persisted-only (elspeth-0ff5003755):
+    the live ``GuidedChatResponse`` deliberately carries kind alone.
+    """
+    if status is ComposerChatTurnStatus.SUCCESS:
+        return None
+    return "quality_guard" if error_class == "AssistantScaffoldLeakError" else "unavailable"
 
 
 def _turn_payload_response(
@@ -580,6 +608,8 @@ async def get_guided(
                             seq=t.seq,
                             step=t.step.value,
                             ts_iso=t.ts_iso,
+                            assistant_message_kind=t.assistant_message_kind,
+                            synthetic_failure_reason=t.synthetic_failure_reason,
                         )
                         for t in guided.chat_history
                     ],
@@ -856,6 +886,8 @@ async def post_guided_reenter(
                         seq=t.seq,
                         step=t.step.value,
                         ts_iso=t.ts_iso,
+                        assistant_message_kind=t.assistant_message_kind,
+                        synthetic_failure_reason=t.synthetic_failure_reason,
                     )
                     for t in new_guided.chat_history
                 ],
@@ -966,6 +998,8 @@ async def post_guided_start(
                                 seq=t.seq,
                                 step=t.step.value,
                                 ts_iso=t.ts_iso,
+                                assistant_message_kind=t.assistant_message_kind,
+                                synthetic_failure_reason=t.synthetic_failure_reason,
                             )
                             for t in guided.chat_history
                         ],
@@ -1049,6 +1083,8 @@ async def post_guided_start(
                         seq=t.seq,
                         step=t.step.value,
                         ts_iso=t.ts_iso,
+                        assistant_message_kind=t.assistant_message_kind,
+                        synthetic_failure_reason=t.synthetic_failure_reason,
                     )
                     for t in seeded_guided.chat_history
                 ],
@@ -1265,6 +1301,8 @@ async def post_guided_respond(
                                 seq=t.seq,
                                 step=t.step.value,
                                 ts_iso=t.ts_iso,
+                                assistant_message_kind=t.assistant_message_kind,
+                                synthetic_failure_reason=t.synthetic_failure_reason,
                             )
                             for t in new_guided.chat_history
                         ],
@@ -1344,9 +1382,27 @@ async def post_guided_respond(
 
                 turn = _build_get_guided_turn(state, guided, catalog=catalog)
                 if turn is None:
+                    # Structured detail — same envelope shape as the
+                    # ``wire_confirm_rejected`` 409 below (``code``/``detail``/
+                    # extra fields; the human-readable text is the nested
+                    # ``detail`` key, matching ``parseResponse``'s
+                    # ``nestedDetail.detail`` read), not the raw protocol
+                    # string: the frontend was rendering the old "Fetch GET
+                    # /api/sessions/{id}/guided first" instruction verbatim in
+                    # the user's alert banner (C-3(c)). ``code`` lets a later
+                    # frontend wave self-heal (re-fetch guided state) instead
+                    # of instructing the user to call an API. ``step`` mirrors
+                    # the ``step_index`` mismatch 409 above so the client can
+                    # correlate without a second round-trip.
                     raise HTTPException(
                         status_code=400,
-                        detail=("No turn has been emitted for the current step. Fetch GET /api/sessions/{id}/guided first."),
+                        detail={
+                            "code": "turn_not_emitted",
+                            "detail": (
+                                "Your session's step is out of sync with the server. Refreshing the session will resync this automatically."
+                            ),
+                            "step": current_step.value,
+                        },
                     )
                 guided, existing_record, current_turn_type, emitted_payload_hash = _append_server_turn_record(
                     guided,
@@ -1717,6 +1773,8 @@ async def post_guided_respond(
                             seq=t.seq,
                             step=t.step.value,
                             ts_iso=t.ts_iso,
+                            assistant_message_kind=t.assistant_message_kind,
+                            synthetic_failure_reason=t.synthetic_failure_reason,
                         )
                         for t in guided.chat_history
                     ],
@@ -1877,6 +1935,10 @@ async def _build_guided_chat_apply_response(
     state_record_out = await service.save_composition_state(session_id, state_data, provenance="convergence_persist")
     response = GuidedChatResponse(
         assistant_message=assistant_message,
+        # Always a real LLM reply: every caller of this helper reached it via
+        # a resolve/commit SUCCESS (STEP_1/STEP_2/STEP_3 apply branches), not
+        # a fallback.
+        assistant_message_kind="assistant",
         guided_session=GuidedSessionResponse(
             step=guided.step.value,
             history=[
@@ -1898,6 +1960,8 @@ async def _build_guided_chat_apply_response(
                     seq=t.seq,
                     step=t.step.value,
                     ts_iso=t.ts_iso,
+                    assistant_message_kind=t.assistant_message_kind,
+                    synthetic_failure_reason=t.synthetic_failure_reason,
                 )
                 for t in guided.chat_history
             ],
@@ -2029,6 +2093,19 @@ async def post_guided_chat(
             )
             current_turn_type = existing_record_for_chat.turn_type if existing_record_for_chat is not None else None
             chat_result = None
+            # Computed once, up front: reused by the STEP_1/STEP_2 resolve
+            # calls below (so a declined-to-prose reply is grounded in the
+            # same context a second, tool-less call would otherwise have
+            # supplied) AND the final advisory fallback. Safe to hoist —
+            # ``state``/``guided.step_1_result``/``guided.step_2_result`` are
+            # only ever reassigned on a branch that returns immediately, so
+            # nothing here changes before a later read of the same value.
+            chat_context_block = build_step_chat_context_block(
+                step=guided.step,
+                current_source=guided.step_1_result,
+                current_sink=guided.step_2_result,
+                state=state,
+            )
 
             if (
                 existing_record_for_chat is not None
@@ -2052,8 +2129,12 @@ async def post_guided_chat(
                     # (elspeth-fb4464cdf0): the guided LLM call may not run
                     # past the composer budget.
                     timeout_seconds=settings.composer_timeout_seconds,
+                    context_block=chat_context_block,
                 )
-                chat_result = source_chat_result.fallback_chat
+                # ``prose_chat`` (a declined-to-prose SUCCESS) and
+                # ``fallback_chat`` (an error) are mutually exclusive; either
+                # one here means "use this directly, skip the second call".
+                chat_result = source_chat_result.fallback_chat or source_chat_result.prose_chat
                 source_resolution = source_chat_result.source_resolution
                 if source_resolution is not None:
                     finished_at = datetime.now(UTC)
@@ -2247,6 +2328,9 @@ async def post_guided_chat(
                         seq=guided.chat_turn_seq + 1,
                         step=GuidedStep.STEP_1_SOURCE,
                         ts_iso=ts_iso,
+                        # Always a real reply: this is the resolve-and-commit
+                        # success path.
+                        assistant_message_kind="assistant",
                     )
                     guided = _replace(
                         guided,
@@ -2301,8 +2385,12 @@ async def post_guided_chat(
                     secret_service=getattr(request.app.state, "scoped_secret_resolver", None),
                     max_discovery_iters=settings.composer_max_discovery_turns,
                     timeout_seconds=settings.composer_timeout_seconds,
+                    context_block=chat_context_block,
                 )
-                chat_result = sink_chat_result.fallback_chat
+                # ``prose_chat`` (a declined-to-prose SUCCESS) and
+                # ``fallback_chat`` (an error) are mutually exclusive; either
+                # one here means "use this directly, skip the second call".
+                chat_result = sink_chat_result.fallback_chat or sink_chat_result.prose_chat
                 sink_resolution = sink_chat_result.sink_resolution
                 if sink_resolution is not None:
                     finished_at = datetime.now(UTC)
@@ -2437,6 +2525,9 @@ async def post_guided_chat(
                         seq=guided.chat_turn_seq + 1,
                         step=GuidedStep.STEP_2_SINK,
                         ts_iso=ts_iso,
+                        # Always a real reply: this is the resolve-and-commit
+                        # success path.
+                        assistant_message_kind="assistant",
                     )
                     guided = _replace(
                         guided,
@@ -2620,6 +2711,9 @@ async def post_guided_chat(
                             seq=guided.chat_turn_seq + 1,
                             step=GuidedStep.STEP_3_TRANSFORMS,
                             ts_iso=ts_iso,
+                            # Always a real reply: this is the propose_chain
+                            # success path.
+                            assistant_message_kind="assistant",
                         )
                         guided = _replace(
                             guided,
@@ -2680,13 +2774,10 @@ async def post_guided_chat(
                         timeout_seconds=settings.composer_timeout_seconds,
                         # LLM-safe current-build context so "explain what I'm
                         # seeing / why" gets a grounded answer (the decision
-                        # card's Explain affordance rides this same path).
-                        context_block=build_step_chat_context_block(
-                            step=guided.step,
-                            current_source=guided.step_1_result,
-                            current_sink=guided.step_2_result,
-                            state=state,
-                        ),
+                        # card's Explain affordance rides this same path) —
+                        # the SAME block already computed above for the
+                        # STEP_1/STEP_2 resolve calls.
+                        context_block=chat_context_block,
                     )
                 except InvariantError as exc:
                     finished_at = datetime.now(UTC)
@@ -2746,6 +2837,11 @@ async def post_guided_chat(
                 seq=guided.chat_turn_seq + 1,
                 step=guided.step,
                 ts_iso=ts_iso,
+                # Real reply (advisory SUCCESS or a salvaged declined-prose
+                # reply) or a synthetic failure — derive both from the same
+                # status/error_class the wire response's kind uses.
+                assistant_message_kind=_guided_chat_wire_kind(chat_result.status),
+                synthetic_failure_reason=_chat_turn_synthetic_failure_reason(chat_result.status, chat_result.error_class),
             )
             new_guided = _replace(
                 guided,
@@ -2813,6 +2909,7 @@ async def post_guided_chat(
 
             return GuidedChatResponse(
                 assistant_message=chat_result.assistant_message,
+                assistant_message_kind=_guided_chat_wire_kind(chat_result.status),
                 guided_session=GuidedSessionResponse(
                     step=new_guided.step.value,
                     history=[
@@ -2834,6 +2931,8 @@ async def post_guided_chat(
                             seq=t.seq,
                             step=t.step.value,
                             ts_iso=t.ts_iso,
+                            assistant_message_kind=t.assistant_message_kind,
+                            synthetic_failure_reason=t.synthetic_failure_reason,
                         )
                         for t in new_guided.chat_history
                     ],

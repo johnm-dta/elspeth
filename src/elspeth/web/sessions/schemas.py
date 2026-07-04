@@ -337,6 +337,12 @@ class ChatTurnResponse(_StrictResponse):
     values are server-emitted (Tier 1) — ``role`` is one of ``"user"`` or
     ``"assistant"``, ``step`` is a :class:`GuidedStep` value, ``ts_iso``
     is the ISO 8601 timestamp the turn was appended to ``chat_history``.
+
+    ``assistant_message_kind`` / ``synthetic_failure_reason`` (fp-review C-2
+    persisted-history closure) mirror the same-named fields on
+    :class:`elspeth.web.composer.guided.protocol.ChatTurn` — ``None`` on
+    every ``USER`` turn and on any turn persisted before this field existed
+    (legacy turns serialise with both ``None``, never a fabricated value).
     """
 
     role: str
@@ -344,6 +350,8 @@ class ChatTurnResponse(_StrictResponse):
     seq: int
     step: str
     ts_iso: str
+    assistant_message_kind: Literal["assistant", "synthetic_failure"] | None
+    synthetic_failure_reason: Literal["quality_guard", "unavailable"] | None
 
 
 class WorkflowProfileResponse(_StrictResponse):
@@ -493,10 +501,15 @@ class GuidedChatRequest(_RequestModel):
 class GuidedChatResponse(_StrictResponse):
     """Response for POST /api/sessions/{id}/guided/chat.
 
-    ``assistant_message`` is the LLM's reply (or, on transient LLM
-    failure, a synthetic "I'm unavailable" message — Phase A does not yet
-    distinguish the two on the wire; slice 5's ``ComposerChatTurn`` audit
-    record adds that discriminator).
+    ``assistant_message`` is the LLM's reply, or a fallback message on
+    failure. ``assistant_message_kind`` is the wire discriminator that used
+    to be missing (fp-review C-2): ``"assistant"`` for a real LLM reply,
+    ``"synthetic_failure"`` for a fallback message the server generated
+    instead of forwarding a model response. The two synthetic-failure causes
+    (a scaffold-leak guard rejection vs genuine provider unavailability)
+    already render distinct message copy; both surface the same recovery
+    affordance, so this discriminator deliberately stops at kind and does not
+    also carry a reason.
 
     ``guided_session`` always carries the updated chat history. Most chat
     remains advisory, but Step 1 schema-form chat may resolve a complete
@@ -506,6 +519,7 @@ class GuidedChatResponse(_StrictResponse):
     """
 
     assistant_message: str
+    assistant_message_kind: Literal["assistant", "synthetic_failure"]
     guided_session: GuidedSessionResponse
     next_turn: TurnPayloadResponse | None
     terminal: TerminalStateResponse | None

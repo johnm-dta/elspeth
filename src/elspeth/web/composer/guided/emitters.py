@@ -328,6 +328,20 @@ def build_step_2_multi_select_turn(
     ticks which fields must appear in the output, adds custom fields, or
     clicks the escape label to let the source decide.
 
+    ``escape_label`` wire contract (elspeth-948eb9c0b8 C-3(a)): clicking the
+    escape action MUST submit ``control_signal: "passthrough"`` (see
+    ``ControlSignal.PASSTHROUGH``) alongside ``chosen: []`` and
+    ``custom_inputs: []``. A bare empty ``chosen``/``custom_inputs`` pair
+    *without* the signal is fail-closed rejected with a structured 400
+    (``code: "guided_step2_no_fields_selected"``) — it is indistinguishable
+    on the wire from a stale/buggy client submitting nothing, so the
+    dispatcher (``_dispatch_guided_respond``'s STEP_2_SINK
+    MULTI_SELECT_WITH_CUSTOM branch, ``sessions/routes/_helpers.py``) refuses
+    to guess. Sending ``control_signal: "passthrough"`` together with a
+    non-empty ``chosen``/``custom_inputs`` is likewise rejected (400,
+    ``code: "guided_step2_passthrough_conflict"``) as a contradictory
+    payload.
+
     Args:
         observed_columns: The columns observed from the source in Step 1.
             Comes from ``GuidedSession.step_1_result.observed_columns``.

@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from elspeth.web.catalog.knob_schema import SchemaFormPayload as SchemaFormPayload
 
@@ -131,6 +131,14 @@ class ControlSignal(StrEnum):
     REQUEST_ADVISOR = "request_advisor"
     REJECT = "reject"
     BACK = "back"
+    # Explicit "pass all fields through" escape hatch for MULTI_SELECT_WITH_CUSTOM
+    # at STEP_2_SINK (the "Let source decide" button). An empty chosen +
+    # custom_inputs pair is otherwise indistinguishable from a stale/buggy
+    # client submitting nothing — PASSTHROUGH is the unambiguous, explicit
+    # signal that fail-closed validation requires before accepting an empty
+    # required-fields set (see _dispatch_guided_respond's STEP_2_SINK
+    # MULTI_SELECT_WITH_CUSTOM branch in sessions/routes/_helpers.py).
+    PASSTHROUGH = "passthrough"
 
 
 class TurnResponse(TypedDict):
@@ -199,6 +207,22 @@ class ChatTurn:
     load-bearing for Phase A.5 openers and Phase B tool palettes where
     the step at *emission* may differ from the step at *display* if the
     user back-buttons.
+
+    ``assistant_message_kind`` / ``synthetic_failure_reason`` (fp-review
+    C-2 persisted-history closure) mirror the discriminator carried on
+    ``GuidedChatResponse.assistant_message_kind`` for the LIVE turn, but
+    persisted per-turn so a reload can still tell a past synthetic failure
+    apart from a real reply. Both are ``None`` on every ``USER`` turn (not
+    applicable) and on any ``ASSISTANT`` turn persisted before this field
+    existed — legacy turns round-trip with both ``None``, never a
+    fabricated value. ``synthetic_failure_reason`` is only ever non-``None``
+    when ``assistant_message_kind == "synthetic_failure"``; it distinguishes
+    a scaffold-leak guard rejection (``"quality_guard"``) from genuine
+    provider unavailability (``"unavailable"``) — the two causes that
+    already render distinct message copy. Deliberately asymmetric with the
+    LIVE ``GuidedChatResponse`` (kind-only, no reason field): the persisted
+    audit record carries the fuller distinction; the live response's
+    recovery affordance doesn't need it (elspeth-0ff5003755).
     """
 
     role: ChatRole
@@ -206,6 +230,8 @@ class ChatTurn:
     seq: int
     step: GuidedStep
     ts_iso: str
+    assistant_message_kind: Literal["assistant", "synthetic_failure"] | None = None
+    synthetic_failure_reason: Literal["quality_guard", "unavailable"] | None = None
 
     def __post_init__(self) -> None:
         if type(self.role) is not ChatRole:
@@ -214,6 +240,18 @@ class ChatTurn:
             raise TypeError(f"step must be GuidedStep, got {type(self.step).__name__}")
         if type(self.seq) is not int:
             raise TypeError(f"seq must be int, got {type(self.seq).__name__}")
+        if self.assistant_message_kind is not None and self.assistant_message_kind not in ("assistant", "synthetic_failure"):
+            raise ValueError(
+                f"assistant_message_kind must be 'assistant', 'synthetic_failure', or None; got {self.assistant_message_kind!r}"
+            )
+        if self.synthetic_failure_reason is not None and self.synthetic_failure_reason not in ("quality_guard", "unavailable"):
+            raise ValueError(
+                f"synthetic_failure_reason must be 'quality_guard', 'unavailable', or None; got {self.synthetic_failure_reason!r}"
+            )
+        if self.synthetic_failure_reason is not None and self.assistant_message_kind != "synthetic_failure":
+            raise ValueError("synthetic_failure_reason is set but assistant_message_kind is not 'synthetic_failure'")
+        if self.role is ChatRole.USER and (self.assistant_message_kind is not None or self.synthetic_failure_reason is not None):
+            raise ValueError("assistant_message_kind/synthetic_failure_reason are not applicable to a USER turn")
         if self.seq < 0:
             raise ValueError("seq must be >= 0")
         if type(self.content) is not str:

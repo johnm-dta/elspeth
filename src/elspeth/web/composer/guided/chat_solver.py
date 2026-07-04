@@ -71,6 +71,28 @@ _TOOL_SCAFFOLD_MARKERS: Final[tuple[str, ...]] = (
     "</tool_response",
 )
 
+# ``solve_step_chat`` never attaches tools (Phase A advisory-only), but its
+# system prompt is ``load_step_chat_skill(step)`` — the SAME per-step skill
+# the tool-equipped resolve calls use, and ``base.md`` unconditionally frames
+# the model as a tool-caller ("you build the pipeline by calling tools",
+# `list_sources`/`get_plugin_schema` lookups). A model primed by that framing
+# with no tools on the wire has nothing real to call, so it narrates one as
+# literal text instead — the scaffold leak ``_require_prose_assistant_message``
+# then correctly rejects. This addendum overrides the framing for THIS call
+# only (a fresh system message, not a ``load_step_chat_skill`` edit — the
+# resolve calls legitimately keep tool access and must not see this).
+_ADVISORY_NO_TOOLS_ADDENDUM: Final[str] = (
+    "## No tools in this reply\n\n"
+    "You have NO tools available for this reply — not `resolve_source`, not "
+    "`list_sources`/`list_sinks`/`list_transforms`/`get_plugin_schema`, nothing. "
+    "Answer in plain prose only. Never write tool-call syntax, XML-style "
+    "scaffolding (`<tool_call>`, `<tool_response>`), or any text that narrates "
+    "invoking a tool — even to describe your reasoning. If the user's message "
+    "needs an action you can't take from here (for example, they described "
+    "data without giving you the actual rows), say so plainly and ask for "
+    "what is missing.\n"
+)
+
 
 class AssistantScaffoldLeakError(ValueError):
     """The model leaked tool-call scaffolding into a user-facing message.
@@ -122,6 +144,31 @@ class Step1SourceChatResolution:
 
     def __post_init__(self) -> None:
         freeze_fields(self, "options", "sample_rows")
+
+
+@dataclass(frozen=True, slots=True)
+class Step1SourceChatOutcome:
+    """Outcome of one ``resolve_source``-equipped LLM call.
+
+    At most one of the two fields is populated. ``resolution`` is a valid
+    ``resolve_source`` tool call. ``prose_reply`` is the model's own
+    register-guarded plain-language answer when it declined the tool — not
+    enough detail to act, or a plain question — captured directly from THIS
+    call so the caller never needs a second, tool-less call to obtain an
+    answer to show the user (that second call previously reused a
+    tool-capable system prompt with no tools attached, which is what caused
+    the model to hallucinate ``<tool_call>`` scaffolding — see
+    ``_ADVISORY_NO_TOOLS_ADDENDUM``).
+
+    Both fields are ``None`` only when the model's reply had neither a tool
+    call nor any content — a genuinely defective/empty response. That rare
+    case is deliberately NOT raised here: the caller falls back to the
+    tool-less advisory call exactly as before, which already raises
+    ``InvariantError`` on empty content.
+    """
+
+    resolution: Step1SourceChatResolution | None
+    prose_reply: str | None
 
 
 _STEP_1_SOURCE_TOOL: dict[str, Any] = {
@@ -508,16 +555,27 @@ async def maybe_resolve_step_1_source_chat(
     seed: int | None,
     recorder: BufferingRecorder | None = None,
     timeout_seconds: float | None = None,
-) -> Step1SourceChatResolution | None:
+    context_block: str | None = None,
+) -> Step1SourceChatOutcome:
     """Try to resolve a Step-1 schema-form chat message into source data.
 
-    Returns ``None`` when the model replies in ordinary prose without a
-    ``resolve_source`` tool call, allowing the route to fall back to the
-    advisory chat path.
+    Returns a :class:`Step1SourceChatOutcome`. ``resolution`` is set on a
+    ``resolve_source`` tool call. When the model instead replies in ordinary
+    prose, ``prose_reply`` carries that (register-guarded) reply so the
+    caller can show it directly without a second, tool-less call — both
+    fields are ``None`` only on a genuinely empty/defective response, in
+    which case the caller falls back to the advisory chat path exactly as
+    before.
 
     When ``current_source`` is supplied the tool prompt includes the current
     applied source so a revision instruction ("add a url column", "make it
     csv not json") resolves relative to it.
+
+    ``context_block`` (:func:`build_step_chat_context_block`) rides as an
+    extra, unmarked system message so a declined-to-prose reply (e.g.
+    "explain what I'm seeing") is grounded in the same "current build"
+    context the tool-less advisory call would otherwise have supplied —
+    parity that keeps the salvaged prose no worse than a second call's.
     """
     if not user_message:
         raise InvariantError("maybe_resolve_step_1_source_chat: user_message is empty (route validation gap)")
@@ -539,8 +597,10 @@ async def maybe_resolve_step_1_source_chat(
                 current_source=current_source,
             ),
         },
-        {"role": "user", "content": user_message},
     ]
+    if context_block is not None:
+        messages.append({"role": "system", "content": context_block})
+    messages.append({"role": "user", "content": user_message})
     tools = [_STEP_1_SOURCE_TOOL]
     # Mark BEFORE kwargs so the SAME marked objects feed both the wire call and
     # the audit record (messages / tools below, read in the finally block).
@@ -580,9 +640,34 @@ async def maybe_resolve_step_1_source_chat(
                 raise ValueError(f"resolve_source function.arguments must be a JSON string; got {type(arguments).__name__}")
             result = _parse_step_1_source_tool_arguments(arguments, plugin_hint=plugin_hint)
             status = ComposerLLMCallStatus.SUCCESS
-            return result
+            return Step1SourceChatOutcome(resolution=result, prose_reply=None)
+        # No resolve_source call: the model judged the message doesn't carry
+        # enough detail to act (or it's a plain question) and answered in
+        # prose instead. Validate + return that prose directly — the SAME
+        # register guard the tool argument gets — so the caller never needs
+        # a second, tool-less call to obtain an answer to show the user.
+        # Deliberately gated on ``not tool_calls`` (mirrors the step-2 sink
+        # salvage): a response that ALSO carries a hallucinated tool call is a
+        # more suspicious shape — its prose narrates an action that never ran —
+        # and must not be trusted; it falls through to the advisory fallback
+        # (now grounded by _ADVISORY_NO_TOOLS_ADDENDUM) exactly as before.
+        if not tool_calls:
+            content = message.content
+            if content is None or not str(content).strip():
+                # Genuinely empty/defective response (no tool call, no
+                # content): both fields None — the caller falls back to the
+                # advisory chat path exactly as before.
+                status = ComposerLLMCallStatus.SUCCESS
+                return Step1SourceChatOutcome(resolution=None, prose_reply=None)
+            prose = _require_prose_assistant_message(str(content), tool="maybe_resolve_step_1_source_chat")
+            status = ComposerLLMCallStatus.SUCCESS
+            return Step1SourceChatOutcome(resolution=None, prose_reply=prose)
+
+        # Non-empty tool_calls with no resolve_source (hallucinated tool name
+        # or function=None): return the empty outcome so the route falls back
+        # to the tool-less advisory call, matching the step-2 contract.
         status = ComposerLLMCallStatus.SUCCESS
-        return None
+        return Step1SourceChatOutcome(resolution=None, prose_reply=None)
     except TimeoutError:
         status = ComposerLLMCallStatus.TIMEOUT
         error_class = "TimeoutError"
@@ -776,6 +861,25 @@ keeps direct callers (and tests) bounded. Reaching the cap returns ``None``
 """
 
 
+@dataclass(frozen=True, slots=True)
+class Step2SinkChatOutcome:
+    """Outcome of one ``resolve_sink``-equipped discovery-loop round.
+
+    At most one of the two fields is populated. ``sink`` is set on a valid
+    ``resolve_sink`` tool call, paired with its ``assistant_message``.
+    Otherwise ``assistant_message`` alone carries the model's own
+    register-guarded plain-prose reply — captured ONLY on a clean, tool-call-
+    free response (see :func:`maybe_resolve_step_2_sink_chat`) — so the
+    caller can show it directly without a second, tool-less call. Both
+    fields ``None`` covers every other non-terminal case unchanged from
+    before this salvage was added: a hallucinated non-discovery tool call, a
+    genuinely empty/defective response, or the discovery-iteration cap.
+    """
+
+    sink: SinkResolved | None
+    assistant_message: str | None
+
+
 async def maybe_resolve_step_2_sink_chat(
     *,
     model: str,
@@ -790,7 +894,8 @@ async def maybe_resolve_step_2_sink_chat(
     user_id: str | None = None,
     max_discovery_iters: int | None = None,
     timeout_seconds: float | None = None,
-) -> tuple[SinkResolved, str] | None:
+    context_block: str | None = None,
+) -> Step2SinkChatOutcome:
     """Resolve a Step-2 chat message into a sink config via a discovery loop.
 
     The composer model is given ``resolve_sink`` plus the read-only sink
@@ -799,19 +904,31 @@ async def maybe_resolve_step_2_sink_chat(
     * a ``resolve_sink`` call is terminal — parsed and returned;
     * one or more *allowed discovery* calls are dispatched via ``execute_tool``,
       their results threaded back, and the loop continues;
-    * a prose reply, OR any tool call that is neither ``resolve_sink`` nor an
-      allowed discovery tool, ends the loop returning ``None`` (advisory
-      fallback) WITHOUT dispatching — the execution-side safety gate that stops
-      a hallucinated mutation/secret call from running, since ``execute_tool``
+    * a clean, tool-call-free prose reply ends the loop returning that prose
+      directly (register-guarded) so the caller never needs a second,
+      tool-less call for an answer to show the user;
+    * any tool call that is neither ``resolve_sink`` nor an allowed discovery
+      tool ends the loop returning an empty outcome (advisory fallback)
+      WITHOUT dispatching — the execution-side safety gate that stops a
+      hallucinated mutation/secret call from running, since ``execute_tool``
       itself would otherwise happily dispatch one.
 
-    Returns ``(sink, assistant_message)`` on resolution, or ``None`` (prose /
-    gate trip / iteration cap) so the route falls back to advisory chat.
+    Returns a :class:`Step2SinkChatOutcome`. ``sink`` (+ ``assistant_message``)
+    is set on resolution; ``assistant_message`` alone is set on a clean prose
+    decline; both ``None`` covers a hallucinated tool call, an empty/defective
+    response, or the iteration cap — the route falls back to advisory chat in
+    that case exactly as before.
 
     Discovery is active only when both ``state`` and ``catalog`` are supplied
     (the guided route always threads them). Without them the loop degrades to
     single-shot: the model sees only ``resolve_sink`` and either resolves or
     replies prose on the first round — the pre-loop behaviour.
+
+    ``context_block`` (:func:`build_step_chat_context_block`) rides as an
+    extra system message so a declined-to-prose reply is grounded in the same
+    "current build" context the tool-less advisory call would otherwise have
+    supplied — parity that keeps the salvaged prose no worse than a second
+    call's (mirrors the Step-1 resolve path's same addition).
 
     Audit: one ``ComposerLLMCall`` is recorded per provider round and one
     ``ComposerToolInvocation`` per executed discovery call; the route drains
@@ -839,8 +956,10 @@ async def maybe_resolve_step_2_sink_chat(
     # breakpoint — deferred. Revisit if the step_2 skill grows past the floor.
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": _build_step_2_sink_tool_prompt(current_sink=current_sink)},
-        {"role": "user", "content": user_message},
     ]
+    if context_block is not None:
+        messages.append({"role": "system", "content": context_block})
+    messages.append({"role": "user", "content": user_message})
 
     for _iteration in range(max(1, iteration_cap)):
         request_messages = list(messages)
@@ -870,16 +989,34 @@ async def maybe_resolve_step_2_sink_chat(
                     raise ValueError(f"resolve_sink function.arguments must be a JSON string; got {type(arguments).__name__}")
                 sink, assistant = _parse_step_2_sink_tool_arguments(arguments)
                 status = ComposerLLMCallStatus.SUCCESS
-                return sink, assistant
+                return Step2SinkChatOutcome(sink=sink, assistant_message=assistant)
+
+            # A clean, tool-call-free reply: the model judged the message
+            # doesn't carry enough detail to act (or it's a plain question)
+            # and answered in prose instead. Validate + return that prose
+            # directly — the SAME register guard the tool argument gets — so
+            # the caller never needs a second, tool-less call for an answer
+            # to show the user. Deliberately gated on ``not tool_calls``, NOT
+            # folded into the safety-gate branch below: a response that ALSO
+            # carries a hallucinated tool call is a more suspicious shape and
+            # must not have its prose trusted either (falls through instead).
+            if not tool_calls:
+                content = message.content
+                if content is None or not str(content).strip():
+                    status = ComposerLLMCallStatus.SUCCESS
+                    return Step2SinkChatOutcome(sink=None, assistant_message=None)
+                prose = _require_prose_assistant_message(str(content), tool="maybe_resolve_step_2_sink_chat")
+                status = ComposerLLMCallStatus.SUCCESS
+                return Step2SinkChatOutcome(sink=None, assistant_message=prose)
 
             # Execution-side safety gate: the only non-terminal calls we
-            # dispatch are allowed read-only discovery tools. A prose reply
-            # (no tool calls) or ANY other tool (a hallucinated mutation /
-            # secret call) ends the loop without dispatching anything.
+            # dispatch are allowed read-only discovery tools. ANY other tool
+            # (a hallucinated mutation / secret call) ends the loop without
+            # dispatching anything.
             discovery_calls = [tc for tc in tool_calls if tc.function is not None and tc.function.name in allowed_discovery]
             if not discovery_calls or len(discovery_calls) != len(tool_calls):
                 status = ComposerLLMCallStatus.SUCCESS
-                return None
+                return Step2SinkChatOutcome(sink=None, assistant_message=None)
 
             # Thread the assistant tool-call request once, then answer every
             # call id with its result, or the next round 400s.
@@ -958,7 +1095,7 @@ async def maybe_resolve_step_2_sink_chat(
             )
 
     # Discovery iteration cap reached without a resolve_sink — advisory fallback.
-    return None
+    return Step2SinkChatOutcome(sink=None, assistant_message=None)
 
 
 async def solve_step_chat(
@@ -1008,6 +1145,7 @@ async def solve_step_chat(
     system_prompt = load_step_chat_skill(step)
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
+        {"role": "system", "content": _ADVISORY_NO_TOOLS_ADDENDUM},
     ]
     if context_block is not None:
         messages.append({"role": "system", "content": context_block})

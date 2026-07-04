@@ -141,6 +141,89 @@ class TestChatTurn:
                 ts_iso="2026-05-13T12:00:00+00:00",
             )
 
+    def test_assistant_message_kind_and_reason_default_to_none(self) -> None:
+        """Legacy-compatible construction: omitting the new fields is valid."""
+        turn = ChatTurn(
+            role=ChatRole.ASSISTANT,
+            content="Here is some advice.",
+            seq=1,
+            step=GuidedStep.STEP_1_SOURCE,
+            ts_iso="2026-05-13T12:00:00+00:00",
+        )
+        assert turn.assistant_message_kind is None
+        assert turn.synthetic_failure_reason is None
+
+    def test_accepts_real_assistant_reply_kind(self) -> None:
+        turn = ChatTurn(
+            role=ChatRole.ASSISTANT,
+            content="Here is some advice.",
+            seq=1,
+            step=GuidedStep.STEP_1_SOURCE,
+            ts_iso="2026-05-13T12:00:00+00:00",
+            assistant_message_kind="assistant",
+        )
+        assert turn.assistant_message_kind == "assistant"
+        assert turn.synthetic_failure_reason is None
+
+    def test_accepts_synthetic_failure_kind_with_reason(self) -> None:
+        turn = ChatTurn(
+            role=ChatRole.ASSISTANT,
+            content="That reply didn't pass a quality check.",
+            seq=1,
+            step=GuidedStep.STEP_1_SOURCE,
+            ts_iso="2026-05-13T12:00:00+00:00",
+            assistant_message_kind="synthetic_failure",
+            synthetic_failure_reason="quality_guard",
+        )
+        assert turn.assistant_message_kind == "synthetic_failure"
+        assert turn.synthetic_failure_reason == "quality_guard"
+
+    def test_rejects_unknown_assistant_message_kind(self) -> None:
+        with pytest.raises(ValueError, match="assistant_message_kind"):
+            ChatTurn(
+                role=ChatRole.ASSISTANT,
+                content="x",
+                seq=1,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+                assistant_message_kind="bogus",  # type: ignore[arg-type]
+            )
+
+    def test_rejects_unknown_synthetic_failure_reason(self) -> None:
+        with pytest.raises(ValueError, match="synthetic_failure_reason"):
+            ChatTurn(
+                role=ChatRole.ASSISTANT,
+                content="x",
+                seq=1,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+                assistant_message_kind="synthetic_failure",
+                synthetic_failure_reason="bogus",  # type: ignore[arg-type]
+            )
+
+    def test_rejects_reason_without_synthetic_failure_kind(self) -> None:
+        with pytest.raises(ValueError, match="synthetic_failure_reason is set"):
+            ChatTurn(
+                role=ChatRole.ASSISTANT,
+                content="x",
+                seq=1,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+                assistant_message_kind="assistant",
+                synthetic_failure_reason="quality_guard",  # type: ignore[arg-type]
+            )
+
+    def test_rejects_kind_on_user_turn(self) -> None:
+        with pytest.raises(ValueError, match="not applicable to a USER turn"):
+            ChatTurn(
+                role=ChatRole.USER,
+                content="x",
+                seq=0,
+                step=GuidedStep.STEP_1_SOURCE,
+                ts_iso="2026-05-13T12:00:00+00:00",
+                assistant_message_kind="assistant",
+            )
+
 
 class TestGuidedSession:
     def test_initial_session_at_step_1(self) -> None:
@@ -458,6 +541,112 @@ class TestGuidedSession:
         with pytest.raises(InvariantError, match=match):
             GuidedSession.from_dict(d)
 
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("assistant_message_kind", 1),
+            ("synthetic_failure_reason", 1),
+        ],
+    )
+    def test_guided_session_from_dict_rejects_malformed_chat_history_kind_type(
+        self,
+        field: str,
+        bad_value: object,
+    ) -> None:
+        """assistant_message_kind/synthetic_failure_reason: str or None, never another type."""
+        d = GuidedSession.initial().to_dict()
+        chat_entry = {
+            "role": ChatRole.ASSISTANT.value,
+            "content": "Here is some advice.",
+            "seq": 0,
+            "step": GuidedStep.STEP_1_SOURCE.value,
+            "ts_iso": "2026-05-13T12:00:00+00:00",
+            field: bad_value,
+        }
+        d["chat_history"] = [chat_entry]
+
+        with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
+            GuidedSession.from_dict(d)
+
+    def test_guided_session_from_dict_rejects_unknown_chat_history_kind_value(self) -> None:
+        """A closed-set violation on the persisted value still crashes loudly
+        (ChatTurn.__post_init__'s ValueError, wrapped as InvariantError by the
+        same broad except every other malformed chat_history case hits)."""
+        d = GuidedSession.initial().to_dict()
+        chat_entry = {
+            "role": ChatRole.ASSISTANT.value,
+            "content": "Here is some advice.",
+            "seq": 0,
+            "step": GuidedStep.STEP_1_SOURCE.value,
+            "ts_iso": "2026-05-13T12:00:00+00:00",
+            "assistant_message_kind": "bogus",
+        }
+        d["chat_history"] = [chat_entry]
+
+        with pytest.raises(InvariantError, match=r"GuidedSession\.from_dict"):
+            GuidedSession.from_dict(d)
+
+    def test_guided_session_roundtrip_chat_history_with_synthetic_failure_kind(self) -> None:
+        """A persisted synthetic-failure turn survives to_dict/from_dict intact.
+
+        fp-review C-2 persisted-history closure: the discriminator must not be
+        lost across the persist/restore cycle (the whole point of adding it).
+        """
+        user_turn = ChatTurn(
+            role=ChatRole.USER,
+            content="what should I do?",
+            seq=0,
+            step=GuidedStep.STEP_1_SOURCE,
+            ts_iso="2026-05-13T12:00:00+00:00",
+        )
+        assistant_turn = ChatTurn(
+            role=ChatRole.ASSISTANT,
+            content="That reply didn't pass a quality check, so it wasn't shown.",
+            seq=1,
+            step=GuidedStep.STEP_1_SOURCE,
+            ts_iso="2026-05-13T12:00:01+00:00",
+            assistant_message_kind="synthetic_failure",
+            synthetic_failure_reason="quality_guard",
+        )
+        sess = dataclasses.replace(
+            GuidedSession.initial(),
+            chat_history=(user_turn, assistant_turn),
+            chat_turn_seq=2,
+        )
+        d = sess.to_dict()
+        assert d["chat_history"][0]["assistant_message_kind"] is None
+        assert d["chat_history"][1]["assistant_message_kind"] == "synthetic_failure"
+        assert d["chat_history"][1]["synthetic_failure_reason"] == "quality_guard"
+
+        restored = GuidedSession.from_dict(d)
+        assert restored == sess
+        assert restored.chat_history[0].assistant_message_kind is None
+        assert restored.chat_history[1].assistant_message_kind == "synthetic_failure"
+        assert restored.chat_history[1].synthetic_failure_reason == "quality_guard"
+
+    def test_guided_session_from_dict_chat_history_legacy_entry_without_kind_fields(self) -> None:
+        """A turn persisted BEFORE this field existed has no key at all.
+
+        Requirement: absence stays absence on the wire — None, never a
+        fabricated default — and from_dict must not crash on the missing keys
+        (unlike role/content/seq/step/ts_iso, these two are genuinely optional).
+        """
+        d = GuidedSession.initial().to_dict()
+        legacy_entry = {
+            "role": ChatRole.ASSISTANT.value,
+            "content": "a pre-migration reply",
+            "seq": 0,
+            "step": GuidedStep.STEP_1_SOURCE.value,
+            "ts_iso": "2026-05-13T12:00:00+00:00",
+            # No "assistant_message_kind" / "synthetic_failure_reason" keys.
+        }
+        d["chat_history"] = [legacy_entry]
+
+        restored = GuidedSession.from_dict(d)
+        assert len(restored.chat_history) == 1
+        assert restored.chat_history[0].assistant_message_kind is None
+        assert restored.chat_history[0].synthetic_failure_reason is None
+
 
 class TestGuidedSessionProfileFields:
     def test_initial_defaults_to_empty_profile(self) -> None:
@@ -587,11 +776,20 @@ def _wire_response(control: ControlSignal | None = None) -> TurnResponse:
 
 
 class TestStepAdvance:
-    def test_initial_session_advances_after_source_confirmed(self) -> None:
-        """INSPECT_AND_CONFIRM with step_1_source_intent set advances to STEP_2_SINK.
+    def test_inspect_and_confirm_is_intra_step_no_advance(self) -> None:
+        """_advance_step_1 is a pure self-loop for INSPECT_AND_CONFIRM — it never
+        advances step or sets step_1_result.
 
-        The new wire contract is narrow: edited_values = {"columns": list}.
-        Plugin, options, and sample_rows are recovered from step_1_source_intent.
+        elspeth-948eb9c0b8 C-3(b) mirror fix (same shape as the Step 2 fix):
+        resolving step_1_source_intent + edited_values["columns"] into a
+        SourceResolved, and the handle_step_1_source commit, both moved to the
+        dispatcher (_dispatch_guided_respond's STEP_1_SOURCE intra-step
+        INSPECT_AND_CONFIRM branch in sessions/routes/_helpers.py) so that
+        guided.step / step_1_result are only ever set once the commit is known
+        to have succeeded — mirroring _advance_step_2/_advance_step_3/_advance_step_4.
+        Coverage for the resolve/validate/commit behaviour itself lives in
+        tests/integration/web/composer/guided/test_respond.py
+        (TestStep1InspectAndConfirmAccept).
         """
         intent = SourceIntent(
             plugin="csv",
@@ -608,66 +806,13 @@ class TestStepAdvance:
             },
         )
         new_sess, next_turn, terminal, directives = step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
-        assert new_sess.step is GuidedStep.STEP_2_SINK
-        assert new_sess.step_1_result is not None
-        assert new_sess.step_1_result.plugin == "csv"
-        assert new_sess.step_1_result.observed_columns == ("id", "name", "score")
-        assert new_sess.step_1_source_intent is None  # consumed; cleared atomically
+        assert new_sess is session  # pure: no state change
+        assert new_sess.step is GuidedStep.STEP_1_SOURCE
+        assert new_sess.step_1_result is None
+        assert new_sess.step_1_source_intent is intent  # untouched — not consumed here
         assert terminal is None
         assert next_turn is None
-        assert any(d.tool_name == "guided_step_advanced" for d in directives)
-
-    def test_advance_step_1_raises_when_intent_missing(self) -> None:
-        """INSPECT_AND_CONFIRM without step_1_source_intent raises InvariantError.
-
-        The intent must be set by the emit site before the turn is sent.
-        Arriving at INSPECT_AND_CONFIRM with intent=None is a state-machine
-        invariant violation (server bug, not client fault).
-        """
-        session = GuidedSession.initial()
-        # Confirm intent is None (initial state — no emit site set it).
-        assert session.step_1_source_intent is None
-        response = _make_response(edited_values={"columns": ["id", "name"]})
-        with pytest.raises(InvariantError, match="step_1_source_intent is None"):
-            step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
-
-    def test_advance_step_1_columns_are_coerced_to_str(self) -> None:
-        """Numeric column values in edited_values["columns"] are coerced to str.
-
-        Tier-3 coercion at the HTTP boundary: ``str(c)`` applied to each element.
-        """
-        intent = SourceIntent(
-            plugin="csv",
-            options={"path": "/data/input.csv"},
-            observed_columns=("col_a",),
-            sample_rows=(),
-        )
-        from dataclasses import replace
-
-        session = replace(GuidedSession.initial(), step_1_source_intent=intent)
-        response = _make_response(edited_values={"columns": [42, "name", True]})
-        new_sess, _, _, _ = step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
-        assert new_sess.step_1_result is not None
-        assert new_sess.step_1_result.observed_columns == ("42", "name", "True")
-
-    def test_inspect_and_confirm_without_edited_values_raises(self) -> None:
-        """edited_values=None on an INSPECT_AND_CONFIRM response must raise ValueError.
-
-        step_1_source_intent must be set so the intent-guard passes; the
-        edited_values-None guard is the second check.
-        """
-        intent = SourceIntent(
-            plugin="csv",
-            options={"path": "/data/input.csv"},
-            observed_columns=("id",),
-            sample_rows=(),
-        )
-        from dataclasses import replace
-
-        session = replace(GuidedSession.initial(), step_1_source_intent=intent)
-        response = _make_response(edited_values=None)
-        with pytest.raises(ValueError, match="inspect_and_confirm"):
-            step_advance(session, response, current_turn_type=TurnType.INSPECT_AND_CONFIRM)
+        assert directives == []
 
     def test_exit_to_freeform_terminates_with_user_pressed_exit(self) -> None:
         """control_signal='exit_to_freeform' produces USER_PRESSED_EXIT terminal."""
@@ -698,9 +843,20 @@ class TestStepAdvance:
     # Task 2.2 tests: Step 2 → Step 2.5 branch
     # ---------------------------------------------------------------------------
 
-    def test_step_2_advances_after_required_fields_declared(self) -> None:
-        """_advance_step_2 reads chosen + custom_inputs from response and plugin + options
-        from GuidedSession.step_2_sink_intent to construct SinkOutputResolved."""
+    def test_step_2_multi_select_is_intra_step_no_advance(self) -> None:
+        """_advance_step_2 is a pure self-loop for MULTI_SELECT_WITH_CUSTOM — it
+        never advances step or sets step_2_result.
+
+        elspeth-948eb9c0b8 C-3(b): resolving chosen + custom_inputs +
+        step_2_sink_intent into a SinkOutputResolved, the fail-closed
+        passthrough validation, and the handle_step_2_sink commit all moved to
+        the dispatcher (_dispatch_guided_respond's STEP_2_SINK intra-step
+        MULTI_SELECT_WITH_CUSTOM branch in sessions/routes/_helpers.py) so
+        that guided.step / step_2_result are only ever set once the commit is
+        known to have succeeded — mirroring _advance_step_3 / _advance_step_4.
+        Coverage for the resolve/validate/commit behaviour itself lives in
+        tests/integration/web/composer/guided/test_respond.py.
+        """
         intent = SinkIntent(plugin="json", options={"path": "out.jsonl"})
         sess = GuidedSession(
             step=GuidedStep.STEP_2_SINK,
@@ -725,51 +881,18 @@ class TestStepAdvance:
             "control_signal": None,
         }
 
-        new_sess, _next, terminal, _events = step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
+        new_sess, next_turn, terminal, directives = step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
 
-        assert new_sess.step is GuidedStep.STEP_3_TRANSFORMS
-        assert new_sess.step_2_result is not None
-        assert len(new_sess.step_2_result.outputs) == 1
-        output = new_sess.step_2_result.outputs[0]
-        assert output.plugin == "json"
-        assert output.required_fields == ("a",)
-        assert output.schema_mode == "observed"
-        # step_2_sink_intent must be cleared after consumption
-        assert new_sess.step_2_sink_intent is None
+        assert new_sess is sess  # pure: no state change
+        assert new_sess.step is GuidedStep.STEP_2_SINK
+        assert new_sess.step_2_result is None
+        assert new_sess.step_2_sink_intent is intent  # untouched — not consumed here
+        assert next_turn is None
         assert terminal is None
+        assert directives == []
 
-    def test_step_2_let_source_decide_sets_observed_mode(self) -> None:
-        """schema_mode is always 'observed' — the backend sets it, not the frontend."""
-        intent = SinkIntent(plugin="json", options={"path": "out.jsonl"})
-        sess = GuidedSession(
-            step=GuidedStep.STEP_2_SINK,
-            history=(),
-            step_1_result=SourceResolved(
-                plugin="csv",
-                options={},
-                observed_columns=("a", "b"),
-                sample_rows=({},),
-            ),
-            step_2_result=None,
-            step_3_proposal=None,
-            terminal=None,
-            step_2_sink_intent=intent,
-        )
-        response: TurnResponse = {
-            "chosen": [],
-            "edited_values": None,
-            "custom_inputs": [],
-            "accepted_step_index": None,
-            "edit_step_index": None,
-            "control_signal": None,
-        }
-        new_sess, _next, _terminal, _events = step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
-        assert new_sess.step_2_result is not None
-        assert new_sess.step_2_result.outputs[0].schema_mode == "observed"
-
-    def test_step_2_without_sink_intent_raises(self) -> None:
-        """MULTI_SELECT_WITH_CUSTOM with step_2_sink_intent=None is a state-machine
-        invariant violation — raises InvariantError immediately (server bug)."""
+    def test_step_2_single_select_and_schema_form_are_also_intra_step(self) -> None:
+        """SINGLE_SELECT and SCHEMA_FORM at STEP_2_SINK are likewise pure self-loops."""
         sess = GuidedSession(
             step=GuidedStep.STEP_2_SINK,
             history=(),
@@ -782,18 +905,14 @@ class TestStepAdvance:
             step_2_result=None,
             step_3_proposal=None,
             terminal=None,
-            step_2_sink_intent=None,  # missing — SCHEMA_FORM dispatcher didn't run
         )
-        response: TurnResponse = {
-            "chosen": ["a"],
-            "edited_values": None,
-            "custom_inputs": [],
-            "accepted_step_index": None,
-            "edit_step_index": None,
-            "control_signal": None,
-        }
-        with pytest.raises(InvariantError, match="step_2_sink_intent is None"):
-            step_advance(sess, response, current_turn_type=TurnType.MULTI_SELECT_WITH_CUSTOM)
+        for turn_type in (TurnType.SINGLE_SELECT, TurnType.SCHEMA_FORM):
+            response = _make_response(chosen=["json"])
+            new_sess, next_turn, terminal, directives = step_advance(sess, response, current_turn_type=turn_type)
+            assert new_sess is sess
+            assert next_turn is None
+            assert terminal is None
+            assert directives == []
 
     # ---------------------------------------------------------------------------
     # Task 2.5 tests: Step 3 accept/edit/reject + terminal-failure paths

@@ -105,7 +105,7 @@ class TestExportFailurePartialRunSemantics:
         with (
             patch.object(RunLifecycleRepository, "set_export_status", new=record_export_status),
             patch(
-                "elspeth.engine.orchestrator.core.export_landscape",
+                "elspeth.engine.orchestrator.run_lifecycle.export_landscape",
                 side_effect=RuntimeError("export sink failed"),
             ),
             pytest.raises(RuntimeError, match="export sink failed"),
@@ -196,7 +196,7 @@ class TestExportFailurePartialRunSemantics:
 
         with (
             patch.object(RunLifecycleRepository, "set_export_status", new=record_export_status),
-            patch("elspeth.engine.orchestrator.core.export_landscape") as mock_export,
+            patch("elspeth.engine.orchestrator.run_lifecycle.export_landscape") as mock_export,
             pytest.raises(RuntimeError, match="source load failure"),
         ):
             orchestrator.run(

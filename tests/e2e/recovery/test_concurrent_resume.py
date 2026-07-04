@@ -976,8 +976,8 @@ class TestTwoResumesSameRunId:
         # stored in the runs table (the real hash from the real run).
         fake_settings = types.SimpleNamespace()
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_config_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_config_hash),
         ):
             orch = Orchestrator(crashed.db, clock=crashed.clock)
             follower_id = orch.join_run(

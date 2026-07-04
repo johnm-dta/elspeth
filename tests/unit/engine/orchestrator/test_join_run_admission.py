@@ -56,8 +56,8 @@ AFTER_EXPIRY = NOW + timedelta(seconds=200)
 _SENTINEL_HASH = "sentinel-config-hash-abc123"
 
 # Patches for resolve_config+stable_hash so joiner_config_hash == _SENTINEL_HASH.
-_PATCH_RESOLVE = patch("elspeth.engine.orchestrator.core.resolve_config", return_value={})
-_PATCH_HASH_SENTINEL = patch("elspeth.engine.orchestrator.core.stable_hash", return_value=_SENTINEL_HASH)
+_PATCH_RESOLVE = patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={})
+_PATCH_HASH_SENTINEL = patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=_SENTINEL_HASH)
 
 
 # ---------------------------------------------------------------------------
@@ -268,8 +268,8 @@ class TestJoinAdmissionRefusals:
 
         fake_settings = types.SimpleNamespace()
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value="different-hash-xyz"),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value="different-hash-xyz"),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             orch = _orchestrator(db)
@@ -355,7 +355,7 @@ class TestJoinAdmissionRefusals:
             return original_access(path, mode)  # type: ignore[arg-type]
 
         fake_settings = types.SimpleNamespace()
-        with patch("elspeth.engine.orchestrator.core.os.access", side_effect=fake_access):
+        with patch("elspeth.engine.orchestrator.join_admission.os.access", side_effect=fake_access):
             orch = _orchestrator(db)
             with pytest.raises(JoinRefusedError) as exc_info:
                 orch.join_run(run_id=RUN_ID, settings=fake_settings, now=NOW)
@@ -382,7 +382,7 @@ class TestJoinAdmissionRefusals:
             return original_access(path, mode)  # type: ignore[arg-type]
 
         fake_settings = types.SimpleNamespace()
-        with patch("elspeth.engine.orchestrator.core.os.access", side_effect=fake_access):
+        with patch("elspeth.engine.orchestrator.join_admission.os.access", side_effect=fake_access):
             orch = _orchestrator(db)
             with pytest.raises(JoinRefusedError) as exc_info:
                 orch.join_run(run_id=RUN_ID, settings=fake_settings, now=NOW)
@@ -409,8 +409,8 @@ class TestJoinAdmissionAtomicity:
 
         fake_settings = types.SimpleNamespace()
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value="wrong-hash"),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value="wrong-hash"),
             pytest.raises(JoinRefusedError),
         ):
             orch = _orchestrator(db)

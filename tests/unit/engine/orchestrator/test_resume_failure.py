@@ -991,7 +991,7 @@ class TestResumeFinalizesAsFailed:
         with (
             patch.object(orch, "_register_graph_nodes_and_edges", return_value=artifacts),
             patch.object(orch._run_core, "initialize_run_context", return_value=run_ctx),
-            patch("elspeth.engine.orchestrator.core.run_transform_runtime_preflights"),
+            patch("elspeth.engine.orchestrator.leader_drain.run_transform_runtime_preflights"),
             patch.object(
                 orch._source_driver,
                 "run_main_processing_loop",

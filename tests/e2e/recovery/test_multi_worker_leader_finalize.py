@@ -8,7 +8,7 @@ leader's ``has_peer_active_leases()`` / ``has_scheduled_work()`` observe a real
 multi-worker image at finalize time.
 
 To keep the bounded wait fast and deterministic, the loop's ``time.monotonic``
-and ``time.sleep`` are patched in ``elspeth.engine.orchestrator.core``: sleep is
+and ``time.sleep`` are patched in ``elspeth.engine.orchestrator.leader_drain``: sleep is
 a no-op and monotonic returns a scripted, advancing clock so the lease-aware
 deadline is reached in a handful of iterations without any real wall-clock wait.
 
@@ -157,7 +157,7 @@ def _build(rows: list[dict[str, Any]], seed_cb: Any) -> tuple[PipelineConfig, Ex
 class _FastMonotonic:
     """Scripted monotonic clock: every call advances by ``step`` seconds.
 
-    Patched over ``core.time.monotonic`` so the 3x liveness deadline is crossed
+    Patched over ``leader_drain.time.monotonic`` so the 3x liveness deadline is crossed
     after a few iterations — no real wall-clock wait. ``step`` defaults to a
     fraction of the liveness window so a handful of iterations exhausts the
     240s budget.
@@ -370,8 +370,8 @@ def test_wedged_alive_peer_bounded_wait_times_out_then_raises(tmp_path: Path) ->
 
     with (
         structlog.testing.capture_logs() as captured,
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         pytest.raises(OrchestrationInvariantError) as exc_info,
     ):
         orch.run(config, graph=graph, payload_store=payload_store)
@@ -430,8 +430,8 @@ def test_deposed_leader_during_wait_breaks_out_via_latch(tmp_path: Path) -> None
             raise RunWorkerEvictedError(worker_id=self._token.worker_id, run_id=self._token.run_id)
 
     with (
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         patch.object(RunHeartbeatThread, "check_and_raise", _latch),
         pytest.raises(RunWorkerEvictedError),
     ):
@@ -488,8 +488,8 @@ def test_dead_peer_expired_lease_reaped_to_ready_in_loop(tmp_path: Path) -> None
     config, graph, _sink, _source = _build([{"id": 1, "value": 10}], _seed)
 
     with (
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         pytest.raises(OrchestrationInvariantError),
     ):
         orch.run(config, graph=graph, payload_store=payload_store)

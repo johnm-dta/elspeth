@@ -416,6 +416,23 @@ class RouteValidationError(Exception):
     """
 
 
+class _RunFailedWithPartialResultError(Exception):
+    """Internal wrapper used to move partial counters to outer failure handlers.
+
+    Raised by the leader run-phase sequencing (``leader_drain.py``) and the
+    resume path, caught and translated by the run-lifecycle failure ceremony
+    (``run_lifecycle.py``). Lives here — the orchestrator package's leaf
+    module — so both sides can import it without a cycle; ``core.py``
+    re-exports it for the legacy ``…orchestrator.core`` import path.
+    """
+
+    def __init__(self, original_error: Exception, partial_result: RunResult) -> None:
+        super().__init__(str(original_error))
+        self.original_error = original_error
+        self.partial_result = partial_result
+        self.original_traceback = original_error.__traceback__
+
+
 @dataclass(frozen=True, slots=True)
 class ValueSourceFinding:
     """Structured per-field violation report from the value-source walker.

@@ -114,8 +114,8 @@ def _join_follower(crashed: Any, leader_token: CoordinationToken) -> str:
     """Admit a follower via join_run, mocking stable_hash to the real DB hash."""
     db_hash = _get_db_config_hash(crashed)
     with (
-        patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-        patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+        patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+        patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
     ):
         orch = _orchestrator(crashed)
         return orch.join_run(
@@ -195,8 +195,8 @@ class TestJoinRunAdmissionRefusals:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -219,8 +219,8 @@ class TestJoinRunAdmissionRefusals:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -246,8 +246,8 @@ class TestJoinRunAdmissionRefusals:
 
         wrong_hash = "wrong-hash-totally-different-abc999"
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=wrong_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=wrong_hash),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -280,8 +280,8 @@ class TestJoinRunAdmissionRefusals:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(
@@ -320,9 +320,9 @@ class TestJoinRunAdmissionRefusals:
             return original_access(path, mode, **kwargs)
 
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
-            patch("elspeth.engine.orchestrator.core.os.access", side_effect=_deny_write),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.os.access", side_effect=_deny_write),
             pytest.raises(JoinRefusedError) as exc_info,
         ):
             _orchestrator(crashed).join_run(

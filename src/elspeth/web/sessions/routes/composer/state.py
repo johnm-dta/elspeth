@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -448,6 +449,53 @@ async def import_state_yaml(
         return _state_response(state_record)
 
 
+def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
+    """Reconstitute the ``blob_ref`` stripped from a guided blob-backed source's
+    committed options, using the GuidedSession snapshot's ``step_1_result`` as
+    the authoritative signal (elspeth-b5ee205720).
+
+    The manual set_source commit strips ``blob_ref`` from guided sources (it
+    cannot prove ``path == storage_path``); it survives only in the persisted
+    snapshot. Both export egress channels — the public-YAML storage-path omission
+    (``_strip_web_metadata(..., omit_blob_bound_source_paths=True)``) and the
+    ``source_blob_ids`` sidecar — key off ``source.options["blob_ref"]``, so
+    without this a guided blob source leaks its absolute storage path AND emits no
+    sidecar (breaking the export→re-import round-trip). Reattaching here lets the
+    existing ``blob_ref``-keyed export machinery treat guided sources exactly like
+    freeform blob-bound ones. Mirrors the snapshot cross-reference in
+    ``redact_guided_snapshot_storage_paths``; never mutates ``state``.
+    """
+    guided = state.guided_session
+    if guided is None or guided.step_1_result is None:
+        return state
+    snapshot_options = guided.step_1_result.options
+    blob_ref = snapshot_options.get("blob_ref")
+    # No blob_ref on the snapshot ⇒ operator-typed source; leave every path alone.
+    if not blob_ref:
+        return state
+    blob_backed_paths: set[str] = set()
+    for key in SOURCE_LOCAL_PATH_OPTION_KEYS:
+        value = snapshot_options.get(key)
+        if isinstance(value, str):
+            blob_backed_paths.add(value)
+    if not blob_backed_paths:
+        return state
+
+    reattached: dict[str, SourceSpec] = {}
+    changed = False
+    for source_name, source in state.sources.items():
+        options = source.options
+        if "blob_ref" in options or not any(options.get(key) in blob_backed_paths for key in SOURCE_LOCAL_PATH_OPTION_KEYS):
+            reattached[source_name] = source
+            continue
+        merged = dict(options)
+        merged["blob_ref"] = str(blob_ref)
+        reattached[source_name] = replace(source, options=merged)
+        changed = True
+
+    return replace(state, sources=reattached) if changed else state
+
+
 @router.get("/{session_id}/state/yaml")
 async def get_state_yaml(
     session_id: UUID,
@@ -533,7 +581,15 @@ async def get_state_yaml(
         # test_get_state_yaml_does_not_echo_preflight_error_messages.
         detail = "Current composition state failed runtime preflight. Fix validation errors before exporting YAML."
         raise HTTPException(status_code=409, detail=detail)
-    yaml_str = generate_public_yaml(state)
+    # elspeth-b5ee205720: reconstitute blob_ref for guided blob-backed sources
+    # (stripped from committed options; retained only in the GuidedSession
+    # snapshot) so BOTH export egress channels below — the public-YAML storage-path
+    # omission and the source_blob_ids sidecar — treat them as blob-bound. Kept
+    # AFTER preflight: blob_ref is extra=forbid for plugin configs and must not
+    # reach plugin instantiation. Preflight ran on the raw `state`; export uses
+    # the reattached copy.
+    export_state = _reattach_guided_blob_refs(state)
+    yaml_str = generate_public_yaml(export_state)
 
     # Phase 6A B3 — sessions-DB audit event for YAML export.
     #
@@ -575,7 +631,7 @@ async def get_state_yaml(
 
     response: StateYamlResponse = {"yaml": yaml_str}
     source_blob_ids = {
-        source_name: str(source.options["blob_ref"]) for source_name, source in state.sources.items() if "blob_ref" in source.options
+        source_name: str(source.options["blob_ref"]) for source_name, source in export_state.sources.items() if "blob_ref" in source.options
     }
     if source_blob_ids:
         response["source_blob_ids"] = source_blob_ids

@@ -265,7 +265,7 @@ class TransformExecutor:
         transform: TransformProtocol,
         token: TokenInfo,
         input_dict: dict[str, Any],
-        ctx: PluginContext,
+        run_id: str,
         node_id: str,
     ) -> tuple[frozenset[str], frozenset[str]]:
         """Run pre-invocation checks before the transform executes.
@@ -326,7 +326,7 @@ class TransformExecutor:
                 inputs=PreEmissionInputs(
                     plugin=transform,
                     node_id=node_id,
-                    run_id=ctx.run_id,
+                    run_id=run_id,
                     row_id=token.row_id,
                     token_id=token.token_id,
                     input_row=token.row_data,
@@ -338,7 +338,7 @@ class TransformExecutor:
             self._record_terminal_contract_failure(
                 transform=transform,
                 token=token,
-                run_id=ctx.run_id,
+                run_id=run_id,
                 violation=violation,
             )
             raise
@@ -419,7 +419,7 @@ class TransformExecutor:
         result: TransformResult,
         transform: TransformProtocol,
         token: TokenInfo,
-        ctx: PluginContext,
+        run_id: str,
         node_id: str,
         static_contract: frozenset[str],
         effective_input_fields: frozenset[str],
@@ -447,7 +447,7 @@ class TransformExecutor:
                 plugin=transform,
                 plugin_name=transform.name,
                 node_id=node_id,
-                run_id=ctx.run_id,
+                run_id=run_id,
                 row_id=token.row_id,
                 token_id=token.token_id,
                 emitted_count=len(emitted_rows),
@@ -457,7 +457,7 @@ class TransformExecutor:
                 inputs=PostEmissionInputs(
                     plugin=transform,
                     node_id=node_id,
-                    run_id=ctx.run_id,
+                    run_id=run_id,
                     row_id=token.row_id,
                     token_id=token.token_id,
                     input_row=token.row_data,
@@ -475,7 +475,7 @@ class TransformExecutor:
             self._record_terminal_contract_failure(
                 transform=transform,
                 token=token,
-                run_id=ctx.run_id,
+                run_id=run_id,
                 violation=violation,
             )
             raise
@@ -526,7 +526,7 @@ class TransformExecutor:
         result: TransformResult,
         transform: TransformProtocol,
         token: TokenInfo,
-        ctx: PluginContext,
+        run_id: str,
         node_id: str,
     ) -> dict[str, Any] | list[dict[str, Any]]:
         """Extract output data + record contract evolution (success-audit phase, part 2).
@@ -573,7 +573,7 @@ class TransformExecutor:
             if self._data_flow is None:
                 raise OrchestrationInvariantError("TransformExecutor.data_flow is None but contract evolution requires DataFlowRepository")
             self._data_flow.update_node_output_contract(
-                run_id=ctx.run_id,
+                run_id=run_id,
                 node_id=node_id,
                 contract=output_contract,
             )
@@ -675,7 +675,7 @@ class TransformExecutor:
                 transform=transform,
                 token=token,
                 input_dict=input_dict,
-                ctx=ctx,
+                run_id=ctx.run_id,
                 node_id=node_id,
             )
 
@@ -760,7 +760,7 @@ class TransformExecutor:
                     result=result,
                     transform=transform,
                     token=token,
-                    ctx=ctx,
+                    run_id=ctx.run_id,
                     node_id=node_id,
                     static_contract=static_contract,
                     effective_input_fields=effective_input_fields,
@@ -787,7 +787,7 @@ class TransformExecutor:
                     result=result,
                     transform=transform,
                     token=token,
-                    ctx=ctx,
+                    run_id=ctx.run_id,
                     node_id=node_id,
                 )
 

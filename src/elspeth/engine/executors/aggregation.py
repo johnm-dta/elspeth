@@ -1,8 +1,7 @@
 """AggregationExecutor - manages batch lifecycle with audit recording."""
 
 import time
-from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -35,9 +34,9 @@ from elspeth.contracts.types import NodeID, StepResolver
 from elspeth.core.canonical import stable_hash
 from elspeth.core.config import AggregationSettings
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.scheduler_repository import token_from_journal_item
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.executors.state_guard import NodeStateGuard
+from elspeth.engine.journal_restore import AggregationJournalRestorer
 from elspeth.engine.spans import SpanFactory
 from elspeth.engine.triggers import TriggerEvaluator
 
@@ -703,6 +702,12 @@ class AggregationExecutor:
         derives batch_id / member_order / counters / attempt offsets from
         audit tables.
 
+        Validation, journal-vs-batch_members reconciliation, token
+        rehydration, and the trigger-latch staleness decision live in
+        ``AggregationJournalRestorer`` (the restore/hydration boundary); this
+        method resolves the node and applies the returned frozen state to its
+        buffers and trigger evaluator.
+
         Args:
             node_id: Aggregation node being restored.
             items: BLOCKED journal rows for this node's barrier_key.
@@ -732,168 +737,52 @@ class AggregationExecutor:
         """
         node = self._get_node(node_id, "restore_from_journal")
 
-        tokens_by_id: dict[str, TokenInfo] = {}
-        oldest_blocked_at: datetime | None = None
-        for item in items:
-            if item.barrier_blocked_at is None:
-                # Every post-epoch-20 BLOCKED row is stamped by mark_blocked.
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} at aggregation node "
-                    f"{node_id!r} (run {self._run_id!r}, resume checkpoint "
-                    f"{resume_checkpoint_id!r}) has NULL barrier_blocked_at — journal "
-                    "corruption (every BLOCKED row is stamped at mark_blocked time)."
-                )
-            if item.token_id in tokens_by_id:
-                raise AuditIntegrityError(
-                    f"Duplicate BLOCKED journal rows for token {item.token_id!r} at "
-                    f"aggregation node {node_id!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {resume_checkpoint_id!r}) — journal corruption."
-                )
-            try:
-                attempt_offset = attempt_offsets[item.token_id]
-            except KeyError:
-                raise AuditIntegrityError(
-                    f"No entry in attempt_offsets for journal token {item.token_id!r} at "
-                    f"aggregation node {node_id!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {resume_checkpoint_id!r}) — audit-derived offsets must "
-                    "cover every BLOCKED journal row."
-                ) from None
-
-            tokens_by_id[item.token_id] = token_from_journal_item(
-                item,
-                attempt_offset=attempt_offset,
-                resume_checkpoint_id=resume_checkpoint_id,
-            )
-            if oldest_blocked_at is None or item.barrier_blocked_at < oldest_blocked_at:
-                oldest_blocked_at = item.barrier_blocked_at
-
-        self._reconcile_journal_batch_members(
+        restored = AggregationJournalRestorer(run_id=self._run_id).restore(
             node_id=node_id,
-            journal_token_ids=tokens_by_id.keys(),
+            items=items,
             member_order=member_order,
+            batch_id=batch_id,
+            accepted_count_total=accepted_count_total,
+            completed_flush_count=completed_flush_count,
+            scalars=scalars,
+            attempt_offsets=attempt_offsets,
+            resume_checkpoint_id=resume_checkpoint_id,
+            now=now,
         )
 
-        # batch_id/items must agree: buffered journal rows imply an in-progress
-        # batch; a batch_id with zero BLOCKED rows means batch membership
-        # advanced past the journal (or vice versa) — corruption either way.
-        if items and batch_id is None:
-            raise AuditIntegrityError(
-                f"Aggregation node {node_id!r} (run {self._run_id!r}, resume checkpoint "
-                f"{resume_checkpoint_id!r}) has {len(items)} BLOCKED journal rows but no "
-                "batch_id — buffered tokens always belong to an in-progress batch."
-            )
-        if not items and batch_id is not None:
-            raise AuditIntegrityError(
-                f"Aggregation node {node_id!r} (run {self._run_id!r}, resume checkpoint "
-                f"{resume_checkpoint_id!r}) has batch_id {batch_id!r} but no BLOCKED "
-                "journal rows — an in-progress batch must have blocked members."
-            )
+        # Apply the validated state — the restorer has already raised on any
+        # journal/audit disagreement (validate-before-mutate: a failed restore
+        # leaves this node's in-memory state intact).
+        node.tokens = list(restored.tokens)
+        node.buffers = [t.row_data.to_dict() for t in restored.tokens]
+        node.batch_id = restored.batch_id
+        node.member_count = len(restored.tokens)
+        node.accepted_count_total = restored.accepted_count_total
+        node.completed_flush_count = restored.completed_flush_count
 
-        # Counter sanity: the cumulative accept counter covers every currently
-        # buffered row, so accepted_count_total < len(items) (or any negative
-        # counter) is impossible audit state. Restoring it would silently emit
-        # row_start <= 0 in the next flush's pagination metadata.
-        if completed_flush_count < 0 or accepted_count_total < len(items):
-            raise AuditIntegrityError(
-                f"Aggregation node {node_id!r} (run {self._run_id!r}, resume checkpoint "
-                f"{resume_checkpoint_id!r}): audit-derived counters are impossible "
-                f"(accepted_count_total={accepted_count_total}, "
-                f"completed_flush_count={completed_flush_count}, buffered={len(items)}). "
-                "accepted_count_total must cover every buffered row and counters must "
-                "be non-negative."
-            )
-
-        ordered_tokens = [tokens_by_id[token_id] for token_id in member_order]
-
-        node.tokens = ordered_tokens
-        node.buffers = [t.row_data.to_dict() for t in ordered_tokens]
-        node.batch_id = batch_id
-        node.member_count = len(ordered_tokens)
-        node.accepted_count_total = accepted_count_total
-        node.completed_flush_count = completed_flush_count
-
-        # Trigger age derives from the absolute blocked-at stamp of the OLDEST
-        # buffered row (first accept of the in-progress batch), clamped at 0
-        # against clock skew.
-        if oldest_blocked_at is not None:
-            elapsed_age_seconds = max(0.0, (now - oldest_blocked_at).total_seconds())
+        latch = restored.trigger_latch
+        if latch is not None:
             node.trigger.restore_from_checkpoint(
-                batch_count=len(ordered_tokens),
-                elapsed_age_seconds=elapsed_age_seconds,
-                count_fire_offset=scalars.count_fire_offset,
-                condition_fire_offset=scalars.condition_fire_offset,
+                batch_count=latch.batch_count,
+                elapsed_age_seconds=latch.elapsed_age_seconds,
+                count_fire_offset=latch.count_fire_offset,
+                condition_fire_offset=latch.condition_fire_offset,
             )
         else:
-            # Counter-only node: no in-progress batch, and trigger latches are
-            # batch-scoped — so any non-None scalars are STALE (the checkpoint
-            # predates the journal: crash after a flush terminalized the
-            # BLOCKED rows but before the next checkpoint — a legitimate
-            # window under D3's staleness model, so rejecting would refuse
-            # valid resumes). Drop them (logged) and leave the trigger fully
-            # unlatched via reset(): calling restore_from_checkpoint here
-            # would plant a phantom first-accept anchor at restore time that
-            # survives into the NEXT genuine batch (record_accept min-rewinds
-            # first_accept_time but never clears it, so a phantom anchor
-            # lingers whenever the genuine arrivals come later) → wrong
-            # timeout age and, with latched offsets, a pre-fired
-            # count/condition latch.
-            elapsed_age_seconds = 0.0
-            if scalars.count_fire_offset is not None or scalars.condition_fire_offset is not None:
-                slog.info(
-                    "aggregation_journal_restore_dropped_stale_scalars",
-                    node_id=str(node_id),
-                    run_id=self._run_id,
-                    resume_checkpoint_id=resume_checkpoint_id,
-                    count_fire_offset=scalars.count_fire_offset,
-                    condition_fire_offset=scalars.condition_fire_offset,
-                )
+            # Counter-only node: the restorer produced no latch (stale
+            # checkpoint scalars are dropped-with-log there) — leave the
+            # trigger fully unlatched for the next genuine batch.
             node.trigger.reset()
 
         slog.info(
             "aggregation_journal_restored",
             node_id=str(node_id),
-            token_count=len(ordered_tokens),
-            batch_id=batch_id,
-            accepted_count_total=accepted_count_total,
-            completed_flush_count=completed_flush_count,
-            elapsed_age_seconds=elapsed_age_seconds,
+            token_count=len(restored.tokens),
+            batch_id=restored.batch_id,
+            accepted_count_total=restored.accepted_count_total,
+            completed_flush_count=restored.completed_flush_count,
+            elapsed_age_seconds=restored.elapsed_age_seconds,
         )
-
-    def _reconcile_journal_batch_members(
-        self,
-        *,
-        node_id: NodeID,
-        journal_token_ids: Iterable[str],
-        member_order: Sequence[str],
-    ) -> None:
-        """Ensure journal BLOCKED rows and persisted batch_members agree as SETS.
-
-        This is the F1 descendant of the old checkpoint-vs-batch_members
-        reconcile. It degenerates to set equality because ``member_order`` IS
-        the batch_members.ordinal ordering (derived by the caller) — comparing
-        ordered tuples would compare batch_members against itself, proving
-        nothing. The real cross-check left is membership: a token with a
-        BLOCKED journal row but no batch_members row (or vice versa) means the
-        journal and the audit trail disagree about the in-progress batch.
-        """
-        journal_set = set(journal_token_ids)
-        member_set = set(member_order)
-        if len(member_set) != len(member_order):
-            duplicated = sorted(token_id for token_id, count in Counter(member_order).items() if count > 1)
-            raise AuditIntegrityError(
-                f"Duplicate token ids in batch_members order for aggregation node "
-                f"{node_id!r} (run {self._run_id!r}): {duplicated!r} — audit trail corruption."
-            )
-        if journal_set != member_set:
-            missing_from_journal = sorted(member_set - journal_set)
-            missing_from_members = sorted(journal_set - member_set)
-            raise AuditIntegrityError(
-                f"Aggregation node {node_id!r} (run {self._run_id!r}): journal BLOCKED "
-                f"rows and persisted batch_members disagree about batch membership. "
-                f"In batch_members but not journal: {missing_from_journal!r}; "
-                f"in journal but not batch_members: {missing_from_members!r}. "
-                "Cannot safely resume this batch."
-            )
 
     def get_batch_id(self, node_id: NodeID) -> str | None:
         """Get current batch ID for an aggregation node.

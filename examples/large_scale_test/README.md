@@ -101,7 +101,6 @@ checkpoint:
   enabled: true
   frequency: every_n
   checkpoint_interval: 100
-  aggregation_boundaries: true
 ```
 
 That setting is the intended durability/performance balance for this high-cardinality

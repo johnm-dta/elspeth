@@ -16,22 +16,36 @@
 // beyond the two switch actions — and avoids importing ChatPanel's helpers back.
 // ============================================================================
 
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import { useSessionStore } from "@/stores/sessionStore";
 
 interface ModeSwitchButtonProps {
   target: "guided" | "freeform";
   hasWork: boolean;
+  /**
+   * C-4b (composer first-principles review 2026-07-04): set when the
+   * session's guided state is permanently terminal (exited_to_freeform with
+   * reason solver_exhausted or protocol_violation — NOT user_pressed_exit,
+   * which the backend's POST /guided/reenter still honours). Renders the
+   * button disabled with this plain-language explanation instead of the
+   * normal switch/confirm flow — clicking must never silently no-op (the
+   * old behaviour: the client re-fetched guided state, saw the same
+   * terminal, and stayed in freeform with zero feedback).
+   */
+  disabledReason?: string;
 }
 
 export function ModeSwitchButton({
   target,
   hasWork,
+  disabledReason,
 }: ModeSwitchButtonProps): JSX.Element {
   const [confirming, setConfirming] = useState(false);
   const enterGuided = useSessionStore((s) => s.enterGuided);
   const exitToFreeform = useSessionStore((s) => s.exitToFreeform);
+  const reactId = useId();
+  const disabledReasonId = `${reactId}-mode-switch-disabled-reason`;
 
   const label = target === "guided" ? "Switch to guided" : "Exit to freeform";
   const confirmLabel =
@@ -41,6 +55,24 @@ export function ModeSwitchButton({
 
   function doSwitch(): void {
     void (target === "guided" ? enterGuided() : exitToFreeform());
+  }
+
+  if (disabledReason !== undefined) {
+    return (
+      <div className="mode-switch-disabled">
+        <button
+          type="button"
+          className="mode-switch-btn"
+          disabled
+          aria-describedby={disabledReasonId}
+        >
+          {label}
+        </button>
+        <span id={disabledReasonId} className="mode-switch-disabled-reason">
+          {disabledReason}
+        </span>
+      </div>
+    );
   }
 
   if (confirming) {

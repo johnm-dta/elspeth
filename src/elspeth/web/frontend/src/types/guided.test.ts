@@ -5,7 +5,9 @@
 import { describe, expect, it } from "vitest";
 
 import type {
+  ChatTurn,
   ControlSignal,
+  GuidedChatResponse,
   GuidedRespondRequest,
   GuidedRespondResponse,
   GuidedSession,
@@ -48,18 +50,20 @@ describe("guided protocol types", () => {
     expect(all).toHaveLength(7);
   });
 
-  it("ControlSignal union has 3 values", () => {
+  it("ControlSignal union has 5 values (C-3: added back + passthrough, fixing pre-existing drift from protocol.py)", () => {
     const _exact: Equals<
       ControlSignal,
-      "exit_to_freeform" | "request_advisor" | "reject"
+      "exit_to_freeform" | "request_advisor" | "reject" | "back" | "passthrough"
     > = true;
     const all: ControlSignal[] = [
       "exit_to_freeform",
       "request_advisor",
       "reject",
+      "back",
+      "passthrough",
     ];
     expect(_exact).toBe(true);
-    expect(all).toHaveLength(3);
+    expect(all).toHaveLength(5);
   });
 
   it("GuidedStep union has exactly 5 values", () => {
@@ -155,6 +159,46 @@ describe("guided protocol types", () => {
     };
     // Runtime: just confirm the type guard compiles; value is irrelevant.
     expect(check).toBeTypeOf("function");
+  });
+
+  it("ChatTurn.assistant_message_kind is optional (C-2: legacy turns omit it)", () => {
+    const withKind: ChatTurn = {
+      role: "assistant",
+      content: "I'm unavailable right now; you can still use the wizard controls.",
+      seq: 1,
+      step: "step_1_source",
+      ts_iso: "t",
+      assistant_message_kind: "synthetic_failure",
+    };
+    const legacy: ChatTurn = {
+      role: "assistant",
+      content: "Source created as a 3-row CSV.",
+      seq: 0,
+      step: "step_1_source",
+      ts_iso: "t",
+      // no assistant_message_kind — compiles: the field is optional.
+    };
+    expect(withKind.assistant_message_kind).toBe("synthetic_failure");
+    expect(legacy.assistant_message_kind).toBeUndefined();
+  });
+
+  it("GuidedChatResponse.assistant_message_kind is optional and typed to the same two values", () => {
+    const response: GuidedChatResponse = {
+      assistant_message: "I'm unavailable right now; you can still use the wizard controls.",
+      assistant_message_kind: "synthetic_failure",
+      guided_session: {
+        step: "step_1_source",
+        history: [],
+        terminal: null,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      next_turn: null,
+      terminal: null,
+      composition_state: null,
+    };
+    expect(response.assistant_message_kind).toBe("synthetic_failure");
   });
 });
 

@@ -24,10 +24,22 @@ export type TurnType =
   | "recipe_offer"
   | "confirm_wiring";
 
+/**
+ * Mirrors protocol.py ControlSignal (source-of-truth enum). "back" and
+ * "passthrough" were missing here — pre-existing drift from the backend
+ * enum, not a deliberate narrowing — surfaced and fixed alongside the C-3
+ * passthrough wiring (composer first-principles review 2026-07-04, C-3).
+ * "back" has no frontend caller yet (no Back-nav widget exists — reframe
+ * epic elspeth-e7757e5c58 slices D/E/F remain open); it is typed here so
+ * the union tracks the backend's closed enum rather than only the signals
+ * some widget happens to send today.
+ */
 export type ControlSignal =
   | "exit_to_freeform"
   | "request_advisor"
-  | "reject";
+  | "reject"
+  | "back"
+  | "passthrough";
 
 export type GuidedStep =
   | "step_1_source"
@@ -68,6 +80,23 @@ export interface TerminalState {
  * entry in GuidedSession.chat_history.  Server-emitted; all values are
  * authoritative (Tier 1).  Ordering is driven by `seq`, not `ts_iso` —
  * two turns produced in the same request share a wall-clock second.
+ *
+ * `assistant_message_kind` (composer first-principles review 2026-07-04,
+ * C-2) discriminates a real LLM reply from a synthetic failure message
+ * (scaffold-guard rejection or provider unavailability) — before this
+ * field, both looked like an ordinary assistant turn and a synthetic
+ * failure could become the "Current decision" headline (guidedRationale.ts)
+ * or render with the normal "ELSPETH said:" bubble treatment
+ * (GuidedChatHistory.tsx). Only meaningful on `role: "assistant"` entries.
+ * The backend always emits this key (ChatTurnResponse declares it required
+ * with a `| null` domain — schemas.py), so on the wire the value is one of
+ * "assistant", "synthetic_failure", or null; the key is never absent. null
+ * is what a user turn, and any turn persisted before this field existed,
+ * carries. Treat null (and, defensively, an absent key on a client-built
+ * turn) as a normal assistant turn — this is documented legacy/user
+ * behaviour, not a fabricated default. Detect a real failure with
+ * `=== "synthetic_failure"`, never with an absence/`in` check (the wire
+ * never omits the key, so an absence check would never fire).
  */
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -75,6 +104,7 @@ export interface ChatTurn {
   seq: number;
   step: GuidedStep;
   ts_iso: string;
+  assistant_message_kind?: "assistant" | "synthetic_failure" | null;
 }
 
 /**
@@ -183,9 +213,20 @@ export interface GuidedChatRequest {
  * Response for POST /api/sessions/{id}/guided/chat (schemas.py — GuidedChatResponse).
  *
  * `assistant_message` is the LLM's advisory reply, or the synthetic "I'm
- * unavailable" message on transient LLM failure (Phase A does not yet
- * distinguish the two on the wire; slice 5's ComposerChatTurn audit shape
- * adds that discriminator).
+ * unavailable" message on transient LLM failure. `assistant_message_kind`
+ * (C-2) is the top-level discriminator for THIS response's reply —
+ * `"synthetic_failure"` covers both a scaffold-guard rejection and provider
+ * unavailability; the same value is mirrored onto the tail entry of
+ * `guided_session.chat_history` (ChatTurn.assistant_message_kind), which is
+ * what the UI actually renders from (GuidedChatHistory reads
+ * `guidedSession.chat_history`, not this envelope field directly).
+ *
+ * Typed optional rather than required: the backend field is landing in the
+ * same wave as this frontend change, and existing fixtures/tests construct
+ * `GuidedChatResponse` literals without it. Absent ⇒ treat as `"assistant"`
+ * — the same documented legacy convention as ChatTurn's field, not a
+ * fabricated default (a POST response with the discriminator omitted has
+ * no failure information to hide; the omission just predates the wave).
  *
  * Most chat is advisory and returns null for the turn/state fields. Step 1
  * source chat may resolve a complete inline source request; then these fields
@@ -193,6 +234,7 @@ export interface GuidedChatRequest {
  */
 export interface GuidedChatResponse {
   assistant_message: string;
+  assistant_message_kind?: "assistant" | "synthetic_failure";
   guided_session: GuidedSession;
   next_turn: TurnPayload | null;
   terminal: TerminalState | null;

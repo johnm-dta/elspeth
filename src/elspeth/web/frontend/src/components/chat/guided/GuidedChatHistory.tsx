@@ -41,6 +41,15 @@ import { GUIDED_STEP_LABELS } from "./stepLabels";
 interface Props {
   /** Server-authoritative chat history from GuidedSession.chat_history. */
   chatHistory: ChatTurn[];
+  /**
+   * C-2iii: Retry affordance for a synthetic-failure turn. Omit to render
+   * the error turn without a Retry button (e.g. a read-only replay
+   * surface). Disabled while a chat/respond is already in flight so a
+   * double-click can't race the resend — mirrors the "Explain this step"
+   * button's gating in ChatPanel.
+   */
+  onRetrySyntheticFailure?: (turn: ChatTurn) => void;
+  retryDisabled?: boolean;
 }
 
 /**
@@ -65,6 +74,8 @@ interface Props {
  */
 export function GuidedChatHistory({
   chatHistory,
+  onRetrySyntheticFailure,
+  retryDisabled = false,
 }: Props): React.ReactElement | null {
   if (chatHistory.length === 0) {
     return null;
@@ -99,6 +110,45 @@ export function GuidedChatHistory({
     }
 
     const isUser = turn.role === "user";
+    // C-2ii: a synthetic-failure assistant turn (scaffold-guard rejection or
+    // provider unavailability) renders as a distinct error turn, NOT an
+    // assistant bubble — it must never carry the "ELSPETH said:" attribution
+    // a real reply gets, and it must visually read as a system event, not
+    // authoritative output. Deliberately NOT role="alert": these turns are
+    // persisted history, so on every remount (session select, browser reload
+    // — now the default load path via guided restore, guided re-entry) an
+    // assertive alert would re-announce every past failure, interrupting the
+    // reader before they act. Live announcement of a genuinely new failure is
+    // handled by the parent transcript's aria-live="polite" log; the sr-only
+    // "Error:" prefix still conveys the kind on read. (fp-review a11y follow-up.)
+    if (turn.role === "assistant" && turn.assistant_message_kind === "synthetic_failure") {
+      rows.push(
+        <div
+          key={`turn-${turn.seq}`}
+          className="message-row message-row--assistant"
+          data-seq={turn.seq}
+        >
+          <div className="bubble bubble-error message-bubble-content">
+            <span className="sr-only">Error:</span>
+            {turn.content}
+            {onRetrySyntheticFailure && (
+              <div className="message-failed-row">
+                <button
+                  type="button"
+                  className="message-retry-btn"
+                  onClick={() => onRetrySyntheticFailure(turn)}
+                  disabled={retryDisabled}
+                >
+                  Retry
+                </button>
+              </div>
+            )}
+          </div>
+        </div>,
+      );
+      continue;
+    }
+
     rows.push(
       <div
         key={`turn-${turn.seq}`}

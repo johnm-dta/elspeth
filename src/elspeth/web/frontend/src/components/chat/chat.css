@@ -93,6 +93,22 @@
   font-size: var(--font-size-sm);
 }
 
+/* A guided synthetic-failure turn (C-2, composer first-principles review
+   2026-07-04): a scaffold-guard rejection or provider-unavailability reply
+   from POST /guided/chat, discriminated by ChatTurn.assistant_message_kind.
+   Left-aligned like .bubble-assistant (it IS a reply in the transcript
+   position), but styled with the error tokens instead of the assistant
+   tokens so it reads as a distinct, non-authoritative event — never
+   mistakeable for a real assistant reply. Same tokens as .chat-panel-error /
+   .ack-stack-error; no new colours. */
+.bubble-error {
+  align-self: flex-start;
+  background-color: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-left: 2px solid var(--color-error);
+  color: var(--color-text);
+}
+
 /* Action buttons on message bubbles — subtly visible, then emphasized on hover/focus */
 .bubble-copy-btn,
 .bubble-edit-btn {
@@ -616,6 +632,17 @@
   outline-offset: 2px;
 }
 
+.mode-switch-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.mode-switch-btn:disabled:hover {
+  background-color: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text-secondary);
+}
+
 /* Confirm primary (shown only when the current chat has work). */
 .mode-switch-btn--confirm {
   color: var(--color-text);
@@ -628,6 +655,24 @@
   flex-wrap: wrap;
   gap: var(--space-sm);
   align-items: center;
+}
+
+/* C-4b: terminal-guided "Switch to guided" — permanently un-reentrable
+   (solver_exhausted / protocol_violation, not the reversible user exit).
+   Disabled button + adjacent plain-language reason so the affordance never
+   reads as a silent no-op — same register as .chat-panel-error's inline
+   explanation, without borrowing its alert-red treatment (this is expected,
+   not a failure). */
+.mode-switch-disabled {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.mode-switch-disabled-reason {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
 }
 
 @media (prefers-reduced-motion: reduce) {

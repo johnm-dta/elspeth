@@ -28,8 +28,11 @@
 // to skip initial mount. Future remove-path widgets should copy this.
 //
 // Escape branch coverage pins the "let source decide" path: chosen=[] and
-// custom_inputs=[] leaves required fields source-decided while the backend
-// preserves observed schema mode from persisted sink intent.
+// custom_inputs=[] with control_signal="passthrough" (C-3a) leaves required
+// fields source-decided while the backend preserves observed schema mode
+// from persisted sink intent. The explicit signal is required — a bare
+// empty chosen/custom_inputs pair with no signal 400s server-side
+// (guided_step2_no_fields_selected).
 //
 // The GuidedRespondRequest shape is the unit under test; these tests will
 // catch any future refactor that silently drops a null field, swaps chosen
@@ -445,7 +448,7 @@ describe("MultiSelectWithCustomTurn — escape_label", () => {
     ).toBeInTheDocument();
   });
 
-  it("escape button submits empty required fields while preserving all null wire fields", async () => {
+  it("escape button submits empty required fields with control_signal=passthrough (C-3a)", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn();
     render(
@@ -456,11 +459,34 @@ describe("MultiSelectWithCustomTurn — escape_label", () => {
     );
     await user.click(screen.getByRole("button", { name: /let source decide/i }));
 
+    // control_signal="passthrough" is the explicit signal the backend
+    // requires before it accepts an empty required-fields set — a bare
+    // chosen=[]/custom_inputs=[] pair with control_signal=null 400s
+    // (guided_step2_no_fields_selected).
     expect(onSubmit).toHaveBeenCalledWith<GuidedRespondRequest[]>({
       ...nullResponse(),
       chosen: [],
       custom_inputs: [],
+      control_signal: "passthrough",
     });
+  });
+
+  it("escape button is enabled even with nothing selected — NOT gated by Continue's empty-state disable", () => {
+    // The live bug (C-3a): Continue was disabled for the empty state AND the
+    // backend 400'd the escape hatch's bare empty submit — the offered
+    // "let source decide" action could not succeed from either side. This
+    // pins that the escape button's own disabled state never depends on
+    // continueDisabled (only on the `disabled` prop, i.e. an in-flight
+    // request) — the wire-shape fix above closes the backend side.
+    render(
+      <MultiSelectWithCustomTurn
+        payload={PAYLOAD_WITH_ESCAPE_LABEL}
+        onSubmit={vi.fn()}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: /let source decide/i }),
+    ).toBeEnabled();
   });
 
   it("does NOT render an escape button when escape_label is null", () => {

@@ -13,6 +13,7 @@ import type {
 } from "@/types/api";
 import { isComposerRecoveryError } from "@/types/recovery";
 import type {
+  GetGuidedResponse,
   GuidedSession,
   TurnPayload,
   TerminalState,
@@ -164,6 +165,18 @@ function mergeCompositionProposals(
   return Array.from(byId.values());
 }
 
+// turn_not_emitted self-heal bookkeeping (C-3, composer first-principles
+// review 2026-07-04): counts consecutive turn_not_emitted rejections per
+// session so respondGuided's self-heal (refetch GET /guided, re-render the
+// current turn) cannot loop forever if the refetch doesn't actually resolve
+// the staleness. Deliberately module-scope, NOT store state — it is retry
+// bookkeeping the UI never reads, not reactive data; keeping it off `set`/
+// `get` keeps the public store surface unchanged. Reset on a successful
+// respond (see respondGuided's success branch) so a session that heals once
+// and later hits a genuinely new staleness gets a fresh budget.
+const turnNotEmittedSelfHealCounts = new Map<string, number>();
+const MAX_TURN_NOT_EMITTED_SELF_HEALS = 1;
+
 // Resetting guided-mode state landed in five places: initialState plus
 // the four navigation actions that switch session context (createSession,
 // archiveSession's active-session branch, selectSession, forkFromMessage).
@@ -180,6 +193,7 @@ function clearedGuidedState(): Pick<
   | "guidedTerminal"
   | "guidedChatPending"
   | "guidedResponsePending"
+  | "guidedSelfHealNotice"
 > {
   return {
     guidedSession: null,
@@ -187,7 +201,63 @@ function clearedGuidedState(): Pick<
     guidedTerminal: null,
     guidedChatPending: false,
     guidedResponsePending: false,
+    guidedSelfHealNotice: null,
   };
+}
+
+// C-4a (composer first-principles review 2026-07-04): resume guided state on
+// session select/reload, so a browser reload mid-guided-build no longer
+// strands the user in freeform with the stepper and current decision gone.
+//
+// There is no cheap client-side signal for "has this session ever touched
+// guided mode" — the session-list summary (types/index.ts Session) carries
+// no guided marker, and CompositionStateResponse's composer_meta (which DOES
+// carry a server-internal guided_session key — schemas.py:252) is never
+// exposed on the wire to the frontend (types/index.ts CompositionState has
+// no composer_meta field at all). So this is a fetch-and-tolerate probe, not
+// a conditional skip: GET /guided 400s with exactly one shape when the
+// session has no guided_session attached (a plain freeform session) — see
+// get_guided's single 400 raise in routes/composer/guided.py — so any
+// caught error here is treated as "this session is freeform-only", not
+// surfaced as a selectSession failure. A non-400 failure (network blip) is
+// swallowed the same way: restoring guided state is a nice-to-have on load,
+// not load-bearing for the freeform surface that always renders regardless.
+async function fetchGuidedStateForSelect(
+  sessionId: string,
+): Promise<GetGuidedResponse | null> {
+  try {
+    const response = await api.getGuided(sessionId);
+    // GET /guided is non-mutating on a session with NO persisted
+    // CompositionState record yet: get_guided's docstring documents that it
+    // returns a lazy in-memory stub GuidedSession + first turn with
+    // composition_state: null, so a user who deliberately clicks "Switch to
+    // guided" on a genuinely blank session gets an initial turn without
+    // writing a spurious empty version. That stub is NOT evidence this
+    // session was ever actually in guided mode — auto-adopting it here would
+    // flip a brand-new, freeform-preferring session straight into the guided
+    // surface on its very first load, for no reason the user asked for. Only
+    // a response with a non-null composition_state confirms a REAL,
+    // persisted guided_session (get_guided 400s before reaching this success
+    // path whenever the persisted state's guided_session key is unset, so a
+    // real composition_state here means it was genuinely set).
+    return response.composition_state !== null ? response : null;
+  } catch (err) {
+    // Only the documented 400 (session has no guided_session — a plain
+    // freeform session) is an expected, silent "freeform-only" outcome.
+    // Anything else (500 on corrupt guided state, 502 during a backend
+    // restart, a network blip) still degrades to freeform because guided
+    // restore is best-effort — but it is NOT the same as "never used guided",
+    // so surface it in the console so a genuinely stranded mid-build session
+    // is at least diagnosable rather than silently indistinguishable.
+    const status = (err as ApiError | undefined)?.status;
+    if (status !== 400) {
+      console.warn(
+        `[sessionStore] guided-state probe for session ${sessionId} failed (status ${status ?? "unknown"}); ` +
+          "falling back to freeform. If this session was mid-guided-build, its state was not restored.",
+      );
+    }
+    return null;
+  }
 }
 
 function clearedRecoveryState(): Pick<
@@ -323,6 +393,19 @@ interface SessionState {
   // In-flight wizard answer flag. Distinct from guidedChatPending: this blocks
   // turn-answer buttons while the server-authoritative state machine advances.
   guidedResponsePending: boolean;
+  /**
+   * Transient, non-alarming notice shown after a turn_not_emitted self-heal
+   * (C-3, composer first-principles review 2026-07-04): respondGuided's
+   * catch detected the client's view of the current turn was stale, silently
+   * refetched GET /guided, and re-rendered the (possibly new) current turn
+   * instead of leaving the raw protocol instruction ("Fetch GET
+   * /api/sessions/{id}/guided first") in the user's alert banner. Kept
+   * SEPARATE from `error` — ChatPanel renders this via role="status"
+   * (polite), not role="alert" like `error`/`errorDetails`: a resync is not
+   * a failure. Cleared at the start of the next guided respond/chat attempt
+   * and by clearError().
+   */
+  guidedSelfHealNotice: string | null;
   // Guided-mode actions
   startGuided: (sessionId: string) => Promise<void>;
   respondGuided: (body: GuidedRespondRequest) => Promise<void>;
@@ -532,11 +615,13 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         compositionState,
         compositionProposals,
         composerPreferences,
+        guided,
       ] = await Promise.all([
         api.fetchMessages(id),
         api.fetchCompositionState(id),
         api.fetchCompositionProposals(id),
         api.fetchComposerPreferences(id),
+        fetchGuidedStateForSelect(id),
       ]);
       // The user may switch sessions while these requests are in flight.
       // Drop stale payloads so an older selection cannot overwrite the
@@ -550,14 +635,29 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         compositionStateLoaded: true,
         compositionProposals: compositionProposals ?? [],
         composerPreferences: composerPreferences ?? null,
+        // C-4a (fp-review 2026-07-04, elspeth-04d2757bf1): resume guided
+        // state when the session has one — a live in-progress build, a
+        // completed build, or an exited-to-freeform terminal all restore
+        // here; ChatPanel's discriminator decides the surface from there
+        // (falling through to freeform for the terminal case exactly as it
+        // already does mid-session). REPLACES the earlier "default-freeform,
+        // never auto-fetch /guided on select" decision — that left a browser
+        // reload mid-guided-build stranded in freeform with the stepper and
+        // current decision gone (guidedSession stayed null until the user
+        // manually clicked "Switch to guided", which then mis-routed:
+        // enterGuided() saw no terminal on a null session and took the
+        // startGuided/GET branch, which just re-observed the same terminal
+        // and landed back in freeform with zero feedback — see C-4b). A
+        // session that never touched guided mode still lands in freeform:
+        // `guided` is null (fetchGuidedStateForSelect's fetch-and-tolerate).
+        ...(guided !== null
+          ? {
+              guidedSession: guided.guided_session,
+              guidedNextTurn: guided.next_turn,
+              guidedTerminal: guided.terminal,
+            }
+          : {}),
       });
-
-      // Default-freeform: do NOT auto-fetch /guided on session select.
-      // The freeform surface renders by default; the "Switch to guided"
-      // button in ChatPanel's freeform body calls enterGuided() to fetch
-      // (and lazy-persist) a guided session on user request.  Sessions that
-      // already have a persisted guided_session require the user to click
-      // the button to surface it — symmetric with "Exit to freeform".
 
       // Fire-and-forget: refresh blob list for the newly selected session
       useBlobStore.getState().loadBlobs(id);
@@ -1348,7 +1448,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // Capture the session identity before the await (Codex #4 stale-fetch guard).
     // Mirrors the active-session guard in loadComposerProgress (lines 367-372).
     const requestedSessionId = activeSessionId;
-    set({ guidedResponsePending: true });
+    // Clear any stale self-heal notice at the start of the next attempt, per
+    // its documented lifecycle (the resync notice describes the PREVIOUS
+    // desync, not this one).
+    set({ guidedResponsePending: true, guidedSelfHealNotice: null });
     try {
       const response = await api.respondGuided(activeSessionId, body);
       // Stale-fetch guard (Codex #4): drop the response if the active session
@@ -1375,11 +1478,76 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // A successful respond clears any earlier rejection surfaced near the
       // turn widget (e.g. a wire_confirm_rejected 409) — the mirror of
       // reenterGuided's error:null on success.
-      set({ guidedResponsePending: false, error: null, errorDetails: null });
+      turnNotEmittedSelfHealCounts.delete(requestedSessionId);
+      set({
+        guidedResponsePending: false,
+        error: null,
+        errorDetails: null,
+        guidedSelfHealNotice: null,
+      });
     } catch (err) {
       if (get().activeSessionId !== requestedSessionId) {
         return;
       }
+      const apiErr = err as ApiError;
+
+      // C-3 self-heal: "turn_not_emitted" means the client's view of the
+      // current turn was stale (guided.py's respond handler couldn't find an
+      // emitted TurnRecord for the current step). Refetch GET /guided
+      // directly (NOT via startGuided — that action swallows its own
+      // failures into `error`, which would stomp the notice we're about to
+      // set; calling api.getGuided here keeps success/failure fully in this
+      // block's control) so the current turn re-renders, and surface a calm
+      // resync notice instead of a raw rejection — NOT the submitted body
+      // resent: the rejected answer was never confirmed against a real
+      // emitted turn, so blindly replaying it against whatever turn now
+      // exists could apply a stale response to the wrong question. The user
+      // re-submits manually against the refreshed turn. Capped at
+      // MAX_TURN_NOT_EMITTED_SELF_HEALS per session so a refetch that
+      // doesn't actually fix the staleness can't loop forever — a failed
+      // resync, or an exhausted budget, falls through to the plain error
+      // path below (whose `apiErr.detail` is already the backend's
+      // plain-language "out of sync" copy, not the old raw protocol string).
+      if (apiErr.error_type === "turn_not_emitted") {
+        const priorAttempts =
+          turnNotEmittedSelfHealCounts.get(requestedSessionId) ?? 0;
+        if (priorAttempts < MAX_TURN_NOT_EMITTED_SELF_HEALS) {
+          turnNotEmittedSelfHealCounts.set(requestedSessionId, priorAttempts + 1);
+          try {
+            const resynced = await api.getGuided(requestedSessionId);
+            if (get().activeSessionId !== requestedSessionId) {
+              return;
+            }
+            set({
+              guidedSession: resynced.guided_session,
+              guidedNextTurn: resynced.next_turn,
+              guidedTerminal: resynced.terminal,
+              compositionState: resynced.composition_state,
+              guidedResponsePending: false,
+              error: null,
+              errorDetails: null,
+              guidedSelfHealNotice:
+                "The wizard had fallen out of sync with the server. We've refreshed to the current step — please try again.",
+            });
+            return;
+          } catch {
+            // The resync fetch itself failed — fall through to the plain
+            // error path below rather than pretending the self-heal
+            // succeeded. Re-check the active session first: the resync await
+            // invalidated the outer catch's entry guard, so without this a
+            // session switch mid-resync would stomp the newly selected
+            // session's UI with this (now-background) session's error.
+            if (get().activeSessionId !== requestedSessionId) {
+              return;
+            }
+          }
+        } else {
+          // Budget exhausted: stop self-healing silently and fall through to
+          // the plain error state below (no infinite loop).
+          turnNotEmittedSelfHealCounts.delete(requestedSessionId);
+        }
+      }
+
       // Surface the backend's structured rejection when present — a wire-stage
       // confirm against an invalid pipeline returns 409 with a nested detail
       // ({code: "wire_confirm_rejected", detail, validation_errors}); showing
@@ -1387,7 +1555,6 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       // fix removes (elspeth-3b35abf148 variant 3). `validation_errors`
       // entries are backend ValidationEntry payloads ({component, message,
       // severity}) — read defensively so any shape still yields a line.
-      const apiErr = err as ApiError;
       const rejectionDetails = (apiErr.validation_errors ?? [])
         .map((entry) => {
           const raw = entry as unknown as Record<string, unknown>;
@@ -1406,6 +1573,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
           apiErr.detail ?? "Failed to submit guided response. Please try again.",
         errorDetails: rejectionDetails.length > 0 ? rejectionDetails : null,
         guidedResponsePending: false,
+        guidedSelfHealNotice: null,
       });
     }
   },
@@ -1486,7 +1654,10 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     // the round-trip is in flight.  Slice 4's optimistic-append pattern
     // produced visible drift if the server replied with a slightly
     // different ts_iso / seq than the client guessed.
-    set({ guidedChatPending: true });
+    // Clear any stale self-heal notice at the start of the next attempt, per
+    // its documented lifecycle — a successful advisory chat must not leave a
+    // "we've refreshed — please try again" resync notice pinned above it.
+    set({ guidedChatPending: true, guidedSelfHealNotice: null });
 
     try {
       const response = await api.chatGuided(
@@ -1623,7 +1794,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
   },
 
   clearError() {
-    set({ error: null, errorDetails: null });
+    set({ error: null, errorDetails: null, guidedSelfHealNotice: null });
   },
 
   selectNode(nodeId: string | null) {

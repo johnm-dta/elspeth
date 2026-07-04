@@ -38,8 +38,8 @@
 //   - MessageBubble.tsx / chat.css (bubble idiom + sr-only author register)
 // ============================================================================
 
-import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { GuidedChatHistory } from "./GuidedChatHistory";
 import type { ChatTurn } from "@/types/guided";
 
@@ -248,5 +248,88 @@ describe("GuidedChatHistory seq ordering", () => {
     // The lower-seq row is the user's turn.
     expect(rows[0].classList.contains("message-row--user")).toBe(true);
     expect(rows[1].classList.contains("message-row--assistant")).toBe(true);
+  });
+});
+
+// ── 8. Synthetic-failure turns (C-2) ─────────────────────────────────────────
+
+const TURN_SYNTHETIC_FAILURE: ChatTurn = {
+  role: "assistant",
+  content: "I'm unavailable right now; you can still use the wizard controls.",
+  seq: 1,
+  step: "step_1_source",
+  ts_iso: "2026-05-13T12:00:00+00:00",
+  assistant_message_kind: "synthetic_failure",
+};
+
+describe("GuidedChatHistory synthetic-failure turns", () => {
+  it("never renders the ELSPETH-said assistant bubble for a synthetic-failure turn", () => {
+    const { container } = render(
+      <GuidedChatHistory chatHistory={[TURN_USER, TURN_SYNTHETIC_FAILURE]} />,
+    );
+
+    // No "ELSPETH said:" prefix anywhere — the synthetic turn must not read
+    // as a real assistant reply.
+    expect(screen.queryByText("ELSPETH said:", { exact: false })).toBeNull();
+    expect(container.querySelector(".bubble-assistant")).toBeNull();
+  });
+
+  it("renders a distinct error bubble carrying the server's message, without an assertive alert role", () => {
+    const { container } = render(
+      <GuidedChatHistory chatHistory={[TURN_SYNTHETIC_FAILURE]} />,
+    );
+
+    // The error bubble is visually and semantically distinct (bubble-error +
+    // sr-only "Error:" prefix), but it is NOT role="alert": these turns are
+    // persisted history, so an assertive alert would re-announce every past
+    // failure on each remount. Live announcement of a new failure is the
+    // parent transcript log's job (aria-live="polite").
+    expect(screen.queryByRole("alert")).toBeNull();
+    const bubble = container.querySelector(".bubble-error");
+    expect(bubble).not.toBeNull();
+    expect(bubble).toHaveTextContent(
+      "I'm unavailable right now; you can still use the wizard controls.",
+    );
+    expect(bubble).toHaveTextContent("Error:");
+  });
+
+  it("omits the Retry button when no onRetrySyntheticFailure handler is supplied", () => {
+    render(<GuidedChatHistory chatHistory={[TURN_SYNTHETIC_FAILURE]} />);
+
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("Retry calls the handler with the failed turn", () => {
+    const onRetry = vi.fn();
+    render(
+      <GuidedChatHistory
+        chatHistory={[TURN_SYNTHETIC_FAILURE]}
+        onRetrySyntheticFailure={onRetry}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    expect(onRetry).toHaveBeenCalledWith(TURN_SYNTHETIC_FAILURE);
+  });
+
+  it("disables Retry while retryDisabled is set (no race with an in-flight resend)", () => {
+    render(
+      <GuidedChatHistory
+        chatHistory={[TURN_SYNTHETIC_FAILURE]}
+        onRetrySyntheticFailure={vi.fn()}
+        retryDisabled
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+  });
+
+  it("still emits the step-change stage divider around a synthetic-failure turn", () => {
+    const { container } = render(
+      <GuidedChatHistory chatHistory={[TURN_SYNTHETIC_FAILURE]} />,
+    );
+
+    expect(container.querySelector(".bubble-system--stage")).not.toBeNull();
   });
 });

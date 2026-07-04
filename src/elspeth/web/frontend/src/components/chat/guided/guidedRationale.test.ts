@@ -114,4 +114,83 @@ describe("latestAssistantRationale", () => {
     });
     expect(latestAssistantRationale(s)).toBeNull();
   });
+
+  it("skips a synthetic-failure turn — it must never become the decision headline (C-2)", () => {
+    const s = session({
+      chat_history: [
+        {
+          role: "assistant",
+          content: "Source created as a 3-row CSV.",
+          seq: 2,
+          step: "step_1_source",
+          ts_iso: "t",
+        },
+        {
+          role: "assistant",
+          content: "I'm unavailable right now; you can still use the wizard controls.",
+          seq: 3,
+          step: "step_1_source",
+          ts_iso: "t",
+          assistant_message_kind: "synthetic_failure",
+        },
+      ],
+    });
+    // The higher-seq turn is synthetic — the real build rationale (seq 2)
+    // stays the headline instead.
+    expect(latestAssistantRationale(s)).toBe("Source created as a 3-row CSV.");
+  });
+
+  it("falls back to the static purpose when the ONLY assistant turn for the step is synthetic", () => {
+    const s = session({
+      step: "step_2_sink",
+      chat_history: [
+        { role: "user", content: "go", seq: 1, step: "step_2_sink", ts_iso: "t" },
+        {
+          role: "assistant",
+          content: "I'm unavailable right now; you can still use the wizard controls.",
+          seq: 2,
+          step: "step_2_sink",
+          ts_iso: "t",
+          assistant_message_kind: "synthetic_failure",
+        },
+      ],
+    });
+    expect(latestAssistantRationale(s)).toBeNull();
+  });
+
+  it("a stale synthetic-failure heading does not persist after the wizard advances", () => {
+    // A synthetic failure at step_1 must not leak forward as the headline
+    // once the wizard has moved on to step_2 — the per-step scoping (turn.step
+    // !== session.step) already excludes it, independent of the kind check.
+    const s = session({
+      step: "step_2_sink",
+      chat_history: [
+        {
+          role: "assistant",
+          content: "I'm unavailable right now; you can still use the wizard controls.",
+          seq: 1,
+          step: "step_1_source",
+          ts_iso: "t",
+          assistant_message_kind: "synthetic_failure",
+        },
+      ],
+    });
+    expect(latestAssistantRationale(s)).toBeNull();
+  });
+
+  it("legacy turns with no assistant_message_kind still count as real rationale (documented absent-field behaviour)", () => {
+    const s = session({
+      chat_history: [
+        {
+          role: "assistant",
+          content: "Source created as a 3-row CSV.",
+          seq: 2,
+          step: "step_1_source",
+          ts_iso: "t",
+          // no assistant_message_kind — pre-discriminator persisted turn
+        },
+      ],
+    });
+    expect(latestAssistantRationale(s)).toBe("Source created as a 3-row CSV.");
+  });
 });

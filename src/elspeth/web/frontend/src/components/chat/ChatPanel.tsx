@@ -73,6 +73,7 @@ import type {
 } from "@/types/api";
 import {
   GUIDED_CHAT_MESSAGE_MAX_LENGTH,
+  type ChatTurn as GuidedChatTurn,
   type GuidedStep,
 } from "@/types/guided";
 import type { ExampleUseCase, RecommendedStartingPoint } from "./templates_data";
@@ -581,8 +582,10 @@ export function ChatPanel({
   const guidedNextTurn = useSessionStore((s) => s.guidedNextTurn);
   const respondGuided = useSessionStore((s) => s.respondGuided);
   const chatGuided = useSessionStore((s) => s.chatGuided);
+  const startGuided = useSessionStore((s) => s.startGuided);
   const guidedChatPending = useSessionStore((s) => s.guidedChatPending);
   const guidedResponsePending = useSessionStore((s) => s.guidedResponsePending);
+  const guidedSelfHealNotice = useSessionStore((s) => s.guidedSelfHealNotice);
   // Whether the CURRENT chat has any work — gates the mode-switch confirmation
   // (ModeSwitchButton). Freeform work = messages or a non-empty composition;
   // guided work = any chat turns or completed steps. Switching is
@@ -594,6 +597,20 @@ export function ChatPanel({
     (guidedSession !== null &&
       (guidedSession.chat_history.length > 0 ||
         guidedSession.history.length > 0));
+  // C-4b: once a guided session ends for a reason OTHER than the user's own
+  // "Exit to freeform" (i.e. solver_exhausted or protocol_violation — both
+  // still carry terminal.kind === "exited_to_freeform"; TerminalReason is
+  // the only field that distinguishes them), POST /guided/reenter refuses
+  // it permanently (routes/composer/guided.py's reenter guard: only
+  // user_pressed_exit is reversible). Offering the ordinary "Switch to
+  // guided" flow there used to re-fetch the same terminal state and land
+  // back in freeform with no feedback — a silent no-op. Disable the button
+  // and say why instead of letting the click do nothing.
+  const guidedSwitchDisabledReason =
+    guidedSession?.terminal?.kind === "exited_to_freeform" &&
+    guidedSession.terminal.reason !== "user_pressed_exit"
+      ? "Guided ended for this session — start a new session to use guided."
+      : undefined;
   // D12 / P3.6: block guided advancement while any pending user_approved
   // interpretation card remains in the store. Hook is unconditional (called at
   // the component top, not inside the conditional guided return); the empty
@@ -663,6 +680,31 @@ export function ChatPanel({
   const cancelGuidedChat = useCallback(() => {
     guidedChatControllerRef.current?.abort(COMPOSE_USER_CANCEL_ABORT_REASON);
   }, []);
+  // C-2iii: Retry affordance on a synthetic-failure turn (GuidedChatHistory).
+  // Chat turns share one monotonic seq counter (slice 5 invariant), and every
+  // assistant reply today is paired with the user turn that triggered it at
+  // seq-1 (ChatRole's docstring: Phase A has no unpaired "opener" turns yet).
+  // Resend THAT message down the normal chat path — same retry semantics as
+  // freeform's MessageBubble Retry, reusing sendGuidedChat rather than a
+  // bespoke request. If no such user turn exists (a future proactive opener,
+  // or any other shape this invariant doesn't cover), there is nothing
+  // sound to resend blind; refetch the guided state instead so the wizard
+  // resyncs to the server's current truth — the same recovery the
+  // turn_not_emitted self-heal uses.
+  const handleRetrySyntheticFailure = useCallback(
+    (turn: GuidedChatTurn) => {
+      if (guidedSession === null || activeSessionId === null) return;
+      const preceding = guidedSession.chat_history.find(
+        (t) => t.seq === turn.seq - 1,
+      );
+      if (preceding !== undefined && preceding.role === "user") {
+        void sendGuidedChat(preceding.content);
+      } else {
+        void startGuided(activeSessionId);
+      }
+    },
+    [guidedSession, activeSessionId, sendGuidedChat, startGuided],
+  );
 
   const activeSessionTitle = sessions.find((s) => s.id === activeSessionId)?.title;
   const {
@@ -1664,7 +1706,15 @@ export function ChatPanel({
               <GuidedTurn
                 turn={guidedNextTurn}
                 onSubmit={(body) => void respondGuided(body)}
-                disabled={guidedResponsePending || hasPendingGuidedInterpretations}
+                // M-10: gate on guidedChatPending too — otherwise a chip/form
+                // widget stays clickable while a /guided/chat is in flight and
+                // can race an in-flight step-respond (mirrors "Explain this
+                // step"'s gating just below).
+                disabled={
+                  guidedResponsePending ||
+                  guidedChatPending ||
+                  hasPendingGuidedInterpretations
+                }
                 isTutorial={isTutorial}
                 wirePendingAcknowledgements={
                   hasPendingGuidedInterpretations
@@ -1697,6 +1747,17 @@ export function ChatPanel({
           {guidedResponsePending && (
             <p className="guided-current-decision-pending" role="status">
               Saving decision...
+            </p>
+          )}
+          {/* C-3 self-heal notice (turn_not_emitted): a calm resync message,
+              deliberately role="status" (polite) rather than role="alert"
+              like the rejection banner below — the wizard resyncing itself
+              is not a failure, so it must not read as one. Cleared on the
+              next guided respond/chat attempt (sessionStore) or by
+              dismissing the generic error. */}
+          {guidedSelfHealNotice && (
+            <p className="guided-current-decision-pending" role="status">
+              {guidedSelfHealNotice}
             </p>
           )}
           {/* Backend rejection surfaced NEXT TO the turn widget it rejected —
@@ -1789,7 +1850,11 @@ export function ChatPanel({
             />
           );
           const transcript = (
-            <GuidedChatHistory chatHistory={guidedSession.chat_history} />
+            <GuidedChatHistory
+              chatHistory={guidedSession.chat_history}
+              onRetrySyntheticFailure={handleRetrySyntheticFailure}
+              retryDisabled={guidedChatPending || guidedResponsePending}
+            />
           );
           // Persistent-mount contract (AcknowledgementStack.tsx): the stack
           // returns null when empty, so the count announcer must live outside
@@ -1954,7 +2019,11 @@ export function ChatPanel({
               auditability product should name the model doing the composing
               in the authoring chrome, not only in run records. */}
           <ModelChip />
-          <ModeSwitchButton target="guided" hasWork={currentChatHasWork} />
+          <ModeSwitchButton
+            target="guided"
+            hasWork={currentChatHasWork}
+            disabledReason={guidedSwitchDisabledReason}
+          />
         </div>
       </div>
 

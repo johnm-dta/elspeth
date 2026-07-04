@@ -75,4 +75,45 @@ describe("ModeSwitchButton", () => {
     );
     expect(exitToFreeform).toHaveBeenCalledTimes(1);
   });
+
+  // ── C-4b: permanently-terminal guided sessions ─────────────────────────────
+
+  it("disabledReason set: renders a disabled button with the explanation, never calls enterGuided", () => {
+    const enterGuided = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({ enterGuided });
+
+    render(
+      <ModeSwitchButton
+        target="guided"
+        hasWork={false}
+        disabledReason="Guided ended for this session — start a new session to use guided."
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Switch to guided" });
+    expect(button).toBeDisabled();
+    fireEvent.click(button);
+    expect(enterGuided).not.toHaveBeenCalled();
+
+    expect(
+      screen.getByText(
+        "Guided ended for this session — start a new session to use guided.",
+      ),
+    ).toBeInTheDocument();
+    // The explanation is programmatically associated with the button, not
+    // just visually nearby — a screen reader must not silently skip it.
+    expect(button).toHaveAttribute("aria-describedby");
+    const describedById = button.getAttribute("aria-describedby");
+    expect(document.getElementById(describedById!)).toHaveTextContent(
+      "Guided ended for this session",
+    );
+  });
+
+  it("disabledReason unset: the normal switch/confirm flow renders instead", () => {
+    render(<ModeSwitchButton target="guided" hasWork={false} />);
+
+    expect(
+      screen.getByRole("button", { name: "Switch to guided" }),
+    ).not.toBeDisabled();
+  });
 });

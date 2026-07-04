@@ -1018,6 +1018,61 @@ describe("ChatPanel mode discriminator", () => {
     );
   });
 
+  // C-3 (composer first-principles review 2026-07-04): a step-2 sink
+  // commit-failure 400 ({code: "guided_step2_sink_commit_failed", detail})
+  // must surface its OWN detail text in the existing error affordance,
+  // not a generic "Failed to submit..." line. respondGuided's catch already
+  // forwards `apiErr.detail` verbatim (sessionStore.ts) — this pins that
+  // ChatPanel renders whatever specific detail string it receives rather
+  // than substituting a canned message.
+  it("surfaces the specific detail text from a guided_step2_sink_commit_failed rejection", () => {
+    (useComposer as ReturnType<typeof vi.fn>).mockReturnValue({
+      sendMessage: vi.fn(),
+      retryMessage: vi.fn(),
+      isComposing: false,
+      compositionState: null,
+      error:
+        "The output configuration could not be applied. Review the options entered for this output and try again.",
+    });
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "The output configuration could not be applied. Review the options entered for this output and try again.",
+    );
+    // Not the generic fallback line.
+    expect(screen.queryByText(/Failed to submit guided response/i)).toBeNull();
+  });
+
+  // C-3 (composer first-principles review 2026-07-04): the turn_not_emitted
+  // self-heal notice renders as a calm role="status" line, never as an alert.
+  it("renders guidedSelfHealNotice as a role=status notice, not an alert", () => {
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedSelfHealNotice:
+        "The wizard had fallen out of sync with the server. We've refreshed to the current step — please try again.",
+    });
+
+    render(<ChatPanel />);
+
+    const notice = screen.getByText(
+      "The wizard had fallen out of sync with the server. We've refreshed to the current step — please try again.",
+    );
+    expect(notice).toHaveAttribute("role", "status");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("disables guided turn buttons while a guided response is pending", async () => {
     const respondGuidedSpy = vi.fn().mockResolvedValue(undefined);
     useSessionStore.setState({
@@ -1088,6 +1143,34 @@ describe("ChatPanel mode discriminator", () => {
     // option button. InterpretationReviewTurn renders no "CSV" button, so this
     // uniquely targets the wizard turn's submit control.
     expect(screen.getByRole("button", { name: "CSV" })).toBeDisabled();
+  });
+
+  // M-10 (composer first-principles review 2026-07-04): GuidedTurn's disabled
+  // gate was missing guidedChatPending, letting a wizard widget stay
+  // clickable while a /guided/chat request raced an in-flight step-respond.
+  // "Explain this step" already gated on both flags; this pins GuidedTurn now
+  // matches.
+  it("disables guided turn buttons while a guided chat is pending (M-10)", async () => {
+    const respondGuidedSpy = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: activeGuidedSession(),
+      guidedNextTurn: singleSelectTurn(),
+      guidedResponsePending: false,
+      guidedChatPending: true,
+      respondGuided: respondGuidedSpy,
+    });
+
+    render(<ChatPanel />);
+
+    const csvButton = screen.getByRole("button", { name: "CSV" });
+    expect(csvButton).toBeDisabled();
+    await act(async () => {
+      csvButton.click();
+    });
+    expect(respondGuidedSpy).not.toHaveBeenCalled();
   });
 
   it("renders the per-step placeholder for STEP_1_SOURCE", () => {
@@ -1971,6 +2054,151 @@ describe("ChatPanel mode discriminator", () => {
     ).toBeNull();
   });
 
+  // C-2iii (composer first-principles review 2026-07-04): Retry on a
+  // synthetic-failure turn.
+  describe("synthetic-failure Retry", () => {
+    function guidedSessionWithSyntheticFailure(): GuidedSession {
+      return {
+        step: "step_1_source",
+        history: [],
+        terminal: null,
+        chat_history: [
+          { role: "user", content: "scrape this page", seq: 1, step: "step_1_source", ts_iso: "t" },
+          {
+            role: "assistant",
+            content: "I'm unavailable right now; you can still use the wizard controls.",
+            seq: 2,
+            step: "step_1_source",
+            ts_iso: "t",
+            assistant_message_kind: "synthetic_failure",
+          },
+        ],
+        chat_turn_seq: 2,
+        profile: null,
+      };
+    }
+
+    it("renders the synthetic-failure turn as a distinct error turn, not an assistant bubble", () => {
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: guidedSessionWithSyntheticFailure(),
+        guidedNextTurn: singleSelectTurn(),
+      });
+
+      render(<ChatPanel />);
+
+      expect(screen.queryByText("ELSPETH said:", { exact: false })).toBeNull();
+      expect(
+        screen.getByText(
+          "I'm unavailable right now; you can still use the wizard controls.",
+        ),
+      ).toBeInTheDocument();
+    });
+
+    it("the Current-decision heading falls back to the static step purpose instead of the synthetic message", () => {
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: guidedSessionWithSyntheticFailure(),
+        guidedNextTurn: singleSelectTurn(),
+      });
+
+      render(<ChatPanel />);
+
+      // Static step-purpose fallback (GUIDED_STEP_PURPOSES.step_1_source) —
+      // the synthetic-failure turn is the only chat_history entry for this
+      // step, so it must never win the headline.
+      expect(
+        screen.getByRole("heading", {
+          level: 2,
+          name: "Choose the input and confirm what ELSPETH can read.",
+        }),
+      ).toBeInTheDocument();
+    });
+
+    it("Retry resends the preceding user message via the normal chat path", async () => {
+      const chatGuidedSpy = vi.fn().mockResolvedValue(undefined);
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: guidedSessionWithSyntheticFailure(),
+        guidedNextTurn: singleSelectTurn(),
+        chatGuided: chatGuidedSpy,
+      });
+
+      render(<ChatPanel />);
+
+      await act(async () => {
+        screen.getByRole("button", { name: "Retry" }).click();
+      });
+
+      await waitFor(() => {
+        expect(chatGuidedSpy).toHaveBeenCalledWith(
+          "scrape this page",
+          expect.any(AbortSignal),
+        );
+      });
+    });
+
+    it("Retry falls back to refetching guided state when there is no preceding user turn to resend", async () => {
+      const startGuidedSpy = vi.fn().mockResolvedValue(undefined);
+      const noUserTurn: GuidedSession = {
+        step: "step_1_source",
+        history: [],
+        terminal: null,
+        chat_history: [
+          {
+            role: "assistant",
+            content: "I'm unavailable right now; you can still use the wizard controls.",
+            seq: 0,
+            step: "step_1_source",
+            ts_iso: "t",
+            assistant_message_kind: "synthetic_failure",
+          },
+        ],
+        chat_turn_seq: 0,
+        profile: null,
+      };
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: noUserTurn,
+        guidedNextTurn: singleSelectTurn(),
+        startGuided: startGuidedSpy,
+      });
+
+      render(<ChatPanel />);
+
+      await act(async () => {
+        screen.getByRole("button", { name: "Retry" }).click();
+      });
+
+      await waitFor(() => {
+        expect(startGuidedSpy).toHaveBeenCalledWith("session-guided");
+      });
+    });
+
+    it("Retry is disabled while a chat or respond is already in flight", () => {
+      useSessionStore.setState({
+        activeSessionId: "session-guided",
+        sessions: [guidedSessionFixture],
+        messages: [],
+        guidedSession: guidedSessionWithSyntheticFailure(),
+        guidedNextTurn: singleSelectTurn(),
+        guidedChatPending: true,
+      });
+
+      render(<ChatPanel />);
+
+      expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    });
+  });
+
   it("tutorial: an Explain send does NOT count as the step's prompt (locked box must not flip to 'Sent')", () => {
     // On confirm-only steps the Explain user-turn shares the current step;
     // without the exact-content filter it would satisfy
@@ -2435,6 +2663,149 @@ describe("ChatPanel mode discriminator", () => {
     expect(
       screen.queryByRole("button", { name: "Open freeform editor" }),
     ).toBeNull();
+  });
+
+  // C-4b (composer first-principles review 2026-07-04): "Switch to guided"
+  // must not silently no-op on a permanently-terminal guided session.
+  it("disables 'Switch to guided' with an explanation when guided ended via solver_exhausted", () => {
+    const terminal: TerminalState = {
+      kind: "exited_to_freeform",
+      reason: "solver_exhausted",
+      pipeline_yaml: null,
+    };
+
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_1_source",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedNextTurn: null,
+      guidedTerminal: terminal,
+    });
+
+    render(<ChatPanel />);
+
+    const button = screen.getByRole("button", { name: "Switch to guided" });
+    expect(button).toBeDisabled();
+    expect(
+      screen.getByText(
+        "Guided ended for this session — start a new session to use guided.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("disables 'Switch to guided' with an explanation when guided ended via protocol_violation", () => {
+    const terminal: TerminalState = {
+      kind: "exited_to_freeform",
+      reason: "protocol_violation",
+      pipeline_yaml: null,
+    };
+
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_1_source",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedNextTurn: null,
+      guidedTerminal: terminal,
+    });
+
+    render(<ChatPanel />);
+
+    expect(screen.getByRole("button", { name: "Switch to guided" })).toBeDisabled();
+  });
+
+  it("keeps 'Switch to guided' enabled (reenterable) when the terminal reason is user_pressed_exit", () => {
+    // Reversible operator exit — POST /guided/reenter still honours it
+    // (routes/composer/guided.py post_guided_reenter). Disabling here would
+    // be false: the switch genuinely works via reenterGuided.
+    const terminal: TerminalState = {
+      kind: "exited_to_freeform",
+      reason: "user_pressed_exit",
+      pipeline_yaml: null,
+    };
+
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_1_source",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedNextTurn: null,
+      guidedTerminal: terminal,
+    });
+
+    render(<ChatPanel />);
+
+    expect(
+      screen.getByRole("button", { name: "Switch to guided" }),
+    ).not.toBeDisabled();
+  });
+
+  it("clicking 'Switch to guided' on a user_pressed_exit terminal session actually resumes guided (C-4b — the old silent no-op)", async () => {
+    // The old bug: guidedSession was null until the user clicked (no C-4a
+    // restore-on-load), so the FIRST click always mis-routed through
+    // enterGuided()'s startGuided/GET branch instead of reenterGuided,
+    // observing the same terminal and landing back in freeform with zero
+    // feedback. With guidedSession already populated (as selectSession now
+    // does on load — sessionStore's C-4a fix), enterGuided() sees
+    // terminal.kind === "exited_to_freeform" up front and correctly calls
+    // reenterGuided() instead. This test pins the click reaching
+    // enterGuided at all; enterGuided's internal branch to reenterGuided is
+    // covered in sessionStore.guided.test.ts.
+    const terminal: TerminalState = {
+      kind: "exited_to_freeform",
+      reason: "user_pressed_exit",
+      pipeline_yaml: null,
+    };
+    const enterGuidedSpy = vi.fn().mockResolvedValue(undefined);
+
+    useSessionStore.setState({
+      activeSessionId: "session-guided",
+      sessions: [guidedSessionFixture],
+      messages: [],
+      guidedSession: {
+        step: "step_1_source",
+        history: [],
+        terminal,
+        chat_history: [],
+        chat_turn_seq: 0,
+        profile: null,
+      },
+      guidedNextTurn: null,
+      guidedTerminal: terminal,
+      enterGuided: enterGuidedSpy,
+    });
+
+    render(<ChatPanel />);
+
+    const button = screen.getByRole("button", { name: "Switch to guided" });
+    expect(button).not.toBeDisabled();
+    await act(async () => {
+      button.click();
+    });
+
+    expect(enterGuidedSpy).toHaveBeenCalledTimes(1);
   });
 
   it("wraps the guided turn surface in a role=log aria-live=polite region (Task 8.2 a11y)", () => {

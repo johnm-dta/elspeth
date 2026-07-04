@@ -79,9 +79,14 @@
 //
 // ESCAPE PATH:
 //   payload.escape_label renders as a first-class "let source decide" action.
-//   It submits chosen=[] and custom_inputs=[] with the rest of the wire body
-//   null. The backend already treats that as observed schema mode with no fixed
-//   required fields, using the persisted sink intent for plugin/options.
+//   It submits chosen=[] and custom_inputs=[] with control_signal="passthrough"
+//   (C-3a — the explicit, unambiguous signal; a bare empty chosen/custom_inputs
+//   pair is otherwise indistinguishable from a stale client submitting nothing,
+//   so the backend fail-closes it). The backend treats passthrough as observed
+//   schema mode with no fixed required fields, using the persisted sink intent
+//   for plugin/options. NOT gated by continueDisabled — the Continue button's
+//   "must assert at least one field" invariant applies to Continue only; the
+//   escape hatch is deliberately available even when nothing is chosen.
 
 import { useEffect, useId, useRef, useState } from "react";
 import type {
@@ -254,13 +259,21 @@ export function MultiSelectWithCustomTurn({
   }
 
   function handleEscape() {
+    // C-3a (composer first-principles review 2026-07-04): an empty
+    // chosen/custom_inputs pair is otherwise indistinguishable from a
+    // stale/buggy client submitting nothing, so the backend fail-closes it
+    // (guided_step2_no_fields_selected) — even from this legitimate escape
+    // hatch. control_signal: "passthrough" is the explicit, unambiguous
+    // signal the backend's STEP_2_SINK MULTI_SELECT_WITH_CUSTOM dispatcher
+    // requires before it will accept the empty required-fields set (see
+    // ControlSignal.PASSTHROUGH in protocol.py).
     onSubmit({
       chosen: [],
       custom_inputs: [],
       edited_values: null,
       accepted_step_index: null,
       edit_step_index: null,
-      control_signal: null,
+      control_signal: "passthrough",
     });
   }
 

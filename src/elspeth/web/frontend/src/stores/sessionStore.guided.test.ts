@@ -8,7 +8,7 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useSessionStore } from "./sessionStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
 import { resetStore } from "@/test/store-helpers";
-import type { GuidedSession, TurnPayload, TerminalState, GetGuidedResponse, GuidedRespondResponse, GuidedChatResponse } from "@/types/guided";
+import type { GuidedSession, TurnPayload, TerminalState, GetGuidedResponse, GuidedRespondRequest, GuidedRespondResponse, GuidedChatResponse } from "@/types/guided";
 
 // Mock the API client — store tests verify state logic, not HTTP calls.
 // Must include all exports used by sessionStore (not just guided ones).
@@ -473,6 +473,41 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(getGuided).not.toHaveBeenCalled();
   });
 
+  // C-4b (composer first-principles review 2026-07-04, elspeth-04d2757bf1):
+  // the live bug was that a user_pressed_exit terminal session's "Switch to
+  // guided" silently no-op'd (client GET-observed the same terminal and
+  // stayed in freeform with zero feedback) instead of actually re-entering.
+  // sampleExitedGuidedSession's terminal.reason IS "user_pressed_exit" — the
+  // one reason POST /guided/reenter honours (routes/composer/guided.py's
+  // post_guided_reenter guard rejects solver_exhausted/protocol_violation
+  // with a 409). This test pins the full round-trip: enterGuided() reaches
+  // reenterGuided(), and the resulting state is a RESUMED, non-terminal
+  // guided session — not just "the right API got called".
+  it("enterGuided: a user_pressed_exit terminal session actually resumes guided (C-4b — not a silent no-op)", async () => {
+    const { reenterGuided } = await import("@/api/client");
+    (reenterGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleGetGuidedResponse,
+    );
+
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      guidedSession: sampleExitedGuidedSession,
+      guidedTerminal: sampleExitedGuidedSession.terminal,
+    });
+    expect(useSessionStore.getState().guidedSession?.terminal).not.toBeNull();
+
+    await useSessionStore.getState().enterGuided();
+
+    const state = useSessionStore.getState();
+    // Resumed: guided is live again (non-terminal, a next turn is present) —
+    // the opposite of the old bug, where the session stayed terminal and
+    // freeform kept rendering with no feedback at all.
+    expect(state.guidedTerminal).toBeNull();
+    expect(state.guidedSession?.terminal).toBeNull();
+    expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
+    expect(state.error).toBeNull();
+  });
+
   it("enterGuided: throws when activeSessionId is null", async () => {
     await expect(useSessionStore.getState().enterGuided()).rejects.toThrow(
       "enterGuided called without active session",
@@ -509,6 +544,102 @@ describe("sessionStore — guided-mode fields and actions", () => {
     expect(state.guidedSession).toBeNull();
     expect(state.guidedNextTurn).toBeNull();
     expect(state.guidedTerminal).toBeNull();
+    expect(state.error).toBeNull();
+  });
+
+  // ── Test 7b: C-4a — selectSession restores a LIVE/persisted guided session ──
+  //
+  // fp-review 2026-07-04, elspeth-04d2757bf1: a browser reload (which
+  // re-runs selectSession for the previously active session) must not
+  // strand a mid-guided-build user in freeform. GET /guided returning a
+  // response with a non-null composition_state confirms the session's
+  // guided_session was genuinely persisted (not the lazy in-memory stub a
+  // brand-new, never-touched session gets — see the next test).
+
+  it("selectSession: restores guidedSession/guidedNextTurn/guidedTerminal from a persisted guided session (C-4a)", async () => {
+    const {
+      fetchMessages,
+      fetchCompositionState,
+      fetchCompositionProposals,
+      fetchComposerPreferences,
+      getGuided,
+    } = await import("@/api/client");
+    (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleCompositionState,
+    );
+    (fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleGetGuidedResponse,
+    );
+
+    await useSessionStore.getState().selectSession("sess-3");
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+    expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
+    expect(state.guidedTerminal).toEqual(sampleGetGuidedResponse.terminal);
+  });
+
+  it("selectSession: does NOT adopt GET /guided's lazy stub for a brand-new session (composition_state: null)", async () => {
+    // get_guided's docstring: a session with no persisted CompositionState
+    // yet gets a non-mutating in-memory stub GuidedSession + first turn,
+    // returned with composition_state: null — that stub is not evidence the
+    // session was ever really in guided mode. Adopting it here would flip
+    // every brand-new, freeform-preferring session into the guided surface
+    // on its very first load.
+    const {
+      fetchMessages,
+      fetchCompositionState,
+      fetchCompositionProposals,
+      fetchComposerPreferences,
+      getGuided,
+    } = await import("@/api/client");
+    (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      guided_session: sampleGuidedSession,
+      next_turn: sampleNextTurn,
+      terminal: null,
+      composition_state: null,
+    });
+
+    await useSessionStore.getState().selectSession("sess-4");
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toBeNull();
+    expect(state.guidedNextTurn).toBeNull();
+  });
+
+  it("selectSession: tolerates GET /guided's 400 for a plain freeform session (no error surfaced)", async () => {
+    const {
+      fetchMessages,
+      fetchCompositionState,
+      fetchCompositionProposals,
+      fetchComposerPreferences,
+      getGuided,
+    } = await import("@/api/client");
+    (fetchMessages as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchCompositionState as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      sampleCompositionState,
+    );
+    (fetchCompositionProposals as ReturnType<typeof vi.fn>).mockResolvedValueOnce([]);
+    (fetchComposerPreferences as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (getGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce({
+      status: 400,
+      detail: "Session is not in guided mode. Use /api/sessions/{id}/messages.",
+    });
+
+    await useSessionStore.getState().selectSession("sess-5");
+
+    const state = useSessionStore.getState();
+    expect(state.guidedSession).toBeNull();
+    expect(state.compositionState).toEqual(sampleCompositionState);
+    // The expected "not guided" outcome must not read as a selectSession
+    // failure — the freeform surface renders normally with no error banner.
     expect(state.error).toBeNull();
   });
 
@@ -1032,6 +1163,190 @@ describe("sessionStore — guided-mode fields and actions", () => {
         "Failed to submit guided response. Please try again.",
       );
       expect(state.errorDetails).toBeNull();
+    });
+  });
+
+  // ── C-3: turn_not_emitted self-heal (composer first-principles review
+  // 2026-07-04, elspeth-948eb9c0b8) ────────────────────────────────────────
+  describe("respondGuided turn_not_emitted self-heal", () => {
+    const turnNotEmittedError = {
+      status: 400,
+      error_type: "turn_not_emitted",
+      detail:
+        "Your session's step is out of sync with the server. Refreshing the session will resync this automatically.",
+    };
+
+    it("refetches guided state and surfaces a calm notice — never the raw rejection detail", async () => {
+      const { respondGuided, getGuided } = await import("@/api/client");
+      (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        turnNotEmittedError,
+      );
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleGetGuidedResponse,
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      await useSessionStore.getState().respondGuided({
+        chosen: ["csv"],
+        edited_values: null,
+        custom_inputs: null,
+        accepted_step_index: null,
+        edit_step_index: null,
+        control_signal: null,
+      });
+
+      const state = useSessionStore.getState();
+      // The refetched (current) turn re-renders.
+      expect(state.guidedSession).toEqual(sampleGetGuidedResponse.guided_session);
+      expect(state.guidedNextTurn).toEqual(sampleGetGuidedResponse.next_turn);
+      expect(state.guidedResponsePending).toBe(false);
+      // A calm, distinct notice — not the generic alarm-red `error` field,
+      // and never the backend's raw rejection text verbatim.
+      expect(state.error).toBeNull();
+      expect(state.guidedSelfHealNotice).not.toBeNull();
+      expect(state.guidedSelfHealNotice).not.toContain(turnNotEmittedError.detail);
+    });
+
+    it("falls back to a plain error state when the resync refetch itself fails", async () => {
+      const { respondGuided, getGuided } = await import("@/api/client");
+      (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        turnNotEmittedError,
+      );
+      (getGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("network down"),
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      await useSessionStore.getState().respondGuided({
+        chosen: ["csv"],
+        edited_values: null,
+        custom_inputs: null,
+        accepted_step_index: null,
+        edit_step_index: null,
+        control_signal: null,
+      });
+
+      const state = useSessionStore.getState();
+      expect(state.guidedSelfHealNotice).toBeNull();
+      // Falls through to the plain-error path — apiErr.detail here is
+      // ALREADY the backend's plain-language "out of sync" copy (not the
+      // old raw protocol instruction the pre-fix backend sent), so showing
+      // it verbatim is honest, not a regression.
+      expect(state.error).toBe(turnNotEmittedError.detail);
+    });
+
+    it("no infinite loop: a second consecutive turn_not_emitted for the same session stops self-healing", async () => {
+      const { respondGuided, getGuided } = await import("@/api/client");
+      (respondGuided as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(turnNotEmittedError)
+        .mockRejectedValueOnce(turnNotEmittedError);
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        sampleGetGuidedResponse,
+      );
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const body: GuidedRespondRequest = {
+        chosen: ["csv"],
+        edited_values: null,
+        custom_inputs: null,
+        accepted_step_index: null,
+        edit_step_index: null,
+        control_signal: null,
+      };
+
+      // First rejection: self-heals (refetch succeeds, calm notice shown).
+      await useSessionStore.getState().respondGuided(body);
+      expect(useSessionStore.getState().guidedSelfHealNotice).not.toBeNull();
+
+      // Second consecutive rejection for the SAME session: budget exhausted
+      // — falls through to the plain error state instead of refetching
+      // again. getGuided is only mocked once above; a second self-heal
+      // attempt would throw on the unconfigured mock, which the plain-error
+      // assertion below would not match if it had silently swallowed.
+      await useSessionStore.getState().respondGuided(body);
+
+      const state = useSessionStore.getState();
+      expect(state.guidedSelfHealNotice).toBeNull();
+      expect(state.error).toBe(turnNotEmittedError.detail);
+    });
+
+    it("a successful respond resets the self-heal budget for the next staleness", async () => {
+      const { respondGuided, getGuided } = await import("@/api/client");
+      (respondGuided as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(turnNotEmittedError)
+        .mockResolvedValueOnce(sampleRespondResponse)
+        .mockRejectedValueOnce(turnNotEmittedError);
+      (getGuided as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce(sampleGetGuidedResponse)
+        .mockResolvedValueOnce(sampleGetGuidedResponse);
+      useSessionStore.setState({
+        activeSessionId: "sess-1",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const body: GuidedRespondRequest = {
+        chosen: ["csv"],
+        edited_values: null,
+        custom_inputs: null,
+        accepted_step_index: null,
+        edit_step_index: null,
+        control_signal: null,
+      };
+
+      await useSessionStore.getState().respondGuided(body); // self-heals
+      await useSessionStore.getState().respondGuided(body); // succeeds — resets budget
+      expect(useSessionStore.getState().guidedSelfHealNotice).toBeNull();
+
+      // A THIRD, later staleness gets its own self-heal attempt rather than
+      // inheriting the first cycle's exhausted budget.
+      await useSessionStore.getState().respondGuided(body);
+      expect(useSessionStore.getState().guidedSelfHealNotice).not.toBeNull();
+    });
+
+    it("a successful chatGuided clears a stale self-heal notice (documented lifecycle)", async () => {
+      const { respondGuided, getGuided, chatGuided } = await import("@/api/client");
+      (respondGuided as ReturnType<typeof vi.fn>).mockRejectedValueOnce(turnNotEmittedError);
+      (getGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce(sampleGetGuidedResponse);
+      (chatGuided as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        guided_session: sampleGuidedSession,
+        next_turn: null,
+        terminal: null,
+        composition_state: null,
+      });
+      // Fresh session id: the self-heal budget counter is module-scoped and
+      // other tests here consume "sess-1"'s budget, which would skip the
+      // self-heal and never set the notice this test needs.
+      useSessionStore.setState({
+        activeSessionId: "sess-heal-clear",
+        guidedSession: sampleGuidedSession,
+      });
+
+      const body: GuidedRespondRequest = {
+        chosen: ["csv"],
+        edited_values: null,
+        custom_inputs: null,
+        accepted_step_index: null,
+        edit_step_index: null,
+        control_signal: null,
+      };
+
+      await useSessionStore.getState().respondGuided(body); // sets the notice
+      expect(useSessionStore.getState().guidedSelfHealNotice).not.toBeNull();
+
+      // The user sends an advisory chat instead of re-submitting the turn; a
+      // successful chat must not leave the "we've refreshed — try again" notice
+      // pinned above it.
+      await useSessionStore.getState().chatGuided("What columns are available?");
+      expect(useSessionStore.getState().guidedSelfHealNotice).toBeNull();
     });
   });
 });

@@ -610,8 +610,13 @@ class TestResumeCheckpointCleanup:
 
         # Call delete_checkpoints() via _checkpoints coordinator (this is what Bug #8 fix added to early-exit path)
         from elspeth.engine.orchestrator import Orchestrator
+        from tests.fixtures.landscape import leader_coordination_token
 
         orchestrator = Orchestrator(db=db, checkpoint_manager=checkpoint_mgr)
+        # Checkpoint deletes fail closed without the run's leader token
+        # (elspeth-fab455790d); production early-exit paths bind it at
+        # run/resume start before any cleanup.
+        orchestrator._checkpoints.bind_coordination(leader_coordination_token(factory, run.run_id))
         orchestrator._checkpoints.delete_checkpoints(run.run_id)
 
         # Verify checkpoints are deleted

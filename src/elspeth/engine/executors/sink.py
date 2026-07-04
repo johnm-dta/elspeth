@@ -352,6 +352,25 @@ class SinkExecutor:
                 outputs=BoundaryOutputs(),
             )
 
+    def _merge_batch_contract(self, tokens: list[TokenInfo]) -> SchemaContract:
+        """Merge the sink-bound tokens' row contracts into one batch contract.
+
+        A merge failure is a framework bug (contracts that reached a sink should
+        always be batch-mergeable); TIER_1/audit-integrity errors propagate
+        untouched.
+        """
+        contract_merge_start = time.perf_counter()
+        try:
+            batch_contract = tokens[0].row_data.contract
+            for token in tokens[1:]:
+                batch_contract = batch_contract.merge_for_batch(token.row_data.contract)
+        except contract_errors.TIER_1_ERRORS:
+            raise
+        except Exception as e:
+            merge_duration_ms = (time.perf_counter() - contract_merge_start) * 1000
+            raise FrameworkBugError(f"Contract merge failed after {merge_duration_ms:.1f}ms: {e}") from e
+        return batch_contract
+
     def write(
         self,
         sink: SinkProtocol,
@@ -426,17 +445,7 @@ class SinkExecutor:
         sink_node_id: str = sink.node_id
 
         # Synchronize context contract to the sink-bound tokens.
-        contract_merge_start = time.perf_counter()
-        try:
-            batch_contract = tokens[0].row_data.contract
-            for token in tokens[1:]:
-                batch_contract = batch_contract.merge_for_batch(token.row_data.contract)
-        except contract_errors.TIER_1_ERRORS:
-            raise
-        except Exception as e:
-            merge_duration_ms = (time.perf_counter() - contract_merge_start) * 1000
-            raise FrameworkBugError(f"Contract merge failed after {merge_duration_ms:.1f}ms: {e}") from e
-        ctx.contract = batch_contract
+        ctx.contract = self._merge_batch_contract(tokens)
 
         # CRITICAL: Clear state_id before entering operation context.
         ctx.state_id = None

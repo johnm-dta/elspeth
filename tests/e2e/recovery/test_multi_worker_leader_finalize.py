@@ -370,8 +370,8 @@ def test_wedged_alive_peer_bounded_wait_times_out_then_raises(tmp_path: Path) ->
 
     with (
         structlog.testing.capture_logs() as captured,
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         pytest.raises(OrchestrationInvariantError) as exc_info,
     ):
         orch.run(config, graph=graph, payload_store=payload_store)
@@ -430,8 +430,8 @@ def test_deposed_leader_during_wait_breaks_out_via_latch(tmp_path: Path) -> None
             raise RunWorkerEvictedError(worker_id=self._token.worker_id, run_id=self._token.run_id)
 
     with (
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         patch.object(RunHeartbeatThread, "check_and_raise", _latch),
         pytest.raises(RunWorkerEvictedError),
     ):
@@ -488,8 +488,8 @@ def test_dead_peer_expired_lease_reaped_to_ready_in_loop(tmp_path: Path) -> None
     config, graph, _sink, _source = _build([{"id": 1, "value": 10}], _seed)
 
     with (
-        patch("elspeth.engine.orchestrator.core.time.sleep", lambda _s: None),
-        patch("elspeth.engine.orchestrator.core.time.monotonic", _FastMonotonic()),
+        patch("elspeth.engine.orchestrator.leader_drain.time.sleep", lambda _s: None),
+        patch("elspeth.engine.orchestrator.leader_drain.time.monotonic", _FastMonotonic()),
         pytest.raises(OrchestrationInvariantError),
     ):
         orch.run(config, graph=graph, payload_store=payload_store)

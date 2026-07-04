@@ -87,10 +87,10 @@ class LeaderFollowerDrain:
         self._make_shutdown_error = make_shutdown_error
         # Resolve the wall-clock seams HERE (construction time), NOT as import-time
         # default args: the fresh-run call site constructs this inside the run, so a
-        # test that patches ``…orchestrator.core.time.monotonic`` / ``.sleep`` (the
-        # shared time module) around the run is honoured — matching the pre-extraction
-        # inline loops, which resolved ``time.monotonic()`` / ``time.sleep()`` at call
-        # time. Unit tests inject fakes explicitly.
+        # test that patches ``…orchestrator.leader_drain.time.monotonic`` / ``.sleep``
+        # (the shared time module) around the run is honoured — matching the
+        # pre-extraction inline loops, which resolved ``time.monotonic()`` /
+        # ``time.sleep()`` at call time. Unit tests inject fakes explicitly.
         self._monotonic = monotonic if monotonic is not None else time.monotonic
         self._sleep = sleep if sleep is not None else time.sleep
         self._poll_interval = poll_interval

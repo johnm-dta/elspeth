@@ -131,8 +131,8 @@ class TestFollowerIsolation:
         # Admit second follower with a second join_run call.
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
         ):
             follower_b = _orchestrator(crashed).join_run(
                 run_id=crashed.run_id,
@@ -237,8 +237,8 @@ class TestFollowerIsolation:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
         ):
             follower_b = _orchestrator(crashed).join_run(
                 run_id=crashed.run_id,
@@ -310,8 +310,8 @@ class TestFollowerIsolation:
 
         db_hash = _get_db_config_hash(crashed)
         with (
-            patch("elspeth.engine.orchestrator.core.resolve_config", return_value={}),
-            patch("elspeth.engine.orchestrator.core.stable_hash", return_value=db_hash),
+            patch("elspeth.engine.orchestrator.join_admission.resolve_config", return_value={}),
+            patch("elspeth.engine.orchestrator.join_admission.stable_hash", return_value=db_hash),
         ):
             follower_b = _orchestrator(crashed).join_run(
                 run_id=crashed.run_id,

@@ -584,19 +584,26 @@ class ResumeCoordinator:
         # Stage 1 — READ-ONLY reconstruction (no durable mutation).
         snapshot = self._load_resume_audit_snapshot(resume_point, payload_store, worker_id=worker_id)
 
-        # Unprocessed-row payload restore (read-only). Runs BEFORE the seat CAS
-        # here to preserve current ordering; nothing between it and the CAS
-        # consumes unprocessed_rows.
+        # Stage 2 — THE FIRST DURABLE ACT: the seat-acquisition CAS (epoch 21,
+        # ADR-030 §B.4 — TOCTOU closure). A CAS loser raises NonResumableRunError
+        # with zero mutation. See _acquire_resume_leadership.
+        coordination_token = self._acquire_resume_leadership(snapshot)
+
+        # Unprocessed-row payload restore, AFTER the seat CAS (elspeth-e3d1310b93).
+        # get_unprocessed_row_data_by_source retrieves + json-decodes +
+        # Pydantic-validates every unprocessed payload blob from the payload
+        # store, so running it after acquire_run_leadership means a LOSING resume
+        # contender is refused (NonResumableRunError, zero mutation) BEFORE paying
+        # that read cost — the CAS now guards the expensive input boundary, not
+        # just durable mutation. The cheap read-only refusals (manifest drift,
+        # source-lifecycle completeness) stay pre-CAS in _load_resume_audit_snapshot;
+        # nothing between the CAS and this restore consumes unprocessed_rows, and
+        # ResumeState is still assembled with it below.
         unprocessed_rows = snapshot.recovery.get_unprocessed_row_data_by_source(
             snapshot.run_id,
             payload_store,
             source_schema_classes=snapshot.source_schema_classes,
         )
-
-        # Stage 2 — THE FIRST DURABLE ACT: the seat-acquisition CAS (epoch 21,
-        # ADR-030 §B.4 — TOCTOU closure). A CAS loser raises NonResumableRunError
-        # with zero mutation. See _acquire_resume_leadership.
-        coordination_token = self._acquire_resume_leadership(snapshot)
 
         # Stage 3 — durable post-CAS repair (only the seat winner may run it):
         # rewrite incomplete batches + detect restored barrier work.

@@ -57,7 +57,7 @@ from sqlalchemy import insert, select, update
 
 from elspeth.contracts import RunStatus
 from elspeth.contracts.scheduler import TokenWorkStatus
-from elspeth.core.checkpoint.recovery import NonResumableRunError
+from elspeth.core.checkpoint.recovery import NonResumableRunError, RecoveryManager
 from elspeth.core.landscape.schema import run_coordination_table, run_workers_table, runs_table
 from elspeth.engine.clock import MockClock
 from elspeth.engine.orchestrator import Orchestrator
@@ -462,6 +462,76 @@ class TestTwoResumesSameRunId:
         assert _duplicate_terminal_outcome_tokens(crashed.db, crashed.run_id) == []
         seat_final = _coordination_row(crashed.db, crashed.run_id)
         assert seat_final["leader_worker_id"] is None, "graceful release after finalize"
+        crashed.db.close()
+
+    def test_cas_loser_skips_unprocessed_payload_restore(self, tmp_path: Path) -> None:
+        """elspeth-e3d1310b93: a resume contender that LOSES the seat CAS refuses
+        BEFORE the unprocessed-row payload restore.
+
+        ``get_unprocessed_row_data_by_source`` retrieves + json-decodes +
+        Pydantic-validates every unprocessed payload blob from the payload store
+        (recovery.py). Historically it ran BEFORE ``acquire_run_leadership``, so
+        every LOSING resume contender paid that full read/decode/validate cost
+        before the seat CAS rejected it — the CAS protected durable mutation but
+        not the expensive input boundary. The restore now runs AFTER the CAS, so
+        a losing racer is refused before touching the payload store.
+
+        This drives ``reconstruct_resume_state`` DIRECTLY rather than public
+        ``resume()``: a live-seat loser is refused earlier, at the resume() entry
+        guard (``test_entry_guard_refuses_resume_while_run_status_running``). The
+        ordering fixed here matters for the RESIDUAL-TOCTOU racer — one that
+        passed the FAILED-status entry guard and only loses at the seat CAS
+        inside ``reconstruct_resume_state`` — so the honest seam is the method
+        itself. A spy on the restore step proves it never runs for the loser;
+        pre-reorder the same spy would record one call before the refusal.
+        """
+        clock = MockClock(start=_T0)
+        crashed = _run_to_interrupted_checkpoint(tmp_path, clock)
+        _craft_crashed_lease(
+            crashed,
+            ingest_sequence=3,
+            lease_owner="crashed-worker-1",
+            lease_seconds=_DEFAULT_LEASE_SECONDS,
+        )
+        clock.advance(_DEFAULT_LEASE_SECONDS + 60)
+
+        # Capture the loser's resume point from the FAILED state — the
+        # residual-TOCTOU racer fetches an equally-valid resume point before the
+        # winner takes the seat (mirrors test_two_resumes_loser_after_winner).
+        resume_point = _resume_point(crashed)
+        assert resume_point is not None
+
+        # Seat a LIVE incumbent leader (huge window → live under both the
+        # MockClock and the wall clock the resume-side CAS reads), so the loser's
+        # seat CAS inside reconstruct_resume_state loses to it.
+        winner_id = f"worker:{crashed.run_id}:winner"
+        _coord(crashed).acquire_run_leadership(
+            run_id=crashed.run_id,
+            worker_id=winner_id,
+            now=clock.now_utc(),
+            window_seconds=_GUARD_LIVE_SEAT_WINDOW_SECONDS,
+        )
+
+        # Spy on the payload-restore read: record every invocation, delegate to
+        # the real implementation so behaviour is otherwise unchanged.
+        restore_invocations: list[str] = []
+        real_restore = RecoveryManager.get_unprocessed_row_data_by_source
+
+        def _spy_restore(self: RecoveryManager, run_id: str, payload_store: object, *, source_schema_classes: object) -> object:
+            restore_invocations.append(run_id)
+            return real_restore(self, run_id, payload_store, source_schema_classes=source_schema_classes)  # type: ignore[arg-type]
+
+        coordinator = crashed.resume_orchestrator()._resume_coordinator
+        with (
+            patch.object(RecoveryManager, "get_unprocessed_row_data_by_source", _spy_restore),
+            pytest.raises(NonResumableRunError, match=r"run leadership is held by"),
+        ):
+            coordinator.reconstruct_resume_state(resume_point, crashed.payload_store)
+
+        assert restore_invocations == [], (
+            "CAS loser must refuse BEFORE the unprocessed-row payload restore "
+            "(elspeth-e3d1310b93: get_unprocessed_row_data_by_source moved after acquire_run_leadership)"
+        )
         crashed.db.close()
 
     def test_two_resumes_loser_after_winner_refused_at_entry_guard(self, tmp_path: Path) -> None:

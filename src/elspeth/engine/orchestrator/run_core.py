@@ -41,6 +41,7 @@ from elspeth.contracts.types import (
 )
 from elspeth.core.config import AggregationSettings
 from elspeth.core.landscape.factory import RecorderFactory
+from elspeth.engine.barrier_coordination import BarrierJournalRestoreContext
 from elspeth.engine.executors.sink import DiversionCounts
 from elspeth.engine.orchestrator.cleanup import cleanup_plugins
 from elspeth.engine.orchestrator.graph_wiring import (
@@ -54,7 +55,7 @@ from elspeth.engine.orchestrator.types import (
     AggNodeEntry,
     RunContext,
 )
-from elspeth.engine.processor import BarrierJournalRestoreContext, RowProcessor, make_step_resolver
+from elspeth.engine.processor import RowProcessor, make_step_resolver
 from elspeth.engine.retry import RetryManager
 
 if TYPE_CHECKING:

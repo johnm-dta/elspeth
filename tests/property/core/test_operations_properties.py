@@ -290,12 +290,15 @@ class TestExceptionRenderingProperties:
         raw_secret = "sk-live-secret-value"
         exc = RedactingException(f"provider rejected credential {raw_secret}")
 
-        with pytest.raises(RedactingException), track_operation(
-            _as_execution_repo(recorder),
-            "run-1",
-            "node-1",
-            "source_load",
-            _as_ctx(ctx),
+        with (
+            pytest.raises(RedactingException),
+            track_operation(
+                _as_execution_repo(recorder),
+                "run-1",
+                "node-1",
+                "source_load",
+                _as_ctx(ctx),
+            ),
         ):
             raise exc
 
@@ -314,12 +317,15 @@ class TestExceptionRenderingProperties:
         ctx = FakePluginContext()
         exc = BrokenStrException("raw credential should not be rendered")
 
-        with pytest.raises(BrokenStrException), track_operation(
-            _as_execution_repo(recorder),
-            "run-1",
-            "node-1",
-            "source_load",
-            _as_ctx(ctx),
+        with (
+            pytest.raises(BrokenStrException),
+            track_operation(
+                _as_execution_repo(recorder),
+                "run-1",
+                "node-1",
+                "source_load",
+                _as_ctx(ctx),
+            ),
         ):
             raise exc
 
@@ -339,12 +345,15 @@ class TestExceptionRenderingProperties:
         ctx = FakePluginContext()
         exc = EmptyStrException()
 
-        with pytest.raises(EmptyStrException), track_operation(
-            _as_execution_repo(recorder),
-            "run-1",
-            "node-1",
-            "sink_write",
-            _as_ctx(ctx),
+        with (
+            pytest.raises(EmptyStrException),
+            track_operation(
+                _as_execution_repo(recorder),
+                "run-1",
+                "node-1",
+                "sink_write",
+                _as_ctx(ctx),
+            ),
         ):
             raise exc
 

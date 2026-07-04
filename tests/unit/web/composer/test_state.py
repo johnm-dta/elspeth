@@ -3930,10 +3930,7 @@ class TestSchemaContractValidation:
         result = state.validate()
 
         assert not result.is_valid
-        assert any(
-            "Connection names overlap with sink names" in error.message and "main" in error.message
-            for error in result.errors
-        )
+        assert any("Connection names overlap with sink names" in error.message and "main" in error.message for error in result.errors)
 
     def test_multi_hop_transform_no_schema_breaks_chain(self) -> None:
         """A schema-less transform breaks downstream guarantees across hops."""

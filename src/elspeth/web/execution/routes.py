@@ -328,13 +328,16 @@ def _copy_artifact_to_temp_snapshot(path: Path, snapshot_dir: Path) -> _Artifact
     temp_path: Path | None = None
     snapshot_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        with tempfile.NamedTemporaryFile(
-            "wb",
-            prefix="elspeth-run-output-",
-            suffix=".snapshot",
-            delete=False,
-            dir=snapshot_dir,
-        ) as temp_file, path.open("rb") as source:
+        with (
+            tempfile.NamedTemporaryFile(
+                "wb",
+                prefix="elspeth-run-output-",
+                suffix=".snapshot",
+                delete=False,
+                dir=snapshot_dir,
+            ) as temp_file,
+            path.open("rb") as source,
+        ):
             temp_path = Path(temp_file.name)
             while chunk := source.read(_ARTIFACT_SNAPSHOT_CHUNK_SIZE):
                 size_bytes += len(chunk)
@@ -540,7 +543,11 @@ class _LoadedRunStatus:
 def _run_integrity_http(exc: ValidationError | _RunStatusIntegrityError) -> HTTPException:
     detail: dict[str, Any] = {
         "code": "run_integrity_error",
-        "message": "Run status failed internal accounting validation.",
+        # "detail" (not "message"): parseResponse (frontend/src/api/client.ts)
+        # reads nestedDetail.detail as the human-readable string, with no
+        # "message" fallback; keeps this site in shape-lockstep with
+        # _run_accounting_integrity_http in sessions/routes/_helpers.py.
+        "detail": "Run status failed internal accounting validation.",
     }
     if isinstance(exc, ValidationError):
         detail["validation_errors"] = exc.errors(include_url=False, include_context=False, include_input=False)

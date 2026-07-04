@@ -63,6 +63,7 @@ from elspeth.core.landscape.factory import RecorderFactory
 from elspeth.core.landscape.run_lifecycle_repository import _IMMUTABLE_SUCCESS_RUN_STATUSES
 from elspeth.core.landscape.schema import RunSourceLifecycleState
 from elspeth.engine._best_effort import best_effort
+from elspeth.engine.barrier_coordination import BarrierJournalRestoreContext
 from elspeth.engine.orchestrator.aggregation import (
     check_aggregation_timeouts,
     handle_incomplete_batches,
@@ -94,7 +95,6 @@ from elspeth.engine.orchestrator.validation import (
     validate_source_quarantine_destination,
     validate_transform_error_sinks,
 )
-from elspeth.engine.processor import BarrierJournalRestoreContext
 from elspeth.engine.retry import RetryManager
 
 if TYPE_CHECKING:

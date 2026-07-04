@@ -270,13 +270,9 @@ class TestValidateEndpoint:
         state_id = uuid4()
         svc = MagicMock()
         svc.validate = AsyncMock()
-        svc.validate_state = AsyncMock(
-            return_value=ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness())
-        )
+        svc.validate_state = AsyncMock(return_value=ValidationResult(is_valid=True, checks=[], errors=[], readiness=_ready_readiness()))
         app = _create_test_app(execution_service=svc)
-        app.state.session_service.get_state = AsyncMock(
-            return_value=_composition_state_record(session_id=session_id, state_id=state_id)
-        )
+        app.state.session_service.get_state = AsyncMock(return_value=_composition_state_record(session_id=session_id, state_id=state_id))
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
                 f"/api/sessions/{session_id}/validate",
@@ -320,9 +316,7 @@ class TestValidateEndpoint:
         svc.validate = AsyncMock()
         svc.validate_state = AsyncMock()
         app = _create_test_app(execution_service=svc)
-        app.state.session_service.get_state = AsyncMock(
-            return_value=_composition_state_record(session_id=uuid4(), state_id=state_id)
-        )
+        app.state.session_service.get_state = AsyncMock(return_value=_composition_state_record(session_id=uuid4(), state_id=state_id))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(

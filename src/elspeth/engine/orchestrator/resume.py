@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -489,6 +490,32 @@ def _derive_resume_failure_counter_baseline(factory: RecorderFactory, run_id: st
     return counters
 
 
+@dataclass(frozen=True, slots=True)
+class _ResumeAuditSnapshot:
+    """READ-ONLY resume reconstruction results, assembled BEFORE the seat CAS.
+
+    ``reconstruct_resume_state`` used to interleave read-only reconstruction
+    (manifest drift, source-lifecycle completeness, per-source schema/contract
+    maps, incomplete-token index) with durable mutation (the leadership CAS and
+    incomplete-batch rewrite) in one method, so a reader could not tell read
+    from write at the boundary (elspeth-e4f1eb6038). This snapshot is the
+    output of the read-only stage: every field is derived from read-only
+    audit/recovery queries and NOTHING here has mutated durable state. The
+    caller composes the durable stages (``_acquire_resume_leadership``,
+    unprocessed-row restore, ``_repair_resume_batches``) on top of it, in order.
+    """
+
+    factory: RecorderFactory
+    recovery: RecoveryManager
+    run_id: str
+    worker_id: str
+    incomplete_by_row: Mapping[str, Sequence[IncompleteTokenSpec]]
+    schema_contracts_by_source: Mapping[NodeID, SchemaContract]
+    source_names_by_source: Mapping[NodeID, str]
+    source_lifecycle_by_source: Mapping[NodeID, str]
+    source_schema_classes: Mapping[NodeID, type[Any]]
+
+
 class ResumeCoordinator:
     """Resume-path orchestration extracted from ``Orchestrator``.
 
@@ -554,18 +581,63 @@ class ResumeCoordinator:
             AuditIntegrityError: If the run is terminally successful
                 (immutable-success durable backstop inside the CAS).
         """
+        # Stage 1 — READ-ONLY reconstruction (no durable mutation).
+        snapshot = self._load_resume_audit_snapshot(resume_point, payload_store, worker_id=worker_id)
+
+        # Unprocessed-row payload restore (read-only). Runs BEFORE the seat CAS
+        # here to preserve current ordering; nothing between it and the CAS
+        # consumes unprocessed_rows.
+        unprocessed_rows = snapshot.recovery.get_unprocessed_row_data_by_source(
+            snapshot.run_id,
+            payload_store,
+            source_schema_classes=snapshot.source_schema_classes,
+        )
+
+        # Stage 2 — THE FIRST DURABLE ACT: the seat-acquisition CAS (epoch 21,
+        # ADR-030 §B.4 — TOCTOU closure). A CAS loser raises NonResumableRunError
+        # with zero mutation. See _acquire_resume_leadership.
+        coordination_token = self._acquire_resume_leadership(snapshot)
+
+        # Stage 3 — durable post-CAS repair (only the seat winner may run it):
+        # rewrite incomplete batches + detect restored barrier work.
+        batch_id_remap, has_restored_barrier_work = self._repair_resume_batches(snapshot)
+
+        return ResumeState(
+            factory=snapshot.factory,
+            run_id=snapshot.run_id,
+            unprocessed_rows=unprocessed_rows,
+            incomplete_by_row=snapshot.incomplete_by_row,
+            recovery_manager=snapshot.recovery,
+            schema_contracts_by_source=snapshot.schema_contracts_by_source,
+            source_names_by_source=snapshot.source_names_by_source,
+            source_lifecycle_by_source=snapshot.source_lifecycle_by_source,
+            has_restored_barrier_work=has_restored_barrier_work,
+            batch_id_remap=batch_id_remap,
+            coordination_token=coordination_token,
+        )
+
+    def _load_resume_audit_snapshot(
+        self, resume_point: ResumePoint, payload_store: PayloadStore, *, worker_id: str | None
+    ) -> _ResumeAuditSnapshot:
+        """READ-ONLY resume reconstruction (elspeth-e4f1eb6038 stage 1).
+
+        Create a fresh factory, verify resumability (runtime-VAL manifest drift
+        + source-lifecycle completeness), and reconstruct the per-source
+        schema/contract maps and the incomplete-token index. Performs NO durable
+        mutation — the seat CAS (``_acquire_resume_leadership``), the
+        unprocessed-row restore, and batch repair (``_repair_resume_batches``)
+        all run in the caller AFTER this returns. Incomplete-source refusal is an
+        operator-facing "start fresh or use a source-aware resume path" outcome;
+        it must not strand the run as RUNNING or rewrite retry batches merely
+        because the operator probed resume.
+        """
         run_id = resume_point.checkpoint.run_id
         worker_id = worker_id or mint_worker_id(run_id)
 
-        # Create fresh factory (stateless, like run())
-        # Pass payload_store for external call payload persistence
+        # Create fresh factory (stateless, like run()); pass payload_store for
+        # external call payload persistence.
         factory = RecorderFactory(self._db, payload_store=payload_store)
 
-        # Validate resumability before mutating the run header or batch state.
-        # Incomplete-source refusal is an operator-facing "start fresh or use a
-        # source-aware resume path" outcome; it must not strand the run as
-        # RUNNING or rewrite retry batches merely because the operator probed
-        # resume.
         from elspeth.core.checkpoint import RecoveryManager
 
         if self._checkpoint_manager is None:
@@ -590,20 +662,13 @@ class ResumeCoordinator:
                 "declaration-contract and Tier-1 registries."
             )
 
-        unprocessed_rows: Sequence[ResumedRow]
-        schema_contracts_by_source: dict[NodeID, SchemaContract]
-
-        # ADR-025 §3 Decision 5 (G6): schema contracts are plural-by-source
-        # and live exclusively in ``run_sources``. The legacy single-source
-        # fallback that read ``runs.schema_contract_json`` was deleted along
-        # with the column itself — readers and writers are now symmetric on
-        # ``run_sources``. ``verify_contract_integrity`` (called via
-        # ``can_resume`` → ``get_resume_point`` before this method runs)
-        # already raises ``EmptyResumeStateError`` when ``run_sources`` is
-        # empty, so by the time we land here every declared source has a
-        # contract record. We still assert the postcondition defensively
-        # against future call-path changes: an empty map at resume time is
-        # Tier-1 audit corruption.
+        # ADR-025 §3 Decision 5 (G6): schema contracts are plural-by-source and
+        # live exclusively in ``run_sources``. ``verify_contract_integrity``
+        # (called via ``can_resume`` → ``get_resume_point`` before this method
+        # runs) already raises ``EmptyResumeStateError`` when ``run_sources`` is
+        # empty, so by the time we land here every declared source has a contract
+        # record. We still assert the postcondition defensively against future
+        # call-path changes: an empty map at resume time is Tier-1 audit corruption.
         source_lifecycle_records = factory.run_lifecycle.get_run_source_lifecycle_records(run_id)
         if not source_lifecycle_records:
             raise EmptyResumeStateError(run_id=run_id)
@@ -615,14 +680,14 @@ class ResumeCoordinator:
         if incomplete_sources:
             raise IncompleteSourceResumeError(run_id, incomplete_sources)
 
-        # F1 fix: pre-compute incomplete child tokens so the resume loop can dispatch
-        # partial-fork/expand/coalesce rows via mid-DAG continuation rather than
-        # whole-row restart (which would re-emit already-completed branches).
+        # F1 fix: pre-compute incomplete child tokens so the resume loop can
+        # dispatch partial-fork/expand/coalesce rows via mid-DAG continuation
+        # rather than whole-row restart (which would re-emit completed branches).
         incomplete_by_row = recovery.get_incomplete_tokens_by_row(run_id)
 
         source_records = factory.run_lifecycle.get_run_source_resume_records(run_id)
         source_schema_classes: dict[NodeID, type[Any]] = {}
-        schema_contracts_by_source = {}
+        schema_contracts_by_source: dict[NodeID, SchemaContract] = {}
         source_names_by_source: dict[NodeID, str] = {}
         source_lifecycle_by_source: dict[NodeID, str] = {}
         for raw_source_node_id, source_record in source_records.items():
@@ -633,61 +698,55 @@ class ResumeCoordinator:
             source_names_by_source[source_node_id] = str(source_record.source_name)
             source_lifecycle_by_source[source_node_id] = str(source_record.lifecycle_state)
 
-        unprocessed_rows = recovery.get_unprocessed_row_data_by_source(
-            run_id,
-            payload_store,
+        return _ResumeAuditSnapshot(
+            factory=factory,
+            recovery=recovery,
+            run_id=run_id,
+            worker_id=worker_id,
+            incomplete_by_row=incomplete_by_row,
+            schema_contracts_by_source=schema_contracts_by_source,
+            source_names_by_source=source_names_by_source,
+            source_lifecycle_by_source=source_lifecycle_by_source,
             source_schema_classes=source_schema_classes,
         )
 
-        # 1. THE FIRST DURABLE ACT (epoch 21, ADR-030 §B.4 — TOCTOU closure):
-        # the seat-acquisition CAS. One BEGIN IMMEDIATE transaction = seat
-        # takeover (leader_epoch+1) + the FAILED/INTERRUPTED→RUNNING
-        # run-status flip (which this subsumed from the old
-        # update_run_status(RUNNING) first-durable-write) + identity-eviction
-        # of the deposed leader + leader_acquire/worker_register/worker_evict
-        # events. A CAS loser raises NonResumableRunError with zero mutation;
-        # a terminally-successful run is refused by the immutable-success
-        # durable backstop (AuditIntegrityError); a held WAL write lock
-        # surfaces as the operator-actionable WriteLockHeldError naming the
-        # registered workers' pids.
-        coordination_token = factory.run_coordination.acquire_run_leadership(
-            run_id=run_id,
-            worker_id=worker_id,
+    def _acquire_resume_leadership(self, snapshot: _ResumeAuditSnapshot) -> CoordinationToken:
+        """THE FIRST DURABLE ACT of resume (epoch 21, ADR-030 §B.4 — TOCTOU
+        closure): the seat-acquisition CAS. One BEGIN IMMEDIATE transaction =
+        seat takeover (leader_epoch+1) + the FAILED/INTERRUPTED→RUNNING
+        run-status flip (which subsumed the old update_run_status(RUNNING)
+        first-durable-write) + identity-eviction of the deposed leader +
+        leader_acquire/worker_register/worker_evict events. A CAS loser raises
+        NonResumableRunError with zero mutation; a terminally-successful run is
+        refused by the immutable-success durable backstop (AuditIntegrityError);
+        a held WAL write lock surfaces as the operator-actionable
+        WriteLockHeldError naming the registered workers' pids.
+        """
+        return snapshot.factory.run_coordination.acquire_run_leadership(
+            run_id=snapshot.run_id,
+            worker_id=snapshot.worker_id,
             now=datetime.now(UTC),
             window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
             entry_point="resume",
         )
 
-        # 2. Handle incomplete batches - call module function directly.
-        # The returned old→retry batch_id mapping feeds the processor's
-        # journal-based barrier restore (BUFFERED token_outcomes still carry
-        # the dead original batch ids after a flush-interrupting crash),
-        # threaded through ResumeState. Runs strictly AFTER the seat CAS:
-        # only the seat winner may rewrite retry batches.
-        batch_id_remap = handle_incomplete_batches(factory.execution, run_id)
+    def _repair_resume_batches(self, snapshot: _ResumeAuditSnapshot) -> tuple[Mapping[str, str], bool]:
+        """Durable post-CAS repair — runs strictly AFTER
+        ``_acquire_resume_leadership`` (only the seat winner may rewrite retry
+        batches).
 
-        # 3. F1: barrier restore runs in PROCESSOR CONSTRUCTION — resume()
-        # bundles a BarrierJournalRestoreContext (checkpoint scalars + the
-        # batch_id_remap captured above) and RowProcessor.__init__ rebuilds
-        # the executors from journal BLOCKED rows + audit tables. The
-        # quiescence gate in resume() therefore consults the JOURNAL: a run
-        # whose remaining work all sits at barriers has zero unprocessed rows
-        # but must still run the processing path so the restored buffers flush.
-        has_restored_barrier_work = recovery.count_blocked_barrier_items(run_id) > 0
-
-        return ResumeState(
-            factory=factory,
-            run_id=run_id,
-            unprocessed_rows=unprocessed_rows,
-            incomplete_by_row=incomplete_by_row,
-            recovery_manager=recovery,
-            schema_contracts_by_source=schema_contracts_by_source,
-            source_names_by_source=source_names_by_source,
-            source_lifecycle_by_source=source_lifecycle_by_source,
-            has_restored_barrier_work=has_restored_barrier_work,
-            batch_id_remap=batch_id_remap,
-            coordination_token=coordination_token,
-        )
+        Rewrites incomplete batches — the returned old→retry batch_id mapping
+        feeds the processor's journal-based barrier restore (BUFFERED
+        token_outcomes still carry the dead original batch ids after a
+        flush-interrupting crash) — and reports whether the scheduler journal
+        carries BLOCKED barrier rows. (F1: barrier restore itself runs in
+        PROCESSOR CONSTRUCTION; a run whose remaining work all sits at barriers
+        has zero unprocessed rows but must still run the processing path so the
+        restored buffers flush, so the resume quiescence gate consults this flag.)
+        """
+        batch_id_remap = handle_incomplete_batches(snapshot.factory.execution, snapshot.run_id)
+        has_restored_barrier_work = snapshot.recovery.count_blocked_barrier_items(snapshot.run_id) > 0
+        return batch_id_remap, has_restored_barrier_work
 
     def resume(
         self,

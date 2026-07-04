@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
+from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
 from elspeth.contracts.data import CompatibilityResult
@@ -34,11 +35,13 @@ from elspeth.web.execution.protocol import YamlGenerator
 from elspeth.web.execution.schemas import CHECK_OUTCOME_SKIPPED_AFTER_FAILURE, ValidationCheck
 from elspeth.web.execution.validation import (
     _ALL_CHECKS,
+    _CHECK_SETTINGS,
     _append_skipped_checks,
     _build_edge_contract_suggestion,
     _collect_secret_refs,
     _format_edge_contract_failure,
     _infer_component_type_from_plugin_error,
+    _reframe_settings_missing_parts,
     validate_pipeline,
 )
 from elspeth.web.interpretation_state import INTERPRETATION_REQUIREMENTS_KEY, PROMPT_TEMPLATE_PARTS_KEY, SOURCE_AUTHORING_KEY
@@ -180,12 +183,14 @@ class TestValidatePipelineEmptyComposition:
         mock_load.assert_not_called()
 
     def test_source_alone_bypasses_empty_check(self) -> None:
-        """A source without outputs is not 'empty' — the user has
-        started composing. Let normal validation flag the missing sink."""
+        """A source without outputs is not 'empty' — the user has started
+        composing. The empty_pipeline short-circuit must NOT fire; normal
+        validation proceeds (here to a mocked plugin failure). The missing-sink
+        reframe happens later, at the settings-load catch — see
+        TestValidatePipelineMissingPartReframe."""
         state = _make_state()  # default: source set, nodes/outputs empty
         settings = _make_settings()
 
-        # Mock heavily so we only exercise the early-return branch.
         with (
             patch("elspeth.web.execution.validation.load_settings_from_yaml_string"),
             patch("elspeth.web.execution.validation.instantiate_runtime_plugins") as mock_inst,
@@ -195,11 +200,132 @@ class TestValidatePipelineEmptyComposition:
             mock_yaml.generate_yaml.return_value = "source:\n  plugin: csv\n  options: {}"
             result = validate_pipeline(state, settings, mock_yaml)
 
-        # Result must be is_valid=False (because plugin instantiation fails
-        # via the mock), but the error must NOT be the empty_pipeline code —
-        # the short-circuit must NOT trigger when source is present.
         assert result.is_valid is False
         assert all(err.error_code != "empty_pipeline" for err in result.errors)
+
+
+def _elspeth_settings_missing_parts_error(present: set[str]) -> PydanticValidationError:
+    """Build a real PydanticValidationError shaped like ElspethSettings
+    rejecting missing required top-level parts. ``present`` names the parts to
+    supply (each valid), so the omitted parts report ``type == "missing"`` with
+    ``loc[0]`` in {"sources", "sinks"} — the exact structure
+    ``_reframe_settings_missing_parts`` keys on. A throwaway model with the same
+    field names keeps the fixture independent of ElspethSettings' nested plugin
+    validation."""
+
+    class _RequiredParts(BaseModel):
+        sources: dict[str, Any]
+        sinks: dict[str, Any]
+
+    data = {name: {"placeholder": {}} for name in present}
+    try:
+        _RequiredParts.model_validate(data)
+    except PydanticValidationError as exc:
+        return exc
+    raise AssertionError("expected a validation error for the missing parts")
+
+
+class TestReframeSettingsMissingParts:
+    """`_reframe_settings_missing_parts` maps ElspethSettings 'Field required'
+    failures on sources/sinks into novice-register findings — the reframe logic
+    behind elspeth-901a404926, over structured ``exc.errors()`` (never str(exc))."""
+
+    def _assert_no_pydantic_leak(self, message: str) -> None:
+        assert "ElspethSettings" not in message
+        assert "Field required" not in message
+        assert "pydantic" not in message.lower()
+
+    def test_missing_sink_only(self) -> None:
+        exc = _elspeth_settings_missing_parts_error(present={"sources"})
+        reframed = _reframe_settings_missing_parts(exc)
+        assert [e.error_code for e in reframed] == ["missing_sink"]
+        assert "output step" in reframed[0].message
+        assert reframed[0].suggestion is not None
+        self._assert_no_pydantic_leak(reframed[0].message)
+
+    def test_missing_source_only(self) -> None:
+        exc = _elspeth_settings_missing_parts_error(present={"sinks"})
+        reframed = _reframe_settings_missing_parts(exc)
+        assert [e.error_code for e in reframed] == ["missing_source"]
+        assert "data source" in reframed[0].message
+        self._assert_no_pydantic_leak(reframed[0].message)
+
+    def test_both_missing_are_source_before_sink(self) -> None:
+        """A lone-transform composition omits both parts; findings must read in
+        a stable source-before-sink order regardless of pydantic's ordering."""
+        exc = _elspeth_settings_missing_parts_error(present=set())
+        reframed = _reframe_settings_missing_parts(exc)
+        assert [e.error_code for e in reframed] == ["missing_source", "missing_sink"]
+
+    def test_non_missing_error_is_not_reframed(self) -> None:
+        """A non-'missing' settings failure (e.g. a type error) returns [] so
+        the caller falls back to str(exc)."""
+
+        class _Model(BaseModel):
+            sources: dict[str, Any]
+            sinks: dict[str, Any]
+
+        try:
+            _Model.model_validate({"sources": "not-a-dict", "sinks": {"x": {}}})
+        except PydanticValidationError as exc:
+            assert _reframe_settings_missing_parts(exc) == []
+        else:
+            raise AssertionError("expected a validation error")
+
+    def test_parity_with_real_elspeth_settings(self) -> None:
+        """Guard against ElspethSettings field renames: a real missing-parts
+        failure of the actual settings model must reframe to both findings —
+        confirms the throwaway fixture's ``loc`` structure matches reality."""
+        from elspeth.core.config import ElspethSettings
+
+        try:
+            ElspethSettings.model_validate({})
+        except PydanticValidationError as exc:
+            reframed = _reframe_settings_missing_parts(exc)
+            assert [e.error_code for e in reframed] == ["missing_source", "missing_sink"]
+        else:
+            raise AssertionError("expected ElspethSettings to reject an empty config")
+
+
+class TestValidatePipelineMissingPartReframe:
+    """The settings-load catch in validate_pipeline routes a missing
+    source/sink pydantic failure through the reframe, keeping the raw dump in
+    the settings ValidationCheck detail for the engineer read (elspeth-901a404926)."""
+
+    def test_missing_sink_surfaces_reframed_finding_not_raw_dump(self) -> None:
+        state = _make_state()  # source present, no output
+        mock_yaml = MagicMock(spec=YamlGenerator)
+        mock_yaml.generate_yaml.return_value = "sources:\n  source:\n    plugin: csv\n    options: {}"
+        exc = _elspeth_settings_missing_parts_error(present={"sources"})
+
+        with patch("elspeth.web.execution.validation.load_settings_from_yaml_string", side_effect=exc):
+            result = validate_pipeline(state, _make_settings(), mock_yaml)
+
+        assert result.is_valid is False
+        assert [e.error_code for e in result.errors] == ["missing_sink"]
+        assert "ElspethSettings" not in result.errors[0].message
+        assert result.readiness.blockers[0].code == "incomplete_pipeline"
+        # The raw dump is retained for the record in the settings check detail.
+        settings_check = _check(result, _CHECK_SETTINGS)
+        assert "Field required" in settings_check.detail
+
+    def test_other_settings_error_still_surfaces_raw_message(self) -> None:
+        """A non-missing-part settings failure keeps its str(exc) message and
+        the settings_load readiness code (unchanged behaviour)."""
+        state = _make_state()
+        mock_yaml = MagicMock(spec=YamlGenerator)
+        mock_yaml.generate_yaml.return_value = "sources:\n  source:\n    plugin: csv\n    options: {}"
+
+        with patch(
+            "elspeth.web.execution.validation.load_settings_from_yaml_string",
+            side_effect=ValueError("some other settings problem"),
+        ):
+            result = validate_pipeline(state, _make_settings(), mock_yaml)
+
+        assert result.is_valid is False
+        assert result.errors[0].error_code is None
+        assert "some other settings problem" in result.errors[0].message
+        assert result.readiness.blockers[0].code == "settings_load"
 
 
 class TestValidatePipelinePathAllowlist:

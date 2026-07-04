@@ -156,9 +156,44 @@ describe("subscriptions — validation result side effects", () => {
           {
             component_type: null,
             component_id: null,
-            message: "Pipeline is empty. Add a source and at least one output to begin building.",
-            suggestion: "Pick a source plugin and an output destination, then validate again.",
+            message: "Pipeline is empty. Add a data source and an output step to begin building.",
+            suggestion: "Pick a data source like a CSV file or text input, and an output like CSV or JSON, then validate again.",
             error_code: "empty_pipeline",
+          },
+        ],
+        warnings: [],
+      } as never,
+    } as never);
+
+    expect(injectSystemMessage).not.toHaveBeenCalled();
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does NOT inject a chat message for the partial missing_source / missing_sink outcome (mid-build steady state)", () => {
+    // elspeth-901a404926: a source with no output (or vice-versa) is a normal
+    // mid-build step. The rail strip carries the plain "Add an output step…"
+    // guidance; injecting an alarmist "Validation failed" chat line on every
+    // intermediate step would be noise, so it stays silent like empty_pipeline.
+    const injectSystemMessage = vi.fn();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      injectSystemMessage,
+      sendMessage,
+    } as never);
+    useExecutionStore.setState({ validationResult: null } as never);
+    initStoreSubscriptions();
+
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        errors: [
+          {
+            component_type: null,
+            component_id: null,
+            message: "Add an output step so your pipeline has somewhere to send its results.",
+            suggestion: "Pick an output like CSV or JSON and connect your last step to it, then validate again.",
+            error_code: "missing_sink",
           },
         ],
         warnings: [],

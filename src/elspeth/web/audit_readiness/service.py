@@ -293,8 +293,14 @@ def _build_validation_row(result: ValidationResult) -> ReadinessRow:
             component_ids=(),
         )
     component_ids = tuple(sorted({err.component_id for err in result.errors if err.component_id is not None}))
-    summary = f"{len(result.errors)} errors — see details" if len(result.errors) != 1 else "1 error — see details"
-    detail = "\n".join(f"[{err.component_type or 'unknown'}] {err.component_id or 'unknown'}: {err.message}" for err in result.errors)
+    summary = "1 problem to fix — see details" if len(result.errors) == 1 else f"{len(result.errors)} problems to fix — see details"
+    # Plain message text only — the engineer-grade "[component_type] component_id:"
+    # prefix (which rendered "[unknown] unknown: …" for settings-level findings)
+    # is a Tier-3 lingo leak on a novice surface (elspeth-901a404926). The web
+    # panel re-humanises each finding through the shared humaniser and resolves
+    # the component_ids list to plain step phrases; this joined text is the
+    # fallback body for non-web consumers (read-only export, MCP audit info).
+    detail = "\n".join(err.message for err in result.errors)
     return ReadinessRow(
         id="validation",
         label="Validation",

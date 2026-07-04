@@ -446,6 +446,75 @@ def test_validation_row_error_lists_component_ids():
     assert row.component_ids == ("out",)
 
 
+def test_validation_row_drops_engineer_prefix_and_uses_problem_wording():
+    """elspeth-901a404926: the Validation row must not leak the
+    "[component_type] component_id:" engineer prefix ("[unknown] unknown: …")
+    on a novice surface, and the summary reads "problem to fix"."""
+    result = ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message="Add an output step so your pipeline has somewhere to send its results.",
+                suggestion=None,
+                error_code="missing_sink",
+            )
+        ],
+        readiness=_blocked_readiness(),
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "validation")
+    assert row.summary == "1 problem to fix — see details"
+    assert row.detail == "Add an output step so your pipeline has somewhere to send its results."
+    assert "unknown" not in (row.detail or "")
+
+
+def test_validation_row_pluralizes_and_joins_messages_only():
+    result = ValidationResult(
+        is_valid=False,
+        checks=[],
+        errors=[
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message="Add a data source so your pipeline has data to read.",
+                suggestion=None,
+                error_code="missing_source",
+            ),
+            ValidationError(
+                component_id=None,
+                component_type=None,
+                message="Add an output step so your pipeline has somewhere to send its results.",
+                suggestion=None,
+                error_code="missing_sink",
+            ),
+        ],
+        readiness=_blocked_readiness(),
+        semantic_contracts=[],
+    )
+    svc = _make_service(_state(), result)
+    snap = asyncio.run(
+        svc.compute_snapshot(
+            session_id=UUID("11111111-1111-1111-1111-111111111111"),
+            user_id="alice",
+        )
+    )
+    row = _row(snap, "validation")
+    assert row.summary == "2 problems to fix — see details"
+    assert row.detail == (
+        "Add a data source so your pipeline has data to read.\nAdd an output step so your pipeline has somewhere to send its results."
+    )
+
+
 def test_plugin_trust_row_ok_summary_when_boundary_plugins_present():
     # Default source_plugin="csv" (a Source — kind-derived boundary), plus
     # the default ("out", "csv") sink (Sink — also kind-derived boundary).

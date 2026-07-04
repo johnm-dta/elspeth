@@ -133,7 +133,11 @@ function snapshotWithRawValidationResult(version: number, validationResult: Vali
         ? {
             ...r,
             status: validationResult.is_valid ? "ok" : "error",
-            summary: validationResult.is_valid ? "All checks pass" : `${validationResult.errors.length} errors — see details`,
+            summary: validationResult.is_valid
+              ? "All checks pass"
+              : validationResult.errors.length === 1
+                ? "1 problem to fix — see details"
+                : `${validationResult.errors.length} problems to fix — see details`,
             detail: validationResult.errors.map((err) => err.message).join("\n"),
             component_ids: validationResult.errors
               .map((err) => err.component_id)

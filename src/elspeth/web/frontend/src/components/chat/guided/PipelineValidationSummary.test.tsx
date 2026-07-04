@@ -119,7 +119,10 @@ describe("PipelineValidationSummary", () => {
     expect(screen.queryByText(/ghost_component/)).toBeNull();
   });
 
-  it("handles a null component_id finding via the generic fallback", () => {
+  it("renders a null component_id finding as the message directly, with no 'this step' possessive", () => {
+    // A settings-level finding owns no step (component_id === null), so the
+    // headline is the message alone — never a bare "'this step':" prefix
+    // (elspeth-901a404926).
     setValidation({
       is_valid: false,
       checks: [],
@@ -134,8 +137,9 @@ describe("PipelineValidationSummary", () => {
       warnings: [],
     });
     render(<PipelineValidationSummary />);
-    expect(screen.getByText(/this step/i)).toBeInTheDocument();
-    expect(screen.getByText(/pipeline has no sink/i)).toBeInTheDocument();
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/1 problem to fix — Pipeline has no sink/);
+    expect(status.textContent).not.toMatch(/this step/i);
   });
 
   it("renders a neutral status element when there is no validation result", () => {
@@ -339,5 +343,35 @@ describe("PipelineValidationSummary", () => {
     expect(status.textContent).toMatch(/A step is waiting for your review\./);
     expect(status.textContent).not.toMatch(/guided_xform_9/);
     expect(screen.getByText("Technical details")).toBeInTheDocument();
+  });
+
+  // ── elspeth-901a404926: reframed settings finding (null component) ─────────
+  it("renders a null-component reframed settings finding without the 'this step' possessive or a pydantic leak", () => {
+    setValidation({
+      is_valid: false,
+      checks: [],
+      errors: [
+        {
+          component_id: null,
+          component_type: null,
+          message: "Add an output step so your pipeline has somewhere to send its results.",
+          suggestion:
+            "Pick an output like CSV or JSON and connect your last step to it, then validate again.",
+          error_code: "missing_sink",
+        },
+      ],
+      warnings: [],
+    });
+    render(<PipelineValidationSummary />);
+    const status = screen.getByRole("status");
+    // The headline is the plain reframed message, with no bare "'this step':"
+    // possessive for a settings-level (null-component) finding.
+    expect(status.textContent).toMatch(/1 problem to fix — Add an output step/);
+    expect(status.textContent).not.toMatch(/this step/);
+    // The reframed message is clean — no raw pydantic internals reach the
+    // announced live region.
+    expect(status.textContent).not.toMatch(/ElspethSettings|Field required|pydantic/i);
+    // A clean settings finding carries no raw dump, so no expander appears.
+    expect(screen.queryByText("Technical details")).toBeNull();
   });
 });

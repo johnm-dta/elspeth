@@ -135,6 +135,28 @@ export function makePhraseFor(
   };
 }
 
+/**
+ * Compose the status-line body: "<N> <label> — <headline>", prefixing the
+ * finding's plain-language step name ("'rate each row': …") only when the
+ * finding is attributed to a resolvable component AND was not already
+ * humanised. A settings-level finding (component_id === null — e.g. the
+ * missing source/output reframe or empty_pipeline) owns no step, so the
+ * possessive prefix would render a bare "'this step':" — omit it there
+ * (elspeth-901a404926).
+ */
+export function formatFindingBody(
+  count: number,
+  label: string,
+  finding: HumanisedFinding,
+  componentId: string | null,
+  phraseFor: (componentId: string | null) => string,
+): string {
+  const attributed = finding.raw === null && componentId !== null;
+  return attributed
+    ? `${count} ${label} — '${phraseFor(componentId)}': ${finding.headline}`
+    : `${count} ${label} — ${finding.headline}`;
+}
+
 export interface PipelineValidationSummaryProps {
   /** Tutorial surface flag: the tutorial has no Secrets panel, so a
    *  Secrets-panel suggestion gets an honest availability note. */
@@ -188,10 +210,7 @@ export function PipelineValidationSummary({
     const label = errors.length === 1 ? "problem to fix" : "problems to fix";
     const finding = humaniseValidationMessage(first.message, phraseFor, stepLabelFor);
     rawDetail = finding.raw;
-    body =
-      finding.raw !== null
-        ? `${errors.length} ${label} — ${finding.headline}`
-        : `${errors.length} ${label} — '${phraseFor(first.component_id)}': ${finding.headline}`;
+    body = formatFindingBody(errors.length, label, finding, first.component_id, phraseFor);
     suggestion = first.suggestion;
   } else if (warnings.length > 0) {
     const first = warnings[0];
@@ -200,10 +219,7 @@ export function PipelineValidationSummary({
     const label = warnings.length === 1 ? "warning" : "warnings";
     const finding = humaniseValidationMessage(first.message, phraseFor, stepLabelFor);
     rawDetail = finding.raw;
-    body =
-      finding.raw !== null
-        ? `${warnings.length} ${label} — ${finding.headline}`
-        : `${warnings.length} ${label} — '${phraseFor(first.component_id)}': ${finding.headline}`;
+    body = formatFindingBody(warnings.length, label, finding, first.component_id, phraseFor);
     suggestion = first.suggestion;
   } else {
     tone = "ok";

@@ -608,6 +608,12 @@ export function AuditReadinessPanel() {
       {selectedRowId && (
         <ReadinessRowDetail
           row={snapshot.rows.find((r) => r.id === selectedRowId)!}
+          // The validation row's findings are re-humanised in the detail
+          // drawer (engine dumps must not render raw here either); other rows
+          // carry display-ready backend prose (elspeth-901a404926).
+          validationErrors={
+            selectedRowId === "validation" ? snapshot.validation_result.errors : undefined
+          }
           onClose={() => setSelectedRowId(null)}
         />
       )}

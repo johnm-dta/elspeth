@@ -696,6 +696,61 @@ def _blob_inline_validation_error(violation: BlobInlineValidationViolation) -> V
     )
 
 
+# The two required-with-no-default top-level parts of ElspethSettings (see
+# core/config.py). A composition missing either fails assembly with a raw
+# pydantic "Field required" dump; ``_reframe_settings_missing_parts`` maps each
+# to a novice-register finding keyed on this table.
+_SETTINGS_MISSING_PART_REFRAMES: dict[str, tuple[str, str, str]] = {
+    # pydantic loc field -> (error_code, message, suggestion)
+    "sources": (
+        "missing_source",
+        "Add a data source so your pipeline has data to read.",
+        "Pick a data source like a CSV file or text input, then validate again.",
+    ),
+    "sinks": (
+        "missing_sink",
+        "Add an output step so your pipeline has somewhere to send its results.",
+        "Pick an output like CSV or JSON and connect your last step to it, then validate again.",
+    ),
+}
+
+
+def _reframe_settings_missing_parts(exc: PydanticValidationError) -> list[ValidationError]:
+    """Reframe ElspethSettings "Field required" failures on the required
+    top-level parts (``sources`` / ``sinks``) into novice-register findings.
+
+    Returns one finding per missing part, in a stable source-before-sink order
+    (so a lone-transform composition surfaces two honest findings). Returns
+    ``[]`` when the failure is anything other than a missing top-level part —
+    the caller then falls back to ``str(exc)``. Detection is over the
+    *structured* ``exc.errors()`` (``type == "missing"`` at the top of ``loc``),
+    never the version-stamped human ``str(exc)`` text.
+    """
+    missing_parts: set[str] = set()
+    for error in exc.errors():
+        if error.get("type") != "missing":
+            continue
+        loc = error.get("loc") or ()
+        # pydantic ``loc`` entries are ``int | str`` (ints index list fields);
+        # our required parts are top-level string keys, so narrow to str.
+        part = loc[0] if loc else None
+        if isinstance(part, str) and part in _SETTINGS_MISSING_PART_REFRAMES:
+            missing_parts.add(part)
+    # Emit in the canonical source-before-sink order regardless of pydantic's
+    # error ordering, so the paired findings read consistently.
+    return [
+        ValidationError(
+            component_id=None,
+            component_type=None,
+            message=_SETTINGS_MISSING_PART_REFRAMES[part][1],
+            suggestion=_SETTINGS_MISSING_PART_REFRAMES[part][2],
+            error_code=_SETTINGS_MISSING_PART_REFRAMES[part][0],
+        )
+        for part in _SETTINGS_MISSING_PART_REFRAMES
+        if part in missing_parts
+    ]
+
+
 @trust_boundary(
     tier=3,
     source="composer-authored CompositionState (pipeline nodes/options) re-read at dry-run validation",
@@ -786,8 +841,8 @@ def validate_pipeline(
                 ValidationError(
                     component_id=None,
                     component_type=None,
-                    message=("Pipeline is empty. Add a source and at least one output to begin building."),
-                    suggestion=("Pick a source plugin (e.g. text, csv) and an output destination, then validate again."),
+                    message=("Pipeline is empty. Add a data source and an output step to begin building."),
+                    suggestion=("Pick a data source like a CSV file or text input, and an output like CSV or JSON, then validate again."),
                     error_code="empty_pipeline",
                 ),
             ],
@@ -1626,24 +1681,45 @@ def validate_pipeline(
                 outcome_code=None,
             )
         )
-        errors.append(
-            ValidationError(
-                component_id=None,
-                component_type=None,
-                message=str(exc),
-                suggestion=None,
-                error_code=None,
+        # Reframe the specific "a required top-level part is missing" failure
+        # (source or sink) into novice-register findings instead of leaking the
+        # raw pydantic dump ("<field> Field required [type=missing] … For
+        # further information visit https://errors.pydantic.dev/…"), which is a
+        # Tier-3 boundary violation on the four surfaces that render
+        # ``errors[].message`` — the rail strip, audit panel, wire-stage
+        # blockers, and chat transcript (elspeth-901a404926). Detected from the
+        # *structured* ``exc.errors()`` (type == "missing" on sources / sinks),
+        # never by parsing ``str(exc)`` — the human string is version-stamped
+        # and fragile. The raw dump is retained above in ``ValidationCheck``
+        # ``detail`` (and the Landscape trail) for the engineer read; other
+        # settings failures still surface ``str(exc)`` verbatim.
+        reframed = _reframe_settings_missing_parts(exc) if isinstance(exc, PydanticValidationError) else []
+        if reframed:
+            errors.extend(reframed)
+            readiness = _blocked_readiness(
+                code="incomplete_pipeline",
+                detail="Pipeline is missing a required source or output.",
             )
-        )
+        else:
+            errors.append(
+                ValidationError(
+                    component_id=None,
+                    component_type=None,
+                    message=str(exc),
+                    suggestion=None,
+                    error_code=None,
+                )
+            )
+            readiness = _blocked_readiness(
+                code="settings_load",
+                detail="Settings failed to load.",
+            )
         _append_skipped_checks(checks, _CHECK_SETTINGS)
         return ValidationResult(
             is_valid=False,
             checks=checks,
             errors=errors,
-            readiness=_blocked_readiness(
-                code="settings_load",
-                detail="Settings failed to load.",
-            ),
+            readiness=readiness,
             semantic_contracts=serialize_semantic_contracts(semantic_contracts),
         )
 

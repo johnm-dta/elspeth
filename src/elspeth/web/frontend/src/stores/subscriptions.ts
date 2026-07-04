@@ -58,6 +58,26 @@ function isEmptyPipelineResult(result: ValidationResult): boolean {
   );
 }
 
+/**
+ * Detects the "partial composition" outcomes — a lone source, a lone output,
+ * or a transform with neither (error codes ``missing_source`` / ``missing_sink``
+ * from the settings-load reframe, elspeth-901a404926). Like ``empty_pipeline``,
+ * these are the tutorial's normal mid-build steady state: the rail strip
+ * already carries the plain "Add an output step…" guidance, so injecting an
+ * alarmist "Validation failed" chat line on every intermediate build step would
+ * be noise. Keep them silent in chat.
+ */
+const INCOMPLETE_PIPELINE_CODES = new Set(["missing_source", "missing_sink"]);
+function isIncompletePipelineResult(result: ValidationResult): boolean {
+  return (
+    !result.is_valid &&
+    result.errors.length > 0 &&
+    result.errors.every(
+      (err) => err.error_code != null && INCOMPLETE_PIPELINE_CODES.has(err.error_code),
+    )
+  );
+}
+
 function isPendingInterpretationReviewResult(result: ValidationResult): boolean {
   const readiness = result.readiness;
   if (!readiness) return false;
@@ -225,13 +245,15 @@ export function initStoreSubscriptions(): void {
     if (fingerprint === previousValidationFingerprint) return;
     previousValidationFingerprint = fingerprint;
 
-    // Empty-pipeline guard: when the backend reports the structured
-    // ``empty_pipeline`` outcome, the user has not built anything yet
-    // (e.g. immediately after exit_to_freeform). Keep that state silent
-    // instead of injecting a local "fix these errors" message. The
-    // fingerprint update above stays so a later non-empty failure with a
-    // different fingerprint still surfaces.
-    if (isEmptyPipelineResult(result)) return;
+    // Structural-incompleteness guard: when the backend reports the
+    // ``empty_pipeline`` outcome (nothing built yet, e.g. immediately after
+    // exit_to_freeform) or a partial ``missing_source`` / ``missing_sink``
+    // outcome (a normal mid-build step), keep that state silent instead of
+    // injecting a local "fix these errors" message — the rail strip carries
+    // the plain-language guidance. The fingerprint update above stays so a
+    // later, genuinely-actionable failure with a different fingerprint still
+    // surfaces.
+    if (isEmptyPipelineResult(result) || isIncompletePipelineResult(result)) return;
 
     const sessionStore = useSessionStore.getState();
 

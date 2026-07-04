@@ -458,10 +458,9 @@ class RuntimeCheckpointConfig:
           - "every_n" -> checkpoint_interval value
           - "aggregation_only" -> 0
         - checkpoint_interval: CheckpointSettings.checkpoint_interval (direct mapping)
-        - aggregation_boundaries: CheckpointSettings.aggregation_boundaries (direct mapping)
 
     Protocol Coverage:
-        RuntimeCheckpointProtocol requires: enabled, frequency, aggregation_boundaries.
+        RuntimeCheckpointProtocol requires: enabled, frequency.
         The additional field (checkpoint_interval) is preserved for full Settings
         fidelity but not part of the protocol.
 
@@ -474,12 +473,10 @@ class RuntimeCheckpointConfig:
     enabled: bool
     frequency: int  # checkpoint every N rows (1=every_row, 0=aggregation_only)
     checkpoint_interval: int | None  # preserved from Settings for reference
-    aggregation_boundaries: bool  # whether to checkpoint at aggregation flush
 
     def __post_init__(self) -> None:
         """Validate configuration values."""
         require_bool(self.enabled, "enabled")
-        require_bool(self.aggregation_boundaries, "aggregation_boundaries")
         require_int(self.frequency, "frequency", min_value=0)
         require_int(self.checkpoint_interval, "checkpoint_interval", optional=True, min_value=0)
 
@@ -491,13 +488,11 @@ class RuntimeCheckpointConfig:
         - enabled=True
         - frequency=1 (every_row)
         - checkpoint_interval=None
-        - aggregation_boundaries=True
         """
         return cls(
             enabled=True,
             frequency=1,  # every_row
             checkpoint_interval=None,
-            aggregation_boundaries=True,
         )
 
     @classmethod
@@ -511,7 +506,6 @@ class RuntimeCheckpointConfig:
                 - "every_n" -> checkpoint_interval value
                 - "aggregation_only" -> 0
             settings.checkpoint_interval -> checkpoint_interval (direct)
-            settings.aggregation_boundaries -> aggregation_boundaries (direct)
 
         Args:
             settings: Validated Pydantic settings model
@@ -536,7 +530,6 @@ class RuntimeCheckpointConfig:
             enabled=settings.enabled,
             frequency=frequency,
             checkpoint_interval=settings.checkpoint_interval,
-            aggregation_boundaries=settings.aggregation_boundaries,
         )
 
 

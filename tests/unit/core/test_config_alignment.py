@@ -274,7 +274,6 @@ class TestCheckpointSettingsAlignment:
         "enabled",
         "frequency",
         "checkpoint_interval",
-        "aggregation_boundaries",
     }
 
     def test_field_categorization_complete(self) -> None:
@@ -688,12 +687,10 @@ class TestExplicitFieldMappings:
         settings_every = CheckpointSettings(
             enabled=True,
             frequency="every_row",
-            aggregation_boundaries=True,
         )
         config_every = RuntimeCheckpointConfig.from_settings(settings_every)
         assert config_every.enabled == settings_every.enabled, "enabled: direct mapping"
         assert config_every.frequency == 1, "frequency: 'every_row' -> 1"
-        assert config_every.aggregation_boundaries == settings_every.aggregation_boundaries, "aggregation_boundaries: direct mapping"
         assert config_every.checkpoint_interval is None, "checkpoint_interval: None when not every_n"
 
         # Test "every_n" frequency
@@ -701,7 +698,6 @@ class TestExplicitFieldMappings:
             enabled=True,
             frequency="every_n",
             checkpoint_interval=100,
-            aggregation_boundaries=False,
         )
         config_n = RuntimeCheckpointConfig.from_settings(settings_n)
         assert config_n.frequency == 100, "frequency: 'every_n' -> checkpoint_interval value"
@@ -711,7 +707,6 @@ class TestExplicitFieldMappings:
         settings_agg = CheckpointSettings(
             enabled=False,
             frequency="aggregation_only",
-            aggregation_boundaries=True,
         )
         config_agg = RuntimeCheckpointConfig.from_settings(settings_agg)
         assert config_agg.frequency == 0, "frequency: 'aggregation_only' -> 0"
@@ -934,14 +929,12 @@ class TestPropertyBasedRoundtrip:
             enabled=st.booleans(),
             frequency=st.sampled_from(["every_row", "every_n", "aggregation_only"]),
             interval=st.integers(min_value=1, max_value=10000),
-            agg_boundaries=st.booleans(),
         )
         @settings(max_examples=100)
         def check_roundtrip(
             enabled: bool,
             frequency: str,
             interval: int,
-            agg_boundaries: bool,
         ) -> None:
             # Build settings based on frequency type
             if frequency == "every_n":
@@ -949,19 +942,16 @@ class TestPropertyBasedRoundtrip:
                     enabled=enabled,
                     frequency=frequency,
                     checkpoint_interval=interval,
-                    aggregation_boundaries=agg_boundaries,
                 )
             else:
                 settings_obj = CheckpointSettings(
                     enabled=enabled,
                     frequency=frequency,
-                    aggregation_boundaries=agg_boundaries,
                 )
 
             config = RuntimeCheckpointConfig.from_settings(settings_obj)
 
             assert config.enabled == enabled
-            assert config.aggregation_boundaries == agg_boundaries
 
             # Verify frequency transformation
             if frequency == "every_row":

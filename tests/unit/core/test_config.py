@@ -789,7 +789,6 @@ class TestCheckpointSettings:
 
         assert settings.enabled is True
         assert settings.frequency == "every_row"
-        assert settings.aggregation_boundaries is True
 
     def test_checkpoint_frequency_options(self) -> None:
         from elspeth.core.config import CheckpointSettings

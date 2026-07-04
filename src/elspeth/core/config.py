@@ -1287,7 +1287,6 @@ class CheckpointSettings(BaseModel):
     enabled: bool = True
     frequency: Literal["every_row", "every_n", "aggregation_only"] = "every_row"
     checkpoint_interval: int | None = Field(default=None, gt=0)  # Required if frequency == "every_n"
-    aggregation_boundaries: bool = True  # Always checkpoint at aggregation flush
 
     @model_validator(mode="after")
     def validate_interval(self) -> "CheckpointSettings":

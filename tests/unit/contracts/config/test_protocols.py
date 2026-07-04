@@ -111,7 +111,6 @@ PROTOCOL_EXPECTED_PROPERTIES: dict[type, set[str]] = {
     RuntimeCheckpointProtocol: {
         "enabled",
         "frequency",
-        "aggregation_boundaries",
     },
     RuntimeTelemetryProtocol: {
         "enabled",
@@ -238,13 +237,11 @@ class _FakeConcurrencyMissing:
 class _FakeCheckpointComplete:
     enabled: bool = True
     frequency: int = 1
-    aggregation_boundaries: bool = True
 
 
 @dataclass
 class _FakeCheckpointMissingFrequency:
     enabled: bool = True
-    aggregation_boundaries: bool = True
 
 
 @dataclass
@@ -474,4 +471,3 @@ class TestCrossValidation:
         config = RuntimeCheckpointConfig.default()
         assert isinstance(config.enabled, bool)
         assert isinstance(config.frequency, int)
-        assert isinstance(config.aggregation_boundaries, bool)

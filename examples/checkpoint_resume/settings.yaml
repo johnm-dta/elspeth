@@ -77,4 +77,3 @@ checkpoint:
   enabled: true
   frequency: every_n
   checkpoint_interval: 5
-  aggregation_boundaries: true

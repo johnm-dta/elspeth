@@ -32,22 +32,19 @@ class TestRuntimeCheckpointAllFields:
         - enabled: bool
         - frequency: Literal["every_row", "every_n", "aggregation_only"]
         - checkpoint_interval: int | None
-        - aggregation_boundaries: bool
 
         RuntimeCheckpointConfig maps these to:
         - enabled: bool (direct)
         - frequency: int (computed from Settings.frequency + checkpoint_interval)
         - checkpoint_interval: int | None (preserved for full Settings fidelity)
-        - aggregation_boundaries: bool (direct)
         """
         from elspeth.contracts.config.runtime import RuntimeCheckpointConfig
 
-        # All 4 fields from CheckpointSettings (preserving all even if not in protocol)
+        # All 3 fields from CheckpointSettings (preserving all even if not in protocol)
         expected_fields = {
             "enabled",
             "frequency",
             "checkpoint_interval",
-            "aggregation_boundaries",
         }
 
         actual_fields = set(RuntimeCheckpointConfig.__dataclass_fields__.keys())
@@ -91,7 +88,6 @@ class TestRuntimeCheckpointFromSettings:
         settings = CheckpointSettings(
             enabled=True,
             frequency="every_row",
-            aggregation_boundaries=True,
         )
 
         config = RuntimeCheckpointConfig.from_settings(settings)
@@ -99,7 +95,6 @@ class TestRuntimeCheckpointFromSettings:
         assert config.enabled is True
         assert config.frequency == 1, "every_row should map to frequency=1"
         assert config.checkpoint_interval is None
-        assert config.aggregation_boundaries is True
 
     def test_from_settings_every_n(self) -> None:
         """from_settings() with frequency='every_n' uses checkpoint_interval."""
@@ -110,7 +105,6 @@ class TestRuntimeCheckpointFromSettings:
             enabled=True,
             frequency="every_n",
             checkpoint_interval=50,
-            aggregation_boundaries=False,
         )
 
         config = RuntimeCheckpointConfig.from_settings(settings)
@@ -118,7 +112,6 @@ class TestRuntimeCheckpointFromSettings:
         assert config.enabled is True
         assert config.frequency == 50, "every_n should map to checkpoint_interval value"
         assert config.checkpoint_interval == 50
-        assert config.aggregation_boundaries is False
 
     def test_from_settings_aggregation_only(self) -> None:
         """from_settings() with frequency='aggregation_only' produces frequency=0."""
@@ -128,7 +121,6 @@ class TestRuntimeCheckpointFromSettings:
         settings = CheckpointSettings(
             enabled=True,
             frequency="aggregation_only",
-            aggregation_boundaries=True,
         )
 
         config = RuntimeCheckpointConfig.from_settings(settings)
@@ -136,7 +128,6 @@ class TestRuntimeCheckpointFromSettings:
         assert config.enabled is True
         assert config.frequency == 0, "aggregation_only should map to frequency=0"
         assert config.checkpoint_interval is None
-        assert config.aggregation_boundaries is True
 
     def test_from_settings_disabled(self) -> None:
         """from_settings() preserves enabled=False."""
@@ -146,7 +137,6 @@ class TestRuntimeCheckpointFromSettings:
         settings = CheckpointSettings(
             enabled=False,
             frequency="every_row",
-            aggregation_boundaries=True,
         )
 
         config = RuntimeCheckpointConfig.from_settings(settings)
@@ -163,11 +153,10 @@ class TestRuntimeCheckpointFromSettings:
         config = RuntimeCheckpointConfig.from_settings(settings)
 
         # CheckpointSettings defaults:
-        # enabled=True, frequency="every_row", checkpoint_interval=None, aggregation_boundaries=True
+        # enabled=True, frequency="every_row", checkpoint_interval=None
         assert config.enabled is True
         assert config.frequency == 1  # "every_row" -> 1
         assert config.checkpoint_interval is None
-        assert config.aggregation_boundaries is True
 
 
 class TestRuntimeCheckpointConvenienceFactories:
@@ -182,11 +171,10 @@ class TestRuntimeCheckpointConvenienceFactories:
 
         config = RuntimeCheckpointConfig.default()
 
-        # Defaults match CheckpointSettings: enabled, every_row (frequency=1), aggregation_boundaries
+        # Defaults match CheckpointSettings: enabled, every_row (frequency=1)
         assert config.enabled is True
         assert config.frequency == 1  # "every_row" -> 1
         assert config.checkpoint_interval is None
-        assert config.aggregation_boundaries is True
 
 
 class TestRuntimeCheckpointValidation:
@@ -201,7 +189,6 @@ class TestRuntimeCheckpointValidation:
                 enabled=True,
                 frequency=-1,
                 checkpoint_interval=None,
-                aggregation_boundaries=True,
             )
 
     def test_frequency_rejects_bool(self) -> None:
@@ -213,7 +200,6 @@ class TestRuntimeCheckpointValidation:
                 enabled=True,
                 frequency=True,
                 checkpoint_interval=None,
-                aggregation_boundaries=True,
             )
 
     def test_checkpoint_interval_rejects_bool(self) -> None:
@@ -225,5 +211,4 @@ class TestRuntimeCheckpointValidation:
                 enabled=True,
                 frequency=1,
                 checkpoint_interval=True,
-                aggregation_boundaries=True,
             )

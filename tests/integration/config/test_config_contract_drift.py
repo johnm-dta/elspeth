@@ -120,16 +120,15 @@ class TestCheckpointConfigPropagation:
     def test_non_default_values_reach_config(self) -> None:
         """Non-default CheckpointSettings values must survive from_settings().
 
-        Invariant: enabled, frequency, checkpoint_interval, and
-        aggregation_boundaries must all be faithfully transferred. The
-        frequency field undergoes a type transformation (str -> int) but
-        the semantic meaning must be preserved.
+        Invariant: enabled, frequency, and checkpoint_interval must all be
+        faithfully transferred. The frequency field undergoes a type
+        transformation (str -> int) but the semantic meaning must be
+        preserved.
         """
         settings = CheckpointSettings(
             enabled=True,
             frequency="every_n",
             checkpoint_interval=50,
-            aggregation_boundaries=False,
         )
 
         runtime_config = RuntimeCheckpointConfig.from_settings(settings)
@@ -137,7 +136,6 @@ class TestCheckpointConfigPropagation:
         assert runtime_config.enabled is True
         assert runtime_config.frequency == 50
         assert runtime_config.checkpoint_interval == 50
-        assert runtime_config.aggregation_boundaries is False
 
     def test_frequency_value_preserved(self) -> None:
         """The frequency field's semantic value must survive type transformation.

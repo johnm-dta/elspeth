@@ -17,7 +17,13 @@ from elspeth.contracts import PendingOutcome, TokenInfo
 from elspeth.contracts.declaration_contracts import _attach_contract_name_from_dispatcher
 from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
-from elspeth.contracts.errors import AuditIntegrityError, PluginContractViolation, SinkRequiredFieldsViolation
+from elspeth.contracts.errors import (
+    AuditIntegrityError,
+    FrameworkBugError,
+    PluginContractViolation,
+    SinkRequiredFieldsViolation,
+)
+from elspeth.contracts.plugin_context import PluginContext
 from elspeth.contracts.results import ArtifactDescriptor
 from elspeth.engine.executors.sink import SinkExecutor
 
@@ -1213,3 +1219,128 @@ class TestDiversionIndexValidation:
         assert execution.begin_node_state.call_count == 2
         failed_calls = [c for c in execution.complete_node_state.call_args_list if c.kwargs.get("status") == NodeStateStatus.FAILED]
         assert len(failed_calls) == 2
+
+
+class TestUncoveredExceptArmCharacterization:
+    """Characterize three error-cleanup arms that were untested before the
+    SinkExecutor.write() decomposition (elspeth-f6a6ab0a46).
+
+    These pin CURRENT behavior so the behavior-preserving extraction into phase
+    helpers cannot silently break a cleanup path. Each targets an arm whose
+    only prior protection was the (ineffective) TIER_1-guard count floor:
+
+    * Test A: failsink begin_node_state GENERIC arm (non-TIER_1 error) — distinct
+      from its TIER_1 sibling; completes states directly + sets divert_states_closed.
+    * Test B: primary Phase-1 outer TIER_1 arm, flag False (best-effort cleanup).
+    * Test C: failsink outer TIER_1 arm, divert_states_closed False (best-effort cleanup).
+
+    RuntimeError is deliberately used for Test A because it is NOT in
+    contract_errors.TIER_1_ERRORS (so it routes to the generic arm), whereas
+    AuditIntegrityError/FrameworkBugError ARE in TIER_1_ERRORS (Tests B/C).
+    """
+
+    def test_failsink_begin_node_state_generic_error_cleans_up_open_states(self) -> None:
+        """A NON-TIER_1 error from failsink begin_node_state hits the generic arm
+        (sink.py 793-813), which completes the primary-divert anchors AND the
+        partially-opened failsink state as FAILED with phase='begin_node_state_failsink',
+        and sets divert_states_closed so the outer arm does not double-complete."""
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink(
+            diversions=(
+                RowDiversion(row_index=0, reason="bad-0", row_data={"field": "v0"}),
+                RowDiversion(row_index=1, reason="bad-1", row_data={"field": "v1"}),
+            ),
+        )
+        failsink = _make_failsink()
+        tokens = [_make_token("t0"), _make_token("t1")]
+
+        # begin_node_state: calls 1-2 primary divert states OK, call 3 first
+        # failsink state OK, call 4 (second failsink state) raises a non-TIER_1 error.
+        call_count = [0]
+        original_side_effect = execution.begin_node_state.side_effect
+
+        def begin_state_with_error(**kwargs: Any) -> MagicMock:
+            call_count[0] += 1
+            if call_count[0] == 4:
+                raise RuntimeError("transient failsink begin failure")
+            return original_side_effect(**kwargs)  # type: ignore[no-any-return]
+
+        execution.begin_node_state.side_effect = begin_state_with_error
+
+        with pytest.raises(RuntimeError, match="transient failsink begin failure"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=MagicMock(spec=PluginContext, run_id="run-1"),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-divert-1",
+            )
+
+        # state-1/2 (primary divert anchors) + state-3 (1st failsink) closed by the generic arm.
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2", "state-3"}
+        for state_id, kwargs in completion_by_state.items():
+            assert kwargs["status"] == NodeStateStatus.FAILED
+            assert kwargs["error"].phase == "begin_node_state_failsink"
+            assert kwargs["error"].exception_type == "RuntimeError", state_id
+
+    def test_primary_write_tier1_error_cleans_up_states_flag_false(self) -> None:
+        """A TIER_1 error from primary sink.write() with NO boundary violation hits
+        the outer TIER_1 arm (sink.py 599-602) with primary_states_closed_by_boundary_failure
+        False, so best-effort cleanup closes every pre-opened primary state as FAILED."""
+        executor, execution, _data_flow = _make_executor()
+        sink = _make_sink()  # no diversions
+        sink.write.side_effect = AuditIntegrityError("primary write audit failure")
+        tokens = [_make_token("t0"), _make_token("t1")]
+
+        with pytest.raises(AuditIntegrityError, match="primary write audit failure"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=MagicMock(spec=PluginContext, run_id="run-1"),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+            )
+
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2"}
+        for state_id, kwargs in completion_by_state.items():
+            assert kwargs["status"] == NodeStateStatus.FAILED
+            assert kwargs["error"].phase == "sink_write"
+            assert kwargs["error"].exception_type == "AuditIntegrityError", state_id
+
+    def test_failsink_write_tier1_error_cleans_up_states_flag_false(self) -> None:
+        """A TIER_1 error from failsink.write() (failsink states already open, so
+        divert_states_closed False) hits the outer TIER_1 arm (sink.py 913-916),
+        best-effort closing the primary-divert anchor AND failsink state as FAILED."""
+        executor, execution, _data_flow = _make_executor()
+        diversions = (RowDiversion(row_index=0, reason="bad", row_data={"x": 1}),)
+        sink = _make_sink(diversions=diversions, on_write_failure="csv_failsink")
+        failsink = _make_failsink()
+        failsink.write.side_effect = FrameworkBugError("failsink write framework bug")
+        tokens = [_make_token("t0")]
+
+        with pytest.raises(FrameworkBugError, match="failsink write framework bug"):
+            executor.write(
+                sink=sink,
+                tokens=tokens,  # type: ignore[arg-type]
+                ctx=MagicMock(spec=PluginContext, run_id="run-1"),
+                step_in_pipeline=5,
+                sink_name="primary",
+                pending_outcome=_default_pending(),
+                failsink=failsink,
+                failsink_name="csv_failsink",
+                failsink_edge_id="edge-failsink-1",
+            )
+
+        completion_by_state = _complete_node_state_kwargs_by_state(execution)
+        assert set(completion_by_state) == {"state-1", "state-2"}
+        for state_id, kwargs in completion_by_state.items():
+            assert kwargs["status"] == NodeStateStatus.FAILED
+            assert kwargs["error"].phase == "failsink_write"
+            assert kwargs["error"].exception_type == "FrameworkBugError", state_id

@@ -6091,6 +6091,33 @@ class TestExecuteTransformNoRetry:
         assert result.status == "error"
         assert error_sink == "discard"
 
+    def test_interrupted_error_converts_to_shutdown_requested_result(self) -> None:
+        """InterruptedError from a transform (e.g. a shutdown-cancelled batch
+        waiter, elspeth-14571961a6) converts to the row-scoped
+        shutdown_requested error result at the PROCESSOR layer — end-state
+        parity with the sync path's retry.py InterruptedError convention."""
+        _, _factory, processor = self._setup()
+        transform = _make_mock_transform(node_id="t1", on_error="discard")
+        token = make_token_info(data={"value": 42})
+        ctx = make_context()
+
+        with patch.object(
+            processor._transform_executor,
+            "execute_transform",
+            side_effect=InterruptedError("Shutdown requested while waiting for token tok-1 (state st-1)"),
+        ):
+            result, _out_token, error_sink = processor._execute_transform_with_retry(
+                transform=transform,
+                token=token,
+                ctx=ctx,
+            )
+
+        assert result.status == "error"
+        assert result.reason is not None
+        assert result.reason["reason"] == "shutdown_requested"
+        assert result.retryable is False
+        assert error_sink == "discard"
+
     def test_transient_connection_error_with_on_error(self) -> None:
         """ConnectionError with on_error returns error result (no re-raise)."""
         _, _factory, processor = self._setup()

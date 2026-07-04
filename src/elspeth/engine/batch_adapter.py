@@ -110,14 +110,21 @@ class RowWaiter:
         Args:
             timeout: Maximum seconds to wait
             shutdown_event: Optional run-cancellation signal. When set, the
-                waiter returns a row-scoped shutdown_requested result instead
-                of waiting for the full transform timeout.
+                waiter stops waiting immediately instead of sleeping out the
+                full transform timeout.
 
         Returns:
             TransformResult for this row
 
         Raises:
             TimeoutError: If result not received within timeout
+            InterruptedError: Run cancellation observed while waiting. The
+                waiter is a delivery primitive — it signals cancellation with
+                the same typed exception the sync path uses (retry.py) and the
+                processor translates it into the row-scoped
+                ``shutdown_requested`` error result
+                (``_convert_retryable_to_error_result``), so shutdown policy
+                lives in one layer (filigree elspeth-14571961a6).
             Exception: Re-raised from worker thread if plugin bug occurred
         """
         token_id, state_id = self._key
@@ -127,15 +134,7 @@ class RowWaiter:
                 with self._lock:
                     if self._key in self._entries:
                         del self._entries[self._key]
-                from elspeth.contracts import TransformResult
-
-                return TransformResult.error(
-                    {
-                        "reason": "shutdown_requested",
-                        "error": f"Shutdown requested while waiting for token {token_id} (state {state_id})",
-                    },
-                    retryable=False,
-                )
+                raise InterruptedError(f"Shutdown requested while waiting for token {token_id} (state {state_id})")
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:

@@ -1040,6 +1040,67 @@ class SinkExecutor:
 
         return failsink_count
 
+    def _handle_discard_diversions(
+        self,
+        *,
+        primary_divert_states: list[tuple[TokenInfo, int, NodeStateOpen]],
+        diversion_by_index: dict[int, RowDiversion],
+        on_token_written: Callable[[TokenInfo], None] | None,
+    ) -> int:
+        """PHASE 3 (discard mode): drop diverted tokens with a FAILED primary state.
+
+        No routing_event (no DAG edge for discard) and no failsink write — the
+        row does not reach its destination. Records SINK_DISCARDED outcomes and
+        checkpoints. Returns the number of discarded tokens.
+        """
+        discard_count = 0
+        # Discard mode: complete primary states and record DIVERTED outcomes.
+        # No routing_event (no DAG edge for discard), no failsink write.
+        for token, idx, primary_state in primary_divert_states:
+            diversion = diversion_by_index[idx]
+
+            # FAILED — the row didn't reach its destination (discarded).
+            discard_error = ExecutionError(
+                exception=diversion.reason,
+                exception_type="SinkDiscard",
+                phase="write",
+            )
+            self._execution.complete_node_state(
+                state_id=primary_state.state_id,
+                status=NodeStateStatus.FAILED,
+                output_data={"discarded": True, "reason": diversion.reason},
+                duration_ms=0.0,
+                error=discard_error,
+            )
+
+            error_hash = compute_error_hash(diversion.reason)
+            # ADR-019: discard-mode diversions are predicate-input
+            # failures, not transient failsink bookkeeping.
+            self._data_flow.record_token_outcome(
+                ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
+                outcome=TerminalOutcome.FAILURE,
+                path=TerminalPath.SINK_DISCARDED,
+                error_hash=error_hash,
+                sink_name="__discard__",
+            )
+            discard_count += 1
+
+        # Checkpoint diverted tokens — discard recording is now durable.
+        # Discard is idempotent, but checkpointing keeps resume state consistent.
+        if on_token_written is not None:
+            for token, _idx, _state in primary_divert_states:
+                try:
+                    on_token_written(token)
+                except contract_errors.TIER_1_ERRORS:
+                    raise
+                except Exception as exc:
+                    raise AuditIntegrityError(
+                        f"Checkpoint failed after discard recording for diverted token {token.token_id}. "
+                        f"Original error: {type(exc).__name__}: {exc}"
+                    ) from exc
+
+        return discard_count
+
     def write(
         self,
         sink: SinkProtocol,
@@ -1192,49 +1253,10 @@ class SinkExecutor:
                     on_token_written=on_token_written,
                 )
             else:
-                # Discard mode: complete primary states and record DIVERTED outcomes.
-                # No routing_event (no DAG edge for discard), no failsink write.
-                for token, idx, primary_state in primary_divert_states:
-                    diversion = diversion_by_index[idx]
-
-                    # FAILED — the row didn't reach its destination (discarded).
-                    discard_error = ExecutionError(
-                        exception=diversion.reason,
-                        exception_type="SinkDiscard",
-                        phase="write",
-                    )
-                    self._execution.complete_node_state(
-                        state_id=primary_state.state_id,
-                        status=NodeStateStatus.FAILED,
-                        output_data={"discarded": True, "reason": diversion.reason},
-                        duration_ms=0.0,
-                        error=discard_error,
-                    )
-
-                    error_hash = compute_error_hash(diversion.reason)
-                    # ADR-019: discard-mode diversions are predicate-input
-                    # failures, not transient failsink bookkeeping.
-                    self._data_flow.record_token_outcome(
-                        ref=TokenRef(token_id=token.token_id, run_id=self._run_id),
-                        outcome=TerminalOutcome.FAILURE,
-                        path=TerminalPath.SINK_DISCARDED,
-                        error_hash=error_hash,
-                        sink_name="__discard__",
-                    )
-                    discard_count += 1
-
-                # Checkpoint diverted tokens — discard recording is now durable.
-                # Discard is idempotent, but checkpointing keeps resume state consistent.
-                if on_token_written is not None:
-                    for token, _idx, _state in primary_divert_states:
-                        try:
-                            on_token_written(token)
-                        except contract_errors.TIER_1_ERRORS:
-                            raise
-                        except Exception as exc:
-                            raise AuditIntegrityError(
-                                f"Checkpoint failed after discard recording for diverted token {token.token_id}. "
-                                f"Original error: {type(exc).__name__}: {exc}"
-                            ) from exc
+                discard_count = self._handle_discard_diversions(
+                    primary_divert_states=primary_divert_states,
+                    diversion_by_index=diversion_by_index,
+                    on_token_written=on_token_written,
+                )
 
         return artifact, DiversionCounts(failsink_mode=failsink_count, discard_mode=discard_count)

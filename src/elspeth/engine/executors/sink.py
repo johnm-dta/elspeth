@@ -371,6 +371,65 @@ class SinkExecutor:
             raise FrameworkBugError(f"Contract merge failed after {merge_duration_ms:.1f}ms: {e}") from e
         return batch_contract
 
+    def _open_primary_states(
+        self,
+        *,
+        tokens: list[TokenInfo],
+        rows: list[dict[str, object]],
+        sink_node_id: str,
+        step_in_pipeline: int,
+        ctx: PluginContext,
+    ) -> list[tuple[TokenInfo, NodeStateOpen]]:
+        """Open node_states for ALL tokens at the primary sink (PRE-PHASE).
+
+        Opened BEFORE I/O so that Phase 1 failures can record FAILED states,
+        preserving the invariant that every token reaches a terminal state. We
+        don't yet know which tokens will be diverted — that's discovered by
+        sink.write() — so we open states for ALL tokens and partition later. On a
+        begin failure, best-effort close any partially-opened states before
+        re-raising (TIER_1 and generic paths both clean up then propagate).
+        """
+        all_states: list[tuple[TokenInfo, NodeStateOpen]] = []
+        try:
+            can_use_bulk_begin = type(self._execution) is ExecutionRepository and all(
+                token.resume_attempt_offset == 0 and token.resume_checkpoint_id is None for token in tokens
+            )
+            if can_use_bulk_begin:
+                opened_states = self._execution.begin_node_states_many(
+                    tuple(
+                        (
+                            token.token_id,
+                            sink_node_id,
+                            ctx.run_id,
+                            step_in_pipeline,
+                            row,
+                        )
+                        for token, row in zip(tokens, rows, strict=True)
+                    )
+                )
+                all_states.extend(zip(tokens, opened_states, strict=True))
+            else:
+                for token, input_dict in zip(tokens, rows, strict=True):
+                    state = self._execution.begin_node_state(
+                        token_id=token.token_id,
+                        node_id=sink_node_id,
+                        run_id=ctx.run_id,
+                        step_index=step_in_pipeline,
+                        input_data=input_dict,
+                        attempt=token.resume_attempt_offset,
+                        resume_checkpoint_id=token.resume_checkpoint_id,
+                    )
+                    all_states.append((token, state))
+        except contract_errors.TIER_1_ERRORS as e:
+            if all_states:
+                self._best_effort_cleanup(all_states, e, "begin_node_state")
+            raise
+        except Exception as e:
+            if all_states:
+                self._best_effort_cleanup(all_states, e, "begin_node_state")
+            raise
+        return all_states
+
     def write(
         self,
         sink: SinkProtocol,
@@ -451,49 +510,13 @@ class SinkExecutor:
         ctx.state_id = None
 
         # ── PRE-PHASE: Open node_states for ALL tokens at primary sink ──
-        # Opened BEFORE I/O so that Phase 1 failures can record FAILED states,
-        # preserving the invariant that every token reaches a terminal state.
-        # We don't yet know which tokens will be diverted — that's discovered
-        # by sink.write() — so we open states for ALL tokens and partition later.
-        all_states: list[tuple[TokenInfo, NodeStateOpen]] = []
-        try:
-            can_use_bulk_begin = type(self._execution) is ExecutionRepository and all(
-                token.resume_attempt_offset == 0 and token.resume_checkpoint_id is None for token in tokens
-            )
-            if can_use_bulk_begin:
-                opened_states = self._execution.begin_node_states_many(
-                    tuple(
-                        (
-                            token.token_id,
-                            sink_node_id,
-                            ctx.run_id,
-                            step_in_pipeline,
-                            row,
-                        )
-                        for token, row in zip(tokens, rows, strict=True)
-                    )
-                )
-                all_states.extend(zip(tokens, opened_states, strict=True))
-            else:
-                for token, input_dict in zip(tokens, rows, strict=True):
-                    state = self._execution.begin_node_state(
-                        token_id=token.token_id,
-                        node_id=sink_node_id,
-                        run_id=ctx.run_id,
-                        step_index=step_in_pipeline,
-                        input_data=input_dict,
-                        attempt=token.resume_attempt_offset,
-                        resume_checkpoint_id=token.resume_checkpoint_id,
-                    )
-                    all_states.append((token, state))
-        except contract_errors.TIER_1_ERRORS as e:
-            if all_states:
-                self._best_effort_cleanup(all_states, e, "begin_node_state")
-            raise
-        except Exception as e:
-            if all_states:
-                self._best_effort_cleanup(all_states, e, "begin_node_state")
-            raise
+        all_states = self._open_primary_states(
+            tokens=tokens,
+            rows=rows,
+            sink_node_id=sink_node_id,
+            step_in_pipeline=step_in_pipeline,
+            ctx=ctx,
+        )
 
         # Index by token_id for O(1) lookup in Phases 2 and 3.
         state_by_token_id: dict[str, NodeStateOpen] = {token.token_id: state for token, state in all_states}

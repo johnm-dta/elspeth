@@ -34,7 +34,7 @@ These run immediately with no setup:
 | `landscape_journal` | 2 | JSON source, audit journal |
 | `multi_flow` | 4 | Two independent named source flows in one run |
 | `multi_source_queue` | 3 | Multiple named sources fan into a queue |
-| `large_scale_test` | 50,000 | Performance test — takes ~7 minutes |
+| `large_scale_test` | 10,000 | Performance test — committed `input.csv` is 10k rows (~1.5 min); regenerate larger via `generate_data.py` (default 50k) |
 | `retention_purge` | 5 | Payload retention policy demo |
 | `schema_contracts_demo` | 5 | Schema validation contracts |
 | `threshold_gate` | 8 | Numeric threshold routing |
@@ -122,7 +122,7 @@ timeout 20 elspeth run --settings examples/openrouter_sentiment/settings.yaml --
 | `openrouter_sentiment` | 5 | ~6s | GPT-4o-mini sentiment |
 | `template_lookups` | 5 | ~8s | Claude Haiku with templates |
 | `openrouter_multi_query_assessment` | 3 | ~18s | Claude Sonnet multi-query |
-| `schema_contracts_llm_assessment` | 5 | >20s | Claude Sonnet — may need longer timeout or resume |
+| `schema_contracts_llm_assessment` | 3 | >20s | Claude Sonnet — may need longer timeout or resume |
 
 If a pipeline is interrupted, resume with the command shown in the output.
 

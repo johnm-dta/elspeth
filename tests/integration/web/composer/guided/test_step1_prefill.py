@@ -80,3 +80,28 @@ def test_step1_prefill_survives_guided_get_rebuild(composer_test_client: TestCli
     assert rebuilt["next_turn"]["type"] == "schema_form"
     rebuilt_prefill = rebuilt["next_turn"]["payload"]["prefilled"]["schema"]
     assert rebuilt_prefill["fields"] == ["name: str", "age: int"]
+
+
+def test_step1_prefill_stays_observed_for_env_var_header(composer_test_client: TestClient) -> None:
+    # A Tier-3 uploaded CSV whose header is a ${VAR} placeholder must not be
+    # promoted into explicit schema.fields specs: those strings later flow through
+    # the runtime YAML loader, where ${VAR} would resolve host env on the CLI path.
+    sess = _create_session(composer_test_client, "step1-prefill-env-header")
+    resp = composer_test_client.post(
+        f"/api/sessions/{sess}/blobs/inline",
+        json={
+            "filename": "secrets.csv",
+            "content": "${AWS_SECRET_ACCESS_KEY},ok\nsecret,1\n",
+            "mime_type": "text/csv",
+        },
+    )
+    assert resp.status_code == 201, resp.json()
+
+    initial = _get_guided(composer_test_client, sess)
+    assert initial["next_turn"]["type"] == "single_select"
+
+    selected = _select_source(composer_test_client, sess, "csv")
+
+    assert selected["next_turn"]["type"] == "schema_form"
+    schema_prefill = selected["next_turn"]["payload"]["prefilled"]["schema"]
+    assert schema_prefill == {"mode": "observed"}

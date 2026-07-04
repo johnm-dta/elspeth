@@ -78,6 +78,47 @@ class TestBuildSchemaFormTurns:
         schema_prefill = turn["payload"]["prefilled"]["schema"]
         assert schema_prefill == {"mode": "flexible", "fields": ["name: str", "age: int"]}
 
+    def test_step_1_schema_form_keeps_observed_mode_for_unsafe_inspected_header(self) -> None:
+        # A Tier-3 uploaded CSV whose header is an env-var placeholder must not be
+        # emitted as an explicit schema.fields spec: those strings later flow through
+        # the runtime YAML loader, and a raw ``${VAR}`` header would become a
+        # config-to-output host-secret exfiltration gadget on the CLI loader path.
+        facts = SourceInspectionFacts(
+            source_kind="csv",
+            redacted_identity={"filename": "input.csv"},
+            byte_range_inspected=(0, 64),
+            sample_row_count=1,
+            observed_headers=("${AWS_SECRET_ACCESS_KEY}", "ok"),
+            inferred_types={"${AWS_SECRET_ACCESS_KEY}": "str", "ok": "int"},
+            url_candidates=(),
+            warnings=(),
+        )
+
+        turn = build_step_1_schema_form_turn("csv", _Catalog(), inspection_facts=facts)
+
+        schema_prefill = turn["payload"]["prefilled"]["schema"]
+        assert schema_prefill == {"mode": "observed"}
+
+    def test_step_1_schema_form_keeps_observed_mode_for_keyword_header(self) -> None:
+        # A header that is a Python keyword ("class") is not a safe explicit field
+        # name either — runtime header normalization would rename it, so declaring
+        # it as an explicit spec would diverge from actual runtime behaviour.
+        facts = SourceInspectionFacts(
+            source_kind="csv",
+            redacted_identity={"filename": "input.csv"},
+            byte_range_inspected=(0, 64),
+            sample_row_count=1,
+            observed_headers=("class", "ok"),
+            inferred_types={"class": "str", "ok": "int"},
+            url_candidates=(),
+            warnings=(),
+        )
+
+        turn = build_step_1_schema_form_turn("csv", _Catalog(), inspection_facts=facts)
+
+        schema_prefill = turn["payload"]["prefilled"]["schema"]
+        assert schema_prefill == {"mode": "observed"}
+
     def test_step_2_schema_form_uses_sink_knobs(self) -> None:
         turn = build_step_2_schema_form_turn("json", _Catalog())
 

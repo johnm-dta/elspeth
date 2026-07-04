@@ -23,6 +23,7 @@ data constructed from system-owned state; the Turn dict itself is not persisted
 
 from __future__ import annotations
 
+import keyword
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
@@ -160,16 +161,46 @@ def _merge_inspection_into_prefill(
 ) -> None:
     """Conservatively prefill source schema from inspection facts."""
     if facts.observed_headers and facts.inferred_types:
-        fields: list[str] = []
-        for header in facts.observed_headers:
-            inferred = facts.inferred_types[header]
-            field_type = "any" if inferred == "null" else inferred
-            fields.append(f"{header}: {field_type}")
-        prefilled["schema"] = {"mode": "flexible", "fields": fields}
+        fields = _schema_field_specs_from_inspection_headers(facts)
+        if fields is not None:
+            prefilled["schema"] = {"mode": "flexible", "fields": fields}
+        else:
+            prefilled["schema"] = {"mode": "observed"}
     elif facts.observed_headers:
         prefilled["schema"] = {"mode": "observed"}
     # Delimiter and encoding are deliberately not prefilled here: the live
     # SourceInspectionFacts model does not carry those fields yet.
+
+
+def _schema_field_specs_from_inspection_headers(facts: SourceInspectionFacts) -> list[str] | None:
+    """Return safe explicit schema field specs, or ``None`` to stay observed.
+
+    Blob inspection facts originate from Tier-3 uploaded bytes. Explicit
+    ``schema.fields`` are later loaded through the runtime YAML settings loader,
+    whose string values support ``${VAR}`` expansion on the operator CLI path.
+    Do not place raw external headers into those strings unless the header is
+    already a safe schema field identifier; otherwise the source runtime's
+    mandatory header normalization remains the authoritative boundary. Safe
+    names must already match the CSV source normalization convention (lowercase
+    Python identifiers) so the prefill does not declare fields that runtime
+    header normalization would rename.
+    """
+    inferred_types = facts.inferred_types
+    if inferred_types is None:
+        return None
+    fields: list[str] = []
+    for header in facts.observed_headers or ():
+        if not _is_safe_schema_field_name(header):
+            return None
+        inferred = inferred_types[header]
+        field_type = "any" if inferred == "null" else inferred
+        fields.append(f"{header}: {field_type}")
+    return fields
+
+
+def _is_safe_schema_field_name(header: str) -> bool:
+    """Return whether ``header`` can safely appear in ``schema.fields``."""
+    return header.isidentifier() and header == header.lower() and not keyword.iskeyword(header)
 
 
 def build_step_2_single_select_turn(

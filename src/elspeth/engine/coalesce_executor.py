@@ -33,10 +33,10 @@ from elspeth.contracts.union_merge import merge_union_contracts
 from elspeth.core.config import CoalesceSettings
 from elspeth.core.landscape.data_flow_repository import DataFlowRepository
 from elspeth.core.landscape.execution_repository import ExecutionRepository
-from elspeth.core.landscape.scheduler_repository import token_from_journal_item
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.clock import DEFAULT_CLOCK
 from elspeth.engine.coalesce_policy import CoalesceAction, CoalesceEvent, decide_coalesce
+from elspeth.engine.journal_restore import CoalesceJournalRestorer
 from elspeth.engine.spans import SpanFactory
 
 if TYPE_CHECKING:
@@ -309,9 +309,11 @@ class CoalesceExecutor:
         clock (clamped at 0 against wall-clock skew), and each branch's
         arrival_time preserves the absolute blocked-at offsets.
 
-        Completed keys are reconstructed from the Landscape (source of truth),
-        unchanged from the blob-restore era — see
-        ``_reconstruct_completed_keys_from_landscape``.
+        Validation, token rehydration, scalar-only handling, and completed-key
+        reconstruction from the Landscape (source of truth) live in
+        ``CoalesceJournalRestorer`` (the restore/hydration boundary); this
+        method applies the returned frozen state wholesale. Late-arrival
+        point lookups stay on the executor (``_check_landscape_for_completion``).
 
         Caller obligations (Task 3.1):
 
@@ -354,234 +356,49 @@ class CoalesceExecutor:
                 unknown coalesce, duplicate journal rows, duplicate branch
                 claims, missing attempt offset, missing state_id.
         """
-        # Validate and group ALL items before touching executor state — if
-        # validation fails, the in-memory state must remain intact for error
-        # recovery (same discipline as the old blob restore).
-        grouped: dict[tuple[str, str], dict[str, TokenWorkItem]] = {}
-        blocked_at_by_token: dict[str, datetime] = {}
-        for item in items:
-            if not item.coalesce_name:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} (run {self._run_id!r}, "
-                    f"resume checkpoint {resume_checkpoint_id!r}) has no coalesce_name — "
-                    "coalesce barrier rows always carry the coalesce cursor; journal corruption."
-                )
-            if item.coalesce_name not in self._settings:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} (run {self._run_id!r}, "
-                    f"resume checkpoint {resume_checkpoint_id!r}) references unknown coalesce "
-                    f"'{item.coalesce_name}'. Configured coalesces: {sorted(self._settings)}"
-                )
-            if item.barrier_blocked_at is None:
-                # Every post-epoch-20 BLOCKED row is stamped by mark_blocked.
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} at coalesce "
-                    f"{item.coalesce_name!r} (run {self._run_id!r}, resume checkpoint "
-                    f"{resume_checkpoint_id!r}) has NULL barrier_blocked_at — journal "
-                    "corruption (every BLOCKED row is stamped at mark_blocked time)."
-                )
-            if not item.branch_name:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} at coalesce "
-                    f"{item.coalesce_name!r} (run {self._run_id!r}, resume checkpoint "
-                    f"{resume_checkpoint_id!r}) has no branch_name — only forked branch "
-                    "tokens block at a coalesce barrier; journal corruption."
-                )
-            if item.branch_name not in self._settings[item.coalesce_name].branches:
-                # The live accept() path rejects unknown branches; restore must
-                # apply the same allowlist (elspeth-a840cb774a) — a rogue branch
-                # inflates quorum/best_effort arrival counts while contributing
-                # no merge data.
-                raise AuditIntegrityError(
-                    f"BLOCKED journal row for token {item.token_id!r} at coalesce "
-                    f"{item.coalesce_name!r} (run {self._run_id!r}, resume checkpoint "
-                    f"{resume_checkpoint_id!r}) claims branch '{item.branch_name}' which is "
-                    f"not in the configured branches {sorted(self._settings[item.coalesce_name].branches)} — "
-                    "journal corruption."
-                )
-            if item.token_id in blocked_at_by_token:
-                raise AuditIntegrityError(
-                    f"Duplicate BLOCKED journal rows for token {item.token_id!r} at "
-                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {resume_checkpoint_id!r}) — journal corruption."
-                )
-            if attempt_offsets.get(item.token_id) is None:
-                raise AuditIntegrityError(
-                    f"No entry in attempt_offsets for journal token {item.token_id!r} at "
-                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {resume_checkpoint_id!r}) — audit-derived offsets must "
-                    "cover every BLOCKED journal row."
-                )
-            if state_ids.get(item.token_id) is None:
-                # The PENDING node_state hold is written at accept() time, before
-                # the journal row blocks; a BLOCKED row with no hold means the
-                # journal and the audit trail disagree — corruption, not a default.
-                raise AuditIntegrityError(
-                    f"No entry in state_ids for journal token {item.token_id!r} at "
-                    f"coalesce {item.coalesce_name!r} (run {self._run_id!r}, resume "
-                    f"checkpoint {resume_checkpoint_id!r}) — every BLOCKED coalesce row "
-                    "holds a PENDING node_state in the audit trail; a missing hold is "
-                    "an audit inconsistency."
-                )
+        restored = CoalesceJournalRestorer(
+            settings=self._settings,
+            node_ids=self._node_ids,
+            execution=self._execution,
+            run_id=self._run_id,
+            clock=self._clock,
+        ).restore(
+            items=items,
+            scalars=scalars,
+            state_ids=state_ids,
+            attempt_offsets=attempt_offsets,
+            resume_checkpoint_id=resume_checkpoint_id,
+            now=now,
+        )
 
-            key = (item.coalesce_name, item.row_id)
-            branch_items = grouped.setdefault(key, {})
-            if item.branch_name in branch_items:
-                raise AuditIntegrityError(
-                    f"BLOCKED journal rows for tokens "
-                    f"{branch_items[item.branch_name].token_id!r} and {item.token_id!r} "
-                    f"both claim branch '{item.branch_name}' at coalesce "
-                    f"{item.coalesce_name!r} for row {item.row_id!r} (run {self._run_id!r}, "
-                    f"resume checkpoint {resume_checkpoint_id!r}) — accept() crashes on a "
-                    "duplicate arrival, so this is journal corruption."
-                )
-            branch_items[item.branch_name] = item
-            blocked_at_by_token[item.token_id] = item.barrier_blocked_at
-
-        monotonic_now = self._clock.monotonic()
-        new_pending: dict[tuple[str, str], _PendingCoalesce] = {}
-        for key, branch_items in grouped.items():
-            min_blocked_at = min(blocked_at_by_token[it.token_id] for it in branch_items.values())
-            # Pending age derives from the absolute blocked-at stamp of the
-            # OLDEST branch (first arrival of this pending key), clamped at 0:
-            # a wall-clock backward step must not put first_arrival in the
-            # monotonic future.
-            first_arrival = monotonic_now - max(0.0, (now - min_blocked_at).total_seconds())
-            branches: dict[str, _BranchEntry] = {}
-            for branch_name, branch_item in branch_items.items():
-                token = token_from_journal_item(
-                    branch_item,
-                    attempt_offset=attempt_offsets[branch_item.token_id],
-                    resume_checkpoint_id=resume_checkpoint_id,
-                )
-                branches[branch_name] = _BranchEntry(
-                    token=token,
-                    arrival_time=first_arrival + (blocked_at_by_token[branch_item.token_id] - min_blocked_at).total_seconds(),
-                    state_id=state_ids[branch_item.token_id],
-                )
-
-            key_scalars = scalars.get(key)
-            lost_branches = dict(key_scalars.lost_branches) if key_scalars is not None else {}
-            allowed_branches = self._settings[key[0]].branches
-            unknown_lost = set(lost_branches) - set(allowed_branches)
-            if unknown_lost:
-                raise AuditIntegrityError(
-                    f"Checkpoint lost_branches for coalesce {key[0]!r} row {key[1]!r} "
-                    f"(run {self._run_id!r}, resume checkpoint {resume_checkpoint_id!r}) "
-                    f"name branches {sorted(unknown_lost)} outside the configured branches "
-                    f"{sorted(allowed_branches)} — checkpoint corruption."
-                )
-            both = set(branches) & set(lost_branches)
-            if both:
-                # Mirrors the live notify_branch_lost invariant: a branch
-                # cannot both arrive and be lost for the same pending key.
-                raise AuditIntegrityError(
-                    f"Branches {sorted(both)} at coalesce {key[0]!r} row {key[1]!r} "
-                    f"(run {self._run_id!r}, resume checkpoint {resume_checkpoint_id!r}) "
-                    "are recorded as both arrived and lost — journal/checkpoint corruption."
-                )
-            new_pending[key] = _PendingCoalesce(
-                branches=branches,
-                first_arrival=first_arrival,
-                lost_branches=lost_branches,
-            )
-
-        # Reconstruct completed keys from Landscape (source of truth) into the
-        # bounded FIFO cache. Evicted keys remain correct because accept()
-        # does an exact Landscape point lookup on cache miss.
-        # Queried BEFORE any mutation: a Landscape error mid-restore must not
-        # leave the executor cleared-but-unrestored.
-        completed_keys = self._reconstruct_completed_keys_from_landscape()
-        completed_key_set = set(completed_keys)
-
-        # Scalar-only entries have no arrived branch payloads in the journal.
-        # If the Landscape says the key completed, the scalar is an older
-        # checkpoint image and must be dropped. Otherwise, a non-empty
-        # lost_branches scalar is the durable image of a zero-arrival pending
-        # key: restore it so a later surviving branch accounts against the
-        # recorded loss instead of forming a fresh, loss-free pending key.
-        for scalar_key in scalars.keys() - grouped.keys():
-            coalesce_name, row_id = scalar_key
-            key_scalars = scalars[scalar_key]
-            lost_branches = dict(key_scalars.lost_branches)
-            if coalesce_name in self._settings and lost_branches and scalar_key not in completed_key_set:
-                unknown_lost = set(lost_branches) - set(self._settings[coalesce_name].branches)
-                if unknown_lost:
-                    # An unknown BRANCH inside a configured, non-completed
-                    # coalesce's scalars is corruption, not staleness — only
-                    # unknown-coalesce / completed / empty keys drop-and-log.
-                    raise AuditIntegrityError(
-                        f"Checkpoint lost_branches for coalesce {coalesce_name!r} row {row_id!r} "
-                        f"(run {self._run_id!r}, resume checkpoint {resume_checkpoint_id!r}) "
-                        f"name branches {sorted(unknown_lost)} outside the configured branches "
-                        f"{sorted(self._settings[coalesce_name].branches)} — checkpoint corruption."
-                    )
-                new_pending[scalar_key] = _PendingCoalesce(
-                    branches={},
-                    first_arrival=monotonic_now,
-                    lost_branches=lost_branches,
-                )
-                slog.info(
-                    "coalesce_journal_restored_loss_only_scalars",
-                    coalesce_name=coalesce_name,
-                    row_id=row_id,
-                    run_id=self._run_id,
-                    resume_checkpoint_id=resume_checkpoint_id,
-                    lost_branches=lost_branches,
-                )
-                continue
-            slog.info(
-                "coalesce_journal_restore_dropped_stale_scalars",
-                coalesce_name=coalesce_name,
-                row_id=row_id,
-                run_id=self._run_id,
-                resume_checkpoint_id=resume_checkpoint_id,
-                lost_branches=lost_branches,
-            )
-
+        # Apply the validated state wholesale — the restorer has already
+        # raised on any journal/audit disagreement (validate-before-mutate:
+        # a failed restore leaves the executor's in-memory state intact).
         self._pending.clear()
         self._completed_keys.clear()
-        for completed_key in completed_keys:
+        for completed_key in restored.completed_keys:
             self._mark_completed(completed_key)
-        self._pending.update(new_pending)
+        for group in restored.pending:
+            self._pending[group.key] = _PendingCoalesce(
+                branches={
+                    branch.branch_name: _BranchEntry(
+                        token=branch.token,
+                        arrival_time=branch.arrival_time,
+                        state_id=branch.state_id,
+                    )
+                    for branch in group.branches
+                },
+                first_arrival=group.first_arrival,
+                lost_branches=dict(group.lost_branches),
+            )
 
         slog.info(
             "coalesce_journal_restored",
-            pending_keys=len(new_pending),
-            token_count=len(blocked_at_by_token),
+            pending_keys=len(restored.pending),
+            token_count=restored.token_count,
             run_id=self._run_id,
             resume_checkpoint_id=resume_checkpoint_id,
         )
-
-    def _reconstruct_completed_keys_from_landscape(self) -> list[tuple[str, str]]:
-        """Read completed coalesce keys from the Landscape audit trail.
-
-        Queries node_states for completed entries at coalesce node IDs, joined
-        with tokens to get row_ids. Maps node_id → coalesce_name via the
-        reverse of self._node_ids.
-
-        This is the restore seeding path: the Landscape records all completed
-        coalesces, but the executor keeps only a bounded FIFO performance
-        cache. Late arrivals for evicted keys are rediscovered through an exact
-        Landscape point lookup.
-
-        Returns the keys instead of mutating ``_completed_keys`` so the caller
-        (``restore_from_journal``) can run the Landscape query BEFORE clearing
-        executor state — a Landscape failure mid-restore must not leave the
-        executor cleared-but-unrestored.
-        """
-        if not self._node_ids:
-            return []
-
-        # Build reverse map: node_id → coalesce_name
-        node_id_to_name: dict[str, str] = {str(nid): name for name, nid in self._node_ids.items()}
-
-        completed_pairs = self._execution.get_completed_row_ids_for_nodes(
-            run_id=self._run_id,
-            node_ids=frozenset(node_id_to_name.keys()),
-        )
-
-        return [(node_id_to_name[node_id_str], row_id) for node_id_str, row_id in completed_pairs if node_id_str in node_id_to_name]
 
     def _check_landscape_for_completion(self, coalesce_name: str, row_id: str) -> bool:
         """Check the Landscape for whether a coalesce key has completed.

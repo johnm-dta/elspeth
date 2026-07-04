@@ -2,9 +2,12 @@
   "name": "elspeth",
   "private": true,
   "devDependencies": {
-    "azurite": "^3.30.0"
+    "azurite": "^3.35.0"
   },
   "scripts": {
     "azurite": "azurite --silent"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
   }
 }

@@ -335,6 +335,23 @@ class TestReportAssembleConfig:
             with pytest.raises(PluginConfigError, match="reserved report metadata"):
                 ReportAssemble({"schema": DYNAMIC_SCHEMA, "text_field": "line", "output_field": reserved})
 
+    def test_title_env_ref_placeholder_is_rejected(self) -> None:
+        # report_assemble emits title/join_with into user-visible report output;
+        # a ${VAR} placeholder there would render an expanded host secret into a
+        # downloadable artifact, so it must be rejected at config time.
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+        from elspeth.plugins.transforms.report_assemble import ReportAssemble
+
+        with pytest.raises(PluginConfigError, match="environment-variable placeholders"):
+            ReportAssemble({"schema": DYNAMIC_SCHEMA, "text_field": "line", "title": "${ELSPETH_SECRET_KEY}"})
+
+    def test_join_with_env_ref_placeholder_is_rejected(self) -> None:
+        from elspeth.plugins.infrastructure.config_base import PluginConfigError
+        from elspeth.plugins.transforms.report_assemble import ReportAssemble
+
+        with pytest.raises(PluginConfigError, match="environment-variable placeholders"):
+            ReportAssemble({"schema": DYNAMIC_SCHEMA, "text_field": "line", "join_with": r"${JOINER:-\n}"})
+
 
 class TestReportAssembleDiscovery:
     def test_register_builtin_plugins_discovers_report_assemble(self) -> None:

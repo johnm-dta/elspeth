@@ -423,6 +423,7 @@ class TransformExecutor:
         transform: TransformProtocol,
         token: TokenInfo,
         ctx: PluginContext,
+        node_id: str,
         static_contract: frozenset[str],
         effective_input_fields: frozenset[str],
     ) -> None:
@@ -448,7 +449,7 @@ class TransformExecutor:
             verify_zero_emission_declaration_path(
                 plugin=transform,
                 plugin_name=transform.name,
-                node_id=transform.node_id,
+                node_id=node_id,
                 run_id=ctx.run_id,
                 row_id=token.row_id,
                 token_id=token.token_id,
@@ -458,7 +459,7 @@ class TransformExecutor:
             run_post_emission_checks(
                 inputs=PostEmissionInputs(
                     plugin=transform,
-                    node_id=transform.node_id or "",
+                    node_id=node_id,
                     run_id=ctx.run_id,
                     row_id=token.row_id,
                     token_id=token.token_id,
@@ -490,6 +491,97 @@ class TransformExecutor:
                     f"Transform '{transform.name}' output validation failed for emitted row {idx}: {e}. "
                     "This indicates a transform schema bug."
                 ) from e
+
+    def _populate_result_audit_fields(
+        self,
+        *,
+        result: TransformResult,
+        transform: TransformProtocol,
+        input_hash: str,
+        duration_ms: float,
+    ) -> None:
+        """Populate audit fields on the result (both success and error results).
+
+        Wraps stable_hash calls to convert canonicalization errors to
+        PluginContractViolation: stable_hash calls canonical_json, which
+        rejects NaN, Infinity, and non-serializable types. Per CLAUDE.md:
+        plugin bugs must crash with clear error messages.
+        """
+        result.input_hash = input_hash
+        try:
+            if result.row is not None:
+                result.output_hash = stable_hash(result.row)
+            elif result.rows is not None:
+                result.output_hash = stable_hash(result.rows)
+            else:
+                result.output_hash = None
+        except (TypeError, ValueError) as e:
+            raise PluginContractViolation(
+                f"Transform '{transform.name}' emitted non-canonical data: {e}. "
+                f"Ensure output contains only JSON-serializable types. "
+                f"Use None instead of NaN for missing values."
+            ) from e
+        result.duration_ms = duration_ms
+
+    def _prepare_success_completion(
+        self,
+        *,
+        result: TransformResult,
+        transform: TransformProtocol,
+        token: TokenInfo,
+        ctx: PluginContext,
+        node_id: str,
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        """Extract output data + record contract evolution (success-audit phase, part 2).
+
+        Runs immediately before the shell completes the state as COMPLETED.
+        Owns the has-output-data invariant, output-data extraction for the
+        audit trail, and output-contract evolution recording. Recording
+        happens BEFORE guard.complete() in the shell so a recording failure
+        auto-fails the state (no "completed-then-crash" window — B1
+        terminality doctrine).
+
+        Returns:
+            Output data (single row dict, or list of row dicts for
+            multi-row results) for the COMPLETED node-state record.
+        """
+        # TransformResult.success() or success_multi() always sets output data
+        if not result.has_output_data:
+            raise RuntimeError(f"Transform '{transform.name}' returned success but has no output data")
+
+        # Extract dicts for audit trail (Tier 1: full trust - store plain dicts)
+        # Transforms return PipelineRow — extract underlying dicts for storage
+        output_data: dict[str, Any] | list[dict[str, Any]]
+        if result.row is not None:
+            output_data = result.row.to_dict()
+        else:
+            if result.rows is None:
+                raise OrchestrationInvariantError("has_output_data guarantees rows when row is None")
+            output_data = [r.to_dict() for r in result.rows]
+
+        # Record the transform's output contract BEFORE completing the state.
+        # This ensures that if contract recording fails, the state is
+        # auto-completed as FAILED by the guard (no "completed-then-crash"
+        # window).  Fix for B1 terminality bug.
+        #
+        # Use the contract from the result directly — the plugin emitted
+        # it and success_multi() guarantees all rows share the same instance.
+        output_contract = None
+        if result.row is not None:
+            output_contract = result.row.contract
+        elif result.rows is not None and result.rows:
+            output_contract = result.rows[0].contract
+
+        if output_contract is not None and output_contract is not token.row_data.contract:
+            if self._data_flow is None:
+                raise OrchestrationInvariantError("TransformExecutor.data_flow is None but contract evolution requires DataFlowRepository")
+            self._data_flow.update_node_output_contract(
+                run_id=ctx.run_id,
+                node_id=node_id,
+                contract=output_contract,
+            )
+
+        return output_data
 
     def execute_transform(
         self,
@@ -544,6 +636,8 @@ class TransformExecutor:
         """
         if transform.node_id is None:
             raise OrchestrationInvariantError(f"Transform '{transform.name}' executed without node_id - orchestrator bug")
+        # Narrowed once here for phase helpers that require a non-None node id.
+        node_id = transform.node_id
 
         # Resolve step position from node_id (injected StepResolver)
         step = self._step_resolver(NodeID(transform.node_id))
@@ -669,72 +763,35 @@ class TransformExecutor:
                     transform=transform,
                     token=token,
                     ctx=ctx,
+                    node_id=node_id,
                     static_contract=static_contract,
                     effective_input_fields=effective_input_fields,
                 )
 
-            # Populate audit fields
-            # Wrap stable_hash calls to convert canonicalization errors to PluginContractViolation.
-            # stable_hash calls canonical_json which rejects NaN, Infinity, non-serializable types.
-            # Per CLAUDE.md: plugin bugs must crash with clear error messages.
-            result.input_hash = input_hash
-            try:
-                if result.row is not None:
-                    result.output_hash = stable_hash(result.row)
-                elif result.rows is not None:
-                    result.output_hash = stable_hash(result.rows)
-                else:
-                    result.output_hash = None
-            except (TypeError, ValueError) as e:
-                raise PluginContractViolation(
-                    f"Transform '{transform.name}' emitted non-canonical data: {e}. "
-                    f"Ensure output contains only JSON-serializable types. "
-                    f"Use None instead of NaN for missing values."
-                ) from e
-            result.duration_ms = duration_ms
+            # Populate audit fields (success and error results alike); a
+            # canonicalization failure raises PluginContractViolation.
+            self._populate_result_audit_fields(
+                result=result,
+                transform=transform,
+                input_hash=input_hash,
+                duration_ms=duration_ms,
+            )
 
             # Initialize error_sink - will be set if transform errors with on_error configured
             error_sink: str | None = None
 
             # Complete node state
             if result.status == "success":
-                # TransformResult.success() or success_multi() always sets output data
-                if not result.has_output_data:
-                    raise RuntimeError(f"Transform '{transform.name}' returned success but has no output data")
-
-                # Extract dicts for audit trail (Tier 1: full trust - store plain dicts)
-                # Transforms return PipelineRow — extract underlying dicts for storage
-                output_data: dict[str, Any] | list[dict[str, Any]]
-                if result.row is not None:
-                    output_data = result.row.to_dict()
-                else:
-                    if result.rows is None:
-                        raise OrchestrationInvariantError("has_output_data guarantees rows when row is None")
-                    output_data = [r.to_dict() for r in result.rows]
-
-                # Record the transform's output contract BEFORE completing the state.
-                # This ensures that if contract recording fails, the state is
-                # auto-completed as FAILED by the guard (no "completed-then-crash"
-                # window).  Fix for B1 terminality bug.
-                #
-                # Use the contract from the result directly — the plugin emitted
-                # it and success_multi() guarantees all rows share the same instance.
-                output_contract = None
-                if result.row is not None:
-                    output_contract = result.row.contract
-                elif result.rows is not None and result.rows:
-                    output_contract = result.rows[0].contract
-
-                if output_contract is not None and output_contract is not token.row_data.contract:
-                    if self._data_flow is None:
-                        raise OrchestrationInvariantError(
-                            "TransformExecutor.data_flow is None but contract evolution requires DataFlowRepository"
-                        )
-                    self._data_flow.update_node_output_contract(
-                        run_id=ctx.run_id,
-                        node_id=transform.node_id,
-                        contract=output_contract,
-                    )
+                # Output-data extraction + contract-evolution recording
+                # (record-before-complete — B1 terminality doctrine: a
+                # recording failure must auto-fail the state via the guard).
+                output_data = self._prepare_success_completion(
+                    result=result,
+                    transform=transform,
+                    token=token,
+                    ctx=ctx,
+                    node_id=node_id,
+                )
 
                 # NOW complete as COMPLETED — all validation has succeeded
                 guard.complete(

@@ -464,6 +464,12 @@ def _reattach_guided_blob_refs(state: CompositionState) -> CompositionState:
     existing ``blob_ref``-keyed export machinery treat guided sources exactly like
     freeform blob-bound ones. Mirrors the snapshot cross-reference in
     ``redact_guided_snapshot_storage_paths``; never mutates ``state``.
+
+    Sources are matched to the snapshot by storage-path-string equality (the same
+    approach as the reference redactor). A second, distinct source carrying the
+    identical absolute path string would also be treated as blob-backed — a
+    narrow, pre-existing edge shared with that redactor; equal paths do mean "the
+    same underlying file", and guided sessions commit a single source today.
     """
     guided = state.guided_session
     if guided is None or guided.step_1_result is None:

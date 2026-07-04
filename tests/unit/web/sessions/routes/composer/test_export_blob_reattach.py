@@ -107,6 +107,8 @@ def test_does_not_touch_operator_typed_source() -> None:
         guided_session=_guided_with_snapshot(blob_ref=BLOB_REF, path=BLOB_PATH),
     )
     out = _reattach_guided_blob_refs(state)
+    # No reattachment happened, so the original (frozen) state is returned as-is.
+    assert out is state
     assert "blob_ref" not in out.sources["source"].options
 
 
@@ -116,4 +118,6 @@ def test_preserves_source_that_already_has_blob_ref() -> None:
         guided_session=_guided_with_snapshot(blob_ref=BLOB_REF, path=BLOB_PATH),
     )
     out = _reattach_guided_blob_refs(state)
+    # A source that already carries blob_ref needs no reattachment; identity holds.
+    assert out is state
     assert out.sources["source"].options["blob_ref"] == "already-bound"

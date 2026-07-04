@@ -100,6 +100,7 @@ from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 from elspeth.engine.orchestrator.landscape_registration import (
     register_nodes_with_landscape,
 )
+from elspeth.engine.orchestrator.leader_follower_drain import LeaderFollowerDrain
 from elspeth.engine.orchestrator.outcomes import accumulate_row_outcomes
 from elspeth.engine.orchestrator.resume import ResumeCoordinator
 from elspeth.engine.orchestrator.run_core import RunExecutionCore
@@ -1189,34 +1190,16 @@ class Orchestrator:
                     routed_destinations=dict(_c.routed_destinations),
                 )
 
+            _leader_follower_drain = LeaderFollowerDrain(
+                processor=loop_ctx.processor,
+                run_id=run_id,
+                shutdown_event=shutdown_event,
+                check_coordination_latch=check_coordination_latch,
+                make_shutdown_error=_shutdown_during_wait,
+            )
+
             if not loop_result.interrupted:
-                peer_wait_seconds = loop_ctx.processor.peer_lease_wait_budget_seconds()
-                peer_wait_deadline = time.monotonic() + peer_wait_seconds
-                while loop_ctx.processor.has_peer_active_leases():
-                    # SIGINT during the wait: surface the graceful-shutdown path
-                    # rather than spinning.
-                    if shutdown_event is not None and shutdown_event.is_set():
-                        raise _shutdown_during_wait()
-                    # Epoch deposition during the wait: check_and_raise surfaces
-                    # RunWorkerEvictedError so the deposed leader runs its
-                    # INTERRUPTED ceremony instead of spinning.
-                    if check_coordination_latch is not None:
-                        check_coordination_latch()
-                    # Actively reap a dead peer's expired lease (recovers it to
-                    # READY within the liveness window).
-                    loop_ctx.processor.reap_expired_peer_leases()
-                    if not loop_ctx.processor.has_peer_active_leases():
-                        break
-                    if time.monotonic() >= peer_wait_deadline:
-                        still_leased = loop_ctx.processor.peer_active_lease_owners()
-                        slog.warning(
-                            "Bounded peer-lease wait timed out; falling through to the unresolved-work invariant",
-                            run_id=run_id,
-                            still_leased_peers=list(still_leased),
-                            waited_seconds=peer_wait_seconds,
-                        )
-                        break
-                    time.sleep(0.5)
+                _leader_follower_drain.wait_for_peer_leases()
 
             if not loop_result.interrupted and loop_ctx.processor.has_unresolved_scheduler_work():
                 active_work = "; ".join(loop_ctx.processor.summarize_unresolved_scheduler_work()) or "<unknown>"
@@ -1255,54 +1238,33 @@ class Orchestrator:
             # PENDING_SINK row makes the run FAIL loudly — the correct, resumable
             # exactly-once fail-direction — never a silent lost row).
             if not loop_result.interrupted:
-                drain_deadline = time.monotonic() + (3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS)
-                while loop_ctx.processor.has_peer_active_leases() or loop_ctx.processor.has_scheduled_work():
-                    if shutdown_event is not None and shutdown_event.is_set():
-                        raise _shutdown_during_wait()
-                    if check_coordination_latch is not None:
-                        check_coordination_latch()
 
-                    if loop_ctx.processor.has_scheduled_work():
-                        follower_results = loop_ctx.processor.drain_scheduled_work(loop_ctx.ctx)
-                        if follower_results:
-                            # Clear pending_tokens before re-flush: write_pending_to_sinks
-                            # does NOT consume entries (it iterates without clearing), so the
-                            # leader's already-written tokens remain.  Accumulating follower
-                            # results on top of them would cause the next flush to re-write
-                            # every leader token → UNIQUE constraint on node_states.
-                            for _sink_list in loop_ctx.pending_tokens.values():
-                                _sink_list.clear()
-                            accumulate_row_outcomes(follower_results, loop_ctx.counters, loop_ctx.pending_tokens)
-                            self._run_core.flush_and_write_sinks(
-                                factory,
-                                run_id,
-                                loop_ctx,
-                                artifacts.sink_id_map,
-                                artifacts.edge_map,
-                                interrupted_by_shutdown=False,
-                                on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
-                            )
-                            # Made progress this iteration; re-check immediately.
-                            continue
+                def _drain_and_flush() -> bool:
+                    # The drain->clear->accumulate->flush coupling stays HERE (not in the
+                    # drain coordinator): write_pending_to_sinks does NOT consume
+                    # pending_tokens entries, so the leader's already-written tokens
+                    # remain. Accumulating follower results on top of them would re-write
+                    # every leader token -> the node_states UNIQUE constraint. Returns
+                    # True when this pass drained+flushed follower work so the coordinator
+                    # re-checks immediately without sleeping.
+                    follower_results = loop_ctx.processor.drain_scheduled_work(loop_ctx.ctx)
+                    if not follower_results:
+                        return False
+                    for _sink_list in loop_ctx.pending_tokens.values():
+                        _sink_list.clear()
+                    accumulate_row_outcomes(follower_results, loop_ctx.counters, loop_ctx.pending_tokens)
+                    self._run_core.flush_and_write_sinks(
+                        factory,
+                        run_id,
+                        loop_ctx,
+                        artifacts.sink_id_map,
+                        artifacts.edge_map,
+                        interrupted_by_shutdown=False,
+                        on_token_written_factory=self._checkpoints.make_checkpoint_after_sink_factory(run_id, run_ctx.processor),
+                    )
+                    return True
 
-                    # No drainable work this pass but a peer still holds a lease that
-                    # could yet produce a PENDING_SINK row.  Actively reap a dead
-                    # peer, then wait briefly — bounded.
-                    if not (loop_ctx.processor.has_peer_active_leases() or loop_ctx.processor.has_scheduled_work()):
-                        break
-                    loop_ctx.processor.reap_expired_peer_leases()
-                    if not (loop_ctx.processor.has_peer_active_leases() or loop_ctx.processor.has_scheduled_work()):
-                        break
-                    if time.monotonic() >= drain_deadline:
-                        slog.warning(
-                            "Bounded follower-drain wait timed out; relying on complete_run quiescence backstop",
-                            run_id=run_id,
-                            still_leased_peers=list(loop_ctx.processor.peer_active_lease_owners()),
-                            has_scheduled_work=loop_ctx.processor.has_scheduled_work(),
-                            waited_seconds=3.0 * DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
-                        )
-                        break
-                    time.sleep(0.5)
+                _leader_follower_drain.drain_pending_sink_work(_drain_and_flush)
 
             # ADR-019 Phase 4: deferred cross-table invariant sweep.
             #

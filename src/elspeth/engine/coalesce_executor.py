@@ -36,6 +36,7 @@ from elspeth.core.landscape.execution_repository import ExecutionRepository
 from elspeth.core.landscape.scheduler_repository import token_from_journal_item
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.clock import DEFAULT_CLOCK
+from elspeth.engine.coalesce_policy import CoalesceAction, CoalesceEvent, decide_coalesce
 from elspeth.engine.spans import SpanFactory
 
 if TYPE_CHECKING:
@@ -628,14 +629,6 @@ class CoalesceExecutor:
         while len(self._completed_keys) > self._max_completed_keys:
             self._completed_keys.popitem(last=False)
 
-    def _require_quorum_count(self, settings: CoalesceSettings) -> int:
-        """Return quorum_count or crash if None — config validation should have caught this."""
-        if settings.quorum_count is None:
-            raise RuntimeError(
-                f"quorum_count is None for quorum policy at coalesce '{settings.name}'. This indicates a config validation bug."
-            )
-        return settings.quorum_count
-
     def accept(
         self,
         token: TokenInfo,
@@ -813,27 +806,20 @@ class CoalesceExecutor:
         settings: CoalesceSettings,
         pending: _PendingCoalesce,
     ) -> bool:
-        """Check if merge conditions are met based on policy."""
-        arrived_count = len(pending.branches)
-        expected_count = len(settings.branches)
+        """Check if merge conditions are met based on policy.
 
-        if settings.policy == "require_all":
-            return arrived_count == expected_count
-
-        elif settings.policy == "first":
-            return arrived_count >= 1
-
-        elif settings.policy == "quorum":
-            return arrived_count >= self._require_quorum_count(settings)
-
-        elif settings.policy == "best_effort":
-            # Merge on timeout (checked elsewhere) or when all branches accounted for.
-            # Lost branches count as "accounted for" — they won't arrive but we know about them.
-            accounted_count = arrived_count + len(pending.lost_branches)
-            return accounted_count >= expected_count
-
-        else:
-            raise RuntimeError(f"Unknown coalesce policy: {settings.policy!r}")
+        Thin delegate over :func:`decide_coalesce` (ARRIVAL event) — the
+        policy matrix lives in ``elspeth.engine.coalesce_policy``. ARRIVAL
+        never yields FAIL, so a boolean is a faithful projection of the
+        decision.
+        """
+        decision = decide_coalesce(
+            settings,
+            CoalesceEvent.ARRIVAL,
+            arrived_count=len(pending.branches),
+            lost_branches=pending.lost_branches,
+        )
+        return decision.action is CoalesceAction.MERGE
 
     def _get_lost_branch_expected_fields(
         self,
@@ -1496,7 +1482,11 @@ class CoalesceExecutor:
         """Resolve a pending coalesce by dispatching on policy.
 
         Shared helper for check_timeouts() and flush_pending(). Decides whether
-        to merge (enough branches arrived) or fail (not enough) based on policy.
+        to merge (enough branches arrived) or fail (not enough) via
+        :func:`decide_coalesce` (TIMEOUT/FLUSH events) — the policy matrix
+        lives in ``elspeth.engine.coalesce_policy``. TIMEOUT/FLUSH never
+        yield WAIT (resolution is forced), so the WAIT arm below is an
+        exhaustiveness guard, not a reachable path.
 
         Args:
             settings: Coalesce settings for this point
@@ -1508,68 +1498,32 @@ class CoalesceExecutor:
             is_timeout: True when triggered by timeout (affects failure reasons
                 and is_timeout flag on _fail_pending)
         """
-        if settings.policy == "best_effort":
-            if len(pending.branches) > 0:
-                return self._execute_merge(
-                    settings=settings,
-                    node_id=node_id,
-                    pending=pending,
-                    step=step,
-                    key=key,
-                    coalesce_name=coalesce_name,
-                )
+        event = CoalesceEvent.TIMEOUT if is_timeout else CoalesceEvent.FLUSH
+        decision = decide_coalesce(
+            settings,
+            event,
+            arrived_count=len(pending.branches),
+            lost_branches=pending.lost_branches,
+            row_id=key[1],
+        )
+        if decision.action is CoalesceAction.MERGE:
+            return self._execute_merge(
+                settings=settings,
+                node_id=node_id,
+                pending=pending,
+                step=step,
+                key=key,
+                coalesce_name=coalesce_name,
+            )
+        if decision.action is CoalesceAction.FAIL:
             return self._fail_pending(
                 settings,
                 key,
                 step,
-                failure_reason="best_effort_timeout_no_arrivals" if is_timeout else "all_branches_lost",
+                failure_reason=decision.require_failure_reason(),
                 is_timeout=is_timeout,
             )
-
-        elif settings.policy == "quorum":
-            if len(pending.branches) >= self._require_quorum_count(settings):
-                return self._execute_merge(
-                    settings=settings,
-                    node_id=node_id,
-                    pending=pending,
-                    step=step,
-                    key=key,
-                    coalesce_name=coalesce_name,
-                )
-            return self._fail_pending(
-                settings,
-                key,
-                step,
-                failure_reason="quorum_not_met_at_timeout" if is_timeout else "quorum_not_met",
-                is_timeout=is_timeout,
-            )
-
-        elif settings.policy == "require_all":
-            return self._fail_pending(
-                settings,
-                key,
-                step,
-                failure_reason="incomplete_branches",
-                is_timeout=is_timeout,
-            )
-
-        elif settings.policy == "first":
-            if len(pending.branches) == 0:
-                return self._fail_pending(
-                    settings,
-                    key,
-                    step,
-                    failure_reason="first_timeout_no_arrivals" if is_timeout else "all_branches_lost",
-                    is_timeout=is_timeout,
-                )
-            raise RuntimeError(
-                f"Invariant violation: 'first' policy should never have arrived pending branches "
-                f"at coalesce '{coalesce_name}', row_id='{key[1]}'. "
-                f"'first' merges immediately on arrival — bug in accept()."
-            )
-
-        else:
-            raise RuntimeError(f"Unknown coalesce policy: {settings.policy!r}")
+        raise RuntimeError("unreachable: decide_coalesce never returns WAIT for TIMEOUT/FLUSH")
 
     def check_timeouts(
         self,
@@ -1789,11 +1743,11 @@ class CoalesceExecutor:
     ) -> CoalesceOutcome | None:
         """Re-evaluate merge conditions after a branch loss notification.
 
-        Policy-specific consequences:
-        - require_all: ANY lost branch = immediate failure
-        - quorum: fail if quorum is now impossible, merge if already met
-        - best_effort: merge immediately if all branches accounted for
-        - first: fail if all branches are lost before first arrival
+        Thin delegate over :func:`decide_coalesce` (LOSS event) — the policy
+        matrix (require_all fails on ANY lost branch; quorum fails when
+        impossible, merges when already met; best_effort merges when all
+        branches are accounted for; first fails only when every branch is
+        lost before any arrival) lives in ``elspeth.engine.coalesce_policy``.
 
         Args:
             settings: Coalesce settings for the affected point
@@ -1804,62 +1758,21 @@ class CoalesceExecutor:
             CoalesceOutcome if merge/failure triggered, None if still waiting.
         """
         pending = self._pending[key]
-        arrived_count = len(pending.branches)
-        total_branches = len(settings.branches)
-        lost_count = len(pending.lost_branches)
-
-        if settings.policy == "require_all":
-            # require_all: ANY lost branch = immediate failure
+        decision = decide_coalesce(
+            settings,
+            CoalesceEvent.LOSS,
+            arrived_count=len(pending.branches),
+            lost_branches=pending.lost_branches,
+            row_id=key[1],
+        )
+        if decision.action is CoalesceAction.MERGE:
+            node_id = self._node_ids[settings.name]
+            return self._execute_merge(settings, node_id, pending, step, key, settings.name)
+        if decision.action is CoalesceAction.FAIL:
             return self._fail_pending(
                 settings,
                 key,
                 step,
-                failure_reason=f"branch_lost:{','.join(sorted(pending.lost_branches.keys()))}",
+                failure_reason=decision.require_failure_reason(),
             )
-
-        elif settings.policy == "quorum":
-            quorum = self._require_quorum_count(settings)
-            # Check if quorum is now impossible
-            max_possible = total_branches - lost_count
-            if max_possible < quorum:
-                return self._fail_pending(
-                    settings,
-                    key,
-                    step,
-                    failure_reason=f"quorum_impossible:need={quorum},max_possible={max_possible}",
-                )
-            # Check if arrived count already meets quorum
-            if arrived_count >= quorum:
-                node_id = self._node_ids[settings.name]
-                return self._execute_merge(settings, node_id, pending, step, key, settings.name)
-            return None  # Still waiting
-
-        elif settings.policy == "best_effort":
-            # All branches accounted for (arrived + lost)?
-            if arrived_count + lost_count >= total_branches:
-                if arrived_count > 0:
-                    node_id = self._node_ids[settings.name]
-                    return self._execute_merge(settings, node_id, pending, step, key, settings.name)
-                return self._fail_pending(
-                    settings,
-                    key,
-                    step,
-                    failure_reason="all_branches_lost",
-                )
-            return None  # Still waiting for remaining branches
-
-        elif settings.policy == "first":
-            # first: if every branch is lost before any arrival, fail the row
-            # cleanly. If any branch arrived, accept() should already have
-            # merged and marked the key complete.
-            if arrived_count == 0 and arrived_count + lost_count >= total_branches:
-                return self._fail_pending(
-                    settings,
-                    key,
-                    step,
-                    failure_reason="all_branches_lost",
-                )
-            return None
-
-        else:
-            raise RuntimeError(f"Unknown coalesce policy: {settings.policy!r}")
+        return None  # WAIT — still waiting for remaining branches

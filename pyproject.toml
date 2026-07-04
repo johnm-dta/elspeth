@@ -468,6 +468,7 @@ paths_to_mutate = [
     "src/elspeth/engine/processor.py",
     "src/elspeth/engine/executors/",
     "src/elspeth/engine/coalesce_executor.py",
+    "src/elspeth/engine/coalesce_policy.py",
     "src/elspeth/engine/tokens.py",
 ]
 # Test runner - include engine tests, use short traceback for debugging

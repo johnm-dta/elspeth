@@ -48,6 +48,7 @@ from elspeth.contracts.errors import (
     OrchestrationInvariantError,
 )
 from elspeth.contracts.events import RunFinished, RunSummary
+from elspeth.contracts.freeze import freeze_fields
 from elspeth.contracts.runtime_val_manifest import build_runtime_val_manifest
 from elspeth.contracts.types import NodeID
 from elspeth.core.canonical import canonical_json
@@ -514,6 +515,16 @@ class _ResumeAuditSnapshot:
     source_names_by_source: Mapping[NodeID, str]
     source_lifecycle_by_source: Mapping[NodeID, str]
     source_schema_classes: Mapping[NodeID, type[Any]]
+
+    def __post_init__(self) -> None:
+        freeze_fields(
+            self,
+            "incomplete_by_row",
+            "schema_contracts_by_source",
+            "source_names_by_source",
+            "source_lifecycle_by_source",
+            "source_schema_classes",
+        )
 
 
 class ResumeCoordinator:

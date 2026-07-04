@@ -13,11 +13,9 @@ Dependencies held by this driver:
 from __future__ import annotations
 
 import json
-import queue
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -51,6 +49,7 @@ from elspeth.engine.orchestrator.aggregation import (
     run_end_of_input_barrier_flush,
 )
 from elspeth.engine.orchestrator.ceremony import RunCeremony
+from elspeth.engine.orchestrator.idle_timeout_pump import IdleTimeoutPump
 from elspeth.engine.orchestrator.landscape_registration import record_schema_contract
 from elspeth.engine.orchestrator.outcomes import (
     accumulate_row_outcomes,
@@ -450,6 +449,36 @@ class SourceIterationDriver:
                 pending_tokens=loop_ctx.pending_tokens,
             )
 
+    def _build_idle_timeout_pump(
+        self,
+        loop_ctx: LoopContext,
+        *,
+        agg_transform_lookup: Mapping[str, AggNodeEntry],
+        coalesce_node_map: Mapping[CoalesceName, NodeID],
+        source_id: NodeID,
+        source_operation_id: str,
+    ) -> IdleTimeoutPump:
+        """Bind the idle-flush closure for this run/source into a pump.
+
+        The poll interval is read at build time (inside the run / delegate
+        call), NOT at import time, so per-instance overrides of
+        ``_SOURCE_IDLE_POLL_INTERVAL_SECONDS`` in tests are honoured.
+        """
+
+        def flush_idle_timeouts() -> None:
+            self._process_idle_timeout_flushes(
+                loop_ctx,
+                agg_transform_lookup=agg_transform_lookup,
+                coalesce_node_map=coalesce_node_map,
+                source_id=source_id,
+                source_operation_id=source_operation_id,
+            )
+
+        return IdleTimeoutPump(
+            flush=flush_idle_timeouts,
+            poll_interval=self._SOURCE_IDLE_POLL_INTERVAL_SECONDS,
+        )
+
     def _next_source_item_with_idle_timeout_flushes(
         self,
         source_iterator: Iterator[SourceRow],
@@ -459,69 +488,45 @@ class SourceIterationDriver:
         coalesce_node_map: Mapping[CoalesceName, NodeID],
         source_id: NodeID,
         source_operation_id: str,
+        pump: IdleTimeoutPump | None = None,
     ) -> SourceRow:
         """Fetch the next source row while periodically flushing idle timeouts.
 
         SourceProtocol lifecycle and iterator advancement stay on this caller
-        thread. Only timeout/coalesce maintenance runs on a helper thread while
-        the caller is blocked inside ``next(source_iterator)``.
-        """
-        error_queue: queue.Queue[BaseException] = queue.Queue(maxsize=1)
-        stop_idle_polling = threading.Event()
+        thread. Only timeout/coalesce maintenance runs on the pump's persistent
+        worker thread while the caller is blocked inside
+        ``next(source_iterator)``; the pump's end-of-fetch park handshake
+        serializes those flushes against this thread before it touches loop
+        state again (see ``idle_timeout_pump.py`` for the invariants).
 
+        ``pump`` is the run-scoped ``IdleTimeoutPump`` started by
+        ``run_main_processing_loop``. When ``None`` (direct calls), a one-shot
+        pump is built, started, and stopped around this single fetch —
+        behaviourally identical to the historical thread-per-fetch poller.
+        """
         self.restore_source_iteration_context(
             loop_ctx.ctx,
             source_id=source_id,
             source_operation_id=source_operation_id,
         )
 
-        def poll_idle_flushes() -> None:
-            while not stop_idle_polling.wait(self._SOURCE_IDLE_POLL_INTERVAL_SECONDS):
-                if not error_queue.empty():
-                    return
-                self._process_idle_timeout_flushes(
-                    loop_ctx,
-                    agg_transform_lookup=agg_transform_lookup,
-                    coalesce_node_map=coalesce_node_map,
-                    source_id=source_id,
-                    source_operation_id=source_operation_id,
-                )
-
-        def poll_idle_flushes_guarded() -> None:
+        source_row: SourceRow | None
+        if pump is not None:
+            source_row = pump.fetch(lambda: next(source_iterator))
+        else:
+            one_shot = self._build_idle_timeout_pump(
+                loop_ctx,
+                agg_transform_lookup=agg_transform_lookup,
+                coalesce_node_map=coalesce_node_map,
+                source_id=source_id,
+                source_operation_id=source_operation_id,
+            )
+            one_shot.start()
             try:
-                poll_idle_flushes()
-            except BaseException as exc:  # pragma: no cover - re-raised on orchestrator thread
-                with suppress(queue.Full):
-                    error_queue.put_nowait(exc)
-                stop_idle_polling.set()
+                source_row = one_shot.fetch(lambda: next(source_iterator))
+            finally:
+                one_shot.stop()
 
-        poller = threading.Thread(target=poll_idle_flushes_guarded, daemon=True)
-        poller.start()
-
-        source_row: SourceRow | None = None
-        source_stop = False
-        source_exc: BaseException | None = None
-        try:
-            try:
-                source_row = next(source_iterator)
-            except StopIteration:
-                source_stop = True
-            except BaseException as exc:
-                source_exc = exc
-        finally:
-            stop_idle_polling.set()
-            poller.join()
-
-        try:
-            idle_error = error_queue.get_nowait()
-        except queue.Empty:
-            idle_error = None
-        if idle_error is not None:
-            raise idle_error
-        if source_exc is not None:
-            raise source_exc
-        if source_stop:
-            raise StopIteration
         if source_row is None:
             raise OrchestrationInvariantError("Source iterator returned no row, no StopIteration, and no exception.")
         return source_row
@@ -805,228 +810,248 @@ class SourceIterationDriver:
 
             source_iterator = self.load_source_with_events(run_id, ctx, active_source=active_source)
             use_idle_polling = self._requires_idle_aggregation_polling(config)
-            source_exhausted = False
-            pending_source_item: SourceRow | None = None
-            try:
-                if use_idle_polling:
-                    pending_source_item = self._next_source_item_with_idle_timeout_flushes(
-                        source_iterator,
-                        loop_ctx,
-                        agg_transform_lookup=agg_transform_lookup,
-                        coalesce_node_map=coalesce_node_map,
-                        source_id=source_id,
-                        source_operation_id=source_operation_id,
-                    )
-                else:
-                    pending_source_item = next(source_iterator)
-            except StopIteration:
-                source_exhausted = True
-
-            # Deferred recording flags — field resolution after first iteration,
-            # schema contract after first VALID row. Always start false so
-            # source-scoped run_sources contracts are backfilled even when the
-            # legacy run-level singleton already exists.
-            field_resolution_recorded = False
-            recorded_field_resolution: tuple[Mapping[str, str], str | None] | None = None
-            schema_contract_recorded = False
-
-            # PROCESS phase
-            phase_start = time.perf_counter()
-            self._events.emit(PhaseStarted(phase=PipelinePhase.PROCESS, action=PhaseAction.PROCESSING))
-            self._ceremony.emit_telemetry(
-                PhaseChanged(
-                    timestamp=datetime.now(UTC),
-                    run_id=run_id,
-                    phase=PipelinePhase.PROCESS,
-                    action=PhaseAction.PROCESSING,
+            idle_pump: IdleTimeoutPump | None = None
+            if use_idle_polling:
+                # ONE persistent idle-flush worker for the whole run; the two
+                # fetch call sites below hand it each per-row next() and its
+                # stop() is guaranteed on every exit path by the finally
+                # bracketing the loop (elspeth-735df9576d).
+                idle_pump = self._build_idle_timeout_pump(
+                    loop_ctx,
+                    agg_transform_lookup=agg_transform_lookup,
+                    coalesce_node_map=coalesce_node_map,
+                    source_id=source_id,
+                    source_operation_id=source_operation_id,
                 )
-            )
-
-            interrupted_by_shutdown = False
+                idle_pump.start()
             try:
-                source_row_index = 0
-                while True:
-                    if pending_source_item is not None:
-                        source_item = pending_source_item
-                        pending_source_item = None
-                    else:
-                        try:
-                            if use_idle_polling:
-                                source_item = self._next_source_item_with_idle_timeout_flushes(
-                                    source_iterator,
-                                    loop_ctx,
-                                    agg_transform_lookup=agg_transform_lookup,
-                                    coalesce_node_map=coalesce_node_map,
-                                    source_id=source_id,
-                                    source_operation_id=source_operation_id,
-                                )
-                            else:
-                                source_item = next(source_iterator)
-                        except StopIteration:
-                            source_exhausted = True
-                            break
-
-                    current_source_row_index = source_row_index
-                    source_row_index += 1
-                    if source_item.source_row_index is None:
-                        raise OrchestrationInvariantError(
-                            f"Source '{active_source.name}' yielded SourceRow without source_row_index at "
-                            f"loop row_index={current_source_row_index}. Source row identity must be source-authored."
+                source_exhausted = False
+                pending_source_item: SourceRow | None = None
+                try:
+                    if use_idle_polling:
+                        pending_source_item = self._next_source_item_with_idle_timeout_flushes(
+                            source_iterator,
+                            loop_ctx,
+                            agg_transform_lookup=agg_transform_lookup,
+                            coalesce_node_map=coalesce_node_map,
+                            source_id=source_id,
+                            source_operation_id=source_operation_id,
+                            pump=idle_pump,
                         )
-                    source_identity_index = source_item.source_row_index
-                    ingest_sequence = counters.rows_processed
-                    counters.rows_processed += 1
+                    else:
+                        pending_source_item = next(source_iterator)
+                except StopIteration:
+                    source_exhausted = True
 
-                    # Record field resolution on first iteration (generators execute body on first next()).
-                    # Provisional: the finalizer re-records the union at EOF (elspeth-fb108a77c9).
-                    if not field_resolution_recorded:
-                        field_resolution_recorded = True
-                        recorded_field_resolution = self.record_field_resolution(factory, run_id, active_source=active_source)
+                # Deferred recording flags — field resolution after first iteration,
+                # schema contract after first VALID row. Always start false so
+                # source-scoped run_sources contracts are backfilled even when the
+                # legacy run-level singleton already exists.
+                field_resolution_recorded = False
+                recorded_field_resolution: tuple[Mapping[str, str], str | None] | None = None
+                schema_contract_recorded = False
 
-                    # Quarantine path — route directly to sink, skip normal processing
-                    if source_item.is_quarantined:
-                        self.handle_quarantine_row(
+                # PROCESS phase
+                phase_start = time.perf_counter()
+                self._events.emit(PhaseStarted(phase=PipelinePhase.PROCESS, action=PhaseAction.PROCESSING))
+                self._ceremony.emit_telemetry(
+                    PhaseChanged(
+                        timestamp=datetime.now(UTC),
+                        run_id=run_id,
+                        phase=PipelinePhase.PROCESS,
+                        action=PhaseAction.PROCESSING,
+                    )
+                )
+
+                interrupted_by_shutdown = False
+                try:
+                    source_row_index = 0
+                    while True:
+                        if pending_source_item is not None:
+                            source_item = pending_source_item
+                            pending_source_item = None
+                        else:
+                            try:
+                                if use_idle_polling:
+                                    source_item = self._next_source_item_with_idle_timeout_flushes(
+                                        source_iterator,
+                                        loop_ctx,
+                                        agg_transform_lookup=agg_transform_lookup,
+                                        coalesce_node_map=coalesce_node_map,
+                                        source_id=source_id,
+                                        source_operation_id=source_operation_id,
+                                        pump=idle_pump,
+                                    )
+                                else:
+                                    source_item = next(source_iterator)
+                            except StopIteration:
+                                source_exhausted = True
+                                break
+
+                        current_source_row_index = source_row_index
+                        source_row_index += 1
+                        if source_item.source_row_index is None:
+                            raise OrchestrationInvariantError(
+                                f"Source '{active_source.name}' yielded SourceRow without source_row_index at "
+                                f"loop row_index={current_source_row_index}. Source row identity must be source-authored."
+                            )
+                        source_identity_index = source_item.source_row_index
+                        ingest_sequence = counters.rows_processed
+                        counters.rows_processed += 1
+
+                        # Record field resolution on first iteration (generators execute body on first next()).
+                        # Provisional: the finalizer re-records the union at EOF (elspeth-fb108a77c9).
+                        if not field_resolution_recorded:
+                            field_resolution_recorded = True
+                            recorded_field_resolution = self.record_field_resolution(factory, run_id, active_source=active_source)
+
+                        # Quarantine path — route directly to sink, skip normal processing
+                        if source_item.is_quarantined:
+                            self.handle_quarantine_row(
+                                factory,
+                                run_id,
+                                source_id,
+                                source_item,
+                                current_source_row_index,
+                                source_identity_index,
+                                ingest_sequence,
+                                edge_map,
+                                loop_ctx,
+                                active_source=active_source,
+                            )
+                            last_progress_time = self.maybe_emit_progress(
+                                counters,
+                                start_time,
+                                last_progress_time,
+                            )
+                            self.restore_source_iteration_context(
+                                ctx,
+                                source_id=source_id,
+                                source_operation_id=source_operation_id,
+                            )
+                            if check_coordination_latch is not None:
+                                check_coordination_latch()
+                            if shutdown_event is not None and shutdown_event.is_set():
+                                interrupted_by_shutdown = True
+                                break
+                            continue
+
+                        # Record schema contract on first VALID row (quarantined rows don't populate contract)
+                        if not schema_contract_recorded and record_schema_contract(
                             factory,
                             run_id,
                             source_id,
-                            source_item,
-                            current_source_row_index,
-                            source_identity_index,
-                            ingest_sequence,
-                            edge_map,
-                            loop_ctx,
+                            ctx,
                             active_source=active_source,
+                        ):
+                            schema_contract_recorded = True
+
+                        # Clear operation_id — source item is fetched, transforms set their own state_id
+                        ctx.operation_id = None
+
+                        # Check aggregation timeouts BEFORE processing (flush OLD batch first)
+                        timeout_result = check_aggregation_timeouts(
+                            config=config,
+                            processor=processor,
+                            ctx=ctx,
+                            pending_tokens=pending_tokens,
+                            agg_transform_lookup=agg_transform_lookup,
                         )
+                        counters.accumulate_flush_result(timeout_result)
+
+                        results = processor.process_row(
+                            row_index=current_source_row_index,
+                            source_row=source_item,
+                            transforms=config.transforms,
+                            ctx=ctx,
+                            source_node_id=source_id,
+                            source_plugin=active_source,
+                            source_on_success=active_source.on_success,
+                            source_row_index=source_identity_index,
+                            ingest_sequence=ingest_sequence,
+                        )
+                        accumulate_row_outcomes(results, counters, pending_tokens)
+
+                        # Check coalesce timeouts after each row
+                        if coalesce_executor is not None:
+                            handle_coalesce_timeouts(
+                                coalesce_executor=coalesce_executor,
+                                coalesce_node_map=coalesce_node_map,
+                                processor=processor,
+                                ctx=ctx,
+                                counters=counters,
+                                pending_tokens=pending_tokens,
+                            )
+
                         last_progress_time = self.maybe_emit_progress(
                             counters,
                             start_time,
                             last_progress_time,
                         )
+
+                        # ADR-030 §A.3 / §C.2: latch check — raises RunWorkerEvictedError
+                        # if the heartbeat thread detected seat deposition or registry
+                        # eviction.  Checked at the same per-row boundary as the
+                        # shutdown_event so the drain loop exits cleanly without
+                        # emitting further work.  The latch is an optimization on top of
+                        # the epoch/membership fences (§C.2 last sentence); the fences
+                        # independently refuse any write a deposed leader attempts, but
+                        # the latch surfaces the condition proactively between writes.
+                        if check_coordination_latch is not None:
+                            check_coordination_latch()
+
+                        # Graceful shutdown — current row fully processed, safe to stop
+                        if shutdown_event is not None and shutdown_event.is_set():
+                            interrupted_by_shutdown = True
+                            break
+
+                        # Restore operation_id for next iteration (generators execute on next())
                         self.restore_source_iteration_context(
                             ctx,
                             source_id=source_id,
                             source_operation_id=source_operation_id,
                         )
-                        if check_coordination_latch is not None:
-                            check_coordination_latch()
-                        if shutdown_event is not None and shutdown_event.is_set():
-                            interrupted_by_shutdown = True
-                            break
-                        continue
 
-                    # Record schema contract on first VALID row (quarantined rows don't populate contract)
-                    if not schema_contract_recorded and record_schema_contract(
+                    # Post-loop: restore operation_id, flush aggregation/coalesce, record deferred state
+                    self.finalize_source_iteration(
+                        loop_ctx,
                         factory,
                         run_id,
                         source_id,
-                        ctx,
+                        active_source_name,
+                        source_operation_id,
+                        recorded_field_resolution,
+                        schema_contract_recorded,
+                        source_exhausted=source_exhausted,
+                        interrupted_by_shutdown=interrupted_by_shutdown,
+                        flush_end_of_input=flush_end_of_input,
                         active_source=active_source,
-                    ):
-                        schema_contract_recorded = True
-
-                    # Clear operation_id — source item is fetched, transforms set their own state_id
-                    ctx.operation_id = None
-
-                    # Check aggregation timeouts BEFORE processing (flush OLD batch first)
-                    timeout_result = check_aggregation_timeouts(
-                        config=config,
-                        processor=processor,
-                        ctx=ctx,
-                        pending_tokens=pending_tokens,
-                        agg_transform_lookup=agg_transform_lookup,
                     )
-                    counters.accumulate_flush_result(timeout_result)
-
-                    results = processor.process_row(
-                        row_index=current_source_row_index,
-                        source_row=source_item,
-                        transforms=config.transforms,
-                        ctx=ctx,
-                        source_node_id=source_id,
-                        source_plugin=active_source,
-                        source_on_success=active_source.on_success,
-                        source_row_index=source_identity_index,
-                        ingest_sequence=ingest_sequence,
-                    )
-                    accumulate_row_outcomes(results, counters, pending_tokens)
-
-                    # Check coalesce timeouts after each row
-                    if coalesce_executor is not None:
-                        handle_coalesce_timeouts(
-                            coalesce_executor=coalesce_executor,
-                            coalesce_node_map=coalesce_node_map,
-                            processor=processor,
-                            ctx=ctx,
-                            counters=counters,
-                            pending_tokens=pending_tokens,
+                    if interrupted_by_shutdown:
+                        self.record_run_source_lifecycle(
+                            factory,
+                            run_id,
+                            source_id,
+                            active_source_name,
+                            active_source,
+                            RunSourceLifecycleState.INTERRUPTED,
+                        )
+                    elif not source_exhausted:
+                        self.record_run_source_lifecycle(
+                            factory,
+                            run_id,
+                            source_id,
+                            active_source_name,
+                            active_source,
+                            RunSourceLifecycleState.LOADED,
                         )
 
-                    last_progress_time = self.maybe_emit_progress(
-                        counters,
-                        start_time,
-                        last_progress_time,
-                    )
-
-                    # ADR-030 §A.3 / §C.2: latch check — raises RunWorkerEvictedError
-                    # if the heartbeat thread detected seat deposition or registry
-                    # eviction.  Checked at the same per-row boundary as the
-                    # shutdown_event so the drain loop exits cleanly without
-                    # emitting further work.  The latch is an optimization on top of
-                    # the epoch/membership fences (§C.2 last sentence); the fences
-                    # independently refuse any write a deposed leader attempts, but
-                    # the latch surfaces the condition proactively between writes.
-                    if check_coordination_latch is not None:
-                        check_coordination_latch()
-
-                    # Graceful shutdown — current row fully processed, safe to stop
-                    if shutdown_event is not None and shutdown_event.is_set():
-                        interrupted_by_shutdown = True
-                        break
-
-                    # Restore operation_id for next iteration (generators execute on next())
-                    self.restore_source_iteration_context(
-                        ctx,
-                        source_id=source_id,
-                        source_operation_id=source_operation_id,
-                    )
-
-                # Post-loop: restore operation_id, flush aggregation/coalesce, record deferred state
-                self.finalize_source_iteration(
-                    loop_ctx,
-                    factory,
-                    run_id,
-                    source_id,
-                    active_source_name,
-                    source_operation_id,
-                    recorded_field_resolution,
-                    schema_contract_recorded,
-                    source_exhausted=source_exhausted,
-                    interrupted_by_shutdown=interrupted_by_shutdown,
-                    flush_end_of_input=flush_end_of_input,
-                    active_source=active_source,
-                )
-                if interrupted_by_shutdown:
-                    self.record_run_source_lifecycle(
-                        factory,
-                        run_id,
-                        source_id,
-                        active_source_name,
-                        active_source,
-                        RunSourceLifecycleState.INTERRUPTED,
-                    )
-                elif not source_exhausted:
-                    self.record_run_source_lifecycle(
-                        factory,
-                        run_id,
-                        source_id,
-                        active_source_name,
-                        active_source,
-                        RunSourceLifecycleState.LOADED,
-                    )
-
-            except Exception as e:
-                self._ceremony.emit_phase_error(PipelinePhase.PROCESS, e, target=active_source.name)
-                raise
+                except Exception as e:
+                    self._ceremony.emit_phase_error(PipelinePhase.PROCESS, e, target=active_source.name)
+                    raise
+            finally:
+                if idle_pump is not None:
+                    idle_pump.stop()
 
         return LoopResult(
             interrupted=interrupted_by_shutdown,

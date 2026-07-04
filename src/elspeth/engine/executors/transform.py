@@ -361,6 +361,61 @@ class TransformExecutor:
 
         return effective_input_fields, static_contract
 
+    def _invoke_transform(
+        self,
+        *,
+        transform: TransformProtocol,
+        batch_runtime: BatchTransformRuntimeProtocol | None,
+        token: TokenInfo,
+        ctx: PluginContext,
+        state_id: str,
+    ) -> TransformResult:
+        """Invoke the transform and return its result (invocation phase).
+
+        Owns invocation-mode selection: synchronous ``transform.process()``
+        vs the row-pipelined batch runtime (``accept()`` + waiter). Exceptions
+        propagate unhandled — the caller owns timing, span, FAILED completion,
+        and timeout eviction, because those bracket ``guard.complete()`` and
+        must stay with the guard.
+        """
+        if batch_runtime is not None:
+            # Batch transform: use accept() with SharedBatchAdapter
+            # One adapter per transform, multiple waiters per adapter
+            adapter = self._get_batch_adapter(batch_runtime)
+
+            # Register waiter for THIS token AND attempt (before accept!)
+            # Using (token_id, state_id) ensures retry safety: if a timeout
+            # occurs and retry happens, the new attempt's waiter won't receive
+            # stale results from the previous attempt.
+            waiter = adapter.register(token.token_id, state_id)
+
+            # Submit work - this returns immediately
+            batch_runtime.accept(token.row_data, ctx)
+
+            # Block until THIS row's result arrives.
+            #
+            # DESIGN DECISION: Sequential row processing
+            # The orchestrator processes rows one at a time, blocking here
+            # until each row completes. This is intentional:
+            # - Concurrency happens WITHIN each row (multi-query transforms
+            #   make 10+ LLM calls concurrently for a single row)
+            # - Across rows, processing is sequential for:
+            #   1. Simpler audit ordering (deterministic state progression)
+            #   2. Natural backpressure (no unbounded queue growth)
+            #   3. Single-threaded orchestrator (easier to reason about)
+            #
+            # For true cross-row parallelism, the orchestrator would need
+            # to be async/await or multi-threaded, which adds complexity.
+            #
+            # Timeout is derived from transform's batch_wait_timeout config
+            # (default 3600s = 1 hour) to allow for sustained rate limiting
+            # and AIMD backoff during capacity errors.
+            result = waiter.wait(timeout=batch_runtime.batch_wait_timeout, shutdown_event=ctx.shutdown_event)
+        else:
+            # Regular transform: synchronous process()
+            result = transform.process(token.row_data, ctx)
+        return result
+
     def execute_transform(
         self,
         transform: TransformProtocol,
@@ -484,43 +539,16 @@ class TransformExecutor:
             ):
                 start = time.perf_counter()
                 try:
-                    if batch_runtime is not None:
-                        # Batch transform: use accept() with SharedBatchAdapter
-                        # One adapter per transform, multiple waiters per adapter
-                        adapter = self._get_batch_adapter(batch_runtime)
-
-                        # Register waiter for THIS token AND attempt (before accept!)
-                        # Using (token_id, state_id) ensures retry safety: if a timeout
-                        # occurs and retry happens, the new attempt's waiter won't receive
-                        # stale results from the previous attempt.
-                        waiter = adapter.register(token.token_id, guard.state_id)
-
-                        # Submit work - this returns immediately
-                        batch_runtime.accept(token.row_data, ctx)
-
-                        # Block until THIS row's result arrives.
-                        #
-                        # DESIGN DECISION: Sequential row processing
-                        # The orchestrator processes rows one at a time, blocking here
-                        # until each row completes. This is intentional:
-                        # - Concurrency happens WITHIN each row (multi-query transforms
-                        #   make 10+ LLM calls concurrently for a single row)
-                        # - Across rows, processing is sequential for:
-                        #   1. Simpler audit ordering (deterministic state progression)
-                        #   2. Natural backpressure (no unbounded queue growth)
-                        #   3. Single-threaded orchestrator (easier to reason about)
-                        #
-                        # For true cross-row parallelism, the orchestrator would need
-                        # to be async/await or multi-threaded, which adds complexity.
-                        #
-                        # Timeout is derived from transform's batch_wait_timeout config
-                        # (default 3600s = 1 hour) to allow for sustained rate limiting
-                        # and AIMD backoff during capacity errors.
-                        result = waiter.wait(timeout=batch_runtime.batch_wait_timeout, shutdown_event=ctx.shutdown_event)
-                    else:
-                        # Regular transform: synchronous process()
-                        result = transform.process(token.row_data, ctx)
-
+                    # Invocation-mode selection (sync process() vs batch-runtime
+                    # accept()+wait) lives in _invoke_transform; timing, FAILED
+                    # completion, and timeout eviction stay here with the guard.
+                    result = self._invoke_transform(
+                        transform=transform,
+                        batch_runtime=batch_runtime,
+                        token=token,
+                        ctx=ctx,
+                        state_id=guard.state_id,
+                    )
                     duration_ms = (time.perf_counter() - start) * 1000
                 except contract_errors.TIER_1_ERRORS:
                     raise  # Tier 1 errors must crash — never record as row FAILED

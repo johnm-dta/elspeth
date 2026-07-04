@@ -279,6 +279,24 @@ interface ApplyRecoveredStateResult {
   needsConfirmation: boolean;
 }
 
+/**
+ * The `source_blob_ids` sidecar from the most recent YAML export fetch,
+ * paired with the exact YAML it describes and the session it belongs to.
+ *
+ * Blob refs are session-scoped (the import endpoint 404s a foreign-session
+ * blob), and the import handler 400s a sidecar entry naming a source absent
+ * from the pasted YAML. So ImportYamlModal replays this ONLY when both guards
+ * hold: `sessionId` still matches the active session AND `yaml` matches the
+ * pasted text verbatim. Those two checks make a stale binding inert, which is
+ * why it is not threaded through every session-reset site — a mismatch simply
+ * declines to replay, and the backend then asks the user to re-provide.
+ */
+export interface ExportedYamlBlobBinding {
+  sessionId: string;
+  yaml: string;
+  sourceBlobIds: Record<string, string>;
+}
+
 interface SessionState {
   sessions: Session[];
   /**
@@ -304,6 +322,14 @@ interface SessionState {
    */
   compositionStateLoaded: boolean;
   compositionProposals: CompositionProposal[];
+  /**
+   * source_blob_ids sidecar captured on the last export fetch, so a
+   * same-session verbatim re-import can rebind blob-backed sources. Null
+   * until an export is fetched (and reset to null by an export with no
+   * blob-backed source). See ExportedYamlBlobBinding for the replay guards.
+   */
+  exportedYamlBlobBinding: ExportedYamlBlobBinding | null;
+  setExportedYamlBlobBinding: (binding: ExportedYamlBlobBinding | null) => void;
   composerPreferences: ComposerPreferences | null;
   staleProposalIds: string[];
   proposalActionPendingIds: string[];
@@ -433,6 +459,7 @@ const initialState = {
   compositionState: null as CompositionState | null,
   compositionStateLoaded: false,
   compositionProposals: [] as CompositionProposal[],
+  exportedYamlBlobBinding: null as ExportedYamlBlobBinding | null,
   composerPreferences: null as ComposerPreferences | null,
   staleProposalIds: [] as string[],
   proposalActionPendingIds: [] as string[],
@@ -449,6 +476,10 @@ const initialState = {
 
 export const useSessionStore = create<SessionState>((set, get) => ({
   ...initialState,
+
+  setExportedYamlBlobBinding(binding) {
+    set({ exportedYamlBlobBinding: binding });
+  },
 
   async loadSessions() {
     try {

@@ -55,6 +55,10 @@ describe("ImportYamlModal", () => {
       // Loaded-and-empty is the default here; an unloaded state (false) makes
       // the confirm step appear even for a null composition (its own test).
       compositionStateLoaded: true,
+      // No exported sidecar by default: only the round-trip tests set one, so
+      // the common path stays a two-arg importCompositionYaml call. setState
+      // merges, so reset it here or a prior test's binding leaks forward.
+      exportedYamlBlobBinding: null,
       guidedSession: null,
       // Stubbed rather than exercised: selectSession's own refetch fan-out
       // (messages/proposals/preferences/blobs/interpretation-events) is
@@ -450,5 +454,99 @@ describe("ImportYamlModal", () => {
         screen.getByText("Blob service unavailable for YAML import"),
       ).toBeInTheDocument(),
     );
+  });
+
+  // ── source_blob_ids sidecar replay (blob-backed export round-trip) ──────────
+
+  const BLOB_UUID = "11111111-1111-1111-1111-111111111111";
+
+  it("replays the source_blob_ids sidecar when the pasted YAML matches the export verbatim", async () => {
+    // The export fetch stashed this binding for the current session. Pasting
+    // the exact exported YAML must re-supply the sidecar so a blob-backed
+    // source rebinds instead of 400-ing as unbound blob storage.
+    useSessionStore.setState({
+      compositionState: emptyState(),
+      exportedYamlBlobBinding: {
+        sessionId: "sess-1",
+        yaml: PIPELINE_YAML,
+        sourceBlobIds: { source: BLOB_UUID },
+      },
+    } as never);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-6",
+      version: 6,
+      is_valid: true,
+      validation_errors: null,
+    });
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml();
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.getByText(buildImportSuccessMessage(6))).toBeInTheDocument(),
+    );
+    expect(api.importCompositionYaml).toHaveBeenCalledWith("sess-1", PIPELINE_YAML, {
+      source: BLOB_UUID,
+    });
+  });
+
+  it("does NOT replay the sidecar when the pasted YAML differs from the export", async () => {
+    // A hand-edited paste can no longer be trusted to match the sidecar's
+    // source names; sending it would risk an unknown-source 400. Degrade to a
+    // plain two-arg import (the backend then asks the user to re-provide).
+    useSessionStore.setState({
+      compositionState: emptyState(),
+      exportedYamlBlobBinding: {
+        sessionId: "sess-1",
+        yaml: PIPELINE_YAML,
+        sourceBlobIds: { source: BLOB_UUID },
+      },
+    } as never);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-7",
+      version: 7,
+      is_valid: true,
+      validation_errors: null,
+    });
+    const edited = `${PIPELINE_YAML}# hand edited\n`;
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml(edited);
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.getByText(buildImportSuccessMessage(7))).toBeInTheDocument(),
+    );
+    expect(api.importCompositionYaml).toHaveBeenCalledWith("sess-1", edited);
+  });
+
+  it("does NOT replay a sidecar that belongs to a different session", async () => {
+    // Blob refs are session-scoped; replaying another session's binding would
+    // 404 on the foreign blob. The sessionId guard drops it.
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: emptyState(),
+      exportedYamlBlobBinding: {
+        sessionId: "sess-other",
+        yaml: PIPELINE_YAML,
+        sourceBlobIds: { source: BLOB_UUID },
+      },
+    } as never);
+    vi.mocked(api.importCompositionYaml).mockResolvedValue({
+      id: "state-8",
+      version: 8,
+      is_valid: true,
+      validation_errors: null,
+    });
+
+    render(<ImportYamlModal onClose={onClose} />);
+    typeYaml();
+    await clickImport();
+
+    await waitFor(() =>
+      expect(screen.getByText(buildImportSuccessMessage(8))).toBeInTheDocument(),
+    );
+    expect(api.importCompositionYaml).toHaveBeenCalledWith("sess-1", PIPELINE_YAML);
   });
 });

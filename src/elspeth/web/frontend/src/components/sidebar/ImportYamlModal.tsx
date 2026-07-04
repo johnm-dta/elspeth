@@ -177,7 +177,23 @@ export function ImportYamlModal({ onClose }: ImportYamlModalProps): JSX.Element 
     setError(null);
     setPhase("submitting");
     try {
-      const result = await api.importCompositionYaml(activeSessionId, yamlText);
+      // Re-supply the export's source_blob_ids sidecar so a blob-backed source
+      // rebinds instead of 400-ing as unbound blob storage. Gate on BOTH the
+      // session and an exact YAML match: blob refs are session-scoped, and a
+      // sidecar naming a source absent from an edited paste would 400. On any
+      // mismatch we send no sidecar and the backend cleanly asks the user to
+      // re-provide the blob. Read at submit time (not subscribed) — it only
+      // matters at the moment of import.
+      const binding = useSessionStore.getState().exportedYamlBlobBinding;
+      const sourceBlobIds =
+        binding &&
+        binding.sessionId === activeSessionId &&
+        binding.yaml.trim() === yamlText.trim()
+          ? binding.sourceBlobIds
+          : undefined;
+      const result = sourceBlobIds
+        ? await api.importCompositionYaml(activeSessionId, yamlText, sourceBlobIds)
+        : await api.importCompositionYaml(activeSessionId, yamlText);
       setSuccessInfo({
         version: result.version,
         isValid: result.is_valid,

@@ -840,11 +840,25 @@ export async function revertToVersion(
 }
 
 /** Fetch the generated YAML for the current composition state. */
-export async function fetchYaml(sessionId: string): Promise<{ yaml: string }> {
+/**
+ * Fetch the current composition's exported YAML. For a source whose options
+ * point into session blob storage, the backend returns a `source_blob_ids`
+ * sidecar (source name -> blob UUID) alongside the YAML: the blob UUIDs are
+ * stripped from the public YAML body, so this sidecar is the ONLY channel by
+ * which the frontend learns them. It must be preserved for the import
+ * round-trip (importCompositionYaml's third arg) — dropping it strands a
+ * re-imported blob-backed source as unbound. Omitted when no source is
+ * blob-backed.
+ */
+export async function fetchYaml(
+  sessionId: string,
+): Promise<{ yaml: string; source_blob_ids?: Record<string, string> }> {
   const response = await fetch(`/api/sessions/${sessionId}/state/yaml`, {
     headers: authHeaders(),
   });
-  return parseResponse<{ yaml: string }>(response);
+  return parseResponse<{ yaml: string; source_blob_ids?: Record<string, string> }>(
+    response,
+  );
 }
 
 /** Request body for POST /api/sessions/{id}/state/yaml. */

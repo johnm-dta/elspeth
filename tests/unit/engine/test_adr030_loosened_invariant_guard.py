@@ -312,7 +312,9 @@ def test_n2_peer_claim_handoff_clears_and_breaks_without_raising(caplog: pytest.
     # Must NOT raise; the drain clears the pending set and breaks.
     import logging
 
-    with caplog.at_level(logging.INFO, logger="elspeth.engine.processor"):
+    # The relinquish decision (and its log line) lives in the scheduler-drain
+    # subsystem since the elspeth-c49f33d6e4 component-3 extraction.
+    with caplog.at_level(logging.INFO, logger="elspeth.engine.scheduler_drain"):
         results = processor._drain_scheduler_claims(
             ctx=PluginContext(run_id=setup.run_id, config={}, landscape=None), pending_items=pending, recover_pending_sinks=False
         )

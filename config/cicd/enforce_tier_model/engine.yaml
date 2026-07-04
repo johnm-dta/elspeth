@@ -47,9 +47,24 @@ per_file_rules:
     (pre-DCV hierarchy, inherits PluginContractViolation) still routes through _record_flush_violation
     when wrapped in an aggregate. The source-boundary failure helper also uses nominal isinstance checks
     to distinguish audit-evidence exceptions from framework/orchestration failures without fabricating
-    context.
+    context. Budget dropped 13->10 after the scheduler-drain extraction
+    (elspeth-c49f33d6e4 component 3) moved the drain-loop and pending-sink
+    handoff isinstance sites to engine/scheduler_drain.py.
   expires: null
-  max_hits: 13
+  max_hits: 10
+- pattern: engine/scheduler_drain.py
+  rules:
+  - R5
+  reason: 'RowResult-vs-fanout-tuple union narrowing in the durable drain loop
+    and the pending-sink handoff tagger: isinstance(result, tuple) discriminates
+    single-result from tuple-result scheduler outcomes before extending the
+    drain results (2 sites in drain_claims) and before per-token tagging
+    (1 site in with_scheduler_pending_sink_handoffs). Repointed from
+    engine/processor.py (its R5 budget drops 13->10) after the scheduler-drain
+    extraction (elspeth-c49f33d6e4 component 3) moved the claim/drain loop and
+    the handoff helpers here.'
+  expires: null
+  max_hits: 3
 - pattern: engine/barrier_coordination.py
   rules:
   - R5
@@ -478,18 +493,19 @@ allow_hits:
     be carried. The rationale above was re-verified against the current code
     at this site.
   expires: '2026-08-31'
-- key: engine/processor.py:R1:RowProcessor:_row_result_from_pending_sink:fp=3538a0148661fc47
+- key: engine/scheduler_drain.py:R1:SchedulerDrainCoordinator:row_result_from_pending_sink:fp=262c85bcd7de4246
   owner: john
   reason: |-
-    This `.get()` is not swallowing corrupt Tier-1 audit data; it implements the called repository method's explicit sparse-result contract for resume attempt derivation. In `_row_result_from_pending_sink`, the aggregate is scoped to the sink step, then the next retry offset is computed: `max_attempts = self._execution.get_max_node_state_attempts(..., step_index=self.resolve_sink_step())` and `attempt_offset = max_attempts.get(scheduled.token_id, -1) + 1`. The contract being consumed is site-specific: `execution_repository.py:633-634` says `Tokens with no node_states rows are absent from the result (callers treat absence as max_attempt = -1, i.e. offset 0).` The guard immediately following still crashes if an offset above zero lacks resume checkpoint provenance, so the defensive invariant is preserved. A drift that changed `get_max_node_state_attempts` to always return every requested token, or changed no-row semantics away from offset 0, would invalidate this suppression.
+    This `.get()` is not swallowing corrupt Tier-1 audit data; it implements the called repository method's explicit sparse-result contract for resume attempt derivation. In `row_result_from_pending_sink`, the aggregate is scoped to the sink step, then the next retry offset is computed: `max_attempts = self._execution.get_max_node_state_attempts(..., step_index=self._processor.resolve_sink_step())` and `attempt_offset = max_attempts.get(scheduled.token_id, -1) + 1`. The contract being consumed is site-specific: `execution_repository.py:633-634` says `Tokens with no node_states rows are absent from the result (callers treat absence as max_attempt = -1, i.e. offset 0).` The guard immediately following still crashes if an offset above zero lacks resume checkpoint provenance, so the defensive invariant is preserved. A drift that changed `get_max_node_state_attempts` to always return every requested token, or changed no-row semantics away from offset 0, would invalidate this suppression.
   safety: |-
-    Pending cicd-judge re-justification: the SchedulerWorkCodec extraction
-    (elspeth-6291c51766) and the barrier-subsystem extraction
-    (elspeth-e76a186916) removed RowProcessor methods above this one, shifting
-    its AST-path-based fingerprint; the function body itself is unchanged. The
-    prior ACCEPTED verdict binds to the exact fingerprint the judge inspected
-    and could not be carried. The rationale above was re-verified against the
-    current code at this site.
+    Pending cicd-judge re-justification: the scheduler-drain extraction
+    (elspeth-c49f33d6e4 component 3) moved this function unchanged from
+    RowProcessor._row_result_from_pending_sink to
+    SchedulerDrainCoordinator.row_result_from_pending_sink (the sink-step
+    resolver is now reached through the drain's processor port). The prior
+    entry was already unsigned pending-judge after two earlier extractions
+    shifted its AST-path fingerprint; this re-key carries the same re-verified
+    rationale to the new site.
   expires: '2026-08-31'
 - key: engine/orchestrator/follower.py:R4:FollowerProcessor:_best_effort_depart:fp=01d63348996b1aed
   owner: john

@@ -571,6 +571,78 @@ describe("AuditReadinessPanel", () => {
     expect(screen.getByText(/Missing required secret/)).toBeInTheDocument();
   });
 
+  // ── Gate legibility (elspeth-088bf83922 T-2, option (a)) ───────────────────
+  //
+  // canExecute (ExecuteButton.tsx) only reads the `validation` row's
+  // is_valid and interpretation-pending state (which the `llm_interpretations`
+  // row mirrors) — plugin_trust/provenance/retention/secrets never gate Run.
+  // These two tests pin that the panel's per-row badges classify honestly
+  // against that real predicate, and that the header carries a one-line
+  // explanation — without touching any gating behaviour.
+
+  it("labels validation and llm_interpretations rows 'Blocks Run' and the other four rows 'Advisory' (elspeth-088bf83922 T-2)", async () => {
+    const everyRowActionable: AuditReadinessSnapshot = {
+      session_id: SESSION_ID,
+      composition_version: 1,
+      checked_at: new Date().toISOString(),
+      rows: [
+        { id: "validation", label: "Validation", status: "error", summary: "Two errors", detail: "Missing source plugin.", component_ids: ["source"] },
+        { id: "plugin_trust", label: "Plugin trust", status: "warning", summary: "One Tier 3 plugin", detail: null, component_ids: ["web_scrape"] },
+        { id: "provenance", label: "Provenance", status: "warning", summary: "Identity passthrough", detail: null, component_ids: ["select_columns"] },
+        { id: "retention", label: "Retention", status: "warning", summary: "Retention shorter than expected", detail: null, component_ids: [] },
+        { id: "llm_interpretations", label: "LLM interpretations", status: "warning", summary: "Untracked LLM output", detail: null, component_ids: ["classify"] },
+        { id: "secrets", label: "Secrets", status: "error", summary: "Missing required secret", detail: "secret 'OPENAI_API_KEY' is not declared.", component_ids: [] },
+      ],
+      validation_result: {
+        is_valid: false,
+        checks: [],
+        errors: [],
+        warnings: [],
+        readiness: BLOCKED_READINESS,
+        semantic_contracts: [],
+      },
+    };
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(everyRowActionable, { signal }),
+    );
+    render(<AuditReadinessPanel />);
+    await waitFor(() => {
+      expect(screen.getByText("Validation")).toBeInTheDocument();
+    });
+
+    // Two gating rows.
+    expect(screen.getByText("Validation").closest("li")).toHaveAttribute(
+      "data-gate",
+      "blocks",
+    );
+    expect(
+      screen.getByTestId("audit-readiness-row-llm-interpretations"),
+    ).toHaveAttribute("data-gate", "blocks");
+
+    // Four advisory rows — never appear in ExecuteButton's canExecute.
+    for (const label of ["Plugin trust", "Provenance", "Retention", "Secrets"]) {
+      expect(screen.getByText(label).closest("li")).toHaveAttribute(
+        "data-gate",
+        "advisory",
+      );
+    }
+
+    // Both labels are visible text, present exactly twice each (one per
+    // gating/advisory row count) — not colour-only.
+    expect(screen.getAllByText("Blocks Run")).toHaveLength(2);
+    expect(screen.getAllByText("Advisory")).toHaveLength(4);
+  });
+
+  it("explains the 'Blocks Run' / 'Advisory' classification in the expanded header", async () => {
+    vi.mocked(api.fetchAuditReadiness).mockImplementationOnce(
+      (_sid, signal) => makeAbortablePromise(snapshotWithProvenanceWarning(1), { signal }),
+    );
+    render(<AuditReadinessPanel />);
+    expect(
+      await screen.findByText(/Rows marked "Blocks Run" must be clear/i),
+    ).toBeInTheDocument();
+  });
+
   it("refetches when compositionState.version advances", async () => {
     vi.mocked(api.fetchAuditReadiness)
       .mockImplementationOnce(

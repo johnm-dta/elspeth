@@ -4,13 +4,17 @@ import {
   ExecuteButton,
   INTERPRETATION_PENDING_RUN_BLOCK_TITLE,
   buildRunEgressSummary,
+  isRunGatingReadinessRow,
+  primaryRunBlockReason,
 } from "./ExecuteButton";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
+import { useAuditReadinessStore } from "@/stores/auditReadinessStore";
 import { resetStore } from "@/test/store-helpers";
 import type { CompositionState } from "@/types/index";
 import type { InterpretationEvent } from "@/types/interpretation";
+import type { AuditReadinessSnapshot } from "@/types/api";
 
 function makeInterpretationEvent(
   overrides: Partial<InterpretationEvent> = {},
@@ -72,6 +76,7 @@ describe("ExecuteButton", () => {
       compositionState: null,
     } as never);
     resetStore(useInterpretationEventsStore);
+    resetStore(useAuditReadinessStore);
   });
 
   it("renders nothing when there is no active session", () => {
@@ -413,6 +418,303 @@ describe("ExecuteButton", () => {
     const button = screen.getByRole("button", { name: /run pipeline/i });
     expect(button).not.toBeDisabled();
     expect(button).not.toHaveAttribute("title");
+  });
+
+  // ── Gate legibility (elspeth-088bf83922 T-2, option (a)) ──────────────────
+  //
+  // canExecute itself is untouched by any of this (pinned by the tests
+  // above, which are unmodified). These tests cover the two NEW, purely
+  // additive affordances: a visible one-line reason when Run is disabled,
+  // naming which of the three gates is active; and a one-line note when Run
+  // is enabled but an advisory audit-readiness row is non-green.
+
+  function seedAuditSnapshot(
+    rows: AuditReadinessSnapshot["rows"],
+    compositionVersion = 1,
+  ): void {
+    useAuditReadinessStore.setState({
+      snapshotsBySession: {
+        "sess-1": {
+          session_id: "sess-1",
+          composition_version: compositionVersion,
+          checked_at: new Date().toISOString(),
+          rows,
+          validation_result: {
+            is_valid: true,
+            checks: [],
+            errors: [],
+            warnings: [],
+          } as never,
+        },
+      },
+    });
+  }
+
+  it("shows 'The pipeline is already running.' when isExecuting is true", () => {
+    useExecutionStore.setState({
+      validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
+      isExecuting: true,
+      progress: null,
+    } as never);
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+
+    render(<ExecuteButton />);
+
+    expect(
+      screen.getByText(
+        "The pipeline is already running.",
+        { selector: "p" },
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows 'The pipeline is already running.' when progress.status is 'running' even if isExecuting has reset to false", () => {
+    // isExecuting flips back to false shortly after the POST resolves
+    // (executionStore.ts); progress.status keeps updating via WebSocket.
+    // canExecute's `progress?.status !== "running"` condition covers this
+    // window — the reason text must too.
+    useExecutionStore.setState({
+      validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
+      isExecuting: false,
+      progress: { status: "running" } as never,
+    } as never);
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+
+    render(<ExecuteButton />);
+
+    expect(
+      screen.getByText("The pipeline is already running.", { selector: "p" }),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the validation reason when structural validation is failing", () => {
+    useExecutionStore.setState({
+      validationResult: {
+        is_valid: false,
+        checks: [],
+        errors: [{ component_type: "source", component_id: "csv_source", message: "x" } as never],
+        warnings: [],
+      } as never,
+      isExecuting: false,
+      progress: null,
+    } as never);
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+
+    render(<ExecuteButton />);
+
+    const reason = screen.getByText(
+      "Fix the validation errors shown in the Audit panel before running.",
+      { selector: "p" },
+    );
+    expect(reason).toHaveAttribute("data-run-block-reason", "validation");
+  });
+
+  it("shows the interpretation-pending reason as visible text, in addition to the existing sr-only/title pair", () => {
+    useExecutionStore.setState({
+      validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
+      isExecuting: false,
+      progress: null,
+    } as never);
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+    useInterpretationEventsStore.setState({
+      pendingBySession: { "sess-1": { "evt-1": makeInterpretationEvent() } },
+      optedOutBySession: {},
+    });
+
+    render(<ExecuteButton />);
+
+    // Same string now renders twice: the pre-existing sr-only span (wired
+    // to aria-describedby) and the new visible <p>. Both must be present.
+    const matches = screen.getAllByText(INTERPRETATION_PENDING_RUN_BLOCK_TITLE);
+    expect(matches).toHaveLength(2);
+    const visible = screen.getByText(INTERPRETATION_PENDING_RUN_BLOCK_TITLE, {
+      selector: "p",
+    });
+    expect(visible).toHaveAttribute("data-run-block-reason", "interpretation");
+  });
+
+  it("shows no reason paragraph when canExecute is true", () => {
+    useExecutionStore.setState({
+      validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
+      isExecuting: false,
+      progress: null,
+    } as never);
+    useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+
+    render(<ExecuteButton />);
+
+    expect(document.querySelector("[data-run-block-reason]")).toBeNull();
+  });
+
+  it("shows a one-line advisory note when Run is enabled but a non-gating audit row is non-green", () => {
+    useExecutionStore.setState({
+      validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
+      isExecuting: false,
+      progress: null,
+    } as never);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: makeComposition(),
+    } as never);
+    seedAuditSnapshot([
+      { id: "validation", label: "Validation", status: "ok", summary: "ok", detail: null, component_ids: [] },
+      { id: "secrets", label: "Secrets", status: "warning", summary: "1 secret unresolved", detail: null, component_ids: [] },
+    ]);
+
+    render(<ExecuteButton />);
+
+    expect(
+      screen.getByText("Advisory checks don't block Run."),
+    ).toBeInTheDocument();
+    expect(document.querySelector("[data-run-block-reason]")).toBeNull();
+  });
+
+  it("does not show the advisory note when every audit row is green", () => {
+    useExecutionStore.setState({
+      validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
+      isExecuting: false,
+      progress: null,
+    } as never);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: makeComposition(),
+    } as never);
+    seedAuditSnapshot([
+      { id: "validation", label: "Validation", status: "ok", summary: "ok", detail: null, component_ids: [] },
+      { id: "secrets", label: "Secrets", status: "ok", summary: "ok", detail: null, component_ids: [] },
+    ]);
+
+    render(<ExecuteButton />);
+
+    expect(
+      screen.queryByText("Advisory checks don't block Run."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not show the advisory note from a stale (composition-version-mismatched) audit snapshot", () => {
+    useExecutionStore.setState({
+      validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
+      isExecuting: false,
+      progress: null,
+    } as never);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: makeComposition({ version: 2 }),
+    } as never);
+    // Snapshot is for v1; the live composition is already at v2.
+    seedAuditSnapshot(
+      [
+        { id: "secrets", label: "Secrets", status: "error", summary: "stale", detail: null, component_ids: [] },
+      ],
+      1,
+    );
+
+    render(<ExecuteButton />);
+
+    expect(
+      screen.queryByText("Advisory checks don't block Run."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never surfaces the advisory note for a non-green GATING row (honesty guard: classification, not snapshot judgment)", () => {
+    // The live validationResult says the composition is valid (Run is
+    // enabled), but the (decoupled, e.g. stale) audit snapshot shows the
+    // validation ROW itself as non-green. Because `validation` is a
+    // gating row, it must be excluded from the advisory-note check —
+    // showing "Advisory checks don't block Run" next to a gating row
+    // would be a false, self-contradicting statement.
+    useExecutionStore.setState({
+      validationResult: { is_valid: true, checks: [], errors: [], warnings: [] } as never,
+      isExecuting: false,
+      progress: null,
+    } as never);
+    useSessionStore.setState({
+      activeSessionId: "sess-1",
+      compositionState: makeComposition(),
+    } as never);
+    seedAuditSnapshot([
+      { id: "validation", label: "Validation", status: "warning", summary: "stale warning", detail: null, component_ids: [] },
+    ]);
+
+    render(<ExecuteButton />);
+
+    expect(
+      screen.queryByText("Advisory checks don't block Run."),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("isRunGatingReadinessRow", () => {
+  it("classifies validation and llm_interpretations as gating", () => {
+    expect(isRunGatingReadinessRow("validation")).toBe(true);
+    expect(isRunGatingReadinessRow("llm_interpretations")).toBe(true);
+  });
+
+  it("classifies plugin_trust, provenance, retention, and secrets as advisory", () => {
+    expect(isRunGatingReadinessRow("plugin_trust")).toBe(false);
+    expect(isRunGatingReadinessRow("provenance")).toBe(false);
+    expect(isRunGatingReadinessRow("retention")).toBe(false);
+    expect(isRunGatingReadinessRow("secrets")).toBe(false);
+  });
+});
+
+describe("primaryRunBlockReason", () => {
+  const allClear = {
+    isExecuting: false,
+    progressRunning: false,
+    isRunBlocked: false,
+    validationFailing: false,
+    validationNotRun: false,
+  };
+
+  it("returns null when nothing blocks", () => {
+    expect(primaryRunBlockReason(allClear)).toBeNull();
+  });
+
+  it("returns 'not_validated' when validation has not run (distinct from failing)", () => {
+    expect(
+      primaryRunBlockReason({ ...allClear, validationNotRun: true }),
+    ).toBe("not_validated");
+  });
+
+  it("prioritises 'interpretation' over an unrun validation", () => {
+    expect(
+      primaryRunBlockReason({
+        ...allClear,
+        isRunBlocked: true,
+        validationNotRun: true,
+      }),
+    ).toBe("interpretation");
+  });
+
+  it("prioritises 'running' over interpretation and validation", () => {
+    expect(
+      primaryRunBlockReason({
+        ...allClear,
+        isExecuting: true,
+        isRunBlocked: true,
+        validationFailing: true,
+      }),
+    ).toBe("running");
+    expect(
+      primaryRunBlockReason({ ...allClear, progressRunning: true }),
+    ).toBe("running");
+  });
+
+  it("prioritises 'interpretation' over validation when not running", () => {
+    expect(
+      primaryRunBlockReason({
+        ...allClear,
+        isRunBlocked: true,
+        validationFailing: true,
+      }),
+    ).toBe("interpretation");
+  });
+
+  it("falls back to 'validation' when only structural validation fails", () => {
+    expect(
+      primaryRunBlockReason({ ...allClear, validationFailing: true }),
+    ).toBe("validation");
   });
 });
 

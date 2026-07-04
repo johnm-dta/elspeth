@@ -216,6 +216,30 @@
   font-weight: 600;
 }
 
+/* Gate legibility (elspeth-088bf83922 T-2): "Blocks Run" / "Advisory" text
+   badge next to each row heading, classified by isRunGatingReadinessRow
+   (ExecuteButton.tsx). Plain text, not colour-coded — the row's existing
+   status-glyph/left-edge-stripe treatment already carries the ok/warning/
+   error signal; this badge answers a different question ("does this row's
+   status affect Run at all") that colour alone cannot distinguish from the
+   status rows already surface. --color-text-muted is the same token
+   .audit-readiness-row-summary already renders on every row background
+   (including the warning/error tints), so no new contrast surface is
+   introduced. */
+.audit-readiness-row-gate {
+  display: inline-block;
+  padding: 0 var(--space-2xs);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.audit-readiness-row-gate--blocks {
+  border: 1px solid var(--color-border-strong);
+}
+
 .audit-readiness-row-summary {
   grid-column: 2 / -1;
   color: var(--color-text-muted);

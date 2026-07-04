@@ -122,6 +122,18 @@ export function SharedAuditReadinessPanel({
             </time>
             .
           </p>
+          {/* Gate legibility (elspeth-088bf83922 T-2, option (a)): a reviewer
+              opening this frozen snapshot has no ExecuteButton in view, so
+              the per-row "Blocks Run" / "Advisory" badges (rendered by
+              AuditReadinessRow below) need this standalone explanation —
+              past tense, since the run this snapshot describes may already
+              have happened. Same classification the live panel uses; no
+              gating behaviour is described or implied here (this view has
+              no Run control at all). */}
+          <p className="audit-readiness-freshness">
+            Rows marked "Blocks Run" had to be clear before this pipeline
+            could run; the rest are advisory and did not stop it.
+          </p>
         </header>
         <ul
           className="audit-readiness-rows"

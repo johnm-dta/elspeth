@@ -162,4 +162,35 @@ describe("SharedAuditReadinessPanel", () => {
       expect(screen.getByText(/2 pending review/)).toBeInTheDocument();
     },
   );
+
+  // ── Gate legibility (elspeth-088bf83922 T-2, option (a)) ───────────────────
+  //
+  // The shared read-only view renders through the same AuditReadinessRow
+  // primitive as the live panel, so it inherits the identical "Blocks Run" /
+  // "Advisory" classification (validation + llm_interpretations gate;
+  // plugin_trust/provenance/retention/secrets are advisory). It also gets a
+  // standalone explanatory line in the header, since a reviewer here has no
+  // ExecuteButton in view to infer the distinction from.
+
+  it("labels validation and llm_interpretations rows 'Blocks Run' and the other four 'Advisory'", () => {
+    render(<SharedAuditReadinessPanel snapshot={_snapshot} />);
+    expect(
+      screen.getByTestId("shared-inspect-readiness-row-validation"),
+    ).toHaveAttribute("data-gate", "blocks");
+    expect(
+      screen.getByTestId("shared-inspect-readiness-row-llm_interpretations"),
+    ).toHaveAttribute("data-gate", "blocks");
+    for (const id of ["plugin_trust", "provenance", "retention", "secrets"]) {
+      expect(
+        screen.getByTestId(`shared-inspect-readiness-row-${id}`),
+      ).toHaveAttribute("data-gate", "advisory");
+    }
+  });
+
+  it("explains the 'Blocks Run' classification in the frozen-snapshot header", () => {
+    render(<SharedAuditReadinessPanel snapshot={_snapshot} />);
+    expect(
+      screen.getByText(/Rows marked "Blocks Run" had to be clear/i),
+    ).toBeInTheDocument();
+  });
 });

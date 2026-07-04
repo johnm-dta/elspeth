@@ -17,9 +17,18 @@
  * everywhere downstream. The live AuditReadinessPanel never wraps in
  * a provider (the default `false` value flows through) so its
  * actionable buttons render as today.
+ *
+ * Gate legibility (elspeth-088bf83922 T-2, option (a)): every row also
+ * renders a small "Blocks Run" / "Advisory" text badge next to its
+ * heading, classified by `isRunGatingReadinessRow` (ExecuteButton.tsx —
+ * the same file that owns `canExecute`, so this label can't drift from
+ * what the button actually does). This is legibility only: it changes no
+ * gating behaviour, and both the live panel and the read-only shared panel
+ * get the same classification since both render through this component.
  */
 
 import { useReadOnly } from "../../contexts/ReadOnlyContext";
+import { isRunGatingReadinessRow } from "../sidebar/ExecuteButton";
 import type { ReadinessRowId, ReadinessStatus } from "../../types/api";
 
 /**
@@ -79,12 +88,32 @@ export function AuditReadinessRow({
     ? `${baseClassName} ${row.extraClassName}`
     : baseClassName;
 
+  // Gate legibility (elspeth-088bf83922 T-2): classify honestly against
+  // isRunGatingReadinessRow (ExecuteButton.tsx), not by local judgment.
+  // The heading text stays in its own leaf span (audit-readiness-row-label-
+  // text) so existing exact-text queries against the heading keep working —
+  // the badge is a sibling within the same audit-readiness-row-label cell,
+  // not appended to the heading string.
+  const gateKind = isRunGatingReadinessRow(row.id) ? "blocks" : "advisory";
+  const gateLabel = gateKind === "blocks" ? "Blocks Run" : "Advisory";
+  const label = (
+    <span className="audit-readiness-row-label">
+      <span className="audit-readiness-row-label-text">{row.heading}</span>{" "}
+      <span
+        className={`audit-readiness-row-gate audit-readiness-row-gate--${gateKind}`}
+      >
+        {gateLabel}
+      </span>
+    </span>
+  );
+
   if (clickable) {
     return (
       <li
         key={row.id}
         className={className}
         data-testid={row.testId}
+        data-gate={gateKind}
       >
         <button
           type="button"
@@ -95,7 +124,7 @@ export function AuditReadinessRow({
             {row.glyph}
           </span>
           <span className="sr-only">{row.ariaStatusLabel}.</span>
-          <span className="audit-readiness-row-label">{row.heading}</span>
+          {label}
           <span className="audit-readiness-row-summary">{row.summaryText}</span>
         </button>
       </li>
@@ -103,7 +132,7 @@ export function AuditReadinessRow({
   }
 
   return (
-    <li key={row.id} className={className} data-testid={row.testId}>
+    <li key={row.id} className={className} data-testid={row.testId} data-gate={gateKind}>
       <div
         className="audit-readiness-row-static"
         role="group"
@@ -113,7 +142,7 @@ export function AuditReadinessRow({
           {row.glyph}
         </span>
         <span className="sr-only">{row.ariaStatusLabel}.</span>
-        <span className="audit-readiness-row-label">{row.heading}</span>
+        {label}
         <span className="audit-readiness-row-summary">{row.summaryText}</span>
       </div>
     </li>

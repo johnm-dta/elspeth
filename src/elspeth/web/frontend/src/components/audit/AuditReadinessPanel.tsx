@@ -453,6 +453,15 @@ export function AuditReadinessPanel() {
             <p className="audit-readiness-freshness">
               Checked {checkedText} · as of v{snapshot.composition_version}
             </p>
+            {/* Gate legibility (elspeth-088bf83922 T-2, option (a)): a
+                one-line explanation of the per-row "Blocks Run" / "Advisory"
+                badges below — legibility only, no gating change. Reuses the
+                freshness paragraph's existing muted-text style rather than
+                introducing a new one. */}
+            <p className="audit-readiness-freshness">
+              Rows marked "Blocks Run" must be clear before you can run this
+              pipeline; the rest are advisory and do not stop a run.
+            </p>
           </div>
           <div className="audit-readiness-actions">
             <button

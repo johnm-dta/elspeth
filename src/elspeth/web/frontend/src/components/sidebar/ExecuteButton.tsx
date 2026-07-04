@@ -2,9 +2,11 @@ import { useId, useState } from "react";
 import { useExecutionStore } from "@/stores/executionStore";
 import { useSessionStore } from "@/stores/sessionStore";
 import { useInterpretationEventsStore } from "@/stores/interpretationEventsStore";
+import { useAuditReadinessStore } from "@/stores/auditReadinessStore";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { sortedSourceEntries, sourceComponentId } from "@/utils/compositionState";
 import type { CompositionState } from "@/types/index";
+import type { ReadinessRowId } from "@/types/api";
 
 /**
  * Run-button tooltip text used when a pending interpretation event blocks
@@ -83,6 +85,82 @@ export function buildRunEgressSummary(
 }
 
 /**
+ * Which audit-readiness rows are load-bearing for `canExecute` below, and
+ * which are informational/advisory only (elspeth-088bf83922 finding T-2,
+ * option (a) — legibility, NOT new gating). Read together with
+ * `canExecute`: `validationResult?.is_valid === true` corresponds to the
+ * `validation` row; `!isRunBlocked` corresponds to the `llm_interpretations`
+ * row (both are driven by the same interpretationEventsStore pending/
+ * opted-out state used to compute `isRunBlocked` below). The other four
+ * rows (plugin_trust, provenance, retention, secrets) never appear in
+ * `canExecute` and are always advisory.
+ *
+ * This file is the single source of truth for what actually gates Run —
+ * AuditReadinessRow (components/audit) imports this function rather than
+ * re-deriving the classification, so the audit panel's "Blocks Run" /
+ * "Advisory" labelling cannot drift from the real predicate below. The
+ * exhaustive switch (the `never` default arm) fails the build if a future
+ * backend row id is added without an explicit classification here.
+ */
+export function isRunGatingReadinessRow(id: ReadinessRowId): boolean {
+  switch (id) {
+    case "validation":
+    case "llm_interpretations":
+      return true;
+    case "plugin_trust":
+    case "provenance":
+    case "retention":
+    case "secrets":
+      return false;
+    default: {
+      const _exhaustive: never = id;
+      throw new Error(`unknown readiness row id: ${String(_exhaustive)}`);
+    }
+  }
+}
+
+/** Which of the (up to) three run-blocking gates is currently active, for
+ *  the plain-language reason text rendered under the button
+ *  (elspeth-088bf83922 T-2). Priority order: an in-flight run takes
+ *  precedence (nothing else matters until it finishes); pending
+ *  interpretation review is next (it also drives the dedicated
+ *  aria-disabled/title/aria-describedby treatment below); structural
+ *  validation is the remaining case. Returns null when none apply, i.e.
+ *  when `canExecute` is true. Exported for the corresponding test. */
+export type RunBlockReason = "running" | "interpretation" | "validation" | "not_validated";
+
+export function primaryRunBlockReason(input: {
+  isExecuting: boolean;
+  progressRunning: boolean;
+  isRunBlocked: boolean;
+  validationFailing: boolean;
+  validationNotRun: boolean;
+}): RunBlockReason | null {
+  if (input.isExecuting || input.progressRunning) return "running";
+  if (input.isRunBlocked) return "interpretation";
+  // "not_validated" (no validation result yet — empty composition, or a
+  // snapshot still in flight) is distinct from "validation" (a result exists
+  // and reports errors). Conflating them made the button claim "fix the
+  // validation errors" when none had been computed and none were shown
+  // anywhere (elspeth-088bf83922 review follow-up).
+  if (input.validationNotRun) return "not_validated";
+  if (input.validationFailing) return "validation";
+  return null;
+}
+
+/** Plain-language text per `RunBlockReason`, rendered visibly below the
+ *  button. The `interpretation` entry reuses
+ *  INTERPRETATION_PENDING_RUN_BLOCK_TITLE verbatim rather than restating it
+ *  — one string, two channels (the existing title/aria-describedby pair for
+ *  mouse/some-AT users, this visible line for everyone else). */
+const RUN_BLOCK_REASON_TEXT: Record<RunBlockReason, string> = {
+  running: "The pipeline is already running.",
+  interpretation: INTERPRETATION_PENDING_RUN_BLOCK_TITLE,
+  validation: "Fix the validation errors shown in the Audit panel before running.",
+  not_validated: "This pipeline hasn't been validated yet.",
+};
+
+/**
  * Run-pipeline button (Phase 2C, with Phase 5b.18b.7 interpretation gating).
  *
  * Gating predicate (spec 18b lines 698-722):
@@ -102,9 +180,10 @@ export function buildRunEgressSummary(
  *     `title` attribute alone is not reliably announced).
  *
  * Other not-runnable states (validation failing, already executing/running)
- * keep native `disabled`: they have their own visible surfaces (audit
- * readiness panel, inline banners, the progress view) and carry no
- * button-attached reason to reach.
+ * keep native `disabled` — the WCAG 4.1.2 concern above is specific to the
+ * interpretation block, which is the only state that removes reachability
+ * from a mouseless/AT user if left natively disabled. They still get a
+ * plain-language reason: see `primaryRunBlockReason` below.
  *
  * The opt-out path is the gate's complement: a session that has opted out
  * of interpretation review runs freely (the backend bakes auto-
@@ -116,6 +195,17 @@ export function buildRunEgressSummary(
  * composition), mirroring the tutorial's Run-step disclosure. A per-session
  * "don't ask again" opt-out (executionStore.runDisclosureAckBySession)
  * keeps it from becoming click-through noise.
+ *
+ * Gate legibility (elspeth-088bf83922 T-2, option (a)): the audit-readiness
+ * panel's rows other than validation/llm_interpretations never block Run —
+ * this button previously gave no hint of that distinction. Two small,
+ * NON-gating additions (`canExecute` itself is untouched):
+ *   - when disabled, a visible one-line reason ("The pipeline is already
+ *     running." / the interpretation-pending line / a validation pointer)
+ *     renders below the button, driven by `primaryRunBlockReason`;
+ *   - when enabled but the audit snapshot has a non-green advisory row
+ *     (plugin_trust/provenance/retention/secrets), a single line notes
+ *     that advisory checks don't block Run.
  */
 export function ExecuteButton(): JSX.Element | null {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -141,6 +231,17 @@ export function ExecuteButton(): JSX.Element | null {
     (s) => s.optedOutBySession,
   );
 
+  // Gate legibility (elspeth-088bf83922 T-2): the version-matched audit
+  // snapshot, read the same way AuditReadinessPanel.tsx guards its own
+  // snapshot selector — a cached snapshot for a stale composition version
+  // must not be used to decide whether to show the advisory note below.
+  const compositionVersion = compositionState?.version ?? null;
+  const auditSnapshot = useAuditReadinessStore((s) => {
+    if (!activeSessionId || compositionVersion === null) return undefined;
+    const cached = s.snapshotsBySession[activeSessionId];
+    return cached?.composition_version === compositionVersion ? cached : undefined;
+  });
+
   const reactId = useId();
   const describedById = `${reactId}-run-block-reason`;
   const [showRunDisclosure, setShowRunDisclosure] = useState(false);
@@ -159,6 +260,23 @@ export function ExecuteButton(): JSX.Element | null {
     !isExecuting &&
     progress?.status !== "running" &&
     !isRunBlocked;
+
+  // Gate legibility (elspeth-088bf83922 T-2) — derived, non-gating. These
+  // three inputs mirror `canExecute`'s own conditions exactly; none of them
+  // feed back into `canExecute`.
+  const blockReason = primaryRunBlockReason({
+    isExecuting,
+    progressRunning: progress?.status === "running",
+    isRunBlocked,
+    validationNotRun: validationResult == null,
+    validationFailing: validationResult != null && validationResult.is_valid !== true,
+  });
+  const advisoryRowsNonGreen =
+    auditSnapshot?.rows.some(
+      (row) =>
+        !isRunGatingReadinessRow(row.id) &&
+        (row.status === "warning" || row.status === "error"),
+    ) ?? false;
 
   function handleRunClick(): void {
     // Blocked-but-focusable case (aria-disabled): activation is a no-op.
@@ -201,10 +319,11 @@ export function ExecuteButton(): JSX.Element | null {
         disabled={isRunBlocked ? undefined : !canExecute}
         aria-disabled={!canExecute ? true : undefined}
         aria-label="Run pipeline"
-        // `title` only when blocked by pending interpretations — the
-        // pre-existing disabled-on-invalid-validation case has its own
-        // surface (the audit-readiness panel and inline error banners) and
-        // a tooltip here would be redundant.
+        // `title` (hover tooltip) only when blocked by pending
+        // interpretations — the other not-runnable states are natively
+        // `disabled`, and a `title` on a disabled element is not reliably
+        // reachable by keyboard/AT users, so their reason is carried by the
+        // always-visible <p> below instead (elspeth-088bf83922 T-2).
         title={isRunBlocked ? INTERPRETATION_PENDING_RUN_BLOCK_TITLE : undefined}
         aria-describedby={isRunBlocked ? describedById : undefined}
       >
@@ -234,6 +353,31 @@ export function ExecuteButton(): JSX.Element | null {
         <span id={describedById} className="sr-only">
           {INTERPRETATION_PENDING_RUN_BLOCK_TITLE}
         </span>
+      )}
+      {/* Gate legibility (elspeth-088bf83922 T-2): a visible (not sr-only)
+          one-line reason for whichever gate is currently holding Run back.
+          Deliberately plain text, not a tooltip — tooltips on natively
+          disabled buttons are not reliably reachable by keyboard/AT users
+          (see the WCAG 4.1.2 note above), and this line is meant for every
+          user, not just the interpretation-pending case that already has
+          its own aria-describedby announcement. */}
+      {blockReason && (
+        <p
+          className="side-rail-execute-reason"
+          data-run-block-reason={blockReason}
+        >
+          {RUN_BLOCK_REASON_TEXT[blockReason]}
+        </p>
+      )}
+      {/* Run is enabled, but the audit-readiness panel has a non-green
+          advisory row (plugin trust / provenance / retention / secrets).
+          These rows never gate Run — say so in one line rather than
+          leaving the user to infer it from an amber/red row that did
+          nothing when they ran anyway. */}
+      {!blockReason && advisoryRowsNonGreen && (
+        <p className="side-rail-execute-reason side-rail-execute-reason--advisory">
+          Advisory checks don't block Run.
+        </p>
       )}
       {showRunDisclosure && (
         <ConfirmDialog

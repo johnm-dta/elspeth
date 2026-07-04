@@ -455,16 +455,16 @@ class BaseTransform(ABC):
             return contract
 
         from elspeth.contracts.schema_contract import SchemaContract
-        from elspeth.contracts.schema_contract_factory import map_schema_mode
+        from elspeth.contracts.schema_contract_factory import expected_runtime_output_contract
 
-        expected_mode = map_schema_mode(output_schema_config.mode)
-        if contract.mode == expected_mode and contract.locked:
+        expected_mode, expected_locked = expected_runtime_output_contract(output_schema_config)
+        if contract.mode == expected_mode and contract.locked == expected_locked:
             return contract
 
         return SchemaContract(
             mode=expected_mode,
             fields=contract.fields,
-            locked=True,
+            locked=expected_locked,
         )
 
     def _apply_declared_output_field_contracts(self, contract: SchemaContract) -> SchemaContract:

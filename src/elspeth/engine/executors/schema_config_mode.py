@@ -39,7 +39,7 @@ from elspeth.contracts.schema_contract import (
     PipelineRow,
     SchemaContract,
 )
-from elspeth.contracts.schema_contract_factory import create_contract_from_config
+from elspeth.contracts.schema_contract_factory import create_contract_from_config, expected_runtime_output_contract
 
 
 def _build_contract(
@@ -140,8 +140,12 @@ def verify_schema_config_mode(
     if not emitted_rows:
         return
 
-    declared_mode = output_schema_config.mode
-    declared_locked = True
+    expected_mode, declared_locked = expected_runtime_output_contract(output_schema_config)
+    # Audit payloads serialize the config-side lowercase casing (pinned by the
+    # schema-config-mode serialization roundtrip tests); comparison below stays
+    # in lowercase space on both sides, so the expectation source is the shared
+    # ADR-014 helper while the violation payload format is unchanged.
+    declared_mode = expected_mode.lower()
     allowed_declared_fields = _allowed_declared_fields(output_schema_config)
     required_output_fields = output_schema_config.get_effective_guaranteed_fields()
 

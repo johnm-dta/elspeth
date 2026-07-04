@@ -25,15 +25,19 @@ from __future__ import annotations
 from unittest.mock import Mock
 
 from elspeth.contracts.barrier_scalars import AggregationNodeScalars, BarrierScalars
+from elspeth.contracts.coordination import CoordinationToken
 from elspeth.contracts.types import NodeID
 from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
 
 
-def _make_coordinator() -> CheckpointCoordinator:
+def _make_coordinator(run_id: str) -> CheckpointCoordinator:
     config = Mock()
     config.enabled = True
     coordinator = CheckpointCoordinator(checkpoint_manager=Mock(), checkpoint_config=config)
     coordinator.set_active_graph(Mock())
+    # Checkpoint writes fail closed without a leader token bound to the run
+    # being written (elspeth-fab455790d).
+    coordinator.bind_coordination(CoordinationToken(run_id=run_id, worker_id="test-leader", leader_epoch=1))
     return coordinator
 
 
@@ -66,7 +70,7 @@ class TestFlushEmptiedAggregationCheckpoints:
         nodes, so the checkpoint is still written with an empty BarrierScalars
         (``has_state`` False → the manager persists NULL).
         """
-        coordinator = _make_coordinator()
+        coordinator = _make_coordinator("run-counter-only")
         loop_ctx = _loop_ctx({})  # executor emitted nothing — no latched nodes
 
         coordinator.checkpoint_interrupted_progress(
@@ -85,7 +89,7 @@ class TestFlushEmptiedAggregationCheckpoints:
         The executor's get_barrier_scalars() already filters to latched nodes;
         the projection must carry them through verbatim.
         """
-        coordinator = _make_coordinator()
+        coordinator = _make_coordinator("run-mixed-agg")
         loop_ctx = _loop_ctx(
             {NodeID("agg_latched"): AggregationNodeScalars(count_fire_offset=0.25, condition_fire_offset=None)},
         )
@@ -106,7 +110,7 @@ class TestFlushEmptiedAggregationCheckpoints:
     def test_no_buffered_tokens_anywhere_still_checkpoints(self) -> None:
         """No latched barriers and no pending sink tokens: the shutdown
         checkpoint is still written (the former no-anchor skip arm is gone)."""
-        coordinator = _make_coordinator()
+        coordinator = _make_coordinator("run-no-anchor")
         loop_ctx = _loop_ctx({})
 
         coordinator.checkpoint_interrupted_progress(

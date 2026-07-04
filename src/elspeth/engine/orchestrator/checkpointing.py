@@ -69,6 +69,31 @@ class CheckpointCoordinator:
             raise OrchestrationInvariantError(f"Cannot create {action}: execution graph not available")
         return self._checkpoint_config, self._checkpoint_manager, self._active_graph
 
+    def _require_fence(self, run_id: str) -> CoordinationToken:
+        """Fail closed unless a leader token bound to THIS run is held.
+
+        ADR-030 defense-in-depth (elspeth-fab455790d): checkpoint create and
+        delete are leader-only writes. A missing token would fall through to
+        CheckpointManager's unfenced plain-write arm (a deliberate seam for
+        direct repository/test/tooling callers, NOT the coordinator runtime
+        path); a token minted for a different run would fence against the
+        wrong run's epoch seat. Both are wiring bugs and must crash before
+        any manager call. Callers invoke this AFTER their enabled/manager
+        gate so disabled-checkpointing runs stay token-free.
+        """
+        token = self._coordination_token
+        if token is None:
+            raise OrchestrationInvariantError(
+                f"Checkpoint write for run {run_id!r} attempted with no bound leader token; "
+                "bind_coordination must run at run/resume start before any checkpoint write (ADR-030)."
+            )
+        if token.run_id != run_id:
+            raise OrchestrationInvariantError(
+                f"Checkpoint write for run {run_id!r} attempted under a leader token for run "
+                f"{token.run_id!r}; the coordinator's bound token must belong to the run being written (ADR-030)."
+            )
+        return token
+
     def reset_sequence(self) -> None:
         """Reset checkpoint ordering for a fresh run."""
         self._sequence_number = 0
@@ -100,13 +125,14 @@ class CheckpointCoordinator:
         if gate is None:
             return
         _config, manager, graph = gate
+        token = self._require_fence(run_id)
 
         manager.create_checkpoint(
             run_id=run_id,
             sequence_number=0,
             barrier_scalars=None,
             graph=graph,
-            coordination_token=self._coordination_token,
+            coordination_token=token,
         )
 
     def maybe_checkpoint(
@@ -138,6 +164,9 @@ class CheckpointCoordinator:
         if gate is None:
             return
         config, manager, graph = gate
+        # Before the sequence increment: every-N runs fail closed even on
+        # rows the frequency gate would skip.
+        token = self._require_fence(run_id)
 
         self._sequence_number += 1
 
@@ -165,7 +194,7 @@ class CheckpointCoordinator:
                 sequence_number=self._sequence_number,
                 barrier_scalars=barrier_scalars,
                 graph=graph,
-                coordination_token=self._coordination_token,
+                coordination_token=token,
             )
 
     def make_checkpoint_after_sink_factory(
@@ -231,6 +260,7 @@ class CheckpointCoordinator:
         if gate is None:
             return
         _config, manager, graph = gate
+        token = self._require_fence(run_id)
 
         self._sequence_number += 1
         manager.create_checkpoint(
@@ -238,7 +268,7 @@ class CheckpointCoordinator:
             sequence_number=self._sequence_number,
             barrier_scalars=loop_ctx.processor.get_barrier_scalars(),
             graph=graph,
-            coordination_token=self._coordination_token,
+            coordination_token=token,
         )
 
     def delete_checkpoints(self, run_id: str) -> None:
@@ -248,4 +278,5 @@ class CheckpointCoordinator:
             run_id: Run to clean up checkpoints for
         """
         if self._checkpoint_manager is not None:
-            self._checkpoint_manager.delete_checkpoints(run_id, coordination_token=self._coordination_token)
+            token = self._require_fence(run_id)
+            self._checkpoint_manager.delete_checkpoints(run_id, coordination_token=token)

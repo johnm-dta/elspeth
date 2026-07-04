@@ -162,7 +162,7 @@ class TestCheckpointInterruptedProgress:
         from elspeth.core.landscape.schema import checkpoints_table
         from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
         from tests.fixtures.factories import make_graph_linear
-        from tests.fixtures.landscape import make_recorder_with_run
+        from tests.fixtures.landscape import leader_coordination_token, make_recorder_with_run
 
         setup = make_recorder_with_run(run_id="run-test-123")
         try:
@@ -173,6 +173,9 @@ class TestCheckpointInterruptedProgress:
                 checkpoint_config=config,
             )
             coordinator.set_active_graph(make_graph_linear())
+            # Checkpoint writes fail closed without the run's leader token
+            # (elspeth-fab455790d); bind the seat begin_run minted.
+            coordinator.bind_coordination(leader_coordination_token(setup.factory, "run-test-123"))
 
             mock_processor = Mock()
             # Live executors with no latched triggers / no recorded losses
@@ -214,7 +217,7 @@ class TestCheckpointInterruptedProgress:
         from elspeth.core.landscape.schema import checkpoints_table
         from elspeth.engine.orchestrator.checkpointing import CheckpointCoordinator
         from tests.fixtures.factories import make_graph_linear
-        from tests.fixtures.landscape import make_recorder_with_run
+        from tests.fixtures.landscape import leader_coordination_token, make_recorder_with_run
 
         setup = make_recorder_with_run(run_id="run-latched")
         try:
@@ -225,6 +228,7 @@ class TestCheckpointInterruptedProgress:
                 checkpoint_config=config,
             )
             coordinator.set_active_graph(make_graph_linear())
+            coordinator.bind_coordination(leader_coordination_token(setup.factory, "run-latched"))
 
             mock_processor = Mock()
             mock_processor.get_barrier_scalars.return_value = BarrierScalars(
@@ -275,6 +279,9 @@ class TestCheckpointInterruptedProgress:
             orchestrator._checkpoints._checkpoint_manager = Mock()
             orchestrator._checkpoints._active_graph = Mock()
             orchestrator._checkpoints._sequence_number = 0
+            from elspeth.contracts.coordination import CoordinationToken
+
+            orchestrator._checkpoints.bind_coordination(CoordinationToken(run_id="run-x", worker_id="test-leader", leader_epoch=1))
 
             scalars = BarrierScalars(
                 aggregation={},
@@ -399,6 +406,11 @@ class TestCheckpointInterruptedProgress:
             orchestrator._checkpoints._checkpoint_manager = Mock()
             orchestrator._checkpoints._active_graph = Mock()
             orchestrator._checkpoints._sequence_number = 0
+            from elspeth.contracts.coordination import CoordinationToken
+
+            orchestrator._checkpoints.bind_coordination(
+                CoordinationToken(run_id="run-lost-branches", worker_id="test-leader", leader_epoch=1)
+            )
 
             scalars = BarrierScalars(
                 aggregation={},

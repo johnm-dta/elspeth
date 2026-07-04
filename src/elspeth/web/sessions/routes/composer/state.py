@@ -4,6 +4,7 @@ from typing import TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from elspeth.core.secrets import collect_credential_field_violations
 from elspeth.web.blobs.protocol import BlobNotFoundError
 from elspeth.web.composer.state import CompositionState, SourceSpec
 from elspeth.web.composer.yaml_importer import (
@@ -12,6 +13,7 @@ from elspeth.web.composer.yaml_importer import (
     composition_state_from_runtime_yaml,
 )
 from elspeth.web.paths import SOURCE_LOCAL_PATH_OPTION_KEYS, allowed_source_directories, resolve_data_path
+from elspeth.web.secrets.ref_policy import allowed_secret_ref_fields
 
 from .._helpers import (
     UTC,
@@ -92,6 +94,84 @@ def _reject_unbound_blob_storage_sources(state: CompositionState, *, data_dir: s
                     "Upload the blob into this session and include source_blob_ids for replay imports."
                 ),
             )
+
+
+def _reject_fabricated_secret_literals(
+    state: CompositionState,
+    *,
+    secret_service: Any | None,
+    user_id: str,
+) -> None:
+    """Reject literal credential values in pasted YAML before persistence.
+
+    The composer's tool-call surface (``set_source``, ``patch_node_options``,
+    ``set_output``) only catches a fabricated ("typed the value directly
+    instead of wiring a secret_ref") credential at /validate or runtime-
+    preflight time -- by then the literal has already been written into
+    CompositionState. Pasted YAML has no equivalent tool-call gate at all, so
+    without this check a literal credential would sail straight through
+    ``_state_data_from_composer_state``'s ``persist_invalid`` policy: written
+    to the DB as plaintext and echoed back verbatim in this response's
+    ``sources``/``nodes``/``outputs`` fields, regardless of whether the state
+    is later flagged ``is_valid=False``.
+
+    Checking (and rejecting outright, before any persistence) here is
+    stricter than the tool-call path affords today -- deliberately so, since
+    this is a new, paste-facing entry point. It reuses the same field-name
+    predicate and the same audit-hygiene discipline (name the field, never
+    the value) as the runtime-preflight ``fabricated_secret`` check in
+    ``elspeth.web.execution.validation``, so a legitimately wired
+    ``{secret_ref: NAME}`` marker or declared ``${NAME}`` env-inventory
+    marker is never mistaken for a fabricated literal.
+
+    Beyond the heuristic name/suffix predicate, each component also feeds its
+    plugin-specific credential fields (via ``allowed_secret_ref_fields`` --
+    the database sink's whole-DSN ``url`` being the canonical case) so a
+    pasted DSN with an embedded password is rejected here exactly as the
+    ``set_source``/``set_output`` tool gate rejects it, rather than slipping
+    past the suffix predicate and persisting plaintext.
+    """
+    env_ref_names: frozenset[str] = frozenset()
+    if secret_service is not None:
+        env_ref_names = frozenset(item.name for item in secret_service.list_refs(user_id))
+
+    violations: dict[str, list[str]] = {}
+    for source_name, source in state.sources.items():
+        fields = collect_credential_field_violations(
+            source.options,
+            env_ref_names,
+            additional_credential_fields=allowed_secret_ref_fields("source", source.plugin),
+        )
+        if fields:
+            violations[f"source:{source_name}"] = fields
+    for node in state.nodes:
+        node_plugin_fields = allowed_secret_ref_fields("transform", node.plugin) if node.plugin is not None else frozenset()
+        fields = collect_credential_field_violations(
+            node.options,
+            env_ref_names,
+            additional_credential_fields=node_plugin_fields,
+        )
+        if fields:
+            violations[f"node:{node.id}"] = fields
+    for output in state.outputs:
+        fields = collect_credential_field_violations(
+            output.options,
+            env_ref_names,
+            additional_credential_fields=allowed_secret_ref_fields("sink", output.plugin),
+        )
+        if fields:
+            violations[f"sink:{output.name}"] = fields
+
+    if violations:
+        components = "; ".join(f"{component}: {', '.join(fields)}" for component, fields in violations.items())
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Pasted YAML contains a literal value in credential-bearing field(s) -- {components}. "
+                "Wire each credential through the Secrets panel (produces a {secret_ref: NAME} marker) "
+                "instead of pasting the value directly."
+            ),
+        )
 
 
 async def _state_with_imported_source_blobs(
@@ -342,6 +422,11 @@ async def import_state_yaml(
         _reject_unbound_blob_storage_sources(
             imported_state,
             data_dir=str(request.app.state.settings.data_dir),
+        )
+        _reject_fabricated_secret_literals(
+            imported_state,
+            secret_service=request.app.state.scoped_secret_resolver,
+            user_id=str(user.user_id),
         )
 
         service: SessionServiceProtocol = request.app.state.session_service

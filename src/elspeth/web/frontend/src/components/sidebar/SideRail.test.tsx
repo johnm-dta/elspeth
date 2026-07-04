@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import { SideRail } from "./SideRail";
+import { useSessionStore } from "@/stores/sessionStore";
 
 describe("SideRail", () => {
   it("renders the audit-readiness slot region", () => {
@@ -145,5 +146,61 @@ describe("SideRail", () => {
     render(<SideRail />);
     expect(screen.queryByTestId("siderail-slot-export-yaml")).toBeNull();
     expect(screen.queryByTestId("siderail-slot-execute-button")).toBeNull();
+  });
+
+  describe("Import YAML mount (elspeth-24c56585f9 T-1)", () => {
+    // ImportYamlButton is mounted directly by SideRail (not fed via a slot
+    // prop — see the comment at its mount site), so it reacts to the real
+    // sessionStore singleton. Reset afterwards so this doesn't leak into
+    // other SideRail tests, none of which set activeSessionId.
+    afterEach(() => {
+      useSessionStore.setState({ activeSessionId: null } as never);
+    });
+
+    it("renders the Import YAML button when a session is active", () => {
+      useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+
+      render(<SideRail />);
+
+      const slot = screen.getByTestId("siderail-slot-import-yaml");
+      expect(
+        within(slot).getByRole("button", { name: /import yaml/i }),
+      ).toBeInTheDocument();
+    });
+
+    it("renders no button in the import-yaml slot without an active session", () => {
+      render(<SideRail />);
+
+      const slot = screen.getByTestId("siderail-slot-import-yaml");
+      expect(within(slot).queryByRole("button")).toBeNull();
+    });
+
+    it("positions the import-yaml slot adjacent to completion-bar and above catalog", () => {
+      useSessionStore.setState({ activeSessionId: "sess-1" } as never);
+      const { container } = render(
+        <SideRail
+          completionBarSlot={<div>Completion bar</div>}
+          catalogSlot={<div>Catalog</div>}
+        />,
+      );
+
+      const slots = Array.from(
+        container.querySelectorAll<HTMLElement>(
+          '[data-testid^="siderail-slot-"]',
+        ),
+      );
+      const indexOf = (testid: string): number =>
+        slots.findIndex((node) => node.dataset.testid === testid);
+
+      const completionIdx = indexOf("siderail-slot-completion-bar");
+      const importIdx = indexOf("siderail-slot-import-yaml");
+      const catalogIdx = indexOf("siderail-slot-catalog");
+
+      expect(completionIdx).toBeGreaterThanOrEqual(0);
+      expect(importIdx).toBeGreaterThanOrEqual(0);
+      expect(catalogIdx).toBeGreaterThanOrEqual(0);
+      expect(completionIdx).toBeLessThan(importIdx);
+      expect(importIdx).toBeLessThan(catalogIdx);
+    });
   });
 });

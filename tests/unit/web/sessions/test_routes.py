@@ -4564,6 +4564,44 @@ sinks:
         assert record.outputs[0]["name"] == "main"
 
     @pytest.mark.asyncio
+    async def test_post_state_yaml_allows_wired_secret_ref_marker(self, tmp_path) -> None:
+        """Hardening (T-1) no-false-positive lock-in: a legitimately wired
+        {secret_ref: NAME} marker in a credential field -- the form export
+        itself produces -- must import cleanly, not trip the new
+        fabricated-literal-credential rejection."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        yaml_text = """
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: /data/blobs/input.csv
+      api_key: {secret_ref: OPENAI_API_KEY}
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    options:
+      path: outputs/out.csv
+    on_write_failure: discard
+"""
+
+        async def _pass_preflight(state, *, settings, secret_service, user_id):
+            return ValidationResult(is_valid=True, checks=[], errors=[])
+
+        with patch("elspeth.web.sessions.routes.composer.state._runtime_preflight_for_state", side_effect=_pass_preflight):
+            resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 200, resp.text
+        record = await service.get_current_state(session.id)
+        assert record is not None
+        assert record.sources["source"]["options"]["api_key"] == {"secret_ref": "OPENAI_API_KEY"}
+
+    @pytest.mark.asyncio
     async def test_post_state_yaml_rejects_blob_storage_path_without_sidecar(self, tmp_path) -> None:
         """Path-only imports must not bypass source blob ownership checks."""
         app, service = _make_app(tmp_path)
@@ -4744,6 +4782,186 @@ sinks:
         assert resp.status_code == 404
         assert resp.json()["detail"] == "Blob not found"
         app.state.blob_service.get_blob.assert_awaited_once_with(blob_id)
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_oversized_document(self, tmp_path) -> None:
+        """Hardening (T-1): a paste over the Pydantic body cap is rejected as 422,
+        and (production parity) the oversized content is not echoed back in the
+        error body.
+
+        The egress redaction is a global ``RequestValidationError`` handler in
+        ``web/app.py`` (``handle_validation_error`` -- allowlists only
+        type/loc/msg, dropping FastAPI's default ``input`` echo) rather than
+        anything endpoint-specific, so it is registered here explicitly:
+        ``_make_app`` builds a bare ``FastAPI()`` without the production
+        app's exception handlers wired up.
+        """
+        app, service = _make_app(tmp_path)
+
+        _SAFE_VALIDATION_ERROR_KEYS = frozenset({"type", "loc", "msg"})
+
+        from fastapi.exceptions import RequestValidationError
+        from fastapi.responses import JSONResponse
+
+        @app.exception_handler(RequestValidationError)
+        async def _handle_validation_error(request, exc: RequestValidationError) -> JSONResponse:
+            safe_errors = [{k: v for k, v in error.items() if k in _SAFE_VALIDATION_ERROR_KEYS} for error in exc.errors()]
+            return JSONResponse(status_code=422, content={"detail": safe_errors})
+
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        oversized = "sources:\n  source:\n    plugin: csv\n" + ("x" * 300_000)
+
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": oversized})
+
+        assert resp.status_code == 422
+        assert "x" * 100 not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_malformed_yaml_syntax(self, tmp_path) -> None:
+        """Hardening (T-1): non-YAML paste is a categorized 400, never a 500,
+        and the error body does not echo the pasted content or raw parser prose."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        not_yaml = "sources: [unterminated\n  plugin: csv"
+
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": not_yaml})
+
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert detail == "YAML parse failed: ParserError"
+        assert "unterminated" not in resp.text
+        assert "plugin" not in resp.text
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_non_pipeline_mapping(self, tmp_path) -> None:
+        """Hardening (T-1): a syntactically valid YAML mapping that names no
+        pipeline section must not silently import as an empty composition --
+        that would be a silent destructive replace of the session's prior work."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        not_a_pipeline = "shopping_list:\n  - milk\n  - eggs\nnotes: just some random yaml\n"
+
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": not_a_pipeline})
+
+        assert resp.status_code == 400
+        assert "must define at least one pipeline section" in resp.json()["detail"]
+        # The session's current state must remain unset -- nothing was persisted.
+        assert await service.get_current_state(session.id) is None
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_aliased_yaml(self, tmp_path) -> None:
+        """Hardening (T-1): anchors/aliases are rejected outright (billion-laughs
+        defense) rather than silently expanded server-side."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        aliased = """
+sources:
+  source: &src
+    plugin: csv
+    on_success: out
+    options:
+      path: /data/blobs/input.csv
+      on_validation_failure: discard
+sinks:
+  out:
+    plugin: csv
+    on_write_failure: discard
+also: *src
+"""
+
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": aliased})
+
+        assert resp.status_code == 400
+        assert resp.json()["detail"].startswith("YAML parse failed: ")
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_literal_credential_value(self, tmp_path) -> None:
+        """Hardening (T-1): a pasted literal credential (not a {secret_ref: ...}
+        marker) in a credential-bearing field is rejected outright, before any
+        persistence -- unlike the tool-call composer surface, which only
+        catches this at /validate or runtime-preflight time (after the value
+        is already written into CompositionState), pasted YAML has no prior
+        tool-call gate, so it would otherwise reach save_composition_state and
+        get echoed back in the response verbatim. The error names the field
+        only, never the value (parity with the runtime-preflight
+        fabricated_secret discipline's audit hygiene)."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        secret_value = "sk-live-totally-real-credential-do-not-leak-1234567890"
+        yaml_text = f"""
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: /data/blobs/input.csv
+      api_key: {secret_value}
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: csv
+    on_write_failure: discard
+"""
+
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "api_key" in detail
+        assert secret_value not in resp.text
+        # Nothing was persisted -- the session has no composition state at all.
+        assert await service.get_current_state(session.id) is None
+
+    @pytest.mark.asyncio
+    async def test_post_state_yaml_rejects_plugin_specific_credential_field(self, tmp_path) -> None:
+        """Hardening (T-1 review follow-up): the fabricated-secret import gate
+        must match plugin-specific credential fields, not just the name/suffix
+        heuristic. The database sink's whole-DSN ``url`` field carries an
+        embedded password but does not end in a secret suffix, so the heuristic
+        predicate alone lets it through -- the import gate feeds
+        allowed_secret_ref_fields per component (mirroring the set_output tool
+        gate) so a pasted plaintext DSN is rejected here rather than persisted
+        and echoed back. The error names the field only, never the value."""
+        app, service = _make_app(tmp_path)
+        client = TestClient(app)
+
+        session = await service.create_session("alice", "Replay", "local")
+        dsn = "postgresql://app:S3cretPw@db.internal/prod"  # secret-scan: allow-this-line (synthetic fixture asserting rejection)
+        yaml_text = f"""
+sources:
+  source:
+    plugin: csv
+    on_success: main
+    options:
+      path: /data/blobs/input.csv
+      on_validation_failure: discard
+sinks:
+  main:
+    plugin: database
+    on_write_failure: discard
+    options:
+      url: {dsn}
+"""
+
+        resp = client.post(f"/api/sessions/{session.id}/state/yaml", json={"yaml": yaml_text})
+
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "url" in detail
+        assert "S3cretPw" not in resp.text
+        assert dsn not in resp.text
+        # Nothing was persisted -- the DSN never reached the DB.
+        assert await service.get_current_state(session.id) is None
 
     @pytest.mark.asyncio
     async def test_yaml_returns_yaml_when_state_exists(self, tmp_path) -> None:

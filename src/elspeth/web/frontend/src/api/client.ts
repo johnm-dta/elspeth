@@ -847,6 +847,62 @@ export async function fetchYaml(sessionId: string): Promise<{ yaml: string }> {
   return parseResponse<{ yaml: string }>(response);
 }
 
+/** Request body for POST /api/sessions/{id}/state/yaml. */
+export interface ImportCompositionYamlRequest {
+  /** Raw YAML text, 1..262144 chars (backend-enforced). */
+  yaml: string;
+  /**
+   * Optional source-name -> blob-UUID map, only needed when the YAML's
+   * source options point into session blob storage (the replay-of-export
+   * case). Omitted entirely when not needed -- the backend 400s a
+   * blob-storage-path source that has no entry here rather than assuming one.
+   */
+  source_blob_ids?: Record<string, string>;
+}
+
+/**
+ * Composition state as returned by the YAML-import endpoint
+ * (`CompositionStateResponse`, sessions/schemas.py:234). Deliberately a
+ * narrow local type rather than the frontend's `CompositionState` (types/
+ * index.ts) -- this route's response additionally carries `is_valid` /
+ * `validation_errors`, and `edges` is always `[]` here (graph routing
+ * derives from node on_success/on_error/routes, not a persisted edge list).
+ * Callers that need the full canonical state re-fetch it (e.g. via
+ * `selectSession`); this type only covers what an import confirmation needs
+ * to render immediately.
+ */
+export interface ImportedCompositionState {
+  id: string;
+  version: number;
+  is_valid: boolean;
+  validation_errors: string[] | null;
+}
+
+/**
+ * Import (replace) a session's composition state from hand-edited or
+ * previously-exported YAML (elspeth-24c56585f9 T-1). This REPLACES the
+ * current composition -- the backend does not merge -- and always resets
+ * the session's guided_session to null server-side, landing the session in
+ * freeform. The prior version remains reachable via `fetchStateVersions` /
+ * `revertToVersion`. A 200 response does not imply the imported pipeline is
+ * runnable: check `is_valid`/`validation_errors` on the result.
+ */
+export async function importCompositionYaml(
+  sessionId: string,
+  yamlText: string,
+  sourceBlobIds?: Record<string, string>,
+): Promise<ImportedCompositionState> {
+  const body: ImportCompositionYamlRequest = sourceBlobIds
+    ? { yaml: yamlText, source_blob_ids: sourceBlobIds }
+    : { yaml: yamlText };
+  const response = await fetch(`/api/sessions/${sessionId}/state/yaml`, {
+    method: "POST",
+    headers: authHeaders("application/json"),
+    body: JSON.stringify(body),
+  });
+  return parseResponse<ImportedCompositionState>(response);
+}
+
 // ── Plugin Catalog ──────────────────────────────────────────────────────────
 
 /** List available source plugins. */

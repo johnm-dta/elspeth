@@ -31,10 +31,46 @@ _UNSUPPORTED_COALESCE_FIELDS = frozenset(
         "select_branch",
     }
 )
+# Recognised top-level pipeline sections. A parsed document that is a
+# mapping but shares none of these keys is not a pipeline export at all
+# (see the guard in composition_state_from_runtime_yaml).
+_PIPELINE_SECTION_KEYS = frozenset({"source", "sources", "transforms", "gates", "aggregations", "coalesce", "sinks"})
 
 
 class RuntimeYamlImportError(ValueError):
     """Raised when runtime YAML cannot be represented as composer state."""
+
+
+class _NoAliasSafeLoader(yaml.SafeLoader):
+    """``SafeLoader`` that rejects YAML anchors/aliases.
+
+    Neither the eval-replay harness nor the composer's own export
+    (:func:`elspeth.web.composer.yaml_generator.generate_public_yaml`) ever
+    emits anchors — each field is written out in full on every dump. PyYAML's
+    anchor/alias machinery lets an alias reuse an already-composed node by
+    object identity rather than re-parsing it, so a document well under
+    ``MAX_RUNTIME_YAML_IMPORT_CHARS`` can compose into a logical structure
+    many orders of magnitude larger once something downstream (``dict()``
+    copies, ``state.to_dict()``, JSON persistence) walks every reference
+    instead of sharing it — a "billion laughs"-style amplification the
+    character cap does not bound. Rejecting aliases outright removes the
+    amplification vector for user-pasted YAML with no loss of legitimate
+    functionality.
+    """
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        # PyYAML ships no inline type annotations for Parser.check_event /
+        # get_event (both untyped in the upstream library), so mypy flags
+        # these as no-untyped-call regardless of how they're invoked.
+        if self.check_event(yaml.events.AliasEvent):  # type: ignore[no-untyped-call]
+            event = self.get_event()  # type: ignore[no-untyped-call]
+            raise yaml.composer.ComposerError(
+                None,
+                None,
+                "aliases are not permitted in pipeline YAML imports",
+                event.start_mark,
+            )
+        return super().compose_node(parent, index)
 
 
 def _require_mapping(value: Any, path: str) -> Mapping[str, Any]:
@@ -237,10 +273,36 @@ def composition_state_from_runtime_yaml(pipeline_yaml: str, *, version: int = 1)
     if len(pipeline_yaml) > MAX_RUNTIME_YAML_IMPORT_CHARS:
         raise RuntimeYamlImportError("pipeline YAML exceeds the 262144 character import limit")
     try:
-        parsed = yaml.safe_load(pipeline_yaml)
-    except yaml.YAMLError as exc:
+        # NOTE for reviewers/scanners: this is yaml.load() with an explicit
+        # Loader=, not yaml.load() with the dangerous default (yaml.Loader /
+        # yaml.UnsafeLoader). _NoAliasSafeLoader subclasses yaml.SafeLoader
+        # and registers no additional constructors -- it only intercepts
+        # alias composition (see class docstring) -- so this call is exactly
+        # as safe against arbitrary-object construction as yaml.safe_load();
+        # `!!python/object:` tags still raise ConstructorError.
+        parsed = yaml.load(pipeline_yaml, Loader=_NoAliasSafeLoader)
+    except (yaml.YAMLError, RecursionError) as exc:
+        # RecursionError: a deeply (but not textually large) nested mapping
+        # chain -- e.g. ~500 levels of ``a:\n  a:\n    a:\n ...`` fits well
+        # under the character cap above but exhausts CPython's default
+        # recursion limit inside PyYAML's pure-Python composer/constructor.
+        # ``yaml.safe_load``/``yaml.load`` always use the pure-Python
+        # SafeLoader (never the libyaml-backed CSafeLoader) so this is a
+        # plain, safely-catchable Python exception, not a C stack overflow.
         raise RuntimeYamlImportError(f"YAML parse failed: {exc.__class__.__name__}") from exc
     doc = _require_mapping(parsed, "pipeline YAML")
+    if not _PIPELINE_SECTION_KEYS & doc.keys():
+        # A pasted document can be syntactically valid YAML *and* a mapping
+        # (so it clears _require_mapping above) while describing nothing
+        # pipeline-shaped at all -- a grocery list, an unrelated config file,
+        # `{}`. Without this gate that silently imports as an empty
+        # CompositionState (no sources, no nodes, no outputs), which
+        # save_composition_state then persists as the session's new current
+        # version -- a silent destructive replace of whatever composition
+        # was there before, with no error to signal anything went wrong.
+        raise RuntimeYamlImportError(
+            "pipeline YAML must define at least one pipeline section (sources, transforms, gates, aggregations, coalesce, or sinks)"
+        )
 
     raw_sources = doc.get("sources")
     if raw_sources is None and doc.get("source") is not None:

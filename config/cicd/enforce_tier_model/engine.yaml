@@ -292,82 +292,38 @@ allow_hits:
   judge_transport: openrouter
   ast_path: 'body[13]/body[4]/body[0]/body[2]/test/operand'
   judge_metadata_signature: 'hmac-sha256:v2:6ec262588a78909dd9753cbc2dd41e5e461c2c843dcd98442a5b5b28b2e2477a'
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=8ae24dda2209d609
+- key: engine/executors/sink.py:R5:SinkExecutor:_write_primary:fp=6c270328107c1717
   owner: john
   reason: |-
-    In SinkExecutor.write (line 540), `if not isinstance(write_result, SinkWriteResult)` guards `write_result = sink.write(rows, ctx)` — the return value of a PLUGIN method dispatched through the BaseSink plugin protocol (the concrete sink is any registered plugin, third-party included). The decisive fact the rule needs: Python does NOT enforce the `-> SinkWriteResult` return annotation at runtime, so a misbehaving or third-party sink can return ANY object; SinkWriteResult being a dataclass does not make the value at THIS call site a guaranteed instance — the annotation is a contract the plugin must honor, not a runtime guarantee. This isinstance is therefore the SOLE runtime enforcement point of the plugin-return contract at the boundary, NOT a redundant re-check of a type our own code constructs. On mismatch it raises a typed PluginContractViolation naming the sink and the actual type (this is a sink plugin bug), strictly more attributable than the bare AttributeError that direct attribute access (write_result.artifact) would produce on a non-instance, and it fails fast before any partial write-state is acted on. This is the CLAUDE.md-sanctioned plugin-returns-wrong-type to CRASH offensive guard; the R5 defensive-isinstance concern does not apply.
+    In SinkExecutor._write_primary (line 516), `if not isinstance(write_result, SinkWriteResult)` guards `write_result = sink.write(rows, ctx)` — the return value of a PLUGIN method dispatched through the BaseSink plugin protocol (the concrete sink is any registered plugin, third-party included). Python does NOT enforce the `-> SinkWriteResult` return annotation at runtime, so a misbehaving or third-party sink can return ANY object; SinkWriteResult being a dataclass does not make the value at THIS call site a guaranteed instance. This isinstance is the SOLE runtime enforcement point of the plugin-return contract at the boundary, NOT a redundant re-check of a type our own code constructs. On mismatch it raises a typed PluginContractViolation naming the sink and the actual type (a sink plugin bug), failing fast before any partial write-state is acted on. This is the CLAUDE.md-sanctioned plugin-returns-wrong-type to CRASH offensive guard; the R5 defensive-isinstance concern does not apply. Relocated verbatim from SinkExecutor.write into _write_primary by the write() decomposition (elspeth-f6a6ab0a46); unsigned pending re-judge.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Suppression gated by cicd-judge; unsigned pending re-judge after the
+    elspeth-f6a6ab0a46 write() decomposition relocated this guard.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:52:44.708570+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.82
-  judge_rationale: |-
-    PRESCRIBED FORM. The isinstance->raise guards the return value of a plugin method dispatched through BaseSink; Python does not runtime-enforce the `-> SinkWriteResult` annotation, so a misbehaving sink plugin can return any object. The rationale plainly states this and the visible code shows the prescribed offensive response: raise a typed PluginContractViolation naming the sink and actual type — the CLAUDE.md 'plugin returns wrong type -> CRASH, maximally informative' pattern, not silent recovery or coercion. The guard sits at the plugin-return enforcement point and fails fast before downstream attribute access; R5's defensive-isinstance concern does not apply here.
-  judge_signature_version: 2
-  scope_fingerprint: c1b583bdcee9b07ff9764485996176b7db46b3a56faca204edc05f91e88ea03e
-  judge_transport: openrouter
-  ast_path: 'body[26]/body[8]/body[14]/body[0]/body[1]/body[5]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:a9895fcfc0eeaa4fefa8668dfefc5926d1b8536283ab2c03ce23971879e500bd'
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=333193edcab82132
+- key: engine/executors/sink.py:R5:SinkExecutor:_write_primary:fp=7f1d563289d0660e
   owner: john
   reason: |-
-    In SinkExecutor.write (line 553), `if not isinstance(artifact_info, ArtifactDescriptor)` guards `write_result.artifact` and raises PluginContractViolation on mismatch. Under the system-owned sink's typed contract, SinkWriteResult.artifact must be an ArtifactDescriptor; per Plugin Ownership a wrong type is a first-party plugin bug we crash on, never coerce. The isinstance→raise is offensive programming (a maximally informative crash naming the sink and the actual type), not coercion, not silent recovery, and not a Tier-3 boundary. Same justification class as fp=8ae24dda2209d609; R5 does not apply.
+    In SinkExecutor._write_primary (line 529), `if not isinstance(artifact_info, ArtifactDescriptor)` guards `write_result.artifact` and raises PluginContractViolation on mismatch. Under the system-owned sink's typed contract, SinkWriteResult.artifact must be an ArtifactDescriptor; per Plugin Ownership a wrong type is a first-party plugin bug we crash on, never coerce. The isinstance->raise is offensive programming (a maximally informative crash naming the sink and the actual type), not coercion, not silent recovery, and not a Tier-3 boundary; R5 does not apply. Relocated verbatim from SinkExecutor.write into _write_primary by the write() decomposition (elspeth-f6a6ab0a46); unsigned pending re-judge.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Suppression gated by cicd-judge; unsigned pending re-judge after the
+    elspeth-f6a6ab0a46 write() decomposition relocated this guard.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:52:49.987391+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. SinkWriteResult.artifact is a first-party typed contract field returned by a system-owned sink plugin; per Plugin Ownership, a wrong type is a plugin bug that must crash, not be coerced or suppressed. The isinstance→raise here is the offensive-programming form (informative PluginContractViolation naming sink and actual type), not the defensive isinstance-to-suppress that R5 targets. The visible code and rationale together establish conformance: no coercion, no silent recovery, just a maximally informative crash on contract violation.
-  judge_signature_version: 2
-  scope_fingerprint: c1b583bdcee9b07ff9764485996176b7db46b3a56faca204edc05f91e88ea03e
-  judge_transport: openrouter
-  ast_path: 'body[26]/body[8]/body[14]/body[0]/body[1]/body[7]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:ca147b13dd2e85874f4c3ef509fa0929e2d28f0ddf3353b99651c8aaf181537f'
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=6bf4f058589b3c6f
+- key: engine/executors/sink.py:R5:SinkExecutor:_handle_failsink_diversions:fp=e06070964c810a2d
   owner: john
   reason: |-
-    In SinkExecutor.write (line 794), `if not isinstance(failsink_write_result, SinkWriteResult)` guards `failsink_write_result = failsink.write(enriched_rows, ctx)` — the return value of a PLUGIN method dispatched through the BaseSink plugin protocol (the concrete failsink is any registered plugin, third-party included). The decisive fact the rule needs: Python does NOT enforce the `-> SinkWriteResult` return annotation at runtime, so a misbehaving or third-party failsink can return ANY object; SinkWriteResult being a dataclass does not make the value at THIS call site a guaranteed instance — the annotation is a contract the plugin must honor, not a runtime guarantee. This isinstance is therefore the SOLE runtime enforcement point of the plugin-return contract at the boundary, NOT a redundant re-check of a type our own code constructs. On mismatch it raises a typed PluginContractViolation naming the failsink and the actual type (this is a failsink plugin bug), strictly more attributable than the bare AttributeError that direct attribute access (failsink_write_result.artifact) would produce on a non-instance, and it fails fast before any partial write-state is acted on. This is the CLAUDE.md-sanctioned plugin-returns-wrong-type to CRASH offensive guard; the R5 defensive-isinstance concern does not apply.
+    In SinkExecutor._handle_failsink_diversions (line 860), `if not isinstance(failsink_write_result, SinkWriteResult)` guards `failsink_write_result = failsink.write(enriched_rows, ctx)` — the return value of a PLUGIN method dispatched through the BaseSink plugin protocol (the concrete failsink is any registered plugin, third-party included). Python does NOT enforce the `-> SinkWriteResult` return annotation at runtime, so a misbehaving or third-party failsink can return ANY object. This isinstance is the SOLE runtime enforcement point of the plugin-return contract at the boundary. On mismatch it raises a typed PluginContractViolation naming the failsink and the actual type (a failsink plugin bug), failing fast before any partial write-state is acted on. This is the CLAUDE.md-sanctioned plugin-returns-wrong-type to CRASH offensive guard; the R5 defensive-isinstance concern does not apply. Relocated verbatim from SinkExecutor.write into _handle_failsink_diversions by the write() decomposition (elspeth-f6a6ab0a46); unsigned pending re-judge.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Suppression gated by cicd-judge; unsigned pending re-judge after the
+    elspeth-f6a6ab0a46 write() decomposition relocated this guard.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:52:56.645959+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.85
-  judge_rationale: |-
-    PRESCRIBED FORM. The isinstance->raise guards a plugin method return (failsink.write) dispatched through the BaseSink protocol; Python does not runtime-enforce the SinkWriteResult return annotation, so a misbehaving plugin can return any object. The rationale plainly states this and the visible code shows the prescribed Plugin-Ownership response: detect wrong type, raise a typed PluginContractViolation naming the plugin and actual type — a maximally informative crash, not coercion or silent recovery. This matches the 'plugin returns wrong type -> CRASH' row of the Plugin Ownership table, and the R5 concern (defensive isinstance hiding bugs) does not apply.
-  judge_signature_version: 2
-  scope_fingerprint: c1b583bdcee9b07ff9764485996176b7db46b3a56faca204edc05f91e88ea03e
-  judge_transport: openrouter
-  ast_path: 'body[26]/body[8]/body[22]/body[2]/body[3]/body[8]/body[0]/body[3]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:5a10334305a43a630e2c847d2310eddb8b39c22328948239e54550e4caad8909'
-- key: engine/executors/sink.py:R5:SinkExecutor:write:fp=00755313e7e139d5
+- key: engine/executors/sink.py:R5:SinkExecutor:_handle_failsink_diversions:fp=bcbd898bd98558d5
   owner: john
   reason: |-
-    In SinkExecutor.write (line 808, the failsink write path), `if not isinstance(failsink_artifact_info, ArtifactDescriptor)` guards `failsink_write_result.artifact` and raises PluginContractViolation on mismatch. Under the system-owned failsink's typed contract, SinkWriteResult.artifact must be an ArtifactDescriptor; per Plugin Ownership a wrong type is a first-party plugin bug we crash on, never coerce. The isinstance→raise is offensive programming producing a maximally informative crash (naming the failsink and the actual type), not coercion, not silent recovery, and not a Tier-3 boundary. Same justification class as fp=6bf4f058589b3c6f; R5 does not apply.
+    In SinkExecutor._handle_failsink_diversions (line 874), `if not isinstance(failsink_artifact_info, ArtifactDescriptor)` guards `failsink_write_result.artifact` and raises PluginContractViolation on mismatch. Under the system-owned failsink's typed contract, SinkWriteResult.artifact must be an ArtifactDescriptor; per Plugin Ownership a wrong type is a first-party plugin bug we crash on, never coerce. The isinstance->raise is offensive programming producing a maximally informative crash (naming the failsink and the actual type), not coercion, not silent recovery, and not a Tier-3 boundary; R5 does not apply. Relocated verbatim from SinkExecutor.write into _handle_failsink_diversions by the write() decomposition (elspeth-f6a6ab0a46); unsigned pending re-judge.
   safety: |-
-    Suppression gated by cicd-judge; see judge_rationale below.
+    Suppression gated by cicd-judge; unsigned pending re-judge after the
+    elspeth-f6a6ab0a46 write() decomposition relocated this guard.
   expires: '2026-09-15'
-  judge_verdict: ACCEPTED
-  judge_recorded_at: '2026-06-17T15:53:02.146208+00:00'
-  judge_model: anthropic/claude-4.7-opus-20260416
-  judge_policy_hash: 'sha256:08052cb8f2c263c39dc61336444e6f2b2859292e283a902510827744f18d68da'
-  judge_confidence: 0.9
-  judge_rationale: |-
-    PRESCRIBED FORM. SinkWriteResult.artifact is a first-party typed contract field returned by a system-owned failsink plugin; per Plugin Ownership, a wrong type is a plugin bug that must crash, not be coerced. The isinstance→raise PluginContractViolation is the prescribed offensive-programming form: it produces a maximally informative crash naming the failsink and the actual type, with no swallowing or coercion. R5's concern (isinstance hiding bugs) does not apply — this surfaces the bug rather than masking it.
-  judge_signature_version: 2
-  scope_fingerprint: c1b583bdcee9b07ff9764485996176b7db46b3a56faca204edc05f91e88ea03e
-  judge_transport: openrouter
-  ast_path: 'body[26]/body[8]/body[22]/body[2]/body[3]/body[8]/body[0]/body[5]/test/operand'
-  judge_metadata_signature: 'hmac-sha256:v2:d8299863bc34727976b87da5db7e112682bea4d7f4a043fc78b76dc3c671ab48'
 - key: engine/coalesce_executor.py:R1:CoalesceExecutor:restore_from_journal:fp=1c1ce4d9897d3e41
   owner: john
   reason: |-

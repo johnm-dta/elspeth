@@ -539,14 +539,14 @@ class TestFollowerChaos:
 
         # Stub the inner RowProcessor to raise RunWorkerEvictedError on first drain.
         stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.side_effect = RunWorkerEvictedError(
+        stub_proc.drain_follower_ready_work.side_effect = RunWorkerEvictedError(
             worker_id=follower_id,
             run_id=crashed.run_id,
         )
 
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,
@@ -671,11 +671,11 @@ class TestFollowerChaos:
         stub_proc = MagicMock()
         idle_calls = [0]
 
-        def _idle_drain(**kw: Any) -> list[Any]:
+        def _idle_drain(*args: Any, **kw: Any) -> list[Any]:
             idle_calls[0] += 1
             return []
 
-        stub_proc._drain_scheduler_claims.side_effect = _idle_drain
+        stub_proc.drain_follower_ready_work.side_effect = _idle_drain
 
         def _wait(seconds: float) -> None:
             # After first idle wait, flip run to FAILED so the next terminal check exits.
@@ -684,7 +684,7 @@ class TestFollowerChaos:
 
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,

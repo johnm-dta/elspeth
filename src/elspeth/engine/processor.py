@@ -42,6 +42,7 @@ from elspeth.engine.scheduler_drain import (
     SCHEDULER_MAINTENANCE_INTERVAL as SCHEDULER_MAINTENANCE_INTERVAL,  # re-export: tests import from here
 )
 from elspeth.engine.scheduler_drain import (
+    ProcessorMode,
     SchedulerDrainCoordinator,
     is_scheduler_sink_bound_result,
     require_scheduler_outcome,
@@ -360,6 +361,7 @@ class RowProcessor:
         coordination_token: CoordinationToken | None = None,
         run_coordination: RunCoordinationRepository | None = None,
         follower_barrier_node_ids: frozenset[NodeID] | None = None,
+        mode: ProcessorMode = ProcessorMode.LEADER,
     ) -> None:
         """Initialize processor.
 
@@ -417,6 +419,15 @@ class RowProcessor:
                 journal-intake adopts the arrival and runs trigger evaluation
                 (§B.2: trigger evaluation is leader-only).  Non-follower
                 processors leave this None (no-op path).
+            mode: Explicit processor role (elspeth-577179bba1). LEADER (the
+                default) covers the fenced leader, the N=1 arm, and direct
+                repository-level construction — within it, behavior still
+                keys on genuine coordination_token/run_coordination presence.
+                FOLLOWER is validated fail-closed below: it requires
+                ``coordination_token=None``, ``run_coordination=None``, and
+                an explicit ``scheduler_lease_owner``; it gates the public
+                :meth:`drain_follower_ready_work` surface and the follower
+                skip of scheduler maintenance (ADR-030 §C.3).
         """
         if scheduler is None:
             raise TypeError("scheduler repository is required; RowProcessor no longer supports the legacy in-memory drain")
@@ -533,6 +544,37 @@ class RowProcessor:
             resolved_scheduler_lease_owner = coordination_token.worker_id
         self._scheduler_lease_owner_registered: bool = resolved_scheduler_lease_owner is not None
         self._scheduler_lease_owner = resolved_scheduler_lease_owner or f"row-processor:{run_id}:{uuid.uuid4().hex}"
+        # Explicit processor role (elspeth-577179bba1): follower-ness is a
+        # STORED construction-time decision, never re-derived from the
+        # coordination_token/run_coordination None-sentinels. On the follower
+        # path those sentinels remain correct ABSENCES (no epoch fence, no
+        # §C.2 housekeeping) — the mode flag, not their None-ness, drives
+        # branch selection. FOLLOWER wiring is validated fail-closed HERE so
+        # a wrong-mode construction crashes instead of silently taking a
+        # leader-only arm. (The follower barrier-intake no-op needs no mode
+        # gate: it is already structural — empty aggregation_settings plus
+        # coalesce_executor=None make the intake pass a no-op.)
+        self._mode = mode
+        if mode is ProcessorMode.FOLLOWER:
+            if coordination_token is not None:
+                raise OrchestrationInvariantError(
+                    "ProcessorMode.FOLLOWER forbids a coordination_token: a follower must never "
+                    "present an epoch fence (ADR-030 §B.1 — the fenced verbs are leader-only). "
+                    "A follower carrying a leader fence is the wrong-mode bug this flag exists to catch."
+                )
+            if run_coordination is not None:
+                raise OrchestrationInvariantError(
+                    "ProcessorMode.FOLLOWER forbids run_coordination: a follower must never run "
+                    "the §C.2 housekeeping/eviction sweep (leader-only). A follower holding the "
+                    "coordination repository is the wrong-mode bug this flag exists to catch."
+                )
+            if not self._scheduler_lease_owner_registered:
+                raise OrchestrationInvariantError(
+                    "ProcessorMode.FOLLOWER requires an explicit scheduler_lease_owner: the "
+                    "follower's registered run_workers identity IS its lease owner and "
+                    "membership-fence key (ADR-030 §A.1/§G); an anonymous minted owner cannot "
+                    "pass the claim fence."
+                )
         self._scheduler_lease_seconds = scheduler_lease_seconds
         if scheduler_heartbeat_seconds <= 0:
             raise OrchestrationInvariantError(f"scheduler_heartbeat_seconds must be positive, got {scheduler_heartbeat_seconds}")
@@ -607,6 +649,7 @@ class RowProcessor:
         # same split).
         self._scheduler_drain = SchedulerDrainCoordinator(
             processor=self,
+            mode=mode,
             run_id=run_id,
             scheduler=scheduler,
             work_codec=self._work_codec,
@@ -3210,6 +3253,38 @@ class RowProcessor:
         """Grouped §D step-2 unquiesced work for invariant diagnostics."""
         return self._scheduler.summarize_unquiesced_work(run_id=self._run_id)
 
+    def drain_follower_ready_work(
+        self,
+        ctx: PluginContext,
+        *,
+        before_claim: Callable[[], None] | None = None,
+    ) -> list[RowResult]:
+        """Follower drain surface: claim and advance READY work only (ADR-030 §B.1/§C.3).
+
+        The explicit follower entry point driven by orchestrator/follower.py's
+        drain loop. The follower-mode contract is owned HERE, not by caller
+        flag wiring: ``claim_ready`` only — never ``claim_pending_sink`` or
+        pending-sink recovery (sink work is leader-only) — and no pre-claimed
+        items. ``before_claim`` is the follower's leader-liveness probe,
+        invoked before every claim attempt.
+
+        Fails closed on mode: driving a LEADER-mode processor through the
+        follower surface is exactly the wrong-mode bug this named contract
+        exists to catch (elspeth-577179bba1).
+        """
+        if self._mode is not ProcessorMode.FOLLOWER:
+            raise OrchestrationInvariantError(
+                f"drain_follower_ready_work called on a {self._mode.value!r}-mode RowProcessor: "
+                "the follower drain surface requires ProcessorMode.FOLLOWER. Leader/N=1 paths "
+                "drain via process_row / drain_scheduled_work."
+            )
+        return self._scheduler_drain.drain_claims(
+            ctx=ctx,
+            pending_items={},
+            recover_pending_sinks=False,
+            before_claim=before_claim,
+        )
+
     def _drain_scheduler_claims(
         self,
         *,
@@ -3225,8 +3300,9 @@ class RowProcessor:
         ``SchedulerDrainCoordinator.drain_claims`` owns the claim loop, the
         per-iteration journal-first barrier intake ordering, the disposition
         arms, and pending-sink recovery. The keyword-only signature here is
-        load-bearing — orchestrator/follower.py and the ADR-030
-        invariant-guard tests call this private name.
+        load-bearing — the ADR-030 invariant-guard tests call this private
+        name. (orchestrator/follower.py now enters via the public
+        :meth:`drain_follower_ready_work` surface instead.)
         """
         return self._scheduler_drain.drain_claims(
             ctx=ctx,

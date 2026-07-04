@@ -53,7 +53,9 @@ drain until one of four stop conditions:
 Follower dispositions (claim_ready only — never claim_pending_sink)
 --------------------------------------------------------------------
 For each claimed token the traversal runs the existing per-node processing
-logic inside :meth:`RowProcessor._drain_scheduler_claims`.  The four
+logic behind :meth:`RowProcessor.drain_follower_ready_work` — the processor's
+explicit follower drain surface (its ``ProcessorMode.FOLLOWER`` contract owns
+the claim_ready-only / no-pending-sink-recovery policy).  The four
 disposition arms are handled by the standard RowProcessor machinery:
 
 barrier node reached
@@ -91,7 +93,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from elspeth.contracts.coordination import (
     DEFAULT_RUN_HEARTBEAT_SECONDS,
@@ -105,15 +107,15 @@ from elspeth.engine.orchestrator.heartbeat import RunHeartbeatThread
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from elspeth.contracts import RowResult
     from elspeth.contracts.payload_store import PayloadStore
     from elspeth.core.dag import ExecutionGraph
     from elspeth.core.landscape.factory import RecorderFactory
     from elspeth.core.landscape.run_coordination_repository import RunCoordinationRepository
     from elspeth.engine.clock import Clock
     from elspeth.engine.orchestrator.types import PipelineConfig
-    from elspeth.engine.processor import RowProcessor
 
-__all__ = ["FollowerProcessor", "build_follower_processor"]
+__all__ = ["FollowerProcessor", "FollowerWorkSource", "build_follower_processor"]
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +125,25 @@ _IDLE_POLL_SECONDS: float = 2.0
 # After no live leader is detected, allow up to this many seconds for the
 # current claim to complete before taking no further claims.
 _SEAT_DEAD_GRACE_SECONDS: float = 5.0
+
+
+class FollowerWorkSource(Protocol):
+    """The narrow processor surface the follower drain loop drives (duck-typed).
+
+    One method: the explicit follower drain entry
+    (:meth:`RowProcessor.drain_follower_ready_work`).  The follower-mode
+    contract — ``claim_ready`` only, never ``claim_pending_sink`` /
+    pending-sink recovery, no pre-claimed items (ADR-030 §B.1/§C.3) — lives
+    behind that name on the processor's ``ProcessorMode.FOLLOWER``; this loop
+    only threads its leader-liveness probe as ``before_claim``.
+    """
+
+    def drain_follower_ready_work(
+        self,
+        ctx: PluginContext,
+        *,
+        before_claim: Callable[[], None] | None = None,
+    ) -> list[RowResult]: ...
 
 
 class _SeatDeadError(Exception):
@@ -144,8 +165,10 @@ class FollowerProcessor:
     Parameters
     ----------
     processor:
-        An already-constructed :class:`RowProcessor` (no source, no barrier
-        executors, no checkpoint coordinator).
+        An already-constructed follower-mode work source (production: a
+        ``ProcessorMode.FOLLOWER`` :class:`RowProcessor` — no source, no
+        barrier executors, no checkpoint coordinator). Only the narrow
+        :class:`FollowerWorkSource` surface is driven.
     token:
         The follower's coordination token (worker_id + run_id, role=follower).
         Used to start the heartbeat thread and to call ``depart_worker`` on
@@ -171,7 +194,7 @@ class FollowerProcessor:
 
     def __init__(
         self,
-        processor: RowProcessor,
+        processor: FollowerWorkSource,
         *,
         token: CoordinationToken,
         run_coordination: RunCoordinationRepository,
@@ -354,19 +377,16 @@ class FollowerProcessor:
             ensure_leader_live()
 
             # ── attempt one claim-and-drain pass ──────────────────────
-            # _drain_scheduler_claims is the existing production drain; it
-            # claims ALL currently READY work until the queue is empty.
-            # For followers we disable the pending-sink recovery arm
-            # (recover_pending_sinks=False) — sink work is leader-only.
-            #
-            # We call the internal method on the RowProcessor via the
-            # documented follower path: claim_ready only, no pending-sink
-            # recovery, no pre-claimed items. The outer loop handles
-            # idle/terminal/seat-dead between drain passes.
-            drained = self._processor._drain_scheduler_claims(
-                ctx=ctx,
-                pending_items={},
-                recover_pending_sinks=False,
+            # drain_follower_ready_work is the processor's EXPLICIT follower
+            # drain surface (elspeth-577179bba1): it claims ALL currently
+            # READY work until the queue is empty. The follower-mode contract
+            # — claim_ready only, never pending-sink recovery (sink work is
+            # leader-only), no pre-claimed items — is owned by the
+            # processor's ProcessorMode.FOLLOWER, not by flag wiring here.
+            # The outer loop handles idle/terminal/seat-dead between drain
+            # passes.
+            drained = self._processor.drain_follower_ready_work(
+                ctx,
                 before_claim=ensure_leader_live_before_claim,
             )
 
@@ -428,11 +448,16 @@ def build_follower_processor(
 ) -> FollowerProcessor:
     """Assemble a follower-mode :class:`FollowerProcessor`.
 
-    Follower-specific wiring compared to the leader:
+    The inner :class:`RowProcessor` is constructed through the SHARED builder
+    (``run_core.build_row_processor``) with ``mode=ProcessorMode.FOLLOWER``
+    (elspeth-577179bba1, absorbing elspeth-07b2031e41 part (b)) — previously a
+    hand-assembled argument list that could drift from the leader/resume path.
+    The builder's FOLLOWER gates own the follower-specific wiring:
 
     - ``source_plugin=None`` — no source ingest
     - ``barrier_restore=None`` — no barrier memory
-    - ``coalesce_executor=None`` — no coalesce executor
+    - ``coalesce_executor=None`` — no coalesce executor (leader-only plane;
+      no settings.coalesce required even on a coalesce graph)
     - ``aggregation_settings={}`` — no trigger evaluation (barrier counting is
       leader-only per §B.2); ``follower_barrier_node_ids`` carries the
       aggregation node ID set so the processor intercepts batch-aware transforms
@@ -445,9 +470,9 @@ def build_follower_processor(
       the scheduler lease_owner (§A.1); also threads the membership fence into
       ``enqueue_ready`` (task e, slice 5)
 
-    The ``ExecutionGraph`` is needed to build the traversal context AND to
-    supply the aggregation node ID set (``get_aggregation_id_map()``) for
-    ``follower_barrier_node_ids``.
+    The token/run_coordination Nones remain correct ABSENCES; the explicit
+    mode flag, not their None-ness, now drives follower branch selection, and
+    RowProcessor validates the combination fail-closed at construction.
 
     Args:
         factory: RecorderFactory bound to the run's audit DB.
@@ -465,22 +490,21 @@ def build_follower_processor(
         A :class:`FollowerProcessor` ready to drive via :meth:`FollowerProcessor.run`.
     """
     from elspeth.contracts.coordination import CoordinationToken
-    from elspeth.contracts.errors import OrchestrationInvariantError
-    from elspeth.contracts.types import NodeID
     from elspeth.engine.orchestrator.graph_wiring import (
         assign_plugin_node_ids,
-        build_dag_traversal_context,
         build_source_id_map,
         load_edge_map,
     )
-    from elspeth.engine.processor import RowProcessor
+    from elspeth.engine.orchestrator.run_core import build_row_processor
+    from elspeth.engine.scheduler_drain import ProcessorMode
     from elspeth.engine.spans import SpanFactory
 
     # Assign node_id to all plugin instances before building the traversal
-    # context.  build_dag_traversal_context requires transform.node_id to be
-    # set on every transform; the leader does this via run_core.py's
-    # assign_plugin_node_ids call, but the follower path omitted it (slice 5
-    # bug: build_follower_processor never called assign_plugin_node_ids).
+    # context.  build_dag_traversal_context (inside build_row_processor)
+    # requires transform.node_id to be set on every transform; the leader does
+    # this via run_core.py's assign_plugin_node_ids call, but the follower
+    # path omitted it (slice 5 bug: build_follower_processor never called
+    # assign_plugin_node_ids).
     #
     # source_id_map comes from the SAME loader the leader and resume use
     # (elspeth-07b2031e41 — the loop was previously copy-pasted per seam).
@@ -495,12 +519,6 @@ def build_follower_processor(
         sink_id_map=graph.get_sink_id_map(),
     )
 
-    # Build the traversal context (node_step_map, node_to_plugin, etc.)
-    # using the existing graph-wiring helper.  config_gate_id_map is required
-    # by build_dag_traversal_context to populate the gate node set.
-    config_gate_id_map = graph.get_config_gate_id_map()
-    traversal = build_dag_traversal_context(graph, config, config_gate_id_map)
-
     # Source node (first source in the graph).  Followers need this to
     # construct the step_resolver closure but never call on_start/load/etc.
     sources = graph.get_sources()
@@ -508,66 +526,43 @@ def build_follower_processor(
         raise ValueError(f"ExecutionGraph for run {run_id!r} has no source nodes")
     source_id = sources[0]
 
-    # Get on_success for the first source (required RowProcessor param).
-    first_source_name, first_source = next(iter(config.sources.items()))
-    first_source_on_success = first_source.on_success
-    if first_source_on_success is None:
-        raise OrchestrationInvariantError(
-            f"Source '{first_source_name}' reached follower RowProcessor construction before on_success was injected. "
-            "Sources must be constructed through the runtime factory bridge before execution."
-        )
-
     # Load the edge_map through the shared loader (same helper as the resume
     # path) so GateExecutor has the correct edge_id for routing events.
     edge_map = load_edge_map(factory.data_flow, run_id)
 
     # Coordination token: followers carry their own token for the heartbeat
     # thread, but do NOT use it as an epoch fence (no leader-fenced verbs).
-    # We pass coordination_token=None to RowProcessor so _require_coordination_token
-    # is not accidentally called, and pass run_coordination=None so the
-    # §C.2 housekeeping sweep is skipped.
+    # coordination_token=None keeps _require_coordination_token unreachable
+    # and derives run_coordination=None (no §C.2 housekeeping sweep) — both
+    # remain correct ABSENCES; ProcessorMode.FOLLOWER, not their None-ness,
+    # drives follower branch selection, and RowProcessor validates the
+    # combination fail-closed.
     #
     # The follower's run_workers row is required for the membership fence on
     # enqueue_ready / claim_ready — the fence is keyed on scheduler_lease_owner,
     # which equals worker_id here (§A.1).
-
-    # ADR-030 §B (slice 5, follower aggregation barrier hand-off): collect all
-    # aggregation node IDs from the graph so the RowProcessor can intercept
-    # batch-aware transforms at those nodes and mark_blocked instead of running
-    # them row-wise.  Trigger evaluation is leader-only (§B.2); a follower
-    # executing an aggregation transform locally produces wrong aggregate output
-    # and bypasses the leader's barrier (silent data corruption).
-    follower_barrier_node_ids: frozenset[NodeID] = frozenset(graph.get_aggregation_id_map().values())
-
-    processor = RowProcessor(
-        execution=factory.execution,
-        data_flow=factory.data_flow,
-        span_factory=SpanFactory(),
+    processor, _coalesce_node_map, _coalesce_executor = build_row_processor(
+        graph=graph,
+        config=config,
+        settings=None,  # follower: no retry policy, no coalesce registration
+        factory=factory,
         run_id=run_id,
-        source_node_id=source_id,
-        source_on_success=first_source_on_success,
-        source_plugin=None,  # follower: no source
+        source_id=source_id,
         edge_map=edge_map,
         route_resolution_map=graph.get_route_resolution_map(),
-        traversal=traversal,
-        aggregation_settings={},  # follower: no trigger evaluation
-        retry_manager=None,
-        coalesce_executor=None,  # follower: no barrier memory
-        branch_to_coalesce=graph.get_branch_to_coalesce_map(),
-        branch_to_sink=graph.get_branch_to_sink_map(),
-        sink_names=frozenset(config.sinks),
-        coalesce_on_success_map={},
-        barrier_restore=None,  # follower: never restores barriers
+        config_gate_id_map=graph.get_config_gate_id_map(),
+        coalesce_id_map=graph.get_coalesce_id_map(),
         payload_store=payload_store,
+        span_factory=SpanFactory(),
         clock=clock,
-        telemetry_manager=None,
-        scheduler=factory.scheduler,
+        max_workers=None,
+        telemetry=None,
+        mode=ProcessorMode.FOLLOWER,
         scheduler_lease_owner=worker_id,  # §A.1: registered identity = lease owner
         scheduler_lease_seconds=scheduler_lease_seconds,
         scheduler_heartbeat_seconds=scheduler_heartbeat_seconds,
+        barrier_restore=None,  # follower: never restores barriers
         coordination_token=None,  # follower: no epoch fence
-        run_coordination=None,  # follower: no §C.2 housekeeping
-        follower_barrier_node_ids=follower_barrier_node_ids,  # §B: aggregation barrier hand-off
     )
 
     # Follower token for the heartbeat thread (worker_id, run_id, epoch=0

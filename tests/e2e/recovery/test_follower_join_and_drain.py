@@ -644,9 +644,9 @@ class TestFollowerLifecycle:
 
         # Stub the inner RowProcessor so we control drain results.
         stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.return_value = []
+        stub_proc.drain_follower_ready_work.return_value = []
         if drain_results is not None:
-            stub_proc._drain_scheduler_claims.side_effect = lambda **kw: drain_results.pop(0) if drain_results else []
+            stub_proc.drain_follower_ready_work.side_effect = lambda *a, **kw: drain_results.pop(0) if drain_results else []
 
         recorded_waits: list[float] = wait_calls if wait_calls is not None else []
 
@@ -661,7 +661,7 @@ class TestFollowerLifecycle:
         follower_token = CoordinationToken(run_id=run_id, worker_id=follower_id, leader_epoch=0)
 
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=coord_repo,
             factory=factory,
@@ -693,7 +693,7 @@ class TestFollowerLifecycle:
 
         # Stub the inner RowProcessor (always idle).
         stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.return_value = []
+        stub_proc.drain_follower_ready_work.return_value = []
 
         wait_calls: list[float] = []
         loop_count = [0]
@@ -710,7 +710,7 @@ class TestFollowerLifecycle:
 
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=real_coord,
             factory=real_factory,
@@ -727,7 +727,7 @@ class TestFollowerLifecycle:
         # wait_fn called ≥ once (idle backoff triggered) and loop exited cleanly.
         assert len(wait_calls) >= 1, "idle backoff must call wait_fn at least once"
         # Drain was called each loop iteration.
-        assert stub_proc._drain_scheduler_claims.call_count >= 1
+        assert stub_proc.drain_follower_ready_work.call_count >= 1
         crashed.db.close()
 
     def test_follower_run_terminal_departs_and_exits_zero(self, tmp_path: Path) -> None:
@@ -747,10 +747,10 @@ class TestFollowerLifecycle:
             conn.execute(update(runs_table).where(runs_table.c.run_id == crashed.run_id).values(status=RunStatus.FAILED.value))
 
         stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.return_value = []
+        stub_proc.drain_follower_ready_work.return_value = []
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,
@@ -793,11 +793,11 @@ class TestFollowerLifecycle:
         clock.advance(10.0)
 
         stub_proc = MagicMock()
-        stub_proc._drain_scheduler_claims.return_value = []
+        stub_proc.drain_follower_ready_work.return_value = []
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
 
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,
@@ -843,11 +843,11 @@ class TestFollowerLifecycle:
 
         stub_proc = MagicMock()
         # First drain call raises KeyboardInterrupt (simulates SIGINT mid-loop).
-        stub_proc._drain_scheduler_claims.side_effect = KeyboardInterrupt
+        stub_proc.drain_follower_ready_work.side_effect = KeyboardInterrupt
 
         follower_token = CoordinationToken(run_id=crashed.run_id, worker_id=follower_id, leader_epoch=0)
         follower = FollowerProcessor(
-            processor=stub_proc,  # type: ignore[arg-type]
+            processor=stub_proc,
             token=follower_token,
             run_coordination=crashed.factory.run_coordination,
             factory=crashed.factory,

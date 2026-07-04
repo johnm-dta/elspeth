@@ -23,9 +23,11 @@ unchanged against both the pre-move and post-move trees:
    ``_heartbeat_active_claim`` refreshes the claimed lease at most once per
    heartbeat interval; outside an active claim it is a no-op.
 5. Maintenance cadence: non-recovery drains run scheduler maintenance every
-   SCHEDULER_MAINTENANCE_INTERVAL drains; the follower build (no coordination
-   token, no run_coordination, registered lease owner) skips lease recovery
-   entirely (ADR-030 §C.3), while the legacy/unregistered build reaps via the
+   SCHEDULER_MAINTENANCE_INTERVAL drains; the FOLLOWER-mode build skips lease
+   recovery entirely (ADR-030 §C.3 — the explicit ProcessorMode from
+   elspeth-577179bba1, replacing the old triple-None sentinel inference),
+   while the legacy/unregistered build — and any LEADER-mode build, including
+   the old registered-owner-without-token sentinel shape — reaps via the
    unfenced arm.
 
 The observables are durable scheduler rows, returned RowResults, and the
@@ -56,6 +58,7 @@ from elspeth.core.landscape.scheduler_repository import TokenSchedulerRepository
 from elspeth.core.landscape.schema import run_workers_table, token_work_items_table
 from elspeth.engine.clock import MockClock
 from elspeth.engine.processor import SCHEDULER_MAINTENANCE_INTERVAL, DAGTraversalContext, RowProcessor
+from elspeth.engine.scheduler_drain import ProcessorMode
 from elspeth.engine.spans import SpanFactory
 from tests.fixtures.landscape import RecorderSetup, leader_coordination_token, make_recorder_with_run, register_test_node
 
@@ -117,6 +120,7 @@ def _build(
     register_leader: str | None = LEADER_OWNER,
     bind_leader_token: bool = False,
     heartbeat_seconds: int = 60,
+    mode: ProcessorMode = ProcessorMode.LEADER,
 ) -> tuple[RowProcessor, _RecordingScheduler, RecorderSetup, MockClock]:
     """Real RowProcessor over a real scheduler DB behind the recording wrapper."""
     setup = make_recorder_with_run(
@@ -147,6 +151,7 @@ def _build(
         scheduler_heartbeat_seconds=heartbeat_seconds,
         coordination_token=(leader_coordination_token(setup.factory, setup.run_id) if bind_leader_token else None),
         clock=clock,
+        mode=mode,
     )
     return processor, spy, setup, clock
 
@@ -482,11 +487,18 @@ def test_non_recovery_drains_run_maintenance_every_interval() -> None:
 
 
 def test_follower_build_skips_lease_recovery_and_legacy_build_reaps_unfenced() -> None:
-    """ADR-030 §C.3: the follower build (no coordination token, no
-    run_coordination, registered lease owner) must NOT run
+    """ADR-030 §C.3: the FOLLOWER-mode build must NOT run
     recover_expired_leases; the legacy/unregistered build reaps via the
-    unfenced (coordination_token=None) arm."""
-    follower, follower_spy, _fsetup, _fclock = _build(lease_owner="follower-1")
+    unfenced (coordination_token=None) arm.
+
+    elspeth-577179bba1 made follower-ness an explicit ProcessorMode instead
+    of the old triple-None inference (token=None + run_coordination=None +
+    registered lease owner). The production follower build passes
+    mode=FOLLOWER; a LEADER-mode construction with the SAME sentinel shape
+    now reaps via the legacy arm — a deliberate semantics change confined to
+    non-production constructions (production's only registered-owner-without-
+    token build IS the follower builder)."""
+    follower, follower_spy, _fsetup, _fclock = _build(lease_owner="follower-1", mode=ProcessorMode.FOLLOWER)
     assert follower.reap_expired_peer_leases() == 0
     assert follower_spy.calls_for("recover_expired_leases") == [], "follower builds must never reap peer leases"
 
@@ -495,3 +507,13 @@ def test_follower_build_skips_lease_recovery_and_legacy_build_reaps_unfenced() -
     recoveries = legacy_spy.calls_for("recover_expired_leases")
     assert len(recoveries) == 1
     assert recoveries[0]["coordination_token"] is None
+
+    # Inverse pin for the semantics change: the old sentinel shape WITHOUT
+    # the explicit mode is a LEADER-mode build and reaps via the legacy
+    # unfenced arm — follower-ness is no longer inferred from the sentinels.
+    sentinel_shape, sentinel_spy, _ssetup, _sclock = _build(lease_owner="follower-1")
+    sentinel_shape.reap_expired_peer_leases()
+    sentinel_recoveries = sentinel_spy.calls_for("recover_expired_leases")
+    assert len(sentinel_recoveries) == 1
+    assert sentinel_recoveries[0]["coordination_token"] is None
+    assert sentinel_recoveries[0]["caller_owner"] == "follower-1"

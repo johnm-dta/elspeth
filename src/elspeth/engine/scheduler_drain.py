@@ -24,12 +24,15 @@ Boundary rules (mirrors engine/barrier_coordination.py):
   split and the existing test net patches ``_process_single_token`` on the
   processor instance.
 - RowProcessor keeps thin delegates for the load-bearing private names
-  (``_drain_scheduler_claims`` is called by orchestrator/follower.py and the
-  ADR-030 invariant-guard tests).
+  (``_drain_scheduler_claims`` is called by the ADR-030 invariant-guard
+  tests). orchestrator/follower.py enters through the PUBLIC follower
+  surface (``RowProcessor.drain_follower_ready_work``), which fences on the
+  explicit :class:`ProcessorMode` stored at construction.
 """
 
 from __future__ import annotations
 
+import enum
 import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING, Protocol
@@ -69,6 +72,32 @@ if TYPE_CHECKING:
 MAX_WORK_QUEUE_ITERATIONS = 100_000
 SCHEDULER_MAINTENANCE_INTERVAL = 64
 logger = logging.getLogger(__name__)
+
+
+class ProcessorMode(enum.Enum):
+    """Explicit processor role for the mode-gated drain policy (elspeth-577179bba1).
+
+    Replaces the old triple-None inference (``coordination_token is None and
+    run_coordination is None and scheduler_lease_owner_registered``) that
+    reverse-derived "is this a follower" from constructor sentinels — an
+    invisible-default hazard: any future change to the None-sentinel meaning
+    would have silently flipped a follower into the unfenced legacy reap arm.
+
+    LEADER (the default) covers every non-follower construction: the fenced
+    leader, the N=1 arm, and direct repository-level test construction.
+    Within LEADER mode, behavior still keys on the GENUINE presence/absence
+    of ``coordination_token`` / ``run_coordination`` (the §C.2 evict sweep
+    and the fenced-vs-legacy reap arm), exactly as before.
+
+    FOLLOWER is drain-only (ADR-030 §C.3): ``claim_ready`` only, never
+    pending-sink recovery, never the §C.2 housekeeping sweep, never
+    ``recover_expired_leases`` — lease recovery and eviction are the
+    leader's responsibility. RowProcessor validates the FOLLOWER wiring
+    invariants fail-closed at construction.
+    """
+
+    LEADER = "leader"
+    FOLLOWER = "follower"
 
 
 def _is_result_tuple(result: RowResult | tuple[RowResult, ...]) -> TypeIs[tuple[RowResult, ...]]:
@@ -236,6 +265,7 @@ class SchedulerDrainCoordinator:
         self,
         *,
         processor: SchedulerDrainHost,
+        mode: ProcessorMode,
         run_id: str,
         scheduler: TokenSchedulerRepository,
         work_codec: SchedulerWorkCodec,
@@ -252,6 +282,10 @@ class SchedulerDrainCoordinator:
         pending_branch_losses: list[BranchLossSpec],
     ) -> None:
         self._processor = processor
+        # Explicit role decided at construction (elspeth-577179bba1): the
+        # maintenance skip below keys on THIS, never on re-deriving
+        # follower-ness from the coordination sentinels.
+        self._mode = mode
         self._run_id = run_id
         self._scheduler = scheduler
         self._work_codec = work_codec
@@ -300,25 +334,32 @@ class SchedulerDrainCoordinator:
         it may rotate BEFORE eviction for a live-heartbeat-but-wedged-drain
         worker, and emits worker_stalled in the same transaction (§A.5 :145).
 
-        Leader-only: the evict sweep is gated on ``_coordination_token`` being
-        set (followers never evict; unfenced/test arm skips silently).
+        ADR-030 §C.2/§C.3 (slice 5): followers run NO maintenance at all —
+        the explicit ``ProcessorMode.FOLLOWER`` stored at construction
+        (elspeth-577179bba1) returns 0 up front.  Followers must not run
+        ``recover_expired_leases``: their ``coordination_token`` is None, so
+        the call would take the UNFENCED/LEGACY arm — that arm
+        unconditionally reaps ALL expired non-caller leases, defeating the
+        liveness-aware gate that protects the leader's and peers' in-flight
+        item leases from spurious rotation (§A.5/§C.1).  Followers are
+        drain-only workers; lease recovery and eviction are the leader's
+        responsibility (§C.2 path 1, §C.3: "followers drain what is
+        claimable, then idle/exit").
 
-        ADR-030 §C.2/§C.3 (slice 5): followers must NOT run
-        ``recover_expired_leases``.  A follower passes
-        ``coordination_token=None``, which takes the UNFENCED/LEGACY arm of
-        ``recover_expired_leases`` — that arm unconditionally reaps ALL
-        expired non-caller leases, defeating the liveness-aware gate that
-        protects the leader's and peers' in-flight item leases from spurious
-        rotation (§A.5/§C.1).  Followers are drain-only workers; lease
-        recovery and eviction are the leader's responsibility (§C.2 path 1,
-        §C.3: "followers drain what is claimable, then idle/exit").
-        The follower path is identified by both ``_coordination_token is None``
-        AND ``_scheduler_lease_owner_registered`` (registered worker identity
-        from run_workers) AND ``_run_coordination is None``.  All three must
-        be true simultaneously for the follower build path (follower.py); in
-        all other None-token cases (N=1 test arm, direct repo construction)
-        the legacy reap is correct and must be preserved.
+        Within LEADER mode, behavior keys on GENUINE presence: the evict
+        sweep is gated on ``_coordination_token`` + ``_run_coordination``
+        being set, and a None-token construction (N=1 test arm, direct repo
+        construction) still reaps via the legacy unfenced arm — exactly as
+        before the mode flag replaced the old triple-None follower inference.
         """
+        if self._mode is ProcessorMode.FOLLOWER:
+            # Identical to the old post-evict-sweep skip: a follower's
+            # coordination_token/run_coordination are None (validated
+            # fail-closed by RowProcessor), so the evict sweep below was
+            # already unreachable for it.
+            self._scheduler_drains_since_maintenance = 0
+            return 0
+
         # §C.2 path 1: leader evicts dead non-leader members before reaping.
         # Individual, not bulk — one evict_worker call per dead member (§B.4,
         # §C.2 :233). evict_worker is idempotent (benign skip on CAS miss).
@@ -340,17 +381,6 @@ class SchedulerDrainCoordinator:
                     grace_seconds=grace,
                     window_seconds=DEFAULT_RUN_LIVENESS_WINDOW_SECONDS,
                 )
-
-        # ADR-030 §C.3: followers must not run recover_expired_leases.
-        # The follower build path (follower.py:build_follower_processor) has
-        # coordination_token=None AND run_coordination=None AND a registered
-        # lease owner (scheduler_lease_owner_registered=True).  In that case
-        # skipping the reap is CORRECT; the leader owns the reap sweep.
-        # All other None-token paths (N=1, test arm) still run the legacy reap.
-        is_follower_path = self._coordination_token is None and self._run_coordination is None and self._scheduler_lease_owner_registered
-        if is_follower_path:
-            self._scheduler_drains_since_maintenance = 0
-            return 0
 
         recovered = self._scheduler.recover_expired_leases(
             run_id=self._run_id,

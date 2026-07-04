@@ -24,7 +24,7 @@ from elspeth.contracts.declaration_contracts import (
     BoundaryOutputs,
     DeclarationContractViolation,
 )
-from elspeth.contracts.diversion import SinkWriteResult
+from elspeth.contracts.diversion import RowDiversion, SinkWriteResult
 from elspeth.contracts.enums import NodeStateStatus, RoutingMode, TerminalOutcome, TerminalPath
 from elspeth.contracts.errors import (
     AuditIntegrityError,
@@ -430,102 +430,29 @@ class SinkExecutor:
             raise
         return all_states
 
-    def write(
+    def _write_primary(
         self,
+        *,
         sink: SinkProtocol,
+        rows: list[dict[str, object]],
         tokens: list[TokenInfo],
         ctx: PluginContext,
-        step_in_pipeline: int,
-        *,
-        sink_name: str,
-        pending_outcome: PendingOutcome | None,
-        failsink: SinkProtocol | None = None,
-        failsink_name: str | None = None,
-        failsink_edge_id: str | None = None,
-        on_token_written: Callable[[TokenInfo], None] | None = None,
-    ) -> tuple[Artifact | None, DiversionCounts]:
-        """Write tokens to sink with artifact recording and failsink routing.
+        all_states: list[tuple[TokenInfo, NodeStateOpen]],
+        sink_node_id: str,
+    ) -> tuple[ArtifactDescriptor, tuple[RowDiversion, ...], float]:
+        """PHASE 1: run the primary sink write inside track_operation.
 
-        CRITICAL: Creates a node_state for EACH token written AND records
-        token outcomes. Node_states are opened BEFORE I/O so that Phase 1
-        failures result in FAILED states (not silent drops). States are
-        completed as COMPLETED only after sink.flush() confirms durability.
-
-        This is the ONLY place terminal outcomes should be recorded for sink-bound
-        tokens. Recording here (not in the orchestrator processing loop) ensures the
-        token outcome contract is honored:
-        - Invariant 3: "COMPLETED/ROUTED implies the token has a completed sink node_state"
-        - Invariant 4: "Completed sink node_state implies a terminal token_outcome"
-
-        Four-phase flow:
-        - Pre-phase: Open node_states for ALL tokens at primary sink
-        - Phase 1: Call sink.write() → discover diversions (FAILED on error)
-        - Phase 2: Complete states for primary (non-diverted) tokens
-        - Phase 3: Handle diversions (failsink write or discard)
-
-        Args:
-            sink: Sink plugin to write to
-            tokens: Tokens to write (may be empty)
-            ctx: Plugin context
-            step_in_pipeline: Current position in DAG (Orchestrator is authority)
-            sink_name: Name of the sink (for token_outcome recording)
-            pending_outcome: PendingOutcome containing outcome and optional error_hash.
-                    Required - all sink-bound tokens must have their outcome recorded.
-            failsink: Resolved failsink instance (or None for discard mode)
-            failsink_name: Config-level name of the failsink (for outcome recording)
-            failsink_edge_id: Edge ID of the __failsink__ DIVERT edge in the DAG
-            on_token_written: Optional callback called for each token after its
-                             path completes durably. Primary tokens are checkpointed
-                             after Phase 2, diverted tokens after Phase 3.
-
-        Returns:
-            Tuple of (Artifact if tokens were written else None, diversion counts)
-
-        Raises:
-            Exception: Propagated from sink.write(), sink.flush(), or failsink.write()
+        Owns boundary/schema validation, the sink.write() plugin-contract guards,
+        the diversion range check, flush, and the full error-cleanup envelope.
+        The primary_states_closed_by_boundary_failure flag lives entirely here:
+        the inner boundary-violation arm sets it (having already FAILED the
+        states + recorded outcomes) so the outer TIER_1/generic arms do not
+        double-clean. Returns (artifact_info, diversions, duration_ms).
         """
-        if not tokens:
-            return None, DiversionCounts()
-
-        # pending_outcome is required for all sink-bound tokens.
-        # PendingTokenMap allows None in its type alias, but _route_to_sink()
-        # always wraps in PendingOutcome. None here means a routing bug.
-        if pending_outcome is None:
-            raise OrchestrationInvariantError(
-                f"Sink '{sink_name}' received pending_outcome=None — all sink-bound tokens must have a PendingOutcome."
-            )
-
-        # Extract dicts from PipelineRow for sink write
-        rows = [t.row_data.to_dict() for t in tokens]
-
-        # Sink must have node_id assigned by orchestrator before execution
-        if sink.node_id is None:
-            raise OrchestrationInvariantError(f"Sink '{sink.name}' executed without node_id - orchestrator bug")
-        sink_node_id: str = sink.node_id
-
-        # Synchronize context contract to the sink-bound tokens.
-        ctx.contract = self._merge_batch_contract(tokens)
-
-        # CRITICAL: Clear state_id before entering operation context.
-        ctx.state_id = None
-
-        # ── PRE-PHASE: Open node_states for ALL tokens at primary sink ──
-        all_states = self._open_primary_states(
-            tokens=tokens,
-            rows=rows,
-            sink_node_id=sink_node_id,
-            step_in_pipeline=step_in_pipeline,
-            ctx=ctx,
-        )
-
-        # Index by token_id for O(1) lookup in Phases 2 and 3.
-        state_by_token_id: dict[str, NodeStateOpen] = {token.token_id: state for token, state in all_states}
-
         primary_states_closed_by_boundary_failure = False
 
-        # ── PHASE 1: External I/O (inside track_operation) ──
         # If any operation here raises, complete ALL pre-opened states as FAILED
-        # before re-raising — no token may exit this method without a terminal state.
+        # before re-raising — no token may exit without a terminal state.
         try:
             with track_operation(
                 recorder=self._execution,
@@ -645,6 +572,109 @@ class SinkExecutor:
                     error=io_error,
                 )
             raise
+
+        return artifact_info, diversions, duration_ms
+
+    def write(
+        self,
+        sink: SinkProtocol,
+        tokens: list[TokenInfo],
+        ctx: PluginContext,
+        step_in_pipeline: int,
+        *,
+        sink_name: str,
+        pending_outcome: PendingOutcome | None,
+        failsink: SinkProtocol | None = None,
+        failsink_name: str | None = None,
+        failsink_edge_id: str | None = None,
+        on_token_written: Callable[[TokenInfo], None] | None = None,
+    ) -> tuple[Artifact | None, DiversionCounts]:
+        """Write tokens to sink with artifact recording and failsink routing.
+
+        CRITICAL: Creates a node_state for EACH token written AND records
+        token outcomes. Node_states are opened BEFORE I/O so that Phase 1
+        failures result in FAILED states (not silent drops). States are
+        completed as COMPLETED only after sink.flush() confirms durability.
+
+        This is the ONLY place terminal outcomes should be recorded for sink-bound
+        tokens. Recording here (not in the orchestrator processing loop) ensures the
+        token outcome contract is honored:
+        - Invariant 3: "COMPLETED/ROUTED implies the token has a completed sink node_state"
+        - Invariant 4: "Completed sink node_state implies a terminal token_outcome"
+
+        Four-phase flow:
+        - Pre-phase: Open node_states for ALL tokens at primary sink
+        - Phase 1: Call sink.write() → discover diversions (FAILED on error)
+        - Phase 2: Complete states for primary (non-diverted) tokens
+        - Phase 3: Handle diversions (failsink write or discard)
+
+        Args:
+            sink: Sink plugin to write to
+            tokens: Tokens to write (may be empty)
+            ctx: Plugin context
+            step_in_pipeline: Current position in DAG (Orchestrator is authority)
+            sink_name: Name of the sink (for token_outcome recording)
+            pending_outcome: PendingOutcome containing outcome and optional error_hash.
+                    Required - all sink-bound tokens must have their outcome recorded.
+            failsink: Resolved failsink instance (or None for discard mode)
+            failsink_name: Config-level name of the failsink (for outcome recording)
+            failsink_edge_id: Edge ID of the __failsink__ DIVERT edge in the DAG
+            on_token_written: Optional callback called for each token after its
+                             path completes durably. Primary tokens are checkpointed
+                             after Phase 2, diverted tokens after Phase 3.
+
+        Returns:
+            Tuple of (Artifact if tokens were written else None, diversion counts)
+
+        Raises:
+            Exception: Propagated from sink.write(), sink.flush(), or failsink.write()
+        """
+        if not tokens:
+            return None, DiversionCounts()
+
+        # pending_outcome is required for all sink-bound tokens.
+        # PendingTokenMap allows None in its type alias, but _route_to_sink()
+        # always wraps in PendingOutcome. None here means a routing bug.
+        if pending_outcome is None:
+            raise OrchestrationInvariantError(
+                f"Sink '{sink_name}' received pending_outcome=None — all sink-bound tokens must have a PendingOutcome."
+            )
+
+        # Extract dicts from PipelineRow for sink write
+        rows = [t.row_data.to_dict() for t in tokens]
+
+        # Sink must have node_id assigned by orchestrator before execution
+        if sink.node_id is None:
+            raise OrchestrationInvariantError(f"Sink '{sink.name}' executed without node_id - orchestrator bug")
+        sink_node_id: str = sink.node_id
+
+        # Synchronize context contract to the sink-bound tokens.
+        ctx.contract = self._merge_batch_contract(tokens)
+
+        # CRITICAL: Clear state_id before entering operation context.
+        ctx.state_id = None
+
+        # ── PRE-PHASE: Open node_states for ALL tokens at primary sink ──
+        all_states = self._open_primary_states(
+            tokens=tokens,
+            rows=rows,
+            sink_node_id=sink_node_id,
+            step_in_pipeline=step_in_pipeline,
+            ctx=ctx,
+        )
+
+        # Index by token_id for O(1) lookup in Phases 2 and 3.
+        state_by_token_id: dict[str, NodeStateOpen] = {token.token_id: state for token, state in all_states}
+
+        # ── PHASE 1: External I/O (inside track_operation) ──
+        artifact_info, diversions, duration_ms = self._write_primary(
+            sink=sink,
+            rows=rows,
+            tokens=tokens,
+            ctx=ctx,
+            all_states=all_states,
+            sink_node_id=sink_node_id,
+        )
 
         # ── PHASE 2: Partition and complete primary tokens ──
         diverted_indices = {d.row_index for d in diversions}

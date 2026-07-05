@@ -172,6 +172,12 @@ class TestAlwaysBlockedRanges:
         with pytest.raises(SSRFBlockedError, match="Always-blocked"):
             _validate_ip_address("169.254.169.254", allowed_ranges=allow_private)
 
+    def test_aws_ipv6_metadata_blocked_even_with_broad_ipv6_allowlist(self) -> None:
+        """fd00:ec2::254 blocked even when allowed_ranges covers IPv6."""
+        broad_ipv6 = (ipaddress.ip_network("::/0"),)
+        with pytest.raises(SSRFBlockedError, match="Always-blocked"):
+            _validate_ip_address("fd00:ec2::254", allowed_ranges=broad_ipv6)
+
     def test_ipv6_link_local_always_blocked(self) -> None:
         """fe80:: addresses are always blocked (IPv6 link-local)."""
         allow_private = (ipaddress.ip_network("0.0.0.0/0"), ipaddress.ip_network("::/0"))
@@ -200,6 +206,7 @@ class TestAlwaysBlockedRanges:
         """Verify ALWAYS_BLOCKED_RANGES has all documented entries."""
         range_strs = {str(r) for r in ALWAYS_BLOCKED_RANGES}
         assert "169.254.0.0/16" in range_strs
+        assert "fd00:ec2::254/128" in range_strs
         assert "fe80::/10" in range_strs
         assert "255.255.255.255/32" in range_strs
         assert "224.0.0.0/4" in range_strs

@@ -194,6 +194,16 @@ class TestAggregationFlushResult:
 # ---------------------------------------------------------------------------
 
 
+def test_processor_ports_live_outside_types_module() -> None:
+    from elspeth.engine.orchestrator import ports, types
+
+    assert not hasattr(types, "RowProcessorHandle")
+    assert ports.RowProcessorHandle.__module__ == "elspeth.engine.orchestrator.ports"
+    assert ports.RowProcessingPort.__module__ == "elspeth.engine.orchestrator.ports"
+    assert ports.SchedulerJournalPort.__module__ == "elspeth.engine.orchestrator.ports"
+    assert ports.AggregationProcessorPort.__module__ == "elspeth.engine.orchestrator.ports"
+
+
 class TestGraphArtifacts:
     """Test GraphArtifacts frozen dataclass with MappingProxyType wrapping."""
 

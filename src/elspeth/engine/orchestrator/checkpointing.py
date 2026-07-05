@@ -20,11 +20,13 @@ if TYPE_CHECKING:
     from elspeth.contracts.identity import TokenInfo
     from elspeth.core.checkpoint import CheckpointManager
     from elspeth.core.dag import ExecutionGraph
-    from elspeth.engine.orchestrator.types import (
+    from elspeth.engine.orchestrator.ports import (
         BarrierScalarsSource,
         CheckpointAfterSinkCallback,
-        LoopContext,
         _CheckpointFactory,
+    )
+    from elspeth.engine.orchestrator.types import (
+        LoopContext,
     )
 
 

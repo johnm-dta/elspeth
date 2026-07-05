@@ -26,7 +26,8 @@ from elspeth.contracts.errors import AuditIntegrityError, OrchestrationInvariant
 from elspeth.contracts.types import CoalesceName, NodeID
 from elspeth.engine._error_hash import compute_error_hash
 from elspeth.engine.orchestrator.counter_classification import TERMINAL_PAIR_COUNTER_EFFECTS, apply_counter_increments
-from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap, RowProcessorHandle
+from elspeth.engine.orchestrator.ports import CoalesceCompletionPort
+from elspeth.engine.orchestrator.types import ExecutionCounters, PendingTokenMap
 
 if TYPE_CHECKING:
     from elspeth.contracts.plugin_context import PluginContext
@@ -91,7 +92,7 @@ def _route_to_sink(
 
 
 def _mark_barrier_tokens_terminal(
-    processor: RowProcessorHandle,
+    processor: CoalesceCompletionPort,
     *,
     barrier_key: str,
     consumed_tokens: tuple[TokenInfo, ...],
@@ -299,7 +300,7 @@ def _process_merged_coalesce_outcome(
     outcome: CoalesceOutcome,
     coalesce_name: CoalesceName,
     coalesce_node_map: dict[CoalesceName, NodeID],
-    processor: RowProcessorHandle,
+    processor: CoalesceCompletionPort,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -348,7 +349,7 @@ def _process_merged_coalesce_outcome(
 def handle_coalesce_timeouts(
     coalesce_executor: CoalesceExecutor,
     coalesce_node_map: dict[CoalesceName, NodeID],
-    processor: RowProcessorHandle,
+    processor: CoalesceCompletionPort,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,
@@ -402,7 +403,7 @@ def handle_coalesce_timeouts(
 def flush_coalesce_pending(
     coalesce_executor: CoalesceExecutor,
     coalesce_node_map: dict[CoalesceName, NodeID],
-    processor: RowProcessorHandle,
+    processor: CoalesceCompletionPort,
     ctx: PluginContext,
     counters: ExecutionCounters,
     pending_tokens: PendingTokenMap,

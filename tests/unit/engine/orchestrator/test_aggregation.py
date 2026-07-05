@@ -31,8 +31,9 @@ from elspeth.engine.orchestrator.aggregation import (
     find_aggregation_transform,
     flush_remaining_aggregation_buffers,
 )
+from elspeth.engine.orchestrator.ports import AggregationProcessorPort
 from elspeth.engine.orchestrator.resume import handle_incomplete_batches
-from elspeth.engine.orchestrator.types import AggNodeEntry, PipelineConfig, RowProcessorHandle
+from elspeth.engine.orchestrator.types import AggNodeEntry, PipelineConfig
 from elspeth.engine.work_items import WorkItem
 from elspeth.testing import make_row, make_token_info
 
@@ -138,8 +139,8 @@ def _make_context() -> PluginContext:
     return PluginContext(run_id="run-1", config={})
 
 
-def _make_processor() -> RowProcessorHandle:
-    return create_autospec(RowProcessorHandle, instance=True, spec_set=True)
+def _make_processor() -> AggregationProcessorPort:
+    return create_autospec(AggregationProcessorPort, instance=True, spec_set=True)
 
 
 def _make_execution() -> ExecutionRepository:

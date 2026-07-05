@@ -474,15 +474,10 @@ class RowProcessor:
         self._clock = clock if clock is not None else DEFAULT_CLOCK
 
         # DAG navigator: pure topology queries extracted from RowProcessor
-        self._nav = DAGNavigator(
-            node_to_plugin=self._node_to_plugin,
-            node_to_next=self._node_to_next,
-            coalesce_node_ids=self._coalesce_node_ids,
-            structural_node_ids=self._structural_node_ids,
-            coalesce_name_by_node_id=self._coalesce_name_by_node_id,
+        self._nav = DAGNavigator.from_traversal_context(
+            traversal,
             coalesce_on_success_map=self._coalesce_on_success_map,
             sink_names=self._sink_names,
-            branch_first_node=dict(traversal.branch_first_node),
         )
 
         # Build error edge map: transform node_id -> DIVERT edge_id.

@@ -7,6 +7,7 @@ Uses v2 fixtures and production assembly path (BUG-LINEAGE-01).
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
@@ -578,7 +579,15 @@ class TestOrchestrator:
         operations = factory.execution.get_operations_for_run(run_id)
         runtime_preflight_ops = [op for op in operations if op.operation_type == "runtime_preflight"]
         assert len(runtime_preflight_ops) == 1
-        assert runtime_preflight_ops[0].status == "completed"
+        operation = runtime_preflight_ops[0]
+        assert operation.status == "completed"
+        assert operation.output_data_ref is not None
+        output_metadata = json.loads(payload_store.retrieve(operation.output_data_ref).decode("utf-8"))
+        assert output_metadata == {
+            "attempt_count": 2,
+            "retry_count": 1,
+            "retry_errors": [{"attempt": 0, "error_type": "RuntimePreflightFailedError"}],
+        }
 
     def test_first_row_inferred_source_contract_persisted_before_processing_failure(self, landscape_db: LandscapeDB, payload_store) -> None:
         """A first-valid-row contract must reach run_sources before process_row can fail.

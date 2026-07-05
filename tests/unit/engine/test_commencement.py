@@ -272,13 +272,13 @@ class TestBuildPreflightContext:
         assert "collections" in context
         assert "env" in context
 
-    def test_env_defaults_to_os_environ(self) -> None:
+    def test_env_defaults_to_empty_mapping(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ELSPETH_SECRET_ORACLE", "sk-hidden")
         context = build_preflight_context(
             dependency_results={},
             collection_probes={},
         )
-        assert "env" in context
-        assert isinstance(context["env"], dict)
+        assert context["env"] == {}
 
 
 class TestCommencementGateTypeEnforcement:

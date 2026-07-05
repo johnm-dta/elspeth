@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -25,12 +24,12 @@ def build_preflight_context(
     Returns a namespace dict with three keys accessible in gate expressions:
     - ``dependency_runs``: {name: {run_id, settings_hash, duration_ms, indexed_at}} for each dependency
     - ``collections``: {name: {reachable, count}} for each probed collection
-    - ``env``: operator environment variables (Tier 3 — defaults to os.environ)
+    - ``env``: explicitly supplied non-secret gate environment values
     """
     return {
         "dependency_runs": dependency_results,
         "collections": collection_probes,
-        "env": env if env is not None else dict(os.environ),
+        "env": env if env is not None else {},
     }
 
 
@@ -76,9 +75,9 @@ def evaluate_commencement_gates(
     Context should be a namespace dict with keys from _GATE_ALLOWED_NAMES
     (collections, dependency_runs, env). Unknown keys are not rejected here —
     the ExpressionParser restricts name access during evaluation.
-    The entire context dict (including Tier 3 env values) is deep-frozen before evaluation.
+    The entire context dict (including explicit Tier 3 env values) is deep-frozen before evaluation.
     """
-    # Deep-freeze entire context for expression evaluation (Tier 3 boundary for env)
+    # Deep-freeze entire context for expression evaluation (Tier 3 boundary for explicit env)
     frozen_context = deep_freeze(context)
     # Build audit snapshot from the frozen context (same object used for evaluation) to ensure the snapshot reflects exactly what the gate saw.
     audit_snapshot = _build_audit_snapshot(frozen_context)

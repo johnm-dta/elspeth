@@ -96,6 +96,26 @@ class TestResolvePreflightDirect:
         assert result.gate_results[0].name == "corpus_ready"
         assert result.gate_results[0].result is True
 
+    def test_commencement_gate_context_uses_empty_env_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Host process environment is not exposed unless the caller supplies gate env."""
+        from elspeth.engine.bootstrap import resolve_preflight
+
+        monkeypatch.setenv("ELSPETH_SECRET_ORACLE", "sk-hidden")
+        mock_config = SimpleNamespace()
+        mock_config.depends_on = []
+        mock_config.commencement_gates = [CommencementGateConfig(name="test_gate", condition="True")]
+
+        captured_context: dict[str, Any] = {}
+
+        def capture_gate_context(gates: object, context: dict[str, Any]) -> list[Any]:
+            captured_context.update(context)
+            return []
+
+        with patch("elspeth.engine.commencement.evaluate_commencement_gates", side_effect=capture_gate_context):
+            resolve_preflight(mock_config, Path("/fake/pipeline.yaml"), probes=[])
+
+        assert captured_context["env"] == {}
+
     def test_dependency_results_flow_into_gate_context(self) -> None:
         """When both depends_on and gates are configured, dep results are in gate context."""
         from elspeth.core.dependency_config import DependencyConfig

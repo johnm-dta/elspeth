@@ -17,6 +17,7 @@ propagate unmodified per CLAUDE.md plugin-ownership posture.
 
 from __future__ import annotations
 
+import json
 from typing import Any, TypedDict
 
 import pytest
@@ -36,6 +37,7 @@ from elspeth.contracts.declaration_contracts import (
     implements_dispatch_site,
     register_declaration_contract,
 )
+from elspeth.contracts.errors import ExecutionError
 from elspeth.engine.executors.declaration_dispatch import _serialize_plugin_name, run_post_emission_checks
 
 
@@ -399,6 +401,58 @@ def test_multiple_violations_wrapped_in_aggregate() -> None:
     for child in aggregate.violations:
         if isinstance(child, DeclarationContractViolation):
             assert child.contract_name in {"raises_violation", "raises_second_violation"}
+
+
+def test_aggregate_message_does_not_embed_raw_child_secret_text() -> None:
+    secret = "sk-or-v1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    class _RaisesSecretViolationContract(DeclarationContract):
+        name = "raises_secret_violation"
+        payload_schema: type = _Payload
+        violation_class: type[_TestViolationA] = _TestViolationA
+
+        def applies_to(self, plugin: Any) -> bool:
+            return True
+
+        @implements_dispatch_site("post_emission_check")
+        def post_emission_check(
+            self,
+            inputs: PostEmissionInputs,
+            outputs: PostEmissionOutputs,
+        ) -> None:
+            raise _TestViolationA(
+                plugin="P",
+                node_id="n",
+                run_id="r",
+                row_id="rw",
+                token_id="t",
+                payload={"note": "payload is structured"},
+                message=f"child violation leaked {secret}",
+            )
+
+        @classmethod
+        def negative_example(cls) -> ExampleBundle:
+            return _empty_example_bundle()
+
+        @classmethod
+        def positive_example_does_not_apply(cls) -> ExampleBundle:
+            return _empty_example_bundle()
+
+    register_declaration_contract(_RaisesSecretViolationContract())
+    register_declaration_contract(_RaisesSecondViolationContract())
+
+    with pytest.raises(AggregateDeclarationContractViolation) as exc_info:
+        run_post_emission_checks(inputs=_inputs(), outputs=_outputs())
+
+    aggregate = exc_info.value
+    assert secret not in str(aggregate)
+
+    serialized = ExecutionError(
+        exception=str(aggregate),
+        exception_type=type(aggregate).__name__,
+        context=aggregate.to_audit_dict(),
+    ).to_dict()
+    assert secret not in json.dumps(serialized, sort_keys=True, default=str)
 
 
 def test_serialize_plugin_name_raises_when_plugin_name_missing() -> None:
